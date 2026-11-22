@@ -33,14 +33,23 @@ const review = () => {
 
 it("selects an offered usable route rather than a stale machine default", async () => {
   const s = world();
-  s.machines[0].config.surfaces.user_defaults.coordinator = { engine: "claude-agent-acp", model: "opus[1m]", effort: "high", parameters: {} };
-  s.options.models = [{ id: "codex-luna", label: "6 Luna", engine: "Codex", efforts: ["low"] }, { id: "offline", label: "Offline", engine: "Claude", unavailable: "Sign in first" }];
+  const config = s.machines[0].config;
+  config.surfaces.user_defaults.coordinator = { engine: "claude-agent-acp", model: "opus[1m]", effort: "high", parameters: {} };
+  config.setup["codex-acp"].status = "connected";
+  config.surfaces.routing.engines["codex-acp"].enabled = ["codex-luna"];
+  config.catalogue["codex-acp"].models = [{ id: "codex-luna", label: "6 Luna", efforts: ["low"], observed: true }];
+  // A machine-wide listing is not the selected project's set of eligible offers.
+  s.options.models = [{ id: "opus[1m]", label: "Opus", engine: "Claude", efforts: ["high"] }];
   await mount(s, `/m/${LOCAL_MACHINE_ID}/new?project=p`);
   expect(document.querySelector('[aria-label="Coordinator model: 6 Luna"]')).not.toBeNull();
 });
 
 it("leaves no unavailable route selected when every offer is unavailable", async () => {
   const s = world();
+  const config = s.machines[0].config;
+  config.surfaces.routing.engines["claude-agent-acp"].enabled = ["offline"];
+  config.catalogue["claude-agent-acp"].models = [{ id: "offline", label: "Offline", efforts: ["high"], observed: true }];
+  config.setup["claude-agent-acp"].status = "downloaded_no_login";
   s.options.models = [{ id: "offline", label: "Offline", engine: "Claude", unavailable: "Sign in first" }];
   const p = await mount(s, `/m/${LOCAL_MACHINE_ID}/new?project=p`);
   const field = document.querySelector<HTMLTextAreaElement>('[aria-label="Describe the task"]')!;

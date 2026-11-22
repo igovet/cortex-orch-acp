@@ -458,6 +458,52 @@ fn owner_steering_messages_are_constraints() {
     );
     assert_eq!(v["owner_write_denials"]["paths"], json!(["src/api.rs"]));
 }
+/// The newest environment preflight is the capsule's `environment`, bounded and kept
+/// out of the decision rows; without one the capsule says so. Rule files are listed.
+#[test]
+fn environment_preflight_and_rule_files_are_in_the_capsule() {
+    let p = Project::new();
+    let s = p.open();
+    TaskMachine::new(&s).create("t", "Goal", "owner").unwrap();
+    let v = s.read(|db| snapshot(db, "t")).unwrap();
+    assert_eq!(v["environment"]["recorded"], false);
+    assert_eq!(
+        v["rule_file_protection"]["paths"],
+        json!(lifecycle::steering::RULE_FILES)
+    );
+    s.write(|db| {
+        lifecycle::event_tx(db, "t", "ENVIRONMENT_PREFLIGHT", json!({"gh_auth":{"status":"old"}}))?;
+        lifecycle::event_tx(db, "t", "ENVIRONMENT_PREFLIGHT",
+            json!({"gh_auth":{"status":"not_logged_in","exit":1},"sudo":{"status":"password_needed"},"padding":"x".repeat(9000)}))?;
+        Ok(())
+    })
+    .unwrap();
+    let v = s.read(|db| snapshot(db, "t")).unwrap();
+    let env = &v["environment"];
+    assert_eq!(env["recorded"], true);
+    // A small fact set is carried whole; an oversized one is a bounded preview.
+    assert!(env["facts"]["clipped"] == true, "{env}");
+    assert!(env.to_string().chars().count() < 4_000);
+    assert!(env["facts"]["preview"]
+        .as_str()
+        .unwrap()
+        .contains("not_logged_in"));
+    assert!(!v["retained_decisions"]
+        .to_string()
+        .contains("ENVIRONMENT_PREFLIGHT"));
+    s.write(|db| {
+        lifecycle::event_tx(
+            db,
+            "t",
+            "ENVIRONMENT_PREFLIGHT",
+            json!({"docker":{"status":"available"}}),
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let v = s.read(|db| snapshot(db, "t")).unwrap();
+    assert_eq!(v["environment"]["facts"]["docker"]["status"], "available");
+}
 /// The brief lists every predecessor report id with role, title, size and pages, for
 /// a dependent node and for the consultation (its packet's reports), and the owner's
 /// constraints and acceptance commands.

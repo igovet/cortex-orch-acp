@@ -1215,6 +1215,8 @@ pub async fn main() {
                         "task_get_context",
                         "read_capsule",
                         "check_preflight",
+                        "sprint_graph",
+                        "sprint_task_result",
                         "read_batch"
                     ]
                     .contains(&v["name"].as_str().unwrap())));
@@ -1233,6 +1235,75 @@ pub async fn main() {
                             menu["result"]["structuredContent"]["tiers"].is_object(),
                             "{menu}"
                         );
+                    }
+                    if mode == "desktop-coordinator" && full_scenario.trim() == "sprint-cross-task"
+                    {
+                        let call = async |input: &mut tokio::process::ChildStdin,
+                                          output: &mut BufReader<tokio::process::ChildStdout>,
+                                          id: u64,
+                                          name: &str,
+                                          arguments: Value| {
+                            wire::write_frame(input, &json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}})).await.unwrap();
+                            wire::read_frame(output).await.unwrap().unwrap()
+                        };
+                        let graph =
+                            call(&mut stdin, &mut stdout, 12, "sprint_graph", json!({})).await;
+                        let graph = &graph["result"]["structuredContent"];
+                        let member = graph["tasks"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|m| m["taskId"] == graph["taskId"])
+                            .unwrap();
+                        let predecessor = member["dependencies"][0].as_str().unwrap();
+                        let dependent = &member["dependents"][0];
+                        let child = graph["tasks"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|m| m["taskId"] == *dependent)
+                            .unwrap();
+                        assert_eq!(child["dependencies"].as_array().unwrap().len(), 2);
+                        let result = call(
+                            &mut stdin,
+                            &mut stdout,
+                            13,
+                            "sprint_task_result",
+                            json!({"member_id":predecessor}),
+                        )
+                        .await;
+                        let catalogue = &result["result"]["structuredContent"]["reports"]["items"];
+                        let report = catalogue
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|r| r["title"] == "Graph handoff")
+                            .unwrap();
+                        let mut args = json!({"member_id":predecessor,"report_id":report["report_id"],"limit":4000});
+                        let first = call(
+                            &mut stdin,
+                            &mut stdout,
+                            14,
+                            "sprint_task_result",
+                            args.clone(),
+                        )
+                        .await;
+                        let page = &first["result"]["structuredContent"]["report"];
+                        assert_eq!(page["sha256"], report["sha256"]);
+                        assert!(page["next_cursor"].is_string());
+                        args["cursor"] = page["next_cursor"].clone();
+                        let last =
+                            call(&mut stdin, &mut stdout, 15, "sprint_task_result", args).await;
+                        let page = &last["result"]["structuredContent"]["report"];
+                        assert_eq!(page["sha256"], report["sha256"]);
+                        assert!(page["next_cursor"].is_null());
+                        assert!(page["markdown"]
+                            .as_str()
+                            .unwrap()
+                            .contains("Decision: graph handoff"));
+                        let denied=call(&mut stdin,&mut stdout,16,"sprint_task_result",json!({"member_id":std::fs::read_to_string(".git/other-member").unwrap()})).await;
+                        assert!(denied["error"].is_object() || denied["result"]["isError"] == true);
+                        std::fs::write(".git/sprint-tool-result", "result-ok").unwrap();
                     }
                     if mode == "desktop-worker" || mode == "desktop-reviewer" {
                         assert!(!tools.iter().any(|t| t["name"] == "list_route_options"));

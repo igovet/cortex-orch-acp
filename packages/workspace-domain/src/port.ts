@@ -15,7 +15,7 @@ export type ProjectSlice = { project: Project; tasks: Task[]; sessions: TaskSess
 /** A confirmed snapshot. `version` is a decimal string, and a store installs only a newer one. */
 export type ProjectionUpdate = { kind: "projection"; version: string } & ({ scope: "workspace"; state: WorkspaceState } | { scope: "project"; slice: ProjectSlice });
 /** What the owner decided about a task. The runtime knows nothing of these, so they come from the machine and sit over its facts. */
-export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptance" | "reviewActions" | "integrationFacts" | "closedAs" | "doneAt" | "archive" | "targetBranch" | "sprintId" | "dependencies" | "integration" | "notVerifiedByCortex" | "purgeBlocker" | "work" | "checkout" | "settings" | "result" | "conflict" | "merge" | "resolvedBy" | "writeDenials">> & {
+export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptance" | "reviewActions" | "integrationFacts" | "closedAs" | "doneAt" | "archive" | "targetBranch" | "sprintId" | "dependencies" | "integration" | "notVerifiedByCortex" | "purgeBlocker" | "work" | "checkout" | "settings" | "result" | "conflict" | "merge" | "resolvedBy" | "writeDenials" | "spend">> & {
   status?: "ready_to_merge" | "done"; automaticReady?: boolean; planning?: boolean; purged?: boolean;
 };
 /**
@@ -124,6 +124,24 @@ export interface WorkspacePort {
   remoteAccess?: {
     call<O extends import("./remote").RemoteOperation>(operation: O, message: import("./remote").RemoteRequests[O]): Promise<import("./remote").RemoteStatus>;
     watch(listener: () => void): () => void;
+  };
+  /**
+   * The machine's open sudo password prompts (`askpass.*`), when its service advertises them. `list` answers null from a
+   * service without them. The password goes to the machine once and is not kept by the port.
+   */
+  sudoPrompts?: {
+    list(): Promise<import("./sudo").SudoPrompts | null>;
+    answer(promptId: string, password: string): Promise<void>;
+    cancel(promptId: string): Promise<void>;
+  };
+  /**
+   * Access the machine's tasks lack and only the owner can give (`owner_actions.*`), when its service advertises them. `list`
+   * answers null from a service without them. A token goes to the machine once and is not kept by the port.
+   */
+  ownerActions?: {
+    list(): Promise<import("./owner-actions").OwnerActions | null>;
+    act(projectId: string, actionId: string, action: import("./owner-actions").OwnerActionVerb): Promise<import("./owner-actions").OwnerActionReply>;
+    token(projectId: string, actionId: string, token: string): Promise<import("./owner-actions").OwnerActionReply>;
   };
   readFile?(checkoutId: string, file: string): Promise<FileRead>;
   /** A commit message or pull request text the machine wrote from the task's real changes. Null when none could be had; the caller keeps its own text. */

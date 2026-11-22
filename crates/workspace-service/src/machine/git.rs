@@ -1,6 +1,7 @@
 //! Installed Git argv only. Inspection overrides filters per command; writes retain hooks.
 use super::{
     files::revision,
+    integration::GitHubRepository,
     native::*,
     settings::{self, Lock},
 };
@@ -16,6 +17,17 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
 };
+fn accepted_commit_source(record: &Value) -> Option<&Value> {
+    let source = &record["acceptance"]["commitSource"];
+    (record["status"] == "ready_to_merge"
+        && record["checkout"]["kind"].as_str().unwrap_or("main") == "main"
+        && record["archive"].is_null()
+        && record["purged"] != true
+        && record["acceptance"]["committedDigest"].is_null()
+        && source.is_object())
+    .then_some(source)
+}
+
 pub(super) mod listing;
 #[cfg(test)]
 mod pull_tests;
@@ -449,6 +461,10 @@ impl Git {
                 self.configs.insert(path.to_path_buf(), config);
             }
             full.extend(self.configs[path].clone());
+        }
+        if verb == "push" && argv.get(1).is_some_and(|arg| arg == "--porcelain") {
+            // The receipt names the URL Git selected, not an HTTP redirect target.
+            full.extend(args(&["-c", "http.followRedirects=false"]));
         }
         full.push(verb.to_owned());
         if matches!(verb, "diff" | "log" | "show") {
@@ -1676,6 +1692,104 @@ impl Git {
         }
         Ok(found[0].to_owned())
     }
+    /// Owner-confirmed Push to a single GitHub-shaped origin can authorize
+    /// Finish. Capture Git's actual porcelain destination and the pinned refspec,
+    /// not a tracking ref or a remote URL read after the network effect.
+    async fn push(
+        &mut self,
+        path: &Path,
+        state: &Path,
+        project: &str,
+        remote: &str,
+        branch: &str,
+    ) -> Result<()> {
+        let remote_ref = format!("refs/heads/{branch}");
+        let repository = if remote == "origin" {
+            self.out(path, &["remote", "get-url", "--push", "--all", "origin"])
+                .await
+                .ok()
+                .and_then(|url| GitHubRepository::from_remote(&url))
+        } else {
+            None
+        };
+        let witness = if let Some(repository) = repository {
+            let commit = self
+                .out(
+                    path,
+                    &["rev-parse", "--verify", &format!("{remote_ref}^{{commit}}")],
+                )
+                .await?;
+            let commit = commit.trim();
+            if !full_commit_id(commit) {
+                return Err(refuse(
+                    "git_failed",
+                    "Git did not identify the exact branch commit.",
+                ));
+            }
+            let refspec = format!("{commit}:{remote_ref}");
+            let receipt = self
+                .out(
+                    path,
+                    &[
+                        "push",
+                        "--porcelain",
+                        "--no-follow-tags",
+                        "--",
+                        remote,
+                        &refspec,
+                    ],
+                )
+                .await?;
+            let mut lines = receipt.lines();
+            let destination = lines
+                .next()
+                .and_then(|line| line.strip_prefix("To "))
+                .and_then(GitHubRepository::from_remote);
+            let ref_pushed = lines.next().is_some_and(|line| {
+                let mut fields = line.splitn(3, '\t');
+                matches!(fields.next(), Some(" " | "*" | "="))
+                    && fields.next() == Some(refspec.as_str())
+                    && fields.next().is_some()
+            });
+            (destination.as_ref() == Some(&repository)
+                && ref_pushed
+                && lines.next() == Some("Done")
+                && lines.next().is_none())
+            .then(|| json!({"repository":repository.qualified_name(), "commit":commit, "ref":remote_ref}))
+        } else {
+            self.checked(path, args(&["push", "--", remote, branch]))
+                .await?;
+            None
+        };
+        if remote == "origin" {
+            let save = || {
+                let _state_lock = Lock::new(state, "machine.lock")?;
+                let mut product = product(state, project)?;
+                if let Some(witness) = witness {
+                    let saved = &mut product["originPushWitnesses"];
+                    if saved.is_null() {
+                        *saved = json!({});
+                    }
+                    saved
+                        .as_object_mut()
+                        .ok_or_else(|| refuse("state_unreadable", "Invalid saved push evidence."))?
+                        .insert(remote_ref, witness);
+                } else if let Some(witnesses) = product["originPushWitnesses"].as_object_mut() {
+                    if witnesses.remove(&remote_ref).is_none() {
+                        return Ok(());
+                    }
+                } else {
+                    return Ok(());
+                }
+                settings::write_json(&product_path(state, project)?, &product)
+            };
+            save().map_err(|_| refuse(
+                "push_witness_unsaved",
+                "Git completed the push, but Workspace could not save its evidence. Inspect the remote before pushing again.",
+            ))?;
+        }
+        Ok(())
+    }
     async fn hunk(
         &mut self,
         path: &Path,
@@ -1909,6 +2023,76 @@ impl Git {
         }
         Ok(())
     }
+    /// A normal, clean single-parent commit. Compare its entire Git tree with the
+    /// bounded raw-byte witness: status alone can hide filters, staged variants or
+    /// index visibility flags.
+    async fn prove_accepted_commit(
+        &mut self,
+        path: &Path,
+    ) -> Option<(String, crate::native_effects::CommitObservation)> {
+        let mut observed = crate::native_effects::observe_commit(path.to_owned()).await?;
+        let commit = self
+            .bytes(
+                path,
+                &["--no-replace-objects", "cat-file", "commit", &observed.head],
+            )
+            .await
+            .ok()?;
+        // The raw object gives the real parent, independent of grafts or shallow history.
+        let mut parents = commit
+            .split(|b| *b == b'\n')
+            .skip(1)
+            .map_while(|line| line.strip_prefix(b"parent "));
+        let parent = std::str::from_utf8(parents.next()?).ok()?;
+        if !valid_sha(parent) || parents.next().is_some() {
+            return None;
+        }
+        let tree = self
+            .bytes(
+                path,
+                &[
+                    "--no-replace-objects",
+                    "ls-tree",
+                    "-r",
+                    "-z",
+                    &observed.head,
+                ],
+            )
+            .await
+            .ok()?;
+        let tree = std::str::from_utf8(&tree).ok()?;
+        if !tree.is_empty() && !tree.ends_with('\0') {
+            return None;
+        }
+        for entry in tree.split_terminator('\0') {
+            let (meta, name) = entry.split_once('\t')?;
+            let (mode, oid) = meta.split_once(" blob ")?;
+            if observed.entries.remove(name)? != format!("{mode} {oid}") {
+                return None;
+            }
+        }
+        if !observed.entries.is_empty()
+            || !self
+                .success(
+                    path,
+                    &[
+                        "--no-replace-objects",
+                        "diff-index",
+                        "--cached",
+                        "--quiet",
+                        "--no-ext-diff",
+                        &observed.head,
+                        "--",
+                    ],
+                )
+                .await
+                .ok()?
+        {
+            return None;
+        }
+        Some((parent.to_owned(), observed))
+    }
+
     pub async fn action(
         &mut self,
         root: &Path,
@@ -2050,6 +2234,13 @@ impl Git {
                 }
             }
             "commit" => {
+                let track_acceptance = path == root
+                    && p["amend"] != true
+                    && product(state, project).ok().is_some_and(|p| {
+                        p["tasks"].as_object().is_some_and(|tasks| {
+                            tasks.values().any(|r| accepted_commit_source(r).is_some())
+                        })
+                    });
                 let staged = self
                     .out(&path, &["diff", "--cached", "--name-only", "-z"])
                     .await?;
@@ -2088,8 +2279,31 @@ impl Git {
                     a.push("--amend".into());
                 }
                 self.checked(&path, a).await?;
+                // Git already succeeded. Missing, incomplete or different evidence
+                // must leave acceptance strict, not turn the Git commit into a failure.
+                let proven = if track_acceptance {
+                    tokio::time::timeout(Duration::from_secs(30), self.prove_accepted_commit(&path))
+                        .await
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                };
                 let _state_lock = Lock::new(state, "machine.lock")?;
                 let mut product = product(state, project)?;
+                if let (Some((head, observed)), Some(tasks)) =
+                    (proven, product["tasks"].as_object_mut())
+                {
+                    for record in tasks.values_mut() {
+                        if accepted_commit_source(record).is_some_and(|source| {
+                            source["head"] == head
+                                && source["branch"] == observed.branch
+                                && source["content"] == observed.content
+                        }) {
+                            record["acceptance"]["committedDigest"] = json!(observed.digest);
+                        }
+                    }
+                }
                 product["drafts"].as_object_mut().unwrap().remove(&wanted);
                 settings::write_json(&product_path(state, project)?, &product)?;
             }
@@ -2113,8 +2327,7 @@ impl Git {
                 let remote = self
                     .configured_remote(&path, p["remote"].as_str().unwrap_or(""))
                     .await?;
-                self.checked(&path, args(&["push", "--", &remote, branch]))
-                    .await?;
+                self.push(&path, state, project, &remote, branch).await?;
             }
             "revert_commit" => {
                 let sha = p["sha"].as_str().unwrap_or("");
@@ -2828,12 +3041,15 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 }
-fn valid_branch(name: &str) -> bool {
+pub(super) fn valid_branch(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 200
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
+}
+pub(super) fn full_commit_id(sha: &str) -> bool {
+    matches!(sha.len(), 40 | 64) && valid_sha(sha)
 }
 fn valid_sha(sha: &str) -> bool {
     (4..=64).contains(&sha.len())

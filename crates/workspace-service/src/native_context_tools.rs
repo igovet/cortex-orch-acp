@@ -12,7 +12,11 @@ use std::{
 pub(super) fn supports(name: &str) -> bool {
     matches!(
         name,
-        "task_get_context" | "read_capsule" | "check_preflight"
+        "task_get_context"
+            | "read_capsule"
+            | "check_preflight"
+            | "sprint_graph"
+            | "sprint_task_result"
     )
 }
 
@@ -129,4 +133,40 @@ pub(super) async fn preflight(root: std::path::PathBuf, args: &Value) -> CoreRes
             Err(error) => return Err(error),
         };
     Ok(json!({"available":available,"reason":reason,"message":message,"evidence":false}))
+}
+
+/// A sibling's published evidence is readable only under the calling coordinator's
+/// live Workspace membership. Ordinary document tools keep their original scope.
+pub(super) fn sprint_read(
+    store: &Store,
+    credential: &cortex_core::channels::Credential,
+    identity: &Identity,
+    state: Option<&std::path::Path>,
+    recipient: &std::path::Path,
+    name: &str,
+    args: &Value,
+) -> CoreResult<Value> {
+    use crate::machine::{sprint_graph::Scope, sprint_result};
+    if identity.role != "coordinator" {
+        return Err(CoreError::Refused("tool_refused"));
+    }
+    crate::native_documents::validate(identity, name, args)?;
+    let state = state.ok_or(CoreError::Refused("sprint_membership_required"))?;
+    let scope = store
+        .read(|db| Scope::load(db, state, &identity.task))?
+        .ok_or(CoreError::Refused("sprint_membership_required"))?;
+    let value = match name {
+        "sprint_graph" => scope.graph(args)?,
+        "sprint_task_result" => sprint_result::read(store, &scope, args, recipient)?,
+        _ => return Err(CoreError::Refused("tool_refused")),
+    };
+    let current = store.read(|db| Scope::load(db, state, &identity.task))?;
+    if !current
+        .as_ref()
+        .is_some_and(|current| scope.same_members(current))
+    {
+        return Err(CoreError::Refused("sprint_membership_changed"));
+    }
+    crate::native_documents::authenticate(store, credential, identity)?;
+    crate::native_commands::defer_json(store, identity, value)
 }

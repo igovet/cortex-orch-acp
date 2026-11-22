@@ -426,15 +426,9 @@ fn command(config: &crate::Config, params: &Value) -> Result<Value> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .and_then(|p| p.canonicalize().ok())
         .ok_or_else(not_ready)?;
-    // Match the retained child environment: release drops XDG_DATA_HOME and
-    // CORTEX_NODE_BINARY; dev uses only its channel-local data root.
-    let data = if workspace_protocol::channel::current().is_dev() {
-        config.state_dir.join("data")
-    } else {
-        home.join(".local/share")
-    };
+    let data = super::config_read::engine_data(config, &home)?;
+    let home = home.canonicalize().map_err(|_| not_ready())?;
     let bundle = config.launch.bundled_engines();
     lookup(
         params["action"] != "add_key",

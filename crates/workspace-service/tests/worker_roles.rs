@@ -2115,8 +2115,9 @@ async fn single_review(ledger: &mut Ledger, verdict: &str, engine: EngineKind) {
                 || state == "PLANNING"
                 || state == "RECOVERING"
         }
-        // A named dead end is the run mode's stop (Manual: the owner's question),
-        // never a second review of the same revision.
+        // A named dead end (here missing access) is a continuation on the strategy
+        // ladder (no-stop policy, RECOVERING), never an owner question and never a
+        // second review of the same revision.
         "INCOMPLETE" => {
             let s = p.store();
             let (reviews, reruns, routed): (i64, i64, i64) = s
@@ -2136,7 +2137,7 @@ async fn single_review(ledger: &mut Ledger, verdict: &str, engine: EngineKind) {
                 (reviews, reruns, routed) == (1, 0, 1),
                 format!("reviews {reviews}, reruns {reruns}, routed {routed}"),
             );
-            state == "WAITING_USER"
+            state == "RECOVERING"
         }
         _ => state != "REVIEWING",
     };

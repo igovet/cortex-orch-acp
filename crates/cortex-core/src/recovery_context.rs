@@ -42,7 +42,8 @@ const NOISE: &str = "('NATIVE_TURN_SETTLED','NATIVE_CONTEXT_DELIVERY','NATIVE_CO
     'NATIVE_DOCUMENT_TOOL','NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_RECONCILED','NATIVE_ATTEMPT_DELIVERY',
     'NATIVE_PERMISSION_REQUESTED','NATIVE_PERMISSION_DECIDED','NATIVE_PERMISSION_AUTO_ALLOWED','NATIVE_PERMISSION_CANCELLED',
     'REPORT_PAGE_READ','EXTERNAL_TOOL_AUTHORIZED','EXTERNAL_TOOL_RESULT','NATIVE_ACCESS_MODE_CONFIRMED',
-    'NATIVE_SESSION_CONFIGURED','NATIVE_ROUTE_SELECTED','NATIVE_TURN_DEGENERATE')";
+    'NATIVE_SESSION_CONFIGURED','NATIVE_ROUTE_SELECTED','NATIVE_TURN_DEGENERATE','ENVIRONMENT_PREFLIGHT',
+    'TASK_PROGRESS','FAILURE_CLASSIFIED','EXTERNAL_WAIT_RECHECKED')";
 const REPORT_TOOLS: &str =
     "published reports: list_reports/read_report; captured sources: read_source";
 
@@ -331,6 +332,31 @@ fn plan_summary(plan: Option<&str>) -> CoreResult<Value> {
         "verification":commands.iter().map(|c|clipped_value(c,each)).collect::<Vec<_>>()}),
     )
 }
+const RULE_FILE_NOTE: &str = "writes to these project rule files are refused (rule_file_protected) unless the owner's task or message names the path or the owner sends allow-write: <path>; do not plan edits to them, propose rule changes in the result instead";
+/// Budget for the host facts recorded at task start.
+const ENVIRONMENT_BUDGET: usize = 2_500;
+/// The newest `ENVIRONMENT_PREFLIGHT` facts the runtime recorded for this task
+/// (host logins, passwordless sudo, free space, display, Docker, Git state),
+/// bounded. Facts, never blockers: a missing login or tool is planned around.
+fn environment(db: &Connection, task: &str) -> CoreResult<Value> {
+    let row: Option<(i64, String, String)> = db
+        .query_row(
+            "SELECT id,payload_json,created_at FROM runtime_events WHERE task_id=? AND type='ENVIRONMENT_PREFLIGHT'
+             ORDER BY id DESC LIMIT 1",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((id, raw, at)) = row else {
+        return Ok(
+            json!({"recorded":false,"note":"no environment preflight was recorded for this task; check a fact with a bounded command when the plan depends on it"}),
+        );
+    };
+    let facts: Value = serde_json::from_str(&raw)?;
+    Ok(json!({"recorded":true,"event_id":id,"recorded_at":at,
+        "facts":clipped_value(&facts, ENVIRONMENT_BUDGET),
+        "note":"host facts observed at task start (exit codes only, no credentials); plan around missing items instead of stopping: a sudo password comes from the owner's password prompt, a missing login is reported to the owner as a fact"}))
+}
 pub fn snapshot(db: &Connection, task: &str) -> CoreResult<Value> {
     snapshot_for(db, task, None)
 }
@@ -503,9 +529,12 @@ pub fn snapshot_for(
         denials.push(path.clone());
     }
     let denials = json!({"paths":denials,"complete":denials.len()==all_denials.len(),"total":all_denials.len()});
+    // Default protections of the project's own agent/rule files (a fixed, short list).
+    let rule_files = json!({"paths":crate::lifecycle::steering::rule_file_protections(db, task)?,
+        "note":RULE_FILE_NOTE});
     let mut context = json!({"task":task,"owner_epoch":owner,"state":state,"revision":revision,"original_goal":goal,
         "retained_user_messages":messages,"retained_decisions":decisions,"constraints":constraints,"questions":questions,
-        "owner_write_denials":denials,
+        "owner_write_denials":denials,"rule_file_protection":rule_files,"environment":environment(db, task)?,"obstacles":crate::lifecycle::obstacles::capsule(db, task)?,
         "plan_summary":plan_summary(plan.as_deref())?,"current_nodes":nodes,"sources":sources,"attempts":attempts,
         "unresolved_commands":unresolved,"command_events_not_restated":command_events,
         "access_mode":crate::access::current(db,task)?,"clipping":notices});

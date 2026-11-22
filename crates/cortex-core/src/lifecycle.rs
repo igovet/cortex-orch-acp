@@ -11,6 +11,8 @@ use serde_json::{json, Value};
 pub mod automatic;
 pub mod completion;
 pub mod domain;
+pub mod loop_guard;
+pub mod obstacles;
 pub mod plan;
 mod probe_correction;
 pub mod progress;
@@ -77,7 +79,14 @@ pub fn attempt_allowed(source: AssignmentState, target: AssignmentState) -> bool
 pub fn event_tx(db: &Connection, task: &str, kind: &str, payload: Value) -> CoreResult<i64> {
     db.execute("INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES (?,?,'runtime',?,?)",
         (task,kind,serde_json::to_string(&payload)?,crate::now()))?;
-    Ok(db.last_insert_rowid())
+    let id = db.last_insert_rowid();
+    // Real progress is also marked as `TASK_PROGRESS`, the task's compact progress
+    // signal (see `obstacles::progress_for`). The caller still gets its own event id.
+    for marker in obstacles::progress_for(db, kind, &payload)? {
+        db.execute("INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES (?,'TASK_PROGRESS','runtime',?,?)",
+            (task,serde_json::to_string(&marker)?,crate::now()))?;
+    }
+    Ok(id)
 }
 fn waiver(db: &Connection, task: &str) -> CoreResult<bool> {
     Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events e JOIN runtime_tasks t USING(task_id)

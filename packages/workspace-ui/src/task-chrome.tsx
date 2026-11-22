@@ -10,6 +10,7 @@ import { behindTarget, conflictLine, finishBlocked, taskCheckout } from "./revie
 import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, languageLabel, modeLabel, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
 import { CHECK_ICON, VERIFICATION } from "./worker";
 import { archiveBlocked } from "./git-actions-model";
+import { spendRows, StallBadge } from "./task-spend";
 
 const useModel = (id: () => string) => {
   const ws = useWs();
@@ -93,6 +94,8 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
     return !!m() && open === 0 && !!reviewDeadEnd(props.view.task) && m()!.mode !== "unconfirmed";
   };
   return <>
+    {/* A working task stuck past the owner's threshold says so here; it is information, not a control. */}
+    <StallBadge task={props.view.task} />
     <Show when={mode() === "live" && props.view.task.conflict === "none" && ((m()?.open.length ?? 0) > 0 || (props.view.column === "needs" && props.view.task.observedPhase !== "recovery"))}><button class="btn btn-primary" onClick={go}>Answer</button></Show>
     <Show when={props.view.task.status === "review" && mode() === "review"}><A class="btn btn-primary" to={{ name: "task", machine: props.view.machine.id, task: props.view.id, tab: "changes", sub: "diff" }}>Review changes</A></Show>
     <Show when={props.view.task.status === "ready_to_merge" && mode() === "review"}>
@@ -228,6 +231,10 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
     <div class="ins-sec"><div class="ins-h"><span>Route and access</span></div>
       <Kv rows={[["Coordinator model", ws.route(settings()) ?? ""], ...(ws.store.state().options.modes.length ? [["Access", modeLabel(settings().mode)] as [string, string]] : []), ...(ws.store.state().options.languages.length ? [["Language", languageLabel(settings().language)] as [string, string]] : [])]} />
       <Show when={usesMachineRoute(m()) && ws.route(settings())}><div class="cap faint">What this machine sets for every task.</div></Show></div>
+    {/* What the task spent, as its engines reported it (`native_progress`). */}
+    <Show when={spendRows(t().spend).length > 0}>
+      <div class="ins-sec"><div class="ins-h"><span>Spend</span></div><Kv rows={spendRows(t().spend)} /></div>
+    </Show>
     <Show when={usage().length > 0}>
       <div class="ins-sec"><div class="ins-h"><span>Usage</span></div><Kv rows={usage()} /></div>
     </Show>

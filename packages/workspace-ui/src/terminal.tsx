@@ -7,6 +7,7 @@ import { useWs } from "./ctx";
 import { ScreenActive } from "./freshness";
 import { I } from "./kit";
 import { Toolbar } from "./layout";
+import { queuedTerminalCommand, takeTerminalCommand } from "./terminal-command";
 
 export function LiveTerminal(props: { projectId: string; repository: string; port: TerminalPort }) {
   const ws = useWs();
@@ -127,6 +128,14 @@ export function LiveTerminal(props: { projectId: string; repository: string; por
   createEffect(() => {
     if (!ws.panels.terminalOpen() || !shown()) return;
     if (!term) void open(); else void resize();
+  });
+  // A command the owner asked for (an owner action's sign-in) is typed into this project's shell once it runs.
+  createEffect(() => {
+    if (!running() || !queuedTerminalCommand(props.projectId)) return;
+    const text = untrack(() => takeTerminalCommand(props.projectId));
+    if (!text || failed || !session) return;
+    pending.push(...inputChunks(text + "\r")); pendingBytes += new TextEncoder().encode(text + "\r").length; void send();
+    term?.focus();
   });
   createEffect(on(ws.panels.terminalOpen, open => { if (open && term && untrack(shown)) term.focus(); }, { defer: true }));
   // A parked tab reads nothing; what the shell printed meanwhile is there to read on return.

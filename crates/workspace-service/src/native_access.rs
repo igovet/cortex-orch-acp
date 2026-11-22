@@ -1,5 +1,5 @@
 //! Outside effects require a live writing channel and durable one-shot identity.
-//! These are explicitly unsandboxed owner routes, never a containment fallback.
+//! These are unsandboxed owner-policy routes; they do not retry a started payload.
 use crate::native_sessions::ClientPermissions;
 use cortex_core::{
     access,
@@ -116,6 +116,58 @@ pub(super) async fn execute(
     name: &str,
     args: Value,
 ) -> CoreResult<Value> {
+    execute_as(
+        executor,
+        credential,
+        root,
+        permissions,
+        protected_roots,
+        running,
+        name,
+        args,
+        None,
+    )
+    .await
+}
+/// A writing worker's `command_run` that needs the host, run by the runtime through
+/// this same consent route (`native_commands::reroute`). `note` says why and is kept
+/// on the receipt; the consent card names the reason.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn execute_rerouted(
+    executor: Arc<StoreExecutor>,
+    credential: Credential,
+    root: PathBuf,
+    permissions: Option<Arc<dyn ClientPermissions>>,
+    protected_roots: Vec<PathBuf>,
+    running: crate::native_commands::Running,
+    args: Value,
+    note: Value,
+) -> CoreResult<Value> {
+    execute_as(
+        executor,
+        credential,
+        root,
+        permissions,
+        protected_roots,
+        running,
+        "outside_command",
+        args,
+        Some(note),
+    )
+    .await
+}
+#[allow(clippy::too_many_arguments)]
+async fn execute_as(
+    executor: Arc<StoreExecutor>,
+    credential: Credential,
+    root: PathBuf,
+    permissions: Option<Arc<dyn ClientPermissions>>,
+    protected_roots: Vec<PathBuf>,
+    running: crate::native_commands::Running,
+    name: &str,
+    args: Value,
+    rerouted: Option<Value>,
+) -> CoreResult<Value> {
     let write = name == "outside_write";
     let path = target(&root, &args, write)?;
     let name = name.to_owned();
@@ -151,7 +203,13 @@ pub(super) async fn execute(
     if let Some(saved) = saved {
         return Ok(saved);
     }
-    let request = json!({"toolCall":{"toolCallId":key,"title":if write {"Write outside the project"} else {"Run outside the sandbox"},
+    let title = match rerouted.as_ref().and_then(|n| n["reason"].as_str()) {
+        Some("privilege") => "Run on the host: the command uses sudo",
+        Some("sandbox_unavailable") => "Run on the host: the command sandbox could not start",
+        _ if write => "Write outside the project",
+        _ => "Run outside the sandbox",
+    };
+    let request = json!({"toolCall":{"toolCallId":key,"title":title,
         "kind":if write {"edit"} else {"execute"},"rawInput":args},
         "options":[{"optionId":"allow","name":"Allow once","kind":"allow_once"},{"optionId":"deny","name":"Deny","kind":"reject_once"}]});
     let selected_control_plane = protected_roots.iter().any(|root| {
@@ -239,7 +297,7 @@ pub(super) async fn execute(
         } else {
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
             let pending = crate::native_commands::outside_capture(
-                executor.clone(),credential.clone(),running,path,&args,cancelled,
+                executor.clone(),credential.clone(),running,path,&args,cancelled,rerouted.clone(),
             );
             tokio::pin!(pending);
             loop {

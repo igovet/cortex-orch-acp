@@ -42,6 +42,19 @@ impossible; do not wait for or request a new host, synthesize evidence, claim a
 host enforced a boundary it did not, or mark an attempt accepted without real
 evidence. Tests and acceptance scenarios must themselves be executable today.
 
+Tasks finish without self-made blockers. The runtime records host facts at
+task start (GitHub CLI and native logins by exit code, passwordless or
+password-needed sudo, free space, display, Docker, Git state) into the
+coordinator's capsule; plan around them from the first turn instead of
+discovering them late, and treat a gap as a fact to work around, not a stop.
+Project rule files (`AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`,
+`.agents/`, `.claude/`, `docs/project/verification.md`) are write-protected for
+every task unless the owner's task or message names the file or the owner sends
+`allow-write: <path>`; propose rule changes in the result instead. Reuse built
+packages; `build-deb` keeps only the newest two builds and caches per channel
+(`scripts/cortex-xtask.sh clean-builds`), and `target/` is cleaned only with an
+explicit `cargo clean`.
+
 ## Qualification evidence discipline
 
 Apply these rules to ACP qualification evidence:
@@ -125,20 +138,17 @@ owner". A request covers only the named work, mode and surface.
   runtime launched by that daemon from the explicit absolute checkout plugin
   path. Never use production `~/.paseo` or the production Cortex agent.
 - **Standalone Cortex Workspace:** `desktop` only, explicitly requested for
-  the standalone 1.0.6 app (isolated install of the candidate archive or built
-  binary from this checkout). Use a private disposable virtual screen, private
-  session bus and separate disposable project, never this checkout or the
-  owner's DISPLAY/WAYLAND session. Run both app and service with the owner's
-  real HOME for existing native engine accounts, and disposable
-  `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and
-  `XDG_RUNTIME_DIR` for app/service state and a distinct socket. Never connect
-  to, modify or reuse the owner's production Workspace install, user service,
-  config or stores, or production Paseo. Take before/after metadata-only
-  snapshots of known real-HOME Cortex/Workspace locations and report stray
-  writes. Prove isolation before any paid call; see the
-  [standalone desktop procedure](docs/project/verification.md#standalone-cortex-workspace-desktop).
-  Apply the qualification evidence rules above, and observe the real window
-  with real input and screenshots or recordings; logs alone do not qualify it.
+  the standalone 1.0.6 app. Test the exact **Dev channel** archive
+  (`cortex-workspace-dev`) in the owner's real environment using the
+  [desktop procedure](docs/project/verification.md#standalone-cortex-workspace-desktop):
+  real HOME, keyring and existing native/gh logins, private per-run Dev XDG
+  roots, a private authenticated Xvfb (smoke alone may use the owner's display),
+  and a separate disposable project. There is no nested sandbox lab. The Dev
+  archive is tested by extraction without `sudo`; installing it is only for a
+  scenario that needs the installed package. Never install, modify or restart the release package or
+  service, never touch production `~/.paseo`, and never change the owner's
+  projects, settings, registrations or stores. Observe the real window with XTEST input
+  and screenshots or recordings.
 
 On either route, preserve the production-account rules above: no copied
 credentials, test accounts or engine login; check native login status without
@@ -174,57 +184,61 @@ this checkout itself.
 
 ### Standalone desktop testing procedure
 
-This is the practical procedure for the standalone Cortex Workspace `desktop`
-mode, distilled from live runs. The binding requirements (baseline inventory,
-environment roots, evidence rules, cleanup) are in
-[verification.md](docs/project/verification.md#standalone-cortex-workspace-desktop);
-this section only records what works in practice. The paid-approval rules above
-stay in force: nothing here authorizes a paid call.
+Use the [binding verification procedure](docs/project/verification.md#standalone-cortex-workspace-desktop).
+These commands run from the checkout through `outside_command` on the real
+host as the owner; Auto handles consent.
 
-1. **Host commands go through `outside_command`.** Scratch-mounted worker shells
-   (`command_run` in read-only or Guarded form) cannot reach the real host
-   display, session bus or sockets. Launch, drive and reap the lab only through
-   the outside-command route, with the owner's consent card (Auto answers it).
-2. **Use one detached, self-reaping lab.** Start it in the background so it
-   survives the launching command, with a driver that later attaches to it and a
-   reaper that stops only its own processes. The lab has: a private,
-   authenticated Xvfb on a free display (never the owner's DISPLAY/WAYLAND); an
-   explicit private D-Bus session socket with no systemd user-manager activation
-   or fallback; a private mode-0700 run root holding all five XDG directories
-   (`XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`,
-   `XDG_RUNTIME_DIR`); the owner's real `HOME` for existing native accounts; the
-   candidate service started explicitly on the private socket **before** the
-   desktop; only the disposable Git project registered (no remote); remote access
-   off; no production overrides such as `CORTEX_ROUTING`.
-3. **Do not wrap the lab in a nested bwrap fence, and do not add a separate
-   sandbox pre-check.** A nested namespace fails to bring up the private bus. The
-   app's own verification sandbox is exercised by the paid task itself; a failure
-   to create it there is a product defect to record, not a setup problem to work
-   around.
-4. **Verify before any paid call:** the service and desktop use the private
-   socket and expected roots, the environment matches in both processes, the
-   selected route is the only enabled one, and native login status is checked
-   without printing credentials. If any of these is unverified, stop before paying.
-5. **Drive the real window.** Use XTEST mouse and keyboard input on the native
-   Tauri/WebKitGTK window, with screenshots or a continuous recording of each
-   state. Judge flicker or transient states by extracting and comparing frames
-   from the recording (a settled screenshot cannot show a two-frame flash); keep
-   the capture immutable and re-analyze the same capture if an analysis script
-   fails. Logs or protocol data alone never establish rendered behavior.
-6. **Keep a command ledger:** every command's argv, cwd, exit code and retained
-   output reference, plus hashes of all artifacts (screenshots, recordings,
-   snapshots). Retain failed invocations; never use them to judge the product.
-7. **Clean up only what you own.** Reap the owned lab processes, remove only the
-   exact private sockets the lab created, and compare before/after metadata-only
-   snapshots of the production Cortex/Workspace locations listed in the linked
-   section; report stray writes and missing coverage.
-8. **Known surface limits of the desktop window:** it does not narrow to phone
-   width, so the phone shell needs a real phone device; Update needs
-   `taskWorktrees`; View PR needs an accepted task with a pull request;
-   loading older conversation pages needs a task long enough to have them. Report
-   these as not exercised rather than passed. The task under test also has to be
-   long enough or arranged to produce a worker question, result and verification
-   if those states are in scope.
+```bash
+# Host facts only (display, logins, sudo, Docker, free space, tools); never fails on a gap:
+bash scripts/qualify-dev-deb.sh probe
+# No-paid smoke; reuse the newest local Dev archive instead of rebuilding:
+bash scripts/qualify-dev-deb.sh smoke --archive newest
+bash scripts/qualify-dev-deb.sh smoke
+# Only with explicit authorization for the named paid scenario:
+# DIR is the evidence directory of a successful private-Xvfb smoke of the same archive:
+bash scripts/qualify-dev-deb.sh drive --archive newest --smoke-evidence .workspace-build/dev-evidence.XXXXXXXX -- /absolute/path/to/foreground-scenario-driver
+# Only if a scenario truly needs the installed Dev package (not the default; asks sudo):
+bash scripts/qualify-dev-deb.sh install --archive newest
+# Delete named local Dev build pairs once they are no longer needed:
+bash scripts/qualify-dev-deb.sh cleanup build-XXXXXXXX
+# Disk hygiene (keeps the newest per channel; also automatic after every successful build):
+scripts/cortex-xtask.sh clean-builds --dry-run
+```
+
+The default way to test a .deb needs no `sudo` and no owner action: the launcher
+extracts the archive with `dpkg-deb -x` into a per-run scratch directory (no
+maintainer scripts, no dpkg registration), runs its service and desktop there
+under private Dev roots, and removes the scratch directory at teardown. Build an
+archive once, test it by extraction, and delete builds you no longer need
+(`cleanup`, `cortex-xtask.sh clean-builds`).
+
+Drive always runs on a private authenticated Xvfb (never the owner's display);
+`--real-display` is for smoke only. Xvfb, xauth, mcookie, xdpyinfo, xdotool and xprop
+are required, and a missing one exits 1. View PR addresses are recorded as digests in
+`opener.sha256` and never handed to a browser (`--capture-opener` is accepted but
+unnecessary).
+
+The launcher verifies the exact archive (package name, manifest SHA-256,
+bundled engines), extracts it without maintainer scripts and starts its service
+and desktop with private Dev XDG roots and the owner's real HOME, session bus
+and gh configuration. It unsets `CORTEX_ROUTING`. Smoke sends no task: it reads
+back machine settings, the observed light route and the matching portable
+default over the run's own socket, clicks the window and keeps a screenshot.
+Before paying, the driver repeats the settings and route/default readback on
+its own socket, confirms the route in the rendered app and checks native login
+by exit code without printing credentials. A desktop window does not qualify
+phone-width behavior; View PR needs an accepted task with a PR, Update needs
+`taskWorktrees`, and older pages need a long enough conversation.
+
+Environment problems are facts, not stops. A missing display, tool, login or
+passwordless sudo is recorded (exit 3 lists the unobserved steps) and the task
+adapts: use a private Xvfb, install what is missing,
+ask the owner to sign in through the question route while other work
+continues, or report the step as not run. Never present an unobserved step as
+a pass. Build an archive once and reuse it (`--archive newest`); do not rebuild
+packages repeatedly, and never write isolation infrastructure for a run. Do not
+edit this file or `docs/project/verification.md` unless the owner's task names
+them.
 
 ## Paseo development and plugin safety
 

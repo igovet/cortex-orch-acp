@@ -28,7 +28,7 @@ function mount(accepted = true, remote = "origin", checks: Check[] = [{ name: "C
   const state = emptyWorkspace(), cap = { everything: true, operations: [] };
   state.machines[0].connection = "connected";
   state.projects.push({ id: "p", machineId: state.machines[0].id, name: "Project", repository: "/p", openBranch: "dev", defaultBranch: "main" });
-  state.tasks.push({ ...draftTask(), checkout: { kind: "main", branch: "dev" }, status: "review", result: { version: 1, digest: "digest", summary: "Result", checks }, reviewActions, workspaceDigest: "digest", acceptance: accepted ? { version: 1, digest: "digest" } : null });
+  state.tasks.push({ ...draftTask(), checkout: { kind: "main", branch: "dev" }, status: accepted ? "ready_to_merge" : "review", result: { version: 1, digest: "digest", summary: "Result", checks }, reviewActions, workspaceDigest: "digest", acceptance: accepted ? { version: 1, digest: "digest" } : null });
   state.repos.push({ projectId: "p", remote, tree: [], sources: {}, commits: [], branches: [], fetchedAt: null,
     checkouts: [{ id: "p:main", projectId: "p", kind: "main", branch: "dev", path: "/p", taskId: null, label: null, base: "main", ahead: 0, behind: 0, behindOf: {}, files: [], draft: "", sources: {}, updateConflict: null }] });
   const script = scriptedPort({ capabilities: cap });

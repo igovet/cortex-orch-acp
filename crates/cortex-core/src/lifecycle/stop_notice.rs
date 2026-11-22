@@ -900,16 +900,19 @@ mod tests {
                 db.execute("INSERT INTO runtime_nodes VALUES ('t',4,'trace','worker-security-auditor','Trace','[]','[\"traefik/**\"]','execution','completed','a1','{}')", [])?;
                 db.execute("INSERT INTO runtime_nodes VALUES ('t',4,'_review_1','worker-code-reviewer','Review','[\"trace\"]','[\"**\"]','review','completed','rv',?)", [incomplete.to_string()])?;
                 lifecycle::review::advance_tx(db, "t")?;
-                assert_eq!(domain::task_tx(db, "t")?.0, crate::TaskState::WaitingUser);
+                // No-stop policy: the dead ends become a continuation, never an owner question.
+                assert_eq!(domain::task_tx(db, "t")?.0, crate::TaskState::Recovering);
+                assert_eq!(db.query_row("SELECT count(*) FROM pending_questions WHERE task_id='t'", [], |r| r.get::<_, i64>(0))?, 0);
+                assert_eq!(db.query_row("SELECT json_extract(payload_json,'$.reason') FROM runtime_events WHERE task_id='t' AND type='AUTOMATIC_CONTINUATION'", [], |r| r.get::<_, String>(0))?, "review_incomplete");
                 assert_eq!(db.query_row("SELECT count(*) FROM runtime_nodes WHERE task_id='t' AND stage='review'", [], |r| r.get::<_, i64>(0))?, 1);
                 assert_eq!(db.query_row("SELECT count(*) FROM runtime_events WHERE type='REVIEW_RERUN'", [], |r| r.get::<_, i64>(0))?, 0);
                 let routed: String = db.query_row("SELECT payload_json FROM runtime_events WHERE task_id='t' AND type='REVIEW_DEAD_END_ROUTED'", [], |r| r.get(0))?;
                 let routed: Value = serde_json::from_str(&routed)?;
                 assert_eq!(routed["blocked"][0]["blocker"], "missing_access");
                 assert_eq!(routed["blocked"][1]["blocker"], "owner_decision");
-                let text: String = db.query_row("SELECT text FROM pending_questions WHERE status='open'", [], |r| r.get(0))?;
+                // The recorded facts still explain the dead ends in plain words.
+                let text = explain_tx(db, "t", "review_incomplete", false)?.text;
                 assert!(text.starts_with("The task stopped: the independent review could not cover the whole change."), "{text}");
-                assert!(text.contains("none was started"), "{text}");
                 assert!(text.contains("Not covered: backend/src/modules/auth/limiter.ts (needs access or a permission the reviewer does not have: the file is on a host the reviewer cannot reach)"), "{text}");
                 assert!(text.contains("retry policy (needs your decision: "), "{text}");
                 Ok(())
@@ -966,7 +969,7 @@ mod tests {
                     lifecycle::review::advance_tx(db, task)?;
                     assert_eq!(db.query_row("SELECT count(*) FROM runtime_nodes WHERE task_id=? AND stage='review'", [task], |r| r.get::<_, i64>(0))?, 1);
                     let stopped: String = db.query_row(
-                        "SELECT coalesce((SELECT json_extract(payload_json,'$.blocker') FROM runtime_events WHERE task_id=?1 AND type IN ('ASK_USER_REQUIRED','USER_QUESTION_REQUESTED') ORDER BY id DESC LIMIT 1),'')",
+                        "SELECT coalesce((SELECT json_extract(payload_json,'$.reason') FROM runtime_events WHERE task_id=?1 AND type='AUTOMATIC_CONTINUATION' ORDER BY id DESC LIMIT 1),'')",
                         [task], |r| r.get(0))?;
                     assert_eq!(stopped, blocker, "{task}");
                     Ok(())

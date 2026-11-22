@@ -15,7 +15,7 @@ const LIVENESS = "service.status";
 /** Reads carry no acknowledgement to lose: closing never waits for them. Anything not listed is a write. */
 const READS = new Set(["native.query", "native.board", "service.status", "service.capabilities", "projects.list", "projects.status",
   "capabilities.get", "project.snapshot", "tasks.list", "tasks.get", "executions.get", "decisions.list", "decisions.get",
-  "results.get", "reports.read", "history.page", "events.page", "requests.get", "directories.search", "terminal.read", "voice.read", "remote.status"]);
+  "results.get", "reports.read", "history.page", "events.page", "requests.get", "directories.search", "terminal.read", "voice.read", "remote.status", "askpass.list", "owner_actions.list"]);
 const MACHINE_READS = new Set(["config.read", "project.config.read", "product.read", "product.facts", "product.board", "workers",
   "repo.snapshot", "repo.file", "repo.list", "repo.locate", "repo.skills", "repo.context", "overview", "logs.folder", "workflow.describe"]);
 function isRead(operation: string, message: unknown): boolean {

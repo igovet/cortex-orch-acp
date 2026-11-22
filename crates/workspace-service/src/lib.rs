@@ -5,6 +5,8 @@ pub mod config_read_dispatch;
 pub mod config_read_model;
 pub mod config_refresh;
 mod core_host;
+#[doc(hidden)]
+pub mod dev_extraction;
 mod directories;
 mod directory_search;
 #[cfg(test)]
@@ -13,7 +15,7 @@ mod hermetic;
 pub mod incoming;
 pub mod incoming_history;
 pub mod incoming_prompt;
-mod launch;
+pub mod launch;
 mod local;
 mod machine;
 pub use machine::{settings_api, update_user_defaults};
@@ -26,6 +28,8 @@ pub async fn maintenance_worker(state: &Path, id: &str) -> io::Result<()> {
 }
 mod native_access;
 mod native_activity;
+#[doc(hidden)]
+pub mod native_askpass;
 mod native_attachments;
 mod native_batch;
 mod native_change_set;
@@ -46,7 +50,11 @@ mod native_instructions;
 pub mod native_mcp;
 mod native_owner_controls;
 mod native_owner_decisions;
+// Owner actions: access a task lacks (a login, a token, sudo), resolved by the owner.
+mod native_owner_actions;
 mod native_pipeline;
+// Environment preflight facts recorded at task start (no model call).
+pub mod native_preflight;
 mod native_project;
 mod native_project_ops;
 mod native_recovery;
@@ -252,6 +260,7 @@ impl Service {
         {
             return Err(failure("private_root_refused"));
         }
+        native_askpass::configure(&config.state_dir);
         let projects = local::read_registry(&config.state_dir.join("projects.json"))?;
         let mut ids = BTreeSet::new();
         let mut paths = BTreeSet::new();
@@ -342,6 +351,28 @@ impl Service {
             });
         }
         let _ = self.remote.set(started);
+    }
+    /// Open `sudo` password prompts, each named by its registered project instead of a
+    /// folder, and whether a paired phone may answer one with a password.
+    async fn sudo_prompts(&self) -> Value {
+        let state = self.state.lock().await;
+        let prompts: Vec<Value> = native_askpass::pending()
+            .into_iter()
+            .map(|mut prompt| {
+                let root = prompt
+                    .as_object_mut()
+                    .and_then(|p| p.remove("projectRoot"))
+                    .unwrap_or(Value::Null);
+                let project = state
+                    .projects
+                    .iter()
+                    .find(|p| root.as_str() == p.canonical_root.to_str());
+                prompt["projectId"] = json!(project.map(|p| &p.project_id));
+                prompt["projectName"] = json!(project.map(|p| &p.display_name));
+                prompt
+            })
+            .collect();
+        json!({"prompts":prompts,"phoneAnswers":native_askpass::phone_allowed()})
     }
     pub async fn projects(&self) -> Value {
         json!(self.state.lock().await.projects)
@@ -714,8 +745,7 @@ impl Service {
                     .unwrap_or_else(|| Arc::new(native_runtime::UnqualifiedRoutes));
                 let maintenance_state = self.config.state_dir.clone();
                 tokio::task::spawn_blocking(move || {
-                    native_runtime::Runtime::open(&root, &id, routes)
-                        .map(|r| r.with_maintenance_state(maintenance_state))
+                    native_runtime::Runtime::open_workspace(&root, &id, routes, maintenance_state)
                 })
                 .await
                 .map_err(|_| failure("storage_unavailable"))?
@@ -1085,7 +1115,7 @@ impl Service {
             "service.status" if params == json!({}) => Ok(self.status().await),
             "service.stop" if params == json!({}) => Ok(json!({"outcome":"stop_requested"})),
             "service.capabilities" if params == json!({}) => Ok(
-                json!({"channel":workspace_protocol::channel::current().name,"application":workspace_protocol::channel::current().title,"methods":["native.query","native.board","service.status","service.capabilities","service.subscribe","service.stop","projects.list","projects.register","projects.rename","projects.remove","projects.activate","projects.status","workspace","executions.cancel","executions.prompt","executions.control","machine.call","directories.search","directories.cancel","terminal.open","terminal.read","terminal.write","terminal.resize","terminal.close","voice.start","voice.read","voice.stop","voice.cancel","remote.status","remote.enable","remote.pairing.start","remote.pairing.cancel","remote.pairing.decide","remote.devices.revoke","remote.relay.set","notifications.report","notifications.opened","notifications.take"],"machine":true,"permissions":false,"sessionOptions":false,
+                json!({"channel":workspace_protocol::channel::current().name,"application":workspace_protocol::channel::current().title,"methods":["native.query","native.board","service.status","service.capabilities","service.subscribe","service.stop","projects.list","projects.register","projects.rename","projects.remove","projects.activate","projects.status","workspace","executions.cancel","executions.prompt","executions.control","machine.call","directories.search","directories.cancel","terminal.open","terminal.read","terminal.write","terminal.resize","terminal.close","voice.start","voice.read","voice.stop","voice.cancel","remote.status","remote.enable","remote.pairing.start","remote.pairing.cancel","remote.pairing.decide","remote.devices.revoke","remote.relay.set","remote.sudo.set","askpass.list","askpass.answer","owner_actions.list","owner_actions.act","notifications.report","notifications.opened","notifications.take"],"machine":true,"permissions":false,"sessionOptions":false,
                     // The native host runs every task in the project folder (no task worktrees).
                     "taskWorktrees":false}),
             ),
@@ -1125,6 +1155,15 @@ impl Service {
                     "projects.activate" => self.activate(&p.project_id).await,
                     _ => self.project_status(&p.project_id).await,
                 }
+            }
+            // Owner password prompts for `sudo` in host commands (`native_askpass`). Never
+            // logged; the answer moves straight to the waiting helper.
+            "askpass.list" if params == json!({}) => Ok(self.sudo_prompts().await),
+            "askpass.answer" => native_askpass::answer_request(params),
+            // Owner actions (`native_owner_actions`): list the open ones, act on one. A pasted
+            // token moves straight to the CLI's stdin and is never logged.
+            method if method.starts_with("owner_actions.") => {
+                self.owner_actions_call(method, params).await
             }
             // Owner-only: the remote tunnel's policy refuses every `remote.*` method.
             method if method.starts_with("remote.") => {

@@ -1495,6 +1495,361 @@ async fn coordinator_tools_not_chat_and_lease() {
     drop(s);
     close(h).await;
 }
+/// sudo in a host command asks the owner through the askpass route, and a writing
+/// worker's command_run that needs the host is rerun there by the runtime. A fake
+/// `sudo` stands in for the real one; no real sudo runs and no real password exists.
+async fn sudo_prompts_and_host_reroute() {
+    use std::os::unix::fs::PermissionsExt;
+    use workspace_service::native_askpass as askpass;
+    // The fake sudo is not root: accept its helper and its shared pipe (fixtures only).
+    askpass::trust_any_caller_for_tests();
+    const SECRET: &str = "fixture-sudo-secret-7Qx2";
+    let digest = |text: &str| {
+        use sha2::Digest;
+        format!("{:x}", sha2::Sha256::digest(text.as_bytes()))
+    };
+    let outside = Project::new();
+    let bin = outside.0.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    // Asks for the password the way sudo does (argv `-A` first) and prints only its digest.
+    std::fs::write(
+        bin.join("sudo"),
+        "#!/bin/sh\n[ \"$1\" = \"-A\" ] || { echo missing-askpass-flag; exit 3; }\n\
+         pw=$(\"$SUDO_ASKPASS\" '[sudo] password for fixture: ') || { echo askpass-failed; exit 1; }\n\
+         printf 'hash=%s\\n' \"$(printf %s \"$pw\" | sha256sum | cut -c1-64)\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("sudo"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let fake = bin.join("sudo").to_str().unwrap().to_owned();
+    async fn checked(
+        d: &workspace_service::native_sessions::SessionDriver,
+        name: &str,
+        args: Value,
+        expected: Value,
+    ) {
+        let prompt = format!(
+            "call:{}",
+            json!({"name":name,"arguments":args,"__fixture_expect":expected})
+        );
+        assert_eq!(d.prompt(&prompt).await.unwrap().stop_reason, "end_turn");
+    }
+    /// Answers the next prompt of task `t` once it opens, after checking what it names.
+    fn answer_next(answer: Option<&'static str>) -> tokio::task::JoinHandle<Value> {
+        tokio::spawn(async move {
+            for _ in 0..500 {
+                if let Some(prompt) = askpass::pending().into_iter().find(|p| p["taskId"] == "t") {
+                    let id = prompt["promptId"].as_str().unwrap();
+                    let reply = match answer {
+                        Some(text) => askpass::Answer::Password(askpass::Secret::new(text.into())),
+                        None => askpass::Answer::Cancel,
+                    };
+                    askpass::answer(id, reply).unwrap();
+                    return prompt;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("no sudo prompt opened");
+        })
+    }
+
+    let p = Project::new();
+    let h = p.host().await;
+    let o = h
+        .create("t".into(), "Install the build tools".into(), "owner".into())
+        .await
+        .unwrap();
+    let s = p.store();
+    s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'", [])?;
+        db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]','[\"src\"]','execution','running','a',NULL)", [])?;
+        cortex_core::access::switch_tx(db, "t", "auto", "fixture", "acp_set_mode")
+    })
+    .unwrap();
+    let d = h
+        .dispatch(
+            "t".into(),
+            o,
+            SessionRole::Worker {
+                assignment: "a".into(),
+            },
+            p.route(),
+        )
+        .await
+        .unwrap();
+    // 1. A writing worker's command_run with sudo runs on the host at once (Auto
+    // answers the consent card); sudo gets `-A` and the owner's answer, and the
+    // receipt says why it was rerouted and how the prompt ended.
+    let answered = answer_next(Some(SECRET));
+    let run = json!({"argv":[fake,"install-fixture"],"request_key":"sudo-run"});
+    checked(
+        &d,
+        "command_run",
+        run.clone(),
+        json!({
+            "/result/isError":false,
+            "/result/structuredContent/profile":"outside_confirmed",
+            "/result/structuredContent/exit_code":0,
+            "/result/structuredContent/output":format!("hash={}\n", digest(SECRET)),
+            "/result/structuredContent/rerouted/from":"command_run",
+            "/result/structuredContent/rerouted/reason":"privilege",
+            "/result/structuredContent/sudo_prompts":["answered"],
+        }),
+    )
+    .await;
+    let prompt = answered.await.unwrap();
+    assert_eq!(prompt["title"], "Password for sudo");
+    assert_eq!(prompt["worker"], "worker-backend-dev");
+    assert_eq!(prompt["task"], "Install the build tools");
+    assert!(prompt["command"]
+        .as_str()
+        .unwrap()
+        .ends_with("install-fixture"));
+    assert!(!prompt.to_string().contains(SECRET));
+    // 2. The same request again answers the same host receipt: nothing runs, nothing asks.
+    checked(
+        &d,
+        "command_run",
+        run,
+        json!({
+            "/result/structuredContent/rerouted/reason":"privilege",
+            "/result/structuredContent/sudo_prompts":["answered"],
+        }),
+    )
+    .await;
+    assert!(!askpass::pending().iter().any(|p| p["taskId"] == "t"));
+    // 3. A cancelled prompt fails sudo normally; the receipt says it was cancelled.
+    let cancelled = answer_next(None);
+    checked(
+        &d,
+        "outside_command",
+        json!({"argv":[fake,"cancel-fixture"],"request_key":"sudo-cancel"}),
+        json!({
+            "/result/structuredContent/exit_code":1,
+            "/result/structuredContent/output":"sudo password prompt: cancelled\naskpass-failed\n",
+            "/result/structuredContent/sudo_prompts":["cancelled"],
+        }),
+    )
+    .await;
+    cancelled.await.unwrap();
+    // 4. If the launcher is available, the payload writes once and emits both
+    // denial signatures. They must survive on the original contained receipt,
+    // with no host request. Otherwise only a trusted preparation failure may
+    // fall back, once, using the ordinary host request key.
+    let output = "unshare: unshare failed: Operation not permitted\nsudo: effective uid is not 0\n";
+    // The sandbox may mount the project root read-only for a plain-folder fixture.
+    // The separate disposable /tmp fixture is writable in both execution routes.
+    let marker = outside.0.join("runs");
+    let command = json!({
+        "argv": [
+            "/bin/sh", "-c",
+            format!("echo ran >> \"$1\" || exit 10; printf '%s' '{output}'; exit 4"),
+            "fixture", marker,
+        ],
+        "request_key": "nested",
+    });
+    let _ = d
+        .prompt(&call("command_run", command.clone()))
+        .await
+        .unwrap();
+    let receipt = |key: &str| -> Value {
+        s.read(|db| {
+            let raw: String = db.query_row(
+                "SELECT result_json FROM runtime_requests WHERE task_id='t' AND request_key=?",
+                [key],
+                |r| r.get(0),
+            )?;
+            Ok(serde_json::from_str(&raw)?)
+        })
+        .unwrap()
+    };
+    let first = receipt("nested");
+    let expected = if first["launched"] == false {
+        assert_eq!(first["failure"], "command_not_started");
+        assert_eq!(
+            first["settlement_evidence"],
+            "supervisor_launcher_failed_before_release"
+        );
+        assert_eq!(first["rerouted_to"]["args"]["request_key"], "nested.host");
+        assert_eq!(
+            first["rerouted_to"]["note"]["reason"],
+            "sandbox_unavailable"
+        );
+        assert_eq!(
+            first["rerouted_to"]["note"]["sandbox_receipt"]["tool_call_ref"],
+            first["tool_call_ref"]
+        );
+        let host = receipt("nested.host");
+        assert_eq!(host["complete"], true);
+        json!({
+            "/result/structuredContent/profile":"outside_confirmed",
+            "/result/structuredContent/exit_code":4,
+            "/result/structuredContent/tool_call_ref":host["reply"]["structuredContent"]["tool_call_ref"],
+            "/result/structuredContent/rerouted/reason":"sandbox_unavailable",
+        })
+    } else {
+        assert_eq!(first["profile"], "development");
+        assert_eq!(first["settled"], true);
+        assert_eq!(first["complete"], true);
+        assert_eq!(first["failure"], Value::Null);
+        assert_eq!(first["exit_code"], 4);
+        assert_eq!(first["output"], output);
+        assert_eq!(first["nested_sandbox"]["code"], "nested_sandbox_denied");
+        assert_eq!(
+            first["sandbox_privilege"]["code"],
+            "privilege_refused_in_sandbox"
+        );
+        assert!(first["rerouted_to"].is_null());
+        json!({
+            "/result/structuredContent/profile":"development",
+            "/result/structuredContent/tool_call_ref":first["tool_call_ref"],
+            "/result/structuredContent/exit_code":4,
+            "/result/structuredContent/nested_sandbox/code":"nested_sandbox_denied",
+            "/result/structuredContent/sandbox_privilege/code":"privilege_refused_in_sandbox",
+        })
+    };
+    checked(&d, "command_run", command.clone(), expected.clone()).await;
+    assert_eq!(receipt("nested"), first);
+    if first["launched"] != false {
+        // Simulate an old service that recorded a deferred output-driven host
+        // route just before shutdown, without starting its outside request.
+        let old_route = json!({
+            "args": {"argv":command["argv"],"cwd":p.0,"timeout_seconds":1800,
+                "request_key":"nested.host"},
+            "note": {"from":"command_run","reason":"nested_sandbox","request_key":"nested"},
+        });
+        s.write(|db| {
+            db.execute(
+                "UPDATE runtime_requests SET result_json=json_set(result_json,'$.rerouted_to',json(?))
+                 WHERE task_id='t' AND request_key='nested' AND operation='command_run'",
+                [old_route.to_string()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        checked(&d, "command_run", command, expected).await;
+        let host_rows: i64 = s
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT count(*) FROM runtime_requests WHERE task_id='t' AND request_key='nested.host'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(host_rows, 0);
+    }
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "ran\n");
+    let outside_runs: i64 = s
+        .read(|db| Ok(db.query_row(
+            "SELECT count(*) FROM runtime_events WHERE task_id='t' AND type='NATIVE_OUTSIDE_SETTLED' AND json_extract(payload_json,'$.decider')='mode:auto'",
+            [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(outside_runs, if first["launched"] == false { 3 } else { 2 });
+    if first["launched"] == false {
+        println!("host routing verified for one trusted pre-launch failure");
+    } else {
+        println!("started sandboxed payload retained its receipt and was not replayed");
+    }
+    d.shutdown().await.unwrap();
+    drop(s);
+    close(h).await;
+
+    // 5. A read-only role is never rerouted: its sudo stays in its read-only sandbox,
+    // no consent card opens and nothing outside the project is written.
+    let r = Project::new();
+    // Not in /tmp, which every sandbox shares writable: the read-only sandbox has a
+    // private /var/tmp, so only a host run could create this.
+    let marker = PathBuf::from(format!(
+        "/var/tmp/cw-reader-sudo-{}-{}",
+        std::process::id(),
+        digest(&format!("{:?}", std::time::SystemTime::now()))[..12].to_owned()
+    ));
+    std::fs::write(
+        bin.join("sudo-writer"),
+        "#!/bin/sh\nfor a; do last=$a; done\n: > \"$last\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        bin.join("sudo-writer"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::fs::create_dir(outside.0.join("as-sudo")).unwrap();
+    std::os::unix::fs::symlink(bin.join("sudo-writer"), outside.0.join("as-sudo/sudo")).unwrap();
+    let h = r.host().await;
+    let o = h
+        .create("t".into(), "Read only".into(), "owner".into())
+        .await
+        .unwrap();
+    let s = r.store();
+    s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'", [])?;
+        db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-explorer','Observe','[]','[\"src\"]','execution','running','a',NULL)", [])?;
+        cortex_core::access::switch_tx(db, "t", "auto", "fixture", "acp_set_mode")
+    })
+    .unwrap();
+    let d = h
+        .dispatch(
+            "t".into(),
+            o,
+            SessionRole::Worker {
+                assignment: "a".into(),
+            },
+            r.route(),
+        )
+        .await
+        .unwrap();
+    let _ = d
+        .prompt(&call(
+            "command_run",
+            json!({"argv":[outside.0.join("as-sudo/sudo"),marker],"request_key":"reader-sudo"}),
+        ))
+        .await
+        .unwrap();
+    let leaked = marker.exists();
+    let _ = std::fs::remove_file(&marker);
+    assert!(!leaked, "a read-only role wrote outside its sandbox");
+    let asked: i64 = s
+        .read(|db| Ok(db.query_row("SELECT count(*) FROM runtime_events WHERE task_id='t' AND type='NATIVE_OUTSIDE_REQUESTED'", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(asked, 0);
+    d.shutdown().await.unwrap();
+    drop(s);
+    close(h).await;
+
+    // The password reached only the fake sudo: no store row, event, receipt, output
+    // file or other project file holds it.
+    fn files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => files(&path, out),
+                Ok(t) if t.is_file() => out.push(path),
+                _ => {}
+            }
+        }
+    }
+    let mut all = Vec::new();
+    for root in [&p.0, &r.0, &outside.0] {
+        files(root, &mut all);
+    }
+    assert!(
+        all.iter()
+            .any(|f| f.extension().is_some_and(|e| e == "bin")),
+        "no command output retained"
+    );
+    assert!(all
+        .iter()
+        .any(|f| f.file_name().is_some_and(|n| n == "cortex.sqlite3")));
+    for file in all {
+        let bytes = std::fs::read(&file).unwrap_or_default();
+        assert!(
+            !bytes.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()),
+            "the sudo password appears in {}",
+            file.display()
+        );
+    }
+}
 async fn access_modes_and_outside_routes() {
     // A writing worker keeps the same asking/workspace-write mode in every access
     // mode: no session runs in bypassPermissions or agent-full-access.
@@ -6365,6 +6720,25 @@ async fn recovery_project_operations_and_structured_tool_errors() {
         .await;
     }
     assert!(p.0.join("src/file.txt").is_file());
+    // `.claude` is a protected rule path until the owner lifts it (here: Remove).
+    checked(
+        &w,
+        "project_skill_link",
+        json!({"action":"link","name":"demo","request_key":"l-protected"}),
+        json!({"/result/isError":true,"/result/structuredContent/code":"rule_file_protected"}),
+        "end_turn",
+    )
+    .await;
+    s.write(|db| {
+        cortex_core::lifecycle::event_tx(
+            db,
+            "t",
+            "OWNER_WRITE_ALLOWED",
+            json!({"path":".claude","request":"lift-claude"}),
+        )?;
+        Ok(())
+    })
+    .unwrap();
     checked(
         &w,
         "project_skill_link",
@@ -6514,6 +6888,8 @@ async fn recovery_project_operations_and_structured_tool_errors() {
     close(h).await;
 }
 fn main() {
+    // The askpass helper and the sudo shim of host commands are this executable too.
+    workspace_service::native_askpass::dispatch();
     if std::env::args().nth(1).as_deref()
         == Some(workspace_service::native_command_supervisor::MODE)
     {
@@ -6607,6 +6983,13 @@ fn main() {
             println!("external worker grants, including Claude review discovery, passed");
             return;
         }
+        if mode == "sudo-host-route" {
+            tokio::time::timeout(Duration::from_secs(90), sudo_prompts_and_host_reroute())
+                .await
+                .expect("sudo host route scenario exceeded deadline");
+            println!("sudo password prompts and host reroute passed");
+            return;
+        }
         // `engine-modes`: only the native permission and engine-mode scenarios.
         if mode == "engine-modes" {
             tokio::time::timeout(Duration::from_secs(90), async {
@@ -6632,6 +7015,7 @@ fn main() {
             read_only_channels_start_restricted_in_every_access_mode().await;
             reopened_synthesis_feedback().await;
             access_modes_and_outside_routes().await;
+            sudo_prompts_and_host_reroute().await;
             route_effort_starts_codex_and_claude_coordinators().await;
             document_tools_through_engine_and_relay().await;
             configured_external_worker_grants().await;
@@ -6675,6 +7059,7 @@ fn main() {
         "engine-modes",
         "plain-folder",
         "external-worker-grants",
+        "sudo-host-route",
     ]
     .contains(&mode.as_str())
     {

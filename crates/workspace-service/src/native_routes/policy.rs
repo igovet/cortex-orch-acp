@@ -984,6 +984,18 @@ impl RouteResolver {
                 }
             }
         }
+        // The owner's per-model work kinds (`preferred_for`) decide which models may do
+        // this kind of work at all; tiers and escalation choose only among them. A model
+        // with no listed kinds serves every kind. Owner store 2026-11-21: an escalated
+        // QA (testing) node went to Fable, configured only for design. When no usable
+        // model lists the kind, every usable model stays eligible, so work never stops.
+        let eligible = |c: &Candidate| {
+            let p = &self.policy(c)["preferred_for"];
+            kinds(p).is_empty() || kind_in(p, kind)
+        };
+        if usable.iter().any(|(c, _)| eligible(c)) {
+            usable.retain(|(c, _)| eligible(c));
+        }
         let meaningfully_worse =
             |preferred: &Vec<(&Candidate, Option<f64>)>, all: &Vec<(&Candidate, Option<f64>)>| {
                 let p = preferred

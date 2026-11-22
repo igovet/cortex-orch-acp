@@ -12,3 +12,5 @@ export * from "./capabilities";
 export * from "./port";
 export * from "./mapping";
 export * from "./remote";
+export * from "./sudo";
+export * from "./owner-actions";

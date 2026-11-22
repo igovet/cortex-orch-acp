@@ -512,7 +512,8 @@ fn cancelled_worker_stopping(db: &Connection, runtime: &str) -> CoreResult<Optio
 /// - `reviewDeadEnd`: an item that the reviewer reported it cannot reach with its tools
 ///   (`tool_unavailable`) in at least two dead-end reviews since the budget was renewed, the task
 ///   resumed or reopened, while the newest dead end still names it (`repeated_review_dead_end`,
-///   the same rule that pauses the runtime). Items compare by their name before any detail.
+///   the same rule that moves the continuation to the `reassign` rung). Items compare by their
+///   name before any detail.
 fn automatic_facts(db: &Connection, runtime: &str, value: &mut Value) -> CoreResult<()> {
     let since: i64 = db.query_row(
         "SELECT coalesce(max(id),0) FROM runtime_events WHERE task_id=?
@@ -533,7 +534,7 @@ fn automatic_facts(db: &Connection, runtime: &str, value: &mut Value) -> CoreRes
     if !spent.is_empty() {
         value["spentOn"] = json!(spent);
     }
-    // The same rule the runtime uses to pause instead of continuing (one definition).
+    // The same rule the runtime uses to change approach (one definition).
     if let Some((item, count)) = crate::lifecycle::automatic::repeated_review_dead_end(db, runtime)?
     {
         value["reviewDeadEnd"] = json!({"item":item,"count":count});

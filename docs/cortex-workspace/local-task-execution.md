@@ -19,6 +19,17 @@ account or paid-model qualification.
 
 ## Native machine boundary
 
+The new-task coordinator chooser uses the selected project's routing rules and
+effective allowed-route list. If the machine default is not offered, the form
+initially selects the first remaining model, when there is one, and saves that
+choice with the draft. Manual planning, replanning and planning recovery use the
+task's coordinator choice or its recorded route instead of resolving the machine
+default first. The chooser does not authorize engine dispatch.
+
+Save and Save-and-leave share one in-flight write per settings draft. A genuine
+conflict from another write still requires reading and reviewing the current
+settings; an unconfirmed write is not retried automatically.
+
 `project.config.read` runs entirely in Rust (the former `PythonCoreMachinePort` was removed). It reads the registered project's routing file and
 Core's live read-only project-ceiling row. The editor retains project-only rules,
 all three engine entries, policy and quota fields, sorted ceiling sets, exact
@@ -750,7 +761,8 @@ re-enters the driver (lost-worker retry for interrupted workers, coordinator
 recovery for an interrupted planning turn). A Resume that refuses (for example
 `native_shutdown_unconfirmed`) commits nothing and leaves the task paused, and a
 recovery barrier recorded while paused (`native_session_outcome_unknown`) is
-never erased: the task returns as RECOVERING for Retry. Explicit `retry`, and an
+never erased silently: the resumed task continues as a continuation that carries
+that uncertainty ([no-stop policy](../features/task-lifecycle/index.md#no-stop-policy-and-the-strategy-ladder)). Explicit `retry`, and an
 owner message to a task whose coordinator waits for the owner, is held in
 recovery or was reopened, settle the old process, retain its prior revision/results, supersede
 obsolete questions and start a fresh coordinator/plan. None of them revive a
@@ -768,8 +780,9 @@ records it at once. The task's Work details list the owner's write denials in fo
 when set) with Remove, which lifts that one denial (`executions.control`
 `allow_write`). An admitted control whose finish receipt never committed is
 closed as an explicit `outcome: unknown` receipt carrying the task revision; the
-same request keeps replaying as `native_control_outcome_unknown`, the task holds
-in RECOVERING until the owner retries, and later restarts do not raise it again.
+same request keeps replaying as `native_control_outcome_unknown`, the task
+continues as a continuation that records that outcome (a paused or waiting task
+keeps it as its barrier), and later restarts do not raise it again.
 A follow-up or incoming start uses the task's own coordinator route (explicit
 choice, else the route pinned when the task started); only a task with neither
 needs a resolvable owner default. A failed first prompt keeps its draft and a
@@ -1111,8 +1124,8 @@ A sprint saved with the former `automatic` value (the queue and acceptance behav
 
 | Next actor | When | What happens |
 | --- | --- | --- |
-| Agent | A result that cannot be accepted but can be repaired (failed or missing ordinary checks, a changed workspace, changed task files, a result that must be refreshed), or a run that ended as failed with every effect known (for example an answer the runtime could not certify because a review or worker did not finish) | The service sends the task back to its coordinator by itself and keeps the queue running. Each distinct repair is attempted once, with at most two automatic repairs per task. Review and verification run again; a fresh result is accepted and finished by the ordinary rules. Changed task files are named to the coordinator, which must reconcile them with current files. While the repair runs no hold is saved. If the service is busy at that moment (another control, maintenance, or the service stopping), nothing is decided: the repair is tried again on the next pass, and a consent you already gave is kept. |
-| Runtime | A route, quota or sign-in blocker, a conflict being resolved, a sprint task that could not be read, a session of a task that is still being stopped, a verified result in a folder without Git (it reaches Done by itself, like already landed work), or a held task with a command whose outcome is not yet confirmed (the hold reads "Waiting for an unconfirmed command of this task to settle"; the runtime settles such command receipts by itself once nothing can still run them, and the hold is decided again then; after 30 minutes without settling, the owner is asked) | The service rechecks on every pass and continues by itself. The conversation shows one quiet line and asks nothing. |
+| Agent | A result that cannot be accepted but can be repaired (failed or missing ordinary checks, a changed workspace, changed task files, a result that must be refreshed), or a run that ended as failed with every effect known (for example an answer the runtime could not certify because a review or worker did not finish) | The service sends the task back to its coordinator by itself and keeps the queue running. Each distinct failure (identified by its fingerprint) is repaired once; there is no cap on the number of automatic repairs per task. Review and verification run again; a fresh result is accepted and finished by the ordinary rules. Changed task files are named to the coordinator, which must reconcile them with current files. While the repair runs no hold is saved. If the service is busy at that moment (another control, maintenance, or the service stopping), nothing is decided: the repair is tried again on the next pass, and a consent you already gave is kept. |
+| Runtime | A route, quota or sign-in blocker, a conflict being resolved, a sprint task that could not be read, a session of a task that is still being stopped, a verified result in a folder without Git (it reaches Done by itself, like already landed work), or a held task with a command whose outcome is not yet confirmed (the hold reads "Waiting for an unconfirmed command of this task to settle"; the runtime settles such command receipts by itself once nothing can still run them, and the hold is decided again then; there is no time limit and the owner is not asked) | The service rechecks on every pass and continues by itself. The conversation shows one quiet line and asks nothing. |
 | Owner | [Owner decisions](#owner-decisions) | The task's conversation pins a decision card above the message box as soon as the hold arrives, even before the result details load. It states the reason, lists in plain words what Cortex asks you to allow, and offers the primary action that grants it, then the separate **Close as is…** with its own confirmation. The task header's **See what is needed** brings the card into view. |
 
 #### Owner decisions
@@ -1163,14 +1176,14 @@ The sidebar keeps the task title visible during recovery. A short status appears
 
 **Close as is** lets you end a blocked review in the task itself. The confirmation shows reported outstanding checks. Closing preserves the result and pending files in the shared folder, marks unaccepted work **Not verified**, and creates no commit. The scheduler rechecks the saved pause and can start the next ready member. A policy-restricted check cannot be launched from the result card. An unrequested paid qualification recorded only as a skipped report observation stays visible after current runtime verification. It does not add an obligation to the verification plan or count as a successful check.
 
-**Continuations and pauses.** When a process stop ends a task in an Automatic sprint (for example a driver stop, a session that fails to start, a lost worker, or a failed or unobserved check), the runtime records a continuation with its reason and evidence, and resumes planning without asking you. Each continuation is counted per task:
+**Continuations: the no-stop policy.** Every task, in any run mode, keeps working until it finishes: the runtime never pauses a task for you because of its own failures, and there are no attempt caps. When a process stop ends a task (a driver stop, a session that fails to start, a lost worker, a failed or unobserved check after its direct repairs, a blocking or stalled review, a degenerate model turn, an interrupted service), the runtime records a continuation with its reason and evidence and resumes planning without asking you, on the next rung of the strategy ladder ([no-stop policy](../features/task-lifecycle/index.md#no-stop-policy-and-the-strategy-ladder)):
 
-- The fourth continuation asks the senior consultant once. Its answer joins the next plan through the ordinary consultation path.
-- After eight continuations, the next stop pauses the queue (`continuation_cap`). The task's decision card offers **Allow more attempts**. It starts fresh planning with a renewed bounded retry budget only after the runtime confirms the previous processes and effects have settled. It does not reset the lifetime continuation count or ask the consultant again. The card says what the counted attempts went to, each stop reason with how often (for example "the review is incomplete (7 times)").
-- A review that cannot be completed is said to the owner before the attempts run out: when the reviewer reports the same item unreachable with its tools (`tool_unavailable`) in two dead-end reviews since the budget was last renewed, the task resumed or reopened, and its newest dead end still names it, the task pins "This review cannot be completed" with "The reviewer cannot read <item> with its tools, so this review cannot be completed. Close as is, or change the file so it can be read." and **Close as is…**. At that stop the runtime pauses the task as `owner_blocker` (the pause records the item and its count; only the owner resumes it, with Allow more attempts, which renews the budget, or Close as is…) instead of spending another automatic attempt on a review that cannot change; after the owner resumes, two new dead ends on the item are needed to pause again (`repeated_review_dead_end` in `crates/cortex-core/src/lifecycle/automatic.rs`, which the projection shares).
-- A model that produced unusable output twice in a row, or a review dead end repeated on the same unreadable item, pauses the task as `owner_blocker`: the runtime never resumes it by itself, and the decision card offers **Allow more attempts** (which renews the budget) and **Close as is…**.
-- A route, connection, quota or authentication problem pauses the task as `external_blocker`. The service resumes it by itself only after the route is observed qualified again. It does not log in or make a paid model call to do so.
-- An effect whose outcome cannot be confirmed pauses the task as `outcome_unknown`. It is never replayed and does not resume by itself; the decision card offers **I checked it, continue** and **Close as is…**.
+- Rung 1 repairs the recorded failure with a fresh plan; rung 2 moves workers to escalated routes (a stronger model, preferably the other engine) and keeps them there; rung 3 asks the senior consultant, whose answer joins the next plan; rung 4 hands the failed work to another role or a different decomposition and moves the coordinator to another qualified model. Then the ladder starts again. The card's summary of what the attempts went to (each stop reason with how often) stays informational.
+- A model that produced unusable output never runs a third time: the coordinator moves to another model and the task continues. A worker is replaced on another model or engine.
+- A review whose reviewer cannot read some items with its tools, and that found nothing to fix, records those items as disclosed unverified limits; the task continues to verification and the final result names them. A review dead end that repeats on the same item takes rung 4.
+- A route, connection, quota or authentication problem waits as `external_blocker`. The service resumes it by itself as soon as that route, or another qualified coordinator route, is usable. It does not log in or make a paid model call to do so.
+- An effect whose outcome cannot be confirmed does not hold the task. Once every session of the task is confirmed gone, the runtime records the uncertainty (`RUNTIME_UNCERTAINTY_RECORDED`) and the coordinator re-verifies those effects from the files, Git state and receipts instead of repeating them. A command that may still run is waited for until the host settles it, however long that takes.
+- A pause an earlier version recorded (`continuation_cap`, `owner_blocker`, `outcome_unknown`) is resumed by the runtime itself; **Allow more attempts** and **I checked it, continue** remain only for cards saved by those versions.
 
 The scheduler rechecks blocked queues when state changes and on its safety tick. Cancelled and archived members no longer stop independent work. Skipping a member does not make it a completed prerequisite: if only blocked dependents remain, the hold names the task that depends on the prerequisite the queue will not finish, and that prerequisite, and that task's card offers **Close as is…** (whose dialog also offers Cancel). Holds that require you surface as paused-sprint notifications when enabled; a hold the service or an agent resolves, and your own **Pause**, do not notify. **Continue queue** is offered exactly when the hold offers **Try again**; no control overrides an unknown effect, failed verification or manual pause on a task. A hold saved by an earlier version is rewritten with its decision on the next scheduler pass.
 
@@ -1407,6 +1420,28 @@ its execution control. A sprint saved by an earlier version whose
 description-only planning was interrupted keeps its cancelled state and note;
 an answer or Resume planning starts a planning task with the description and
 the saved conversation.
+
+#### Reading relationships and prior results
+
+Once a materialized sprint task starts, its coordinator receives a compact
+summary of the task's direct predecessors and dependents. The coordinator can
+use the read-only `sprint_graph` tool to page through the sprint graph or inspect
+the selected task's neighbours. `sprint_task_result` opens a member's durable
+state, the recorded synthesis, answered questions, write restrictions, the latest
+recorded verification for its plan revision, and its immutable published report
+catalogue. Answers and reports have separate continuations. A manual closure
+retains its recorded verification warning. A report body is available through the same bounded cursor
+pages as an ordinary report read. Both tools are coordinator-only and the
+runtime derives the sprint from the authenticated task, so a task cannot select
+another sprint or an arbitrary project task.
+
+The result view reports whether recorded file writes are confirmed in the
+recipient checkout, missing or unknown. A missing receipt,
+ambiguous observation or unreadable file remains unknown. A queue dependency
+still controls scheduling exactly as before. Hybrid acceptance does not by
+itself mean that code from a predecessor is present in the recipient checkout.
+Native execution that cannot establish a supported separate-worktree route
+continues to refuse that start rather than claiming cross-worktree availability.
 
 #### Creating a plan's tasks
 

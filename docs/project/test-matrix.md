@@ -6,6 +6,10 @@ This page documents the no-paid automated suite and its limits. Paid live checks
 
 The suites cover settings-only routing, exact model-policy validation and profile management alongside deterministic DAG scheduling, authenticated file/command/external MCP gateways, mandatory review, exact revision verification, steering, bounded recovery and unfiltered transcript replay. Historical paid qualification used the then-configured routes in an isolated test project; it is not evidence for current settings or a production route. The paid probes were not used in that campaign.
 
+## Build profile
+
+Debug and test builds keep only line tables (`[profile.dev] debug = "line-tables-only"`, dependencies without debuginfo, root `Cargo.toml`), so backtraces keep file and line. Full debuginfo had made each test binary about 500 MB, 79% of it debug sections, and a full run wrote 20-30 GB (2026-11-21).
+
 ## Where the tests are
 
 | Surface | Location | Command |
@@ -21,6 +25,8 @@ The suites cover settings-only routing, exact model-policy validation and profil
 | Generators, package identity, runtime payload, markdown links | `crates/cortex-xtask/tests/repo.rs` | `cargo test --locked --offline -p cortex-xtask` |
 | Paseo plugin | `integrations/paseo/server`, `integrations/paseo/client` | `npm --prefix integrations/paseo run typecheck` and the `test:*` scripts |
 | Workspace UI and domain | `packages/workspace-ui/test`, `packages/workspace-domain/test`, `apps/cortex-workspace-desktop/test` | `npm --prefix <dir> run test` |
+| Workspace Dev extracted archive (manual, no paid calls) | exact local Dev `.deb` (manifest SHA-256, bundled engines), extracted with private Dev XDG roots and the owner's real HOME, keyring and logins; private Xvfb or the owner's display; XTEST and screenshot; unobserved steps exit 3 | `bash scripts/qualify-dev-deb.sh probe` (host facts, no build), then `bash scripts/qualify-dev-deb.sh smoke --archive newest` or `smoke` (see [desktop verification](verification.md#standalone-cortex-workspace-desktop)); not part of `test-fast` or the installed-package gate |
+| Environment preflight, rule-file protection, build hygiene | `native_preflight` unit tests, `crates/cortex-core/tests/steering.rs`, `crates/cortex-core/tests/recovery_context.rs`, the `rule_files_refuse` test in `native_project`, the `builds` unit tests | `cargo test --locked --offline -p workspace-service --lib -- native_preflight rule_files_refuse`, `cargo test --locked --offline -p cortex-core --test steering --test recovery_context`, `cargo test --locked --offline -p cortex-xtask --bin cortex-xtask builds` |
 | Workspace busy state | `tests/workspace-busy.test.ts` | its Vitest config `tests/workspace-busy.vitest.config.ts` |
 
 Run Rust tests under `umask 022` with `~/.cargo/bin/cargo`, `--locked --offline`, GNU `timeout` and sequentially.
@@ -81,7 +87,7 @@ scripts/cortex-xtask.sh test-fast
 scripts/cortex-xtask.sh test-fast --list
 ```
 
-`test-fast` is the Rust `cortex-xtask` command. It runs its steps one at a time under GNU `timeout --kill-after=5`; no step runs in parallel with another:
+`test-fast` is the Rust `cortex-xtask` command. It checks `timeout --version` on the invoking `PATH` and falls back to `gnutimeout --version` if needed. Only a successful GNU coreutils version probe qualifies; the runner uses that exact executable with `--kill-after=5`. No step runs in parallel with another:
 
 | Step | Directory | Command | Bound |
 | --- | --- | --- | --- |
@@ -95,7 +101,7 @@ scripts/cortex-xtask.sh test-fast --list
 | `paseo-typecheck` | `integrations/paseo` | `npm run typecheck` | 600 s |
 | `paseo-<name>` | `integrations/paseo` | one per `test:*` script in `package.json`, except `test:installed-questions` and `test:native-queue`, which need the explicitly supplied installed Metro bundle path described above | 180 s each |
 
-`--only NAMES` and `--skip NAMES` take comma-separated step names; an unknown name fails. Any nonzero step makes the final exit nonzero, while later steps still run. The runner points `HOME` and `XDG_CONFIG_HOME`/`XDG_STATE_HOME`/`XDG_CACHE_HOME` at a fresh private scratch directory outside Git, keeps `CARGO_HOME`/`RUSTUP_HOME`, sets `CORTEX_WORKSPACE_CHANNEL=dev`, removes `CORTEX_WORKSPACE_RELEASE_AUTHORIZED` and points `WORKSPACE_TEST_SERVICE_BINARY` at `target/debug/workspace-service` for the `cargo` and `desktop` steps; no dependencies are installed by the runner. The `build` step rebuilds the service those tests launch, so an older build is never tested. A missing prerequisite (`cargo`, `npm`/`npx`, installed `node_modules`, GNU `timeout`) exits 2 with an explicit message, never a silent skip. Keep `HOME` and `TMPDIR` of the invoking shell outside **every** git repository, ancestors included: the storage guards refuse to treat a directory inside a checkout as a user home, and a scratch home under a dotfiles repository produces false failures far from their cause.
+`--only NAMES` and `--skip NAMES` take comma-separated step names; an unknown name fails. Any nonzero step makes the final exit nonzero, while later steps still run. The runner points `HOME` and `XDG_CONFIG_HOME`/`XDG_STATE_HOME`/`XDG_CACHE_HOME` at a fresh private scratch directory outside Git, keeps `CARGO_HOME`/`RUSTUP_HOME`, sets `CORTEX_WORKSPACE_CHANNEL=dev`, removes `CORTEX_WORKSPACE_RELEASE_AUTHORIZED` and points `WORKSPACE_TEST_SERVICE_BINARY` at `target/debug/workspace-service` for the `cargo` and `desktop` steps; no dependencies are installed by the runner. The `build` step rebuilds the service those tests launch, so an older build is never tested. A missing prerequisite (`cargo`, `npm`/`npx`, installed `node_modules`, GNU `timeout`) exits 2 with an explicit message, never a silent skip. Test steps inherit the invoking shell's `TMPDIR`. If `/tmp` is out of quota, choose a writable absolute temporary directory with sufficient space (for example `TMPDIR=/var/tmp` where available). Keep `HOME` and `TMPDIR` of the invoking shell outside **every** git repository, ancestors included: the storage guards refuse to treat a directory inside a checkout as a user home, and a scratch home under a dotfiles repository produces false failures far from their cause.
 
 The earlier Python runner's timing observations (eight pytest workers, batch grouping and the 2026-10 and 2026-11 baselines) described a suite that no longer exists and are not carried forward; no Rust-era whole-suite timing is recorded here, so retain exact counts, skips and exit codes from each run instead.
 

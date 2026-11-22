@@ -28,4 +28,14 @@ rust = "1.99.1"
 tauri-cli = "2.10.1"
 tauri = "2.10.1"
 tauri-build = "2.5.6"
-lock-sha256 = "7c0969b4a636f5620d937fa4b7bb6c25829eb2006bd33c1b46d1678f6a988cfc"
+lock-sha256 = "cef9de01066661ab3535e6a8e7707eef81e5541035a5b4a24cadd79b79aac0d8"
+
+# Debug and test builds keep only line tables (file:line backtraces). Full debuginfo
+# made every test binary about 500 MB, 79% of it debug sections, and each change
+# relinked dozens of them: 20-30 GB written per test run, enough to saturate the disk
+# (2026-11-21). Dependencies carry no debuginfo at all.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

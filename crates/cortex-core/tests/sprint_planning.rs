@@ -298,9 +298,9 @@ fn a_planning_study_names_no_verification_and_other_plans_still_must() {
 /// stopped again after one review. An answer after that stop now grants a fresh
 /// budget at the next submission; a resubmission with no answer does not.
 #[test]
-fn an_owner_answer_after_a_coordinator_review_cycle_stop_renews_the_plan_budget() {
-    use cortex_core::lifecycle::{event_tx, review};
-    for answered in [true, false] {
+fn a_review_cycle_continuation_renews_the_plan_budget() {
+    use cortex_core::lifecycle::{automatic, review};
+    for resumed in [true, false] {
         let (_p, s, task, _) = start(Some(NativeExecutionPolicy::SprintPlanning));
         let first = json!([{"key":"t1","title":"First","description":"Do it","dependsOn":[]}]);
         let args = json!({"tasks":first,"request_key":"p1"});
@@ -324,37 +324,28 @@ fn an_owner_answer_after_a_coordinator_review_cycle_stop_renews_the_plan_budget(
         );
         s.write(|db| review::advance_tx(db, &task)).unwrap();
         assert_eq!(state(&s, &task), "RECOVERING");
-        let (asked, blocked): (i64, i64) = s
+        // No-stop policy: a continuation, never a question for the owner.
+        let owed = s.read(|db| automatic::owed(db, &task)).unwrap().unwrap();
+        assert_eq!(owed.evidence["reason"], "review_cycle_limit");
+        let asked: i64 = s
             .read(|db| {
                 Ok(db.query_row(
-                    "SELECT count(*) FILTER (WHERE type='ASK_USER_REQUIRED'),count(*) FILTER (WHERE type='TASK_STATE_CHANGED')
-                     FROM runtime_events WHERE task_id=? AND json_extract(payload_json,'$.blocker')='review_cycle_limit'",
+                    "SELECT count(*) FROM runtime_events WHERE task_id=? AND type IN ('ASK_USER_REQUIRED','USER_QUESTION_REQUESTED')",
                     [&task],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| r.get(0),
                 )?)
             })
             .unwrap();
-        assert_eq!((asked, blocked), (1, 0));
-        // The coordinator's question and, maybe, the owner's answer.
+        assert_eq!(asked, 0);
         s.write(|db| {
-            event_tx(
-                db,
-                &task,
-                "USER_QUESTION_REQUESTED",
-                json!({"coordinator":true}),
-            )?;
-            if answered {
-                event_tx(
-                    db,
-                    &task,
-                    "USER_ANSWER_RECEIVED",
-                    json!({"answer_source":"text"}),
+            if resumed {
+                automatic::resume_tx(db, &task, owed.event)?.unwrap();
+            } else {
+                db.execute(
+                    "UPDATE runtime_tasks SET state='PLANNING',blocker=NULL WHERE task_id=?",
+                    [&task],
                 )?;
             }
-            db.execute(
-                "UPDATE runtime_tasks SET state='PLANNING' WHERE task_id=?",
-                [&task],
-            )?;
             Ok(())
         })
         .unwrap();
@@ -373,6 +364,6 @@ fn an_owner_answer_after_a_coordinator_review_cycle_stop_renews_the_plan_budget(
                 )?)
             })
             .unwrap();
-        assert_eq!(cycle, if answered { 1 } else { 4 }, "answered: {answered}");
+        assert_eq!(cycle, if resumed { 1 } else { 4 }, "resumed: {resumed}");
     }
 }

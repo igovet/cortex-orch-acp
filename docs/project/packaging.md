@@ -81,6 +81,35 @@ handoff gate below; pass `--check-installed --prior-archive /absolute/path/to/pr
 to run it after building. Both dev and release channels are supported by the gate.
 A local-release build remains non-official even after passing it.
 
+### Build output hygiene
+
+Every successful `build-deb` (and so each wrapper run) ends by keeping only the
+newest two `.workspace-build/build-*` directories per channel (`dev`, `release`,
+and `incomplete` for builds without a manifest) and the newest two
+`.workspace-build/.cache/<channel>-<image>` caches per channel; a removed build
+also takes its `local-dev/` or `local-prod/` copy. It prints each removal and the
+total freed on stderr, and a hygiene failure never fails the finished build.
+Never removed, whatever their age: the build in progress (`build-deb` holds an
+exclusive `flock` on its build directory for the whole build), any build or cache
+a running Docker or Podman container references (its `container.cid`, or a
+bind-mount source), the build holding the exact archive of an installed
+`cortex-workspace` or `cortex-workspace-dev` package (`dpkg-query`), the current
+build's cache, and a Dev build whose `local-dev` copy may be in use while another
+process holds the `local-dev` lock. `--keep-builds N` changes the count (`0`
+disables it). Run the same cleanup on demand, or preview it:
+
+```sh
+scripts/cortex-xtask.sh clean-builds --dry-run
+scripts/cortex-xtask.sh clean-builds --keep 2
+```
+
+A container engine that lists running containers but cannot be inspected in time
+refuses the cleanup rather than guessing. Cargo's own `target/` directory is never
+cleaned automatically. Reclaim it explicitly when needed, for example
+`cargo clean --profile dev` (debug artifacts), `cargo clean --release`,
+`cargo clean -p <crate>` (one package), `cargo clean --doc`, or plain `cargo clean`
+(everything; the next build is a full rebuild).
+
 ## Manual Workspace releases
 
 Once `.github/workflows/workspace-desktop-release.yml` (named **Workspace release**)
@@ -155,7 +184,7 @@ fake-engine journeys. No workflow publication or host installation is performed.
 
 ### Native service startup
 
-Both shipped user units invoke `workspace-service <allowed-root> <runtime-root>` (the installed binaries `cortex-workspace-service` and `cortex-workspace-service-dev`, allowed root `/`). The runtime root is a trusted absolute source checkout or this channel's installed `/usr/lib/<package>/runtime` directory. The only other accepted forms are the one-argument MCP relay and the internal maintenance-worker mode: the former three- and five-argument forms, `--fixture-launcher`, the retained/legacy ACP child and `CORTEX_WORKSPACE_NATIVE=0` were removed with the Python runtime. Binding the socket and serving native operations requires no interpreter or helper files, and the `.deb` depends on no `python3` and ships no `src/` or `.py` files. Native setup/login bundle discovery and Node voice assets derive from the trusted runtime root. Requests that only the former Python helper could answer are refused with `config_api_unavailable` or their native refusal code, never forwarded. See [the startup boundary](../cortex-workspace/local-task-execution.md#python-independent-native-service-startup). The installed-archive real-input gate above remains mandatory before handoff; source/socket tests do not establish rendered desktop or installed-upgrade results.
+The service sets `CARGO_BUILD_JOBS` and `CMAKE_BUILD_PARALLEL_LEVEL` to half of the machine's CPUs (at least two) when the owner has not set them, before it starts anything, so every engine and task command inherits a bounded build parallelism; the owner's own value always wins. Both shipped user units run with `CPUWeight=20` and `MemoryHigh=60%`. Every task process (engines, builds, tests, renders) lives in the unit's cgroup (`KillMode=control-group`), so under contention the desktop session gets the CPU first and, above the memory threshold, the kernel reclaims the unit's own memory instead of swapping out the session; nothing is killed for it (no `MemoryMax`), and an idle machine runs tasks at full speed. `IOWeight` is not set: a user manager is not delegated the `io` controller. Both units also set `IOSchedulingClass=best-effort` with `IOSchedulingPriority=7`, the lowest best-effort priority, so task disk access yields to the session without starving on a block device whose scheduler honours I/O priorities (BFQ); with the `none` scheduler it has no effect. Both shipped user units invoke `workspace-service <allowed-root> <runtime-root>` (the installed binaries `cortex-workspace-service` and `cortex-workspace-service-dev`, allowed root `/`). The runtime root is a trusted absolute source checkout or this channel's installed `/usr/lib/<package>/runtime` directory. The only other accepted forms are the one-argument MCP relay and the internal maintenance-worker mode: the former three- and five-argument forms, `--fixture-launcher`, the retained/legacy ACP child and `CORTEX_WORKSPACE_NATIVE=0` were removed with the Python runtime. Binding the socket and serving native operations requires no interpreter or helper files, and the `.deb` depends on no `python3` and ships no `src/` or `.py` files. Native setup/login bundle discovery and Node voice assets derive from the trusted runtime root. Requests that only the former Python helper could answer are refused with `config_api_unavailable` or their native refusal code, never forwarded. See [the startup boundary](../cortex-workspace/local-task-execution.md#python-independent-native-service-startup). The installed-archive real-input gate above remains mandatory before handoff; source/socket tests do not establish rendered desktop or installed-upgrade results.
 
 ## Offline Workspace engines
 

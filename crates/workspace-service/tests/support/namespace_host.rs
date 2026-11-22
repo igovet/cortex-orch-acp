@@ -67,6 +67,8 @@ pub fn assert_unavailable_view() -> bool {
         "unchanged"
     );
     std::fs::remove_dir_all(root).unwrap();
-    println!("namespace-restricted host: all three production command profiles asserted fail-closed; positive integration journeys require the disposable container run");
+    println!(
+        "namespace-restricted host: all three production command profiles asserted fail-closed; positive integration journeys require the disposable container run"
+    );
     true
 }

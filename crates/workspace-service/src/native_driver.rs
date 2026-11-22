@@ -80,11 +80,11 @@ impl NativeHost {
                 || !lifecycle::steering::pending(db, &t)?.is_empty() {
                 return Ok(Vec::new());
             }
-            let failed: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=? AND revision=? AND status='failed')",
-                (&t, revision), |r| r.get(0),
-            )?;
-            if failed { return Ok(Vec::new()); }
+            // A node parked behind missing access, an outage or an owner decision
+            // does not stop its siblings; a resolved obstacle retries its node here.
+            lifecycle::obstacles::classify_failed_tx(db, &t)?;
+            lifecycle::obstacles::retry_unblocked_tx(db, &t)?;
+            if lifecycle::obstacles::unparked_failure(db, &t)? { return Ok(Vec::new()); }
             let claimed = scheduler::claim_ready_tx(
                 db,
                 &t,
@@ -122,7 +122,7 @@ impl NativeHost {
         owner: OwnerEpoch,
         recheck_after_verification: bool,
     ) -> CoreResult<Value> {
-        let _driver = self.driver.lock().await;
+        let driver = self.driver.lock().await;
         for _ in 0..8 {
             let t = task.clone();
             let o = owner.clone();
@@ -180,10 +180,16 @@ impl NativeHost {
                                 if let (Some(digest),Some(manifest))=(e.project_digest.as_deref(),baseline_manifest.as_ref()){lifecycle::reconciliation::record_baseline_manifest_tx(db,&t,digest,manifest)?;}
                             },
                             TaskState::Executing=>{
-                                let (failed,unfinished):(bool,bool)=db.query_row(
-                                    "SELECT EXISTS(SELECT 1 FROM runtime_nodes n JOIN runtime_tasks t USING(task_id) WHERE n.task_id=? AND n.revision=t.revision AND n.status='failed'),
-                                     EXISTS(SELECT 1 FROM runtime_nodes n JOIN runtime_tasks t USING(task_id) WHERE n.task_id=? AND n.revision=t.revision AND n.status!='completed')",
-                                     (&t,&t),|r|Ok((r.get(0)?,r.get(1)?)))?;
+                                // Each failed node is classified once. Access, an outage or an
+                                // owner decision parks it (its dependents wait, siblings run); a
+                                // resolved access action or ended outage retries it at once. Only
+                                // an unparked (technical) failure takes the coordinator route.
+                                lifecycle::obstacles::classify_failed_tx(db,&t)?;
+                                lifecycle::obstacles::retry_unblocked_tx(db,&t)?;
+                                let failed=lifecycle::obstacles::unparked_failure(db,&t)?;
+                                let unfinished:bool=db.query_row(
+                                    "SELECT EXISTS(SELECT 1 FROM runtime_nodes n JOIN runtime_tasks t USING(task_id) WHERE n.task_id=? AND n.revision=t.revision AND n.status!='completed')",
+                                     [&t],|r|r.get(0))?;
                                 if failed&&!active&&!domain::return_to_coordinator_tx(db,&t,"worker_failed")?{domain::stop_tx(db,&t,"worker_failed")?;}
                                 // An owner-stopped worker is not a dead end: siblings keep
                                 // running, and once nothing else is runnable the coordinator
@@ -248,6 +254,13 @@ impl NativeHost {
                             }
                             assignments.push(item);
                         }
+                        // Nothing else of the plan can run and only parked work remains: an
+                        // owner decision goes to the coordinator, which asks the owner; access
+                        // or an outage pauses the plan as the runtime's own wait (no model call)
+                        // until the obstacle clears.
+                        if assignments.is_empty() && !active && lifecycle::obstacles::settle_parked_tx(db,&t)? {
+                            return Ok(json!({"continue":true}));
+                        }
                         let conflict = assignments.is_empty() && scheduler::policy::write_conflict_tx(db,&t)?.is_some();
                         Ok(json!({"state":current,"revision":domain::task_tx(db,&t)?.1,"assignments":assignments,"writeConflict":conflict}))
                     })?).await?;
@@ -257,7 +270,19 @@ impl NativeHost {
                     return Ok(step);
                 }
                 TaskState::Verifying => {
-                    self.verify_plan(&task, &owner).await?;
+                    if let Verified::Waiting(left) = self.verify_plan(&task, &owner).await? {
+                        // The runtime's own wait for the verifier's environment: no
+                        // model call. The progress loop comes back after a short pause
+                        // (and takes owner messages meanwhile); other callers decide.
+                        drop(driver);
+                        if recheck_after_verification {
+                            tokio::time::sleep(left.min(std::time::Duration::from_secs(5))).await;
+                        }
+                        return Ok(
+                            json!({"state":"VERIFYING","assignments":[],"recheck":recheck_after_verification,
+                            "verificationWait":true,"retryInSeconds":left.as_secs()}),
+                        );
+                    }
                     if recheck_after_verification {
                         return Ok(json!({"recheck":true}));
                     }
@@ -337,6 +362,19 @@ impl NativeHost {
                                     }
                                     return Ok(true); // Return the new durable state, without publishing synthesis.
                                 }
+                                // Input still waiting for the coordinator holds completion:
+                                // each blocking item is named once, and the coordinator's next
+                                // turn (which carries it in its capsule) delivers it, instead
+                                // of the driver stopping into the strategy ladder.
+                                Err(CoreError::Refused("completion_pending_input")) => {
+                                    let items=completion::pending_input_tx(db,&t)?;
+                                    let last:Option<String>=db.query_row("SELECT json_extract(payload_json,'$.items') FROM runtime_events
+                                        WHERE task_id=? AND type='COMPLETION_INPUT_PENDING' ORDER BY id DESC LIMIT 1",[&t],|r|r.get(0)).optional()?;
+                                    if last.and_then(|s|serde_json::from_str::<Value>(&s).ok()).as_ref()!=Some(&json!(items)) {
+                                        lifecycle::event_tx(db,&t,"COMPLETION_INPUT_PENDING",json!({"items":items}))?;
+                                    }
+                                    return Ok(false);
+                                }
                                 result => result?,
                             }
                             let sessions=db.prepare("SELECT session_id FROM acp_host_sessions WHERE task_id=?
@@ -372,7 +410,36 @@ impl NativeHost {
         }
         Err(CoreError::Refused("native_driver_progress_limit"))
     }
-    async fn verify_plan(&self, task: &str, owner: &OwnerEpoch) -> CoreResult<()> {
+    /// Runs the plan's verification commands once on the reviewed binding and records
+    /// the outcome. An environmental outcome (`completion::verifier_environment`) is
+    /// rerun once by the runtime itself (`VERIFICATION_RERUN`, no model call); if it
+    /// fails the same way again, the verification becomes the runtime's own wait
+    /// (`VERIFICATION_ENVIRONMENT_WAIT`, no replan and no ladder rung) and is run again
+    /// after the next backoff step (1, 2, 5, 10 minutes), after which the runtime asks the
+    /// owner one question. A real failure stays a failure; nothing
+    /// unverified is recorded as passed.
+    async fn verify_plan(&self, task: &str, owner: &OwnerEpoch) -> CoreResult<Verified> {
+        // A verification waiting for its environment is not run, nor the project
+        // observed, before its recheck is due.
+        let t = task.to_owned();
+        let wait = recv(
+            self.executor
+                .read(move |db| completion::verification_wait_tx(db, &t))?,
+        )
+        .await?;
+        let now = unix_now()?;
+        let rechecking = match &wait {
+            Some(w) => {
+                let due = w["retry_not_before"].as_f64().unwrap_or(0.0);
+                if due > now {
+                    return Ok(Verified::Waiting(std::time::Duration::from_secs_f64(
+                        due - now,
+                    )));
+                }
+                true
+            }
+            None => false,
+        };
         // One observation anchors the review preflight, the recorded intent
         // digest, every post-command drift check and the final record.
         // Verification compares what the approving review bound: the task's own files
@@ -389,10 +456,10 @@ impl NativeHost {
         let intent=recv(self.executor.write(move|db|{
             ownership::check_tx(db,&t,&o)?;
             let (_,revision)=domain::task_tx(db,&t)?;
-            let unfinished:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND operation='native_verification_intent'
-                AND json_extract(result_json,'$.revision')=? AND NOT EXISTS(SELECT 1 FROM runtime_requests r WHERE r.task_id=? AND r.actor='native-verifier-finish' AND r.request_key=runtime_requests.request_key))",
-                (&t,revision,&t),|r|r.get(0))?;
-            if unfinished{return Err(CoreError::Refused("native_verification_outcome_unknown"));}
+            // A run of this revision that started and never finished (a restart or crash
+            // mid-run) has an unknown outcome: it is settled as unknown and verification
+            // runs again, instead of every later verification of the revision being refused.
+            completion::settle_interrupted_verification_tx(db,&t)?;
             match completion::verification_preflight_tx(db,&t,&preflight) {
                 Err(e) if e.code()=="verification_review_revision_changed" => {
                     completion::review_changed_checkout_tx(db,&t,&preflight)?;
@@ -417,37 +484,38 @@ impl NativeHost {
             Ok(Some((commands,run,bound)))
         })?).await?;
         let Some((commands, run, bound)) = intent else {
-            return Ok(());
+            return Ok(Verified::Recorded);
         };
         let mut keys = Vec::new();
         let mut all_exits_observed = true;
         for (index, argv) in commands.into_iter().enumerate() {
-            let mut receipt = match self.owner_verify(task, owner, &argv).await {
-                Ok(r) => r,
-                Err(err) => {
-                    json!({"tool_call_ref":format!("{run}:{index}"),"argv":argv,"profile":"native-readonly-landlock-seccomp",
-                    "observation":{"complete":false,"failure":err.code(),"exit_code":null}})
-                }
-            };
-            // The run binds what the verification binds; the checkout it ran in is
-            // kept beside it.
-            receipt["revision_digest"] = json!(bound);
-            receipt["checkout_digest"] = json!(digest);
-            receipt["owner_epoch"] = json!(owner.epoch);
-            receipt["run"] = json!(run);
-            let t = task.to_owned();
             let key = format!("{run}:{index}");
-            let raw = receipt.clone();
-            let run_key = run.clone();
-            let output_key = key.clone();
-            recv(self.executor.write(move|db|{
-                // A command already dispatched under this intent is an observed
-                // effect even if later state/epoch/project changes disqualify it.
-                let exists:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor='native-verifier' AND request_key=? AND operation='native_verification_intent')",(&t,&run_key),|r|r.get(0))?;
-                if !exists{return Err(CoreError::Refused("verification_intent_missing"));}
-                lifecycle::request_tx(db,&t,"native-verifier-output",&output_key,"native_command_output",&raw,||Ok(raw.clone()))?;
-                Ok(())
-            })?).await?;
+            let (mut receipt, mut environment) = self
+                .verification_run(task, owner, &run, &key, &argv, &bound, &digest)
+                .await?;
+            let mut key = key;
+            let mut receipts = vec![receipt["tool_call_ref"].clone()];
+            // The first environmental outcome of a fresh verification is rerun once,
+            // exactly, by the runtime; a due recheck of a waiting verification is
+            // itself that rerun.
+            if let (Some(reason), false) = (environment, rechecking) {
+                let (t, o, a, first) = (
+                    task.to_owned(),
+                    owner.clone(),
+                    json!(argv),
+                    receipt["tool_call_ref"].clone(),
+                );
+                recv(self.executor.write(move |db| {
+                    ownership::check_tx(db, &t, &o)?;
+                    completion::record_verification_rerun_tx(db, &t, &a, reason, &first)
+                })?)
+                .await?;
+                key = format!("{run}:{index}:rerun");
+                (receipt, environment) = self
+                    .verification_run(task, owner, &run, &key, &argv, &bound, &digest)
+                    .await?;
+                receipts.push(receipt["tool_call_ref"].clone());
+            }
             // Drift is a change of what the review bound: with a task-file binding,
             // another actor's edit elsewhere in the checkout is not drift.
             let mut fresh = native_effects::observe(self.root.clone()).await?;
@@ -462,20 +530,44 @@ impl NativeHost {
             all_exits_observed &= receipt["observation"]["complete"] == true
                 && receipt["observation"]["exit_code"].is_i64();
             if fresh_bound.as_deref() != Some(bound.as_str()) {
-                if !all_exits_observed {
-                    return Err(CoreError::Refused("native_verification_outcome_unknown"));
-                }
+                // The reviewed bytes changed while the command ran: whatever it
+                // observed (an unobserved exit is an unknown outcome, never a pass) does
+                // not verify them. The run is settled and a fresh review binds the new
+                // bytes.
+                let outcome = if all_exits_observed {
+                    "observed"
+                } else {
+                    "unknown"
+                };
                 let (t, o) = (task.to_owned(), owner.clone());
-                return recv(self.executor.write(move |db| {
+                recv(self.executor.write(move |db| {
                     ownership::check_tx(db,&t,&o)?;
                     lifecycle::request_tx(db,&t,"native-verifier-finish",&run,"native_verification_finished",
-                        &json!({"last_output":key}),||Ok(json!({"settled":true,"reason":"verification_review_revision_changed","last_output":key})))?;
+                        &json!({"last_output":key}),||Ok(json!({"settled":true,"reason":"verification_review_revision_changed","last_output":key,
+                            "outcome":outcome,"settled_by":"runtime_reverify"})))?;
                     completion::review_changed_checkout_tx(db,&t,&fresh)
-                })?).await;
+                })?).await?;
+                return Ok(Verified::Recorded);
+            }
+            if let Some(reason) = environment {
+                let (t, o, a) = (task.to_owned(), owner.clone(), json!(argv));
+                let wait = recv(self.executor.write(move |db| {
+                    ownership::check_tx(db, &t, &o)?;
+                    lifecycle::request_tx(db,&t,"native-verifier-finish",&run,"native_verification_finished",
+                        &json!({"last_output":key}),||Ok(json!({"settled":true,"reason":"verifier_environment","environment":reason,"last_output":key})))?;
+                    completion::record_verification_wait_tx(db, &t, &a, reason, &json!(receipts), unix_now()?)
+                })?)
+                .await?;
+                // After the 10-minute recheck the runtime asked the owner instead
+                // (WAITING_USER): nothing more to wait for here.
+                if wait["owner_question"].is_string() {
+                    return Ok(Verified::Recorded);
+                }
+                let left = wait["retry_after_s"].as_u64().unwrap_or(60);
+                return Ok(Verified::Waiting(std::time::Duration::from_secs(left)));
             }
             let t = task.to_owned();
             let o = owner.clone();
-            let key = format!("{run}:{index}");
             keys.push(key.clone());
             recv(self.executor.write(move |db| {
                 ownership::check_tx(db, &t, &o)?;
@@ -507,8 +599,71 @@ impl NativeHost {
             )?;
             Ok(())
         })?)
-        .await
+        .await?;
+        Ok(Verified::Recorded)
     }
+    /// One run of one verification command under the run's intent: the receipt (its
+    /// output retained under `key` as the runtime's own diagnostic) and whether its
+    /// outcome was environmental (`completion::verifier_environment`), judged against
+    /// the task's own worker runs of the same command on the same checkout.
+    #[allow(clippy::too_many_arguments)]
+    async fn verification_run(
+        &self,
+        task: &str,
+        owner: &OwnerEpoch,
+        run: &str,
+        key: &str,
+        argv: &[String],
+        bound: &str,
+        digest: &Option<String>,
+    ) -> CoreResult<(Value, Option<&'static str>)> {
+        let mut receipt = match self.owner_verify(task, owner, argv).await {
+            Ok(r) => r,
+            Err(err) => {
+                json!({"tool_call_ref":key,"argv":argv,"profile":"native-readonly-landlock-seccomp",
+                "observation":{"complete":false,"failure":err.code(),"exit_code":null}})
+            }
+        };
+        // The run binds what the verification binds; the checkout it ran in is
+        // kept beside it.
+        receipt["revision_digest"] = json!(bound);
+        receipt["checkout_digest"] = json!(digest);
+        receipt["owner_epoch"] = json!(owner.epoch);
+        receipt["run"] = json!(run);
+        let t = task.to_owned();
+        let raw = receipt.clone();
+        let run_key = run.to_owned();
+        let output_key = key.to_owned();
+        let digests = [bound.to_owned(), digest.clone().unwrap_or_default()];
+        let argv = argv.to_vec();
+        let environment = recv(self.executor.write(move|db|{
+            // A command already dispatched under this intent is an observed
+            // effect even if later state/epoch/project changes disqualify it.
+            let exists:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor='native-verifier' AND request_key=? AND operation='native_verification_intent')",(&t,&run_key),|r|r.get(0))?;
+            if !exists{return Err(CoreError::Refused("verification_intent_missing"));}
+            lifecycle::request_tx(db,&t,"native-verifier-output",&output_key,"native_command_output",&raw,||Ok(raw.clone()))?;
+            let observation=&raw["observation"];
+            let failed=observation["complete"]==true && observation["exit_code"].as_i64().is_some_and(|c|c!=0);
+            let worker_passed=failed && completion::worker_passed_tx(db,&t,&argv,&[digests[0].as_str(),digests[1].as_str()])?;
+            Ok(completion::verifier_environment(observation,worker_passed))
+        })?).await?;
+        Ok((receipt, environment))
+    }
+}
+
+/// What one verification step left: an outcome recorded (passed, failed, or a
+/// fresh review of changed bytes), or the runtime's own wait for the verifier's
+/// environment with the time until its recheck.
+pub(super) enum Verified {
+    Recorded,
+    Waiting(std::time::Duration),
+}
+
+fn unix_now() -> CoreResult<f64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| CoreError::Refused("clock_unavailable"))?
+        .as_secs_f64())
 }
 
 /// D5: a native sprint must plan and run its tasks like single tasks do.
@@ -605,6 +760,9 @@ while IFS= read -r line; do
         printf '{{"jsonrpc":"2.0","id":%s,"result":{{"configOptions":%s}}}}\n' "$id" "$(config)" ;;
     *'"method":"session/prompt"'*)
         case "$line" in
+        *'Sprint task t1'*)
+            printf '%s\n' "$line" > "$0/.git/sprint-child-prompt"
+            update '{fixture}' ;;
         *'Automatic recovery. Inspect the current task'*)
             printf '%s\n' "$line" > "$0/.git/automatic-repair-prompt"
             printf 'repair\n' >> "$0/.git/automatic-repair-input"
@@ -863,6 +1021,37 @@ done
             );
         }
     }
+
+    /// Cross-task reads are coordinator-only and expose bounded cursors. Workers
+    /// must continue to use their assignment-local report tools.
+    #[test]
+    fn sprint_cross_task_reads_are_coordinator_only() {
+        let coordinator = cortex_engine::schema::catalogue("coordinator", None, None).unwrap();
+        let graph = coordinator
+            .iter()
+            .find(|t| t["name"] == "sprint_graph")
+            .expect("sprint_graph advertised");
+        assert!(
+            cortex_engine::schema::validate(&graph["inputSchema"], &json!({"limit": 20})).is_ok()
+        );
+        let result = coordinator
+            .iter()
+            .find(|t| t["name"] == "sprint_task_result")
+            .expect("sprint_task_result advertised");
+        assert!(cortex_engine::schema::validate(
+            &result["inputSchema"],
+            &json!({"member_id": "task-a"})
+        )
+        .is_ok());
+        assert!(cortex_engine::schema::validate(&result["inputSchema"], &json!({})).is_err());
+        for profile in ["worker-explorer", "worker-backend-dev"] {
+            let worker =
+                cortex_engine::schema::catalogue("worker", Some(profile), Some("execution"))
+                    .unwrap();
+            assert!(!worker.iter().any(|t| t["name"] == "sprint_graph"));
+            assert!(!worker.iter().any(|t| t["name"] == "sprint_task_result"));
+        }
+    }
     #[tokio::test(flavor = "multi_thread")]
     async fn native_sprint_plans_read_only_and_runs_its_queue_in_dependency_order() {
         let root = std::env::temp_dir().join(format!("ns-{}", crate::identity().unwrap()));
@@ -928,13 +1117,14 @@ done
             .as_str()
             .unwrap()
             .to_owned();
+        // No-stop policy: a turn that ends without a plan is a continuation (RECOVERING).
         wait("the planning coordinator's turn to settle", || async {
             let runtime = service.state.lock().await.native.get(&id).unwrap().clone();
             let t = planning.clone();
             runtime.host.executor.read(move |db| Ok(db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM workspace_tasks w JOIN workspace_executions e ON e.execution_id=w.execution_id
                  JOIN runtime_tasks r ON r.task_id=e.runtime_task_id WHERE w.task_id=?
-                 AND r.state IN ('WAITING_USER','FAILED','CANCELLED','BLOCKED')
+                 AND r.state IN ('WAITING_USER','FAILED','CANCELLED','BLOCKED','RECOVERING')
                  AND NOT EXISTS(SELECT 1 FROM capacity_reservations c WHERE c.task_id=r.task_id AND c.state!='released'))",
                 [&t], |r| r.get::<_, bool>(0))?)).unwrap().await.unwrap().unwrap()
         })
@@ -1022,7 +1212,7 @@ done
             let runtime = service.state.lock().await.native.get(&id).unwrap().clone();
             runtime.host.executor.read(|db| Ok(db.query_row(
                 "SELECT NOT EXISTS(SELECT 1 FROM capacity_reservations WHERE state!='released')
-                 AND EXISTS(SELECT 1 FROM runtime_tasks WHERE state IN ('WAITING_USER','FAILED','CANCELLED','BLOCKED'))",
+                 AND EXISTS(SELECT 1 FROM runtime_tasks WHERE state IN ('WAITING_USER','FAILED','CANCELLED','BLOCKED','RECOVERING'))",
                 [], |r| r.get::<_, bool>(0))?)).unwrap().await.unwrap().unwrap()
         })
         .await;
@@ -1041,6 +1231,16 @@ done
             executions(&service, &id).await.get(&second) == Some(&true)
         })
         .await;
+        wait("the dependent prompt to be recorded", || async {
+            folder.join(".git/sprint-child-prompt").is_file()
+        })
+        .await;
+        let child_prompt =
+            std::fs::read_to_string(folder.join(".git/sprint-child-prompt")).unwrap();
+        assert!(
+            child_prompt.contains(&first),
+            "dependent prompt omitted predecessor {first}"
+        );
         let board = call(&service, "product.board", &id, json!({})).await;
         assert_eq!(board["tasks"][first.as_str()]["status"], "ready_to_merge");
         assert_eq!(
@@ -1051,6 +1251,104 @@ done
         let _ = runner.await;
         drop(runtime);
         drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn service_runtime_binds_cross_task_graph_to_the_authenticated_member() {
+        let root = std::env::temp_dir().join(format!("ns-graph-{}", crate::identity().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let folder = root.join("project");
+        std::fs::create_dir(&folder).unwrap();
+        assert!(std::process::Command::new("/usr/bin/git")
+            .args(["init", "-q"])
+            .current_dir(&folder)
+            .status()
+            .unwrap()
+            .success());
+        let service = Service::bind_native(
+            Config {
+                runtime_dir: root.join("runtime"),
+                state_dir: root.join("state"),
+                allowed_root: root.clone(),
+                launch: LaunchSpec::bare(),
+                request_timeout: Duration::from_secs(5),
+                shutdown_timeout: Duration::from_secs(2),
+                event_capacity: 64,
+            },
+            Arc::new(Peer(None)),
+        )
+        .await
+        .unwrap();
+        let id = service.register(&folder, "Graph").await.unwrap()["projectId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        service.activate(&id).await.unwrap();
+        let sprint_id = call(&service, "product.sprint", &id, json!({"action":"create","description":"Graph fixture","runMode":"manual","checkout":{"kind":"main"}})).await["sprintId"].clone();
+        let a = service.workspace(create(&id, "graph-a")).await.unwrap()["target"].clone();
+        let b = service.workspace(create(&id, "graph-b")).await.unwrap()["target"].clone();
+        call(
+            &service,
+            "product.task",
+            &id,
+            json!({"action":"sprint","taskId":a,"sprintId":sprint_id,"dependencies":[]}),
+        )
+        .await;
+        call(
+            &service,
+            "product.task",
+            &id,
+            json!({"action":"sprint","taskId":b,"sprintId":sprint_id,"dependencies":[a]}),
+        )
+        .await;
+        call(&service, "product.sprint", &id, json!({"action":"patch","sprintId":sprint_id,"patch":{"planning":"created","materializedVersion":1,"taskIds":[a,b]}})).await;
+        let runtime = service.state.lock().await.native.get(&id).unwrap().clone();
+        let request = json!({"protocol":{"major":1,"minor":8},"requestId":"graph-start","projectId":id,"actorId":"forged","operation":"tasks.start","target":a,"expectedVersion":"1","ownerEpoch":null,"payload":{}});
+        let start = service.workspace(request).await.unwrap();
+        assert_eq!(start["outcome"], "recorded", "start refused: {start}");
+        let runtime_task = runtime
+            .host
+            .executor
+            .read({
+                let a = a.as_str().unwrap().to_owned();
+                move |db| {
+                    Ok(db.query_row(
+                        "SELECT runtime_task_id FROM workspace_executions WHERE task_id=?",
+                        [&a],
+                        |r| r.get::<_, String>(0),
+                    )?)
+                }
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let state = root.join("state");
+        let graph_result = runtime
+            .host
+            .executor
+            .read({
+                let state = state.clone();
+                let runtime_task = runtime_task.clone();
+                move |db| {
+                    let scope =
+                        crate::machine::sprint_graph::Scope::load(db, &state, &runtime_task)?
+                            .expect("sprint scope");
+                    let graph = scope.graph(&json!({"limit":10}))?;
+                    let foreign = scope.member("outside").unwrap_err().code();
+                    Ok((graph, foreign.to_owned()))
+                }
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let graph = graph_result.0;
+        assert_eq!(graph["tasks"].as_array().unwrap().len(), 2);
+        assert_eq!(graph_result.1, "task_outside_sprint");
+        service.stop().await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2417,6 +2715,11 @@ pub(crate) mod sprints {
             let project = registered["projectId"].as_str().unwrap().to_owned();
             service.activate(&project).await.unwrap();
             let runtime = service.state.lock().await.native[&project].clone();
+            // These fixtures drive every scheduler pass themselves: the tick alone
+            // continues a stopped task, never a background follower.
+            runtime
+                .followers
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             let id = call(
                 &service,
                 "product.sprint",
@@ -3146,7 +3449,7 @@ pub(crate) mod sprints {
         }
 
         #[tokio::test]
-        async fn automatic_sprint_projects_a_core_pause_and_waits_for_its_release() {
+        async fn a_retired_core_pause_is_resumed_by_the_runtime_not_held_for_the_owner() {
             let (_scratch, folder, service, runtime, project, id, tasks) =
                 automatic_fixture("dev", "main", "main").await;
             let mut jobs = Jobs::default();
@@ -3155,11 +3458,8 @@ pub(crate) mod sprints {
                 .await
                 .unwrap();
             let task = settled_peer(&runtime, &tasks[0]).await;
-            let before = service.native_tasks(&project).await.unwrap()[&tasks[0]]
-                ["automaticContinuation"]["continuationCount"]
-                .as_u64()
-                .unwrap();
             let t = task.clone();
+            // A pause an earlier version recorded for the owner (an attempt cap).
             runtime.host.executor.write(move |db| {
                 db.execute("UPDATE runtime_tasks SET state='RECOVERING',blocker='automatic_continuation_paused' WHERE task_id=?", [&t])?;
                 cortex_core::lifecycle::event_tx(db, &t, "AUTOMATIC_CONTINUATION", json!({"reason":"Retry checks"}))?;
@@ -3171,44 +3471,14 @@ pub(crate) mod sprints {
                 .sprint_pass(&project, &runtime, &mut jobs, false)
                 .await
                 .unwrap();
-            let held = sprint(&service, &project, &id).await;
-            assert_eq!(held["queueState"], "paused", "{held}");
-            assert_eq!(held["automaticQueue"]["kind"], "continuation");
-            assert_eq!(held["automaticQueue"]["code"], "continuation_cap");
-            assert_eq!(held["automaticQueue"]["needsOwner"], true);
-            let projection = service.native_tasks(&project).await.unwrap();
-            assert_eq!(
-                projection[&tasks[0]]["automaticContinuation"]["continuationCount"],
-                before + 1
-            );
-            assert_eq!(
-                projection[&tasks[0]]["automaticContinuation"]["lastContinuationReason"],
-                "Retry checks"
-            );
-            assert!(projection[&tasks[1]]["executionId"].is_null());
-            // Exercise the actual owner Resume control, not a fixture-only
-            // update that removes the blocker behind the scheduler's back.
-            let receipt = runtime.control(project.clone(), json!({
-                "projectId":project,"executionId":projection[&tasks[0]]["executionId"],
-                "requestId":"resume-cap","action":"resume","expectedVersion":projection[&tasks[0]]["version"]
-            })).await.unwrap();
-            assert_eq!(receipt["outcome"], "recorded");
-            let renewed = runtime.host.executor.read(move |db| {
-                Ok(db.query_row("SELECT count(*) FROM runtime_events WHERE task_id=? AND type='AUTOMATIC_CAP_RENEWED'",
+            // No-stop policy: the runtime resumes it with a changed strategy by itself.
+            let resumed = runtime.host.executor.read(move |db| {
+                Ok(db.query_row("SELECT count(*) FROM runtime_events WHERE task_id=? AND type='AUTOMATIC_RESUMED'",
                     [&task], |row| row.get::<_, i64>(0))?)
             }).unwrap().await.unwrap().unwrap();
-            assert_eq!(renewed, 1);
-            service
-                .sprint_pass(&project, &runtime, &mut jobs, false)
-                .await
-                .unwrap();
-            assert_eq!(
-                sprint(&service, &project, &id).await["queueState"],
-                "running"
-            );
-            assert!(
-                service.native_tasks(&project).await.unwrap()[&tasks[1]]["executionId"].is_null()
-            );
+            assert!(resumed >= 1, "{resumed}");
+            let sprint = sprint(&service, &project, &id).await;
+            assert_ne!(sprint["automaticQueue"]["needsOwner"], true, "{sprint}");
             assert_eq!(git_fixture(&folder, &["rev-list", "--count", "HEAD"]), "1");
             service.stop().await.unwrap();
         }
@@ -4504,9 +4774,23 @@ pub(crate) mod sprints {
                                 sprint(&service, &project, &id).await["automaticQueue"].clone();
                             assert_eq!(kept["nextActor"], BY_RUNTIME, "{kind}/{code}: {kept}");
                             assert_eq!(kept["settling"]["hold"]["code"], code);
+                        } else if saved["settling"].is_null() {
+                            // No-stop policy: the task's continuation already settled the
+                            // write for re-verification by its coordinator, so the hold is
+                            // decided as if every effect were known.
+                            let t = task.clone();
+                            let settled_by: String = runtime.host.executor.read(move |db| {
+                                Ok(db.query_row("SELECT coalesce(json_extract(result_json,'$.settled_by'),'') FROM runtime_requests
+                                    WHERE task_id=? AND request_key='invariant-unknown'", [&t], |r| r.get(0))?)
+                            }).unwrap().await.unwrap().unwrap();
+                            assert_eq!(settled_by, "runtime_reverify", "{kind}/{code}: {saved}");
+                            assert_eq!(
+                                saved["reason"], "A plain reason.",
+                                "{kind}/{code}: {saved}"
+                            );
                         } else {
                             assert_eq!(saved["nextActor"], BY_OWNER, "{kind}/{code}: {saved}");
-                            assert_eq!(saved["reason"], UNSETTLED_REASON);
+                            assert_eq!(saved["reason"], UNSETTLED_REASON, "{kind}/{code}: {saved}");
                             assert_eq!(actions.last(), Some(&"close_as_is"), "{saved}");
                             for action in &actions {
                                 assert!(ACCEPTED_UNSETTLED.contains(action), "{action}: {saved}");
@@ -4586,18 +4870,19 @@ pub(crate) mod sprints {
             // The same hold decided again keeps its first wait and its replaced decision.
             let again = settling_hold(waiting.clone(), &waiting, Some(Unsettled::Commands), 6);
             assert_eq!(again, waiting);
+            // No time cap: commands stay the runtime's to settle, however long it takes.
             let late = settling_hold(
                 hold.clone(),
                 &waiting,
                 Some(Unsettled::Commands),
-                5 + SETTLE_WAIT_MS,
+                5 + 24 * 60 * 60 * 1000,
             );
-            assert_eq!(late["nextActor"], BY_OWNER);
-            assert_eq!(late["ownerActions"], json!(["close_as_is"]));
-            assert_eq!(late["asks"], json!([UNSETTLED_CLOSE_ASK]));
+            assert_eq!(late["nextActor"], BY_RUNTIME);
+            assert_eq!(late["ownerActions"], json!([]));
             assert_eq!(late["settling"]["hold"], hold);
             let never = settling_hold(hold.clone(), &Value::Null, Some(Unsettled::Effects), 5);
             assert_eq!(never["ownerActions"], json!(["close_as_is"]));
+            assert_eq!(never["asks"], json!([UNSETTLED_CLOSE_ASK]));
             // Settled again: the replaced decision comes back unchanged.
             assert_eq!(settling_hold(never, &late, None, 9), hold);
             // An action the service accepts with an unknown effect stays offered first.
@@ -4991,14 +5276,12 @@ pub(crate) mod sprints {
             }
         };
         match (kind, code) {
-            // A route, login or quota blocker: the runtime resumes once the route qualifies.
-            ("continuation", "external_blocker") => (BY_RUNTIME, vec![]),
-            ("continuation", "continuation_cap") => (BY_OWNER, close(vec!["allow_retries"])),
-            // Another automatic attempt would not change it, and the route recovering
-            // does not clear it: only the owner resumes (with a renewed budget) or closes.
-            ("continuation", "owner_blocker") => (BY_OWNER, close(vec!["allow_retries"])),
-            // An effect whose outcome is unknown is never replayed automatically.
-            ("continuation", _) => (BY_OWNER, close(vec!["confirm_and_continue"])),
+            // No-stop policy: every continuation hold is the runtime's own. A route,
+            // login or quota blocker resumes once the route qualifies (or another one
+            // does); a pause an earlier version recorded for the owner (an attempt cap,
+            // an owner blocker, an unknown outcome) is resumed by the runtime with a
+            // changed strategy and the uncertainty recorded, never replayed blindly.
+            ("continuation", _) => (BY_RUNTIME, vec![]),
             ("owner_integration", "owner_accepted") => (BY_OWNER, close(vec!["allow_finish"])),
             ("owner_integration", _) => (BY_OWNER, close(vec!["confirm_integration"])),
             ("start_refused", "native_worktree_unavailable") => {
@@ -5133,8 +5416,6 @@ pub(crate) mod sprints {
         Commands,
         Effects,
     }
-    /// How long a hold waits for unconfirmed commands before the owner is asked.
-    pub(super) const SETTLE_WAIT_MS: i64 = 30 * 60 * 1000;
     pub(super) const SETTLING_REASON: &str = "Waiting for an unconfirmed command of this task to settle. Automatic continues by itself once it has.";
     pub(super) const UNSETTLED_REASON: &str = "An action of this task never confirmed whether it finished, and Cortex cannot find out by itself.";
     pub(super) const UNSETTLED_CLOSE_ASK: &str = "Check the project folder, then close the task as is. Nothing is repeated, and the unconfirmed action stays recorded as unknown, never as done.";
@@ -5152,7 +5433,7 @@ pub(crate) mod sprints {
     ];
 
     /// The hold persisted while a task has an unknown effect. While the runtime can
-    /// still settle it (supervised commands, bounded by `SETTLE_WAIT_MS`) the runtime
+    /// still settle it (supervised commands, with no time cap) the runtime
     /// acts next and the owner is asked nothing; otherwise the owner is offered only
     /// actions the service accepts. The decision it replaces is kept in `settling.hold`
     /// and comes back once the effect is known. A hold without a task, a refused start,
@@ -5178,8 +5459,9 @@ pub(crate) mod sprints {
             .as_i64()
             .filter(|_| prior["taskId"] == original["taskId"])
             .unwrap_or(now);
-        let waiting =
-            unsettled == Unsettled::Commands && now.saturating_sub(since) < SETTLE_WAIT_MS;
+        // No-stop policy: the runtime keeps waiting for its own command evidence (no
+        // time cap); only an effect it can never confirm reaches the owner here.
+        let waiting = unsettled == Unsettled::Commands;
         let (actor, reason, actions, asks) = if waiting {
             (BY_RUNTIME, SETTLING_REASON, vec![], vec![])
         } else {
@@ -5232,7 +5514,7 @@ pub(crate) mod sprints {
     /// Which unknown effects a sprint task's runtime has, read from the same receipts
     /// `require_known_effects` checks. The runtime re-settles every command receipt on its
     /// own passes (`resettle_orphaned_commands`) once nothing can still run it; a payload
-    /// that outlives its supervisor keeps it open, bounded here by `SETTLE_WAIT_MS`. Any
+    /// that outlives its supervisor keeps it open until the host settles it. Any
     /// other receipt (a write, an edit, a call) can never be settled by it.
     pub(super) async fn unsettled_effects(
         runtime: &Runtime,
@@ -5286,13 +5568,8 @@ pub(crate) mod sprints {
         held.is_object().then(|| {
             let code = held["kind"].as_str().unwrap_or("outcome_unknown");
             let reason = match code {
-                "continuation_cap" => "The agent used all of its automatic attempts for this task.",
-                "outcome_unknown" => "An action of this task may or may not have finished. It is not repeated automatically.",
-                "owner_blocker" => match held["reason"].as_str() {
-                    Some("native_turn_degenerate") => "The model produced unusable output twice in a row, so the task stopped instead of trying the same model again. Choose another model in the task settings, then allow more attempts, or close it as is.",
-                    Some("review_incomplete") => "The reviewer cannot read an item with its tools, so another automatic review would not complete it. Change the file so it can be read, then allow more attempts, or close the task as is.",
-                    _ => "Another automatic attempt would not change what stopped this task. Allow more attempts after changing it, or close the task as is.",
-                },
+                "continuation_cap" | "owner_blocker" => "The agent continues this task with a changed approach.",
+                "outcome_unknown" => "An action of this task may or may not have finished. The agent checks it and continues; it is not repeated blindly.",
                 _ => match held["reason"].as_str() {
                     Some("engine_authentication_required" | "authorization_required") => "The engine needs you to sign in again. Automatic continues by itself once it can connect.",
                     Some("engine_quota_exhausted") => "The engine usage limit is reached. Automatic continues by itself when the engine is available again.",

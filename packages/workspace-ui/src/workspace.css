@@ -166,6 +166,9 @@ dialog.ws-picker { height: min(460px, 64vh); border: 1px solid var(--line-strong
 .chk:not(input) { appearance: auto; width: auto; height: auto; border: 0; border-radius: 0; background: none; }
 input.chk { display: inline-block; min-height: 0; }
 .ws-chk-why { margin: -2px 0 6px 21px; font-size: var(--t-cap); line-height: 16px; color: var(--fg-3); overflow-wrap: anywhere; }
+/* A task's spend above its workers, and the quiet no-progress badge beside its actions (task-spend.tsx). */
+.ws-spend { padding: 4px 10px 6px; overflow-wrap: anywhere; }
+.ws-stall { color: var(--fg-2); }
 
 /* A message from the feed keeps its own line breaks. */
 .ai { white-space: pre-wrap; overflow-wrap: anywhere; }

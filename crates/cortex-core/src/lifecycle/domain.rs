@@ -213,7 +213,7 @@ pub fn task_language_tx(db: &Transaction<'_>, task: &str) -> CoreResult<&'static
 /// Plain-language form of runtime blockers whose raw code would otherwise reach
 /// an owner question, in the task's language. An unknown blocker is named as an
 /// internal stop with its code in parentheses, never as the bare code.
-fn owner_readable_blocker(blocker: &str, ru: bool) -> String {
+pub(crate) fn owner_readable_blocker(blocker: &str, ru: bool) -> String {
     let (en, ruw) = match blocker {
         "worker_stopped_by_owner" => (
             "a worker was stopped and the remaining planned work depends on it or has nothing left to run",
@@ -349,72 +349,52 @@ pub fn owner_stopped_work_is_idle_tx(db: &Transaction<'_>, task: &str) -> CoreRe
         .collect::<CoreResult<Vec<_>>>()?;
     Ok(crate::scheduler::dependency_ready(&nodes, "execution")?.is_empty())
 }
-/// Stop is not successful completion. Work-level stops first let the coordinator ask.
+/// Stop is not successful completion, and no runtime stop parks a task for the owner
+/// (the no-stop policy, every task): the stop becomes a continuation on the next rung
+/// of the strategy ladder ([`super::automatic`]), which the host resumes with a fresh
+/// plan. The runtime asks the owner nothing about its own failures; the coordinator
+/// still asks about the work itself. A task already waiting on a question or wait
+/// keeps it.
 pub fn stop_tx(db: &Transaction<'_>, task: &str, blocker: &str) -> CoreResult<TaskState> {
-    let (source, revision) = task_tx(db, task)?;
+    let (source, _) = task_tx(db, task)?;
     if source.terminal() || source == TaskState::Paused {
         return refuse("task_not_stoppable");
     }
     if blocker.trim().is_empty() {
         return refuse("blocker_required");
     }
-    if super::automatic::enabled(db, task)? {
-        return super::automatic::stop_tx(db, task, blocker);
+    // A final result that replaced a failed mandatory check needs the owner's
+    // decision about the work itself (outside Automatic, which never drops a failed
+    // check): the verified revision stays current, the refused synthesis is
+    // discarded, and its coordinator asks the owner (`ASK_USER_REQUIRED`).
+    if source == TaskState::Reconciling
+        && blocker == "completion_dropped_failed_check"
+        && !super::automatic::enabled(db, task)?
+    {
+        event_tx(db, task, "ASK_USER_REQUIRED", json!({"blocker":blocker}))?;
+        db.execute(
+            "UPDATE runtime_tasks SET synthesis=NULL WHERE task_id=?",
+            [task],
+        )?;
+        return Ok(source);
     }
-    let work = [
-        "verification_failed",
-        "worker_failed",
-        "worker_stopped_by_owner",
-        "worker_retry_limit",
-        "worker_failure_not_retryable",
-        "review_cycle_limit",
-        "review_no_progress",
-        "review_blocked",
-        "no_runnable_nodes",
-        "scheduler_capacity_timeout",
-        "lost_worker_",
-        "verification_review_revision_changed",
-        "verification_revision_unavailable",
-        "review_revision_unavailable",
-        "completion_",
-    ]
-    .iter()
-    .any(|p| blocker.starts_with(p));
-    let (asked, answered): (i64, i64) = db.query_row(
-        "SELECT
-        coalesce(max(CASE WHEN type='ASK_USER_REQUIRED' THEN id END),0),
-        coalesce(max(CASE WHEN type='USER_ANSWER_RECEIVED' THEN id END),0)
-        FROM runtime_events WHERE task_id=?",
-        [task],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    let returns = source != TaskState::WaitingUser && work && (asked == 0 || answered > asked);
-    // The explanation reads the facts (which steps were pending, what held them)
-    // before the stop cancels anything; the question it replaces is named so the
-    // Conversation can say why that one was withdrawn.
+    super::automatic::stop_tx(db, task, blocker)
+}
+/// The runtime stop question an earlier version recorded (`runtime_stop`), for tests
+/// of how a store that still holds one renders and answers it. The runtime itself no
+/// longer asks it.
+#[cfg(test)]
+pub(crate) fn legacy_stop_question_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    blocker: &str,
+) -> CoreResult<TaskState> {
+    let (_, revision) = task_tx(db, task)?;
     let ru = task_language_tx(db, task)? == "ru";
-    let notice = if returns {
-        None
-    } else {
-        Some(super::stop_notice::explain_tx(db, task, blocker, ru)?)
-    };
+    let notice = super::stop_notice::explain_tx(db, task, blocker, ru)?;
     waits::cancel_tx(db, task, None, "task_stopped_for_question", "cancelled")?;
     cancel_nodes_tx(db, task, "task_stopped_for_question")?;
     revoke_tx(db, task, None)?;
-    let Some(notice) = notice else {
-        event_tx(db, task, "ASK_USER_REQUIRED", json!({"blocker":blocker}))?;
-        if source == TaskState::Reconciling && blocker == "completion_dropped_failed_check" {
-            // The verified revision is still current. Discard the refused synthesis
-            // so its coordinator can ask about the removed check on that revision.
-            db.execute(
-                "UPDATE runtime_tasks SET synthesis=NULL WHERE task_id=?",
-                [task],
-            )?;
-            return Ok(source);
-        }
-        state_tx(db, task, TaskState::Recovering, None)?;
-        return Ok(TaskState::Recovering);
-    };
     let supersedes = db
         .prepare(
             "SELECT id FROM pending_questions WHERE task_id=? AND status='open' ORDER BY rowid",
@@ -424,7 +404,6 @@ pub fn stop_tx(db: &Transaction<'_>, task: &str, blocker: &str) -> CoreResult<Ta
     db.execute("UPDATE pending_questions SET status='superseded',answered_at=? WHERE task_id=? AND status='open'",
         (crate::now(),task))?;
     let id = format!("pq_{}", uuid::Uuid::new_v4().simple());
-    let question = notice.text.clone();
     let options = json!(if ru { STOP_OPTIONS_RU } else { STOP_OPTIONS_EN });
     db.execute(
         "INSERT INTO pending_questions(id,task_id,dedup_key,text,options_json,status,created_at)
@@ -433,12 +412,12 @@ pub fn stop_tx(db: &Transaction<'_>, task: &str, blocker: &str) -> CoreResult<Ta
             &id,
             task,
             format!("runtime:stop:{id}"),
-            &question,
+            &notice.text,
             options.to_string(),
             crate::now(),
         ),
     )?;
-    let mut payload = json!({"question_id":id,"question":question,"options":options,
+    let mut payload = json!({"question_id":id,"question":notice.text,"options":options,
         "resume_state":"RECOVERING","blocker":blocker,"revision":revision,"runtime_stop":true,"supersedes":supersedes});
     if let (Some(p), Value::Object(n)) = (payload.as_object_mut(), notice.payload()) {
         p.extend(n);
@@ -697,6 +676,19 @@ pub fn owner_pause_tx(
                 (TaskState::Paused, blocker)
             };
             state_tx(db, task, target, blocker.as_deref())?;
+            // A barrier for an effect with an unknown outcome is not an owner hold: the
+            // resumed task continues with that uncertainty recorded for its coordinator.
+            if resume
+                && target == TaskState::Recovering
+                && blocker
+                    .as_deref()
+                    .is_some_and(|b| b.ends_with("outcome_unknown"))
+                && super::automatic::continue_unsettled_tx(db, task, blocker.as_deref().unwrap())?
+            {
+                return Ok(
+                    json!({"state":TaskState::Recovering,"outcome":"recorded","continued":true}),
+                );
+            }
             Ok(json!({"state":target,"outcome":"recorded"}))
         },
     )
@@ -865,23 +857,20 @@ pub fn propose_replan_tx(
         if super::automatic::held(db, task)? {
             return refuse("automatic_continuation_pending");
         }
+        // Counted since the owner's last input or reopening only: a resumed
+        // continuation does not reset it (every plan-then-fail cycle passes through
+        // one, and the count would never reach the consultation).
         let count: i64 = db.query_row(
             "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED'
             AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=? AND type IN
-                ('USER_STEERING','USER_ANSWER_RECEIVED','WORKER_USER_ANSWER_RECEIVED','AUTOMATIC_RESUMED')),0)",
+                ('USER_STEERING','USER_ANSWER_RECEIVED','WORKER_USER_ANSWER_RECEIVED','TASK_REOPENED')),0)",
             (task, task),
             |r| r.get(0),
         )?;
-        if count >= 3 {
-            if super::automatic::enabled(db, task)? {
-                if stop_tx(db, task, "replan_limit")? != TaskState::Recovering {
-                    return refuse("automatic_real_decision_pending");
-                }
-                return Ok(json!({"accepted":false,"state":"RECOVERING",
-                    "decision":"automatic_continuation","scope_granted":false}));
-            }
-            return refuse("replan_limit_requires_user_input");
-        }
+        // No replan limit: from the fourth replan since the owner's last input the
+        // runtime changes approach itself. The replan is accepted as a senior
+        // consultation, whose advice joins the next plan (never an owner question).
+        let consult = count >= 3 && operation != "escalation_request";
         if operation == "scope_request" {
             let paths = proposal["scope"]
                 .as_array()
@@ -922,13 +911,27 @@ pub fn propose_replan_tx(
         cancel_nodes_tx(db, task, "replanning")?;
         revoke_tx(db, task, None)?;
         state_tx(db, task, TaskState::Recovering, None)?;
-        let receipt = json!({"accepted":true,"state":"RECOVERING","decision":if operation=="escalation_request"{"senior_consultation"}else{"replan"},"scope_granted":false});
-        event_tx(
-            db,
-            task,
-            "REPLAN_REQUEST_ACCEPTED",
-            json!({"operation":operation,"proposal":proposal,"decision":receipt,"revision":revision}),
-        )?;
+        let consulted = operation == "escalation_request" || consult;
+        let mut receipt = json!({"accepted":true,"state":"RECOVERING","decision":if consulted{"senior_consultation"}else{"replan"},"scope_granted":false});
+        let mut recorded = json!({"operation":operation,"proposal":proposal,"revision":revision});
+        if consult {
+            receipt["strategy"] = json!("consult");
+            receipt["instruction"] = json!(super::automatic::strategy_instruction("consult"));
+            let reason = proposal["reason"]
+                .as_str()
+                .or_else(|| proposal["objective"].as_str())
+                .unwrap_or("");
+            recorded["operation"] = json!("escalation_request");
+            recorded["requested_operation"] = json!(operation);
+            recorded["proposal"] = json!({
+                "question":"The coordinator replanned repeatedly without finishing the task. What approach should the next plan take instead?",
+                "reason":format!("Replan {} since the owner's last input. {reason}", count + 1),
+                "report_ids":proposal["report_ids"].clone(),
+                "requested":proposal,
+            });
+        }
+        recorded["decision"] = receipt.clone();
+        event_tx(db, task, "REPLAN_REQUEST_ACCEPTED", recorded)?;
         Ok(receipt)
     })
 }

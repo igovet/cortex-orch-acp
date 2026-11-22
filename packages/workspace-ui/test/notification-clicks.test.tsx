@@ -152,7 +152,7 @@ it("a window the service started opens the click's place, and the service, not t
   // The open question is the service's to announce; the window stays quiet.
   expect(h.notify).not.toHaveBeenCalled();
   // It reports the task on view in the focused window, with every kind on.
-  expect(h.reports.at(-1)).toEqual({ focused: { project: "p", task: "t" }, kinds: ["question", "stop", "result", "failed", "planning", "paused"] });
+  expect(h.reports.at(-1)).toEqual({ focused: { project: "p", task: "t" }, kinds: ["question", "stop", "result", "failed", "planning", "paused", "stalled"], stallHours: 3 });
 });
 
 it("a service that does not raise notifications leaves the window's own question notifications", async () => {
@@ -161,5 +161,5 @@ it("a service that does not raise notifications leaves the window's own question
   h.setState(s => ({ ...s, sessions: s.sessions.map(x => ({ ...x, decisions: x.decisions.map(d => ({ ...d, id: `${d.id}-new` })) })) }));
   await flush();
   expect(h.notify).toHaveBeenCalledWith({ label: "Fix the race", target: { kind: "question", project: "p", task: "t", decision: "q-new" } });
-  expect(h.reports[0]).toEqual({ focused: null, kinds: ["question", "stop", "result", "failed", "planning", "paused"] });
+  expect(h.reports[0]).toEqual({ focused: null, kinds: ["question", "stop", "result", "failed", "planning", "paused", "stalled"], stallHours: 3 });
 });

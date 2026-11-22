@@ -709,8 +709,16 @@ async fn missing_service_can_recover_without_replaying_any_request() {
 async fn mismatched_rpc_identity_and_oversized_frame_fail_closed() {
     for oversized in [false, true] {
         let f = Fixture::new();
-        let socket = f.0.join("test.sock");
-        let server = tokio::net::UnixListener::bind(&socket).unwrap();
+        use std::os::fd::AsRawFd;
+        // Use a real path beyond sockaddr_un's limit even with a short TMPDIR,
+        // binding the fixture through a directory fd like the real service.
+        let runtime = f.0.join("x".repeat(110));
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = runtime.join("test.sock");
+        let dir = std::fs::File::open(&runtime).unwrap();
+        let address = format!("/proc/self/fd/{}/test.sock", dir.as_raw_fd());
+        let server = tokio::net::UnixListener::bind(address).unwrap();
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
         let responder = tokio::spawn(async move {
             let (mut peer, _) = server.accept().await.unwrap();

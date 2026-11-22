@@ -261,6 +261,20 @@ fn account_environment(scratch: &Path) -> Res<BTreeMap<String, String>> {
     Ok(env)
 }
 
+/// Resolve once against the invoking PATH, before changing the test cwd or
+/// augmenting the child PATH with Cargo's directory. Some distributions ship
+/// GNU coreutils under the prefixed name and a different implementation as timeout.
+fn gnu_timeout(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    candidates.into_iter().find(|path| {
+        Command::new(path)
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| {
+                out.status.success() && out.stdout.starts_with(b"timeout (GNU coreutils) ")
+            })
+    })
+}
+
 pub fn run(root: &Path, options: &Options) -> Res<i32> {
     let all = steps(root)?;
     for name in options.only.iter().chain(&options.skip) {
@@ -287,10 +301,16 @@ pub fn run(root: &Path, options: &Options) -> Res<i32> {
         }
         return Ok(0);
     }
-    if which("timeout").is_none() {
-        eprintln!("Requires GNU timeout.");
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let candidates = ["timeout", "gnutimeout"]
+        .into_iter()
+        .filter_map(which)
+        .map(|path| cwd.join(path));
+    let Some(timeout) = gnu_timeout(candidates) else {
+        eprintln!("Requires GNU timeout (timeout or gnutimeout on PATH).");
         return Ok(2);
-    }
+    };
+    println!("GNU timeout: {}", timeout.display());
     let cargo = which("cargo").or_else(|| {
         let home = std::env::var("CARGO_HOME")
             .ok()
@@ -342,7 +362,7 @@ pub fn run(root: &Path, options: &Options) -> Res<i32> {
             step.argv.join(" ")
         );
         let tick = Instant::now();
-        let mut command = Command::new("timeout");
+        let mut command = Command::new(&timeout);
         command
             .args(["--kill-after=5", &step.seconds.to_string()])
             .args(&step.argv)
@@ -352,9 +372,8 @@ pub fn run(root: &Path, options: &Options) -> Res<i32> {
             .env("PATH", &path)
             .env("CARGO_TARGET_DIR", &target)
             .env("CORTEX_WORKSPACE_CHANNEL", "dev");
-        command
-            .env_remove("CORTEX_WORKSPACE_RELEASE_AUTHORIZED")
-            .env("TMPDIR", "/tmp");
+        // Child fixtures use the same caller-selected temporary root as the scratch account.
+        command.env_remove("CORTEX_WORKSPACE_RELEASE_AUTHORIZED");
         if step.name == "cargo" || step.name == "desktop" || step.name == "remote" {
             command.env(
                 "WORKSPACE_TEST_SERVICE_BINARY",
@@ -379,4 +398,34 @@ pub fn run(root: &Path, options: &Options) -> Res<i32> {
         start.elapsed().as_secs_f64()
     );
     Ok(i32::from(failed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gnu_timeout_prefers_verified_default_and_rejects_non_gnu() {
+        let scratch = TempDir::new("cortex-timeout-test-").unwrap();
+        let fixture = |name: &str, version: &str, code: u8| {
+            let path = scratch.0.join(name);
+            fs::write(
+                &path,
+                format!("#!/bin/sh\nprintf '%s\\n' '{version}'\nexit {code}\n"),
+            )
+            .unwrap();
+            crate::proc::chmod(&path, 0o700).unwrap();
+            path
+        };
+        let gnu = fixture("timeout", "timeout (GNU coreutils) 9.7", 0);
+        let prefixed = fixture("gnutimeout", "timeout (GNU coreutils) 9.7", 0);
+        let uutils = fixture("uutils", "timeout (uutils coreutils) 0.10.0", 0);
+        let failed = fixture("failed", "timeout (GNU coreutils) 9.7", 1);
+        assert_eq!(gnu_timeout([gnu.clone(), prefixed.clone()]), Some(gnu));
+        assert_eq!(
+            gnu_timeout([uutils.clone(), prefixed.clone()]),
+            Some(prefixed)
+        );
+        assert_eq!(gnu_timeout([uutils, failed]), None);
+    }
 }

@@ -1,6 +1,6 @@
 import { plainChoice } from "./selectors";
 import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, useContext, type Accessor, type JSX } from "solid-js";
-import { capabilityOf, FEATURES, type Attachment, type AttachmentInput, type AttachmentRef, type Message, type TaskSettings, type WorkspaceCommand } from "@cortex/workspace-domain";
+import { capabilityOf, FEATURES, type Attachment, type AttachmentInput, type AttachmentRef, type Message, type SessionOptions, type TaskSettings, type WorkspaceCommand } from "@cortex/workspace-domain";
 import { attachmentFile, attachmentName, attachmentPreview, attachmentRef, keepBytes, readAttachments, wireAttachments } from "./attachments";
 import { autoGrow } from "./autogrow";
 import { useWs } from "./ctx";
@@ -151,9 +151,9 @@ export function CBar(props: { children: JSX.Element }) {
  * Model, effort, then Settings for access and language: the same choices on a new task and in every composer that calls an
  * engine. `compact` leaves Settings out where only the model and effort apply.
  */
-export function RouteBar(props: { id: string; settings: TaskSettings; onChange: (patch: Partial<TaskSettings>) => void; up?: boolean; disabled?: string; compact?: boolean; needs?: WorkspaceCommand["type"] }) {
+export function RouteBar(props: { id: string; settings: TaskSettings; onChange: (patch: Partial<TaskSettings>) => void; up?: boolean; disabled?: string; compact?: boolean; needs?: WorkspaceCommand["type"]; options?: SessionOptions }) {
   const ws = useWs();
-  const options = () => ws.store.state().options;
+  const options = () => props.options ?? ws.store.state().options;
   const efforts = () => { const selected = options().models.find(m => m.id === props.settings.model); return options().efforts.filter(e => !selected?.efforts || selected.efforts.includes(e.id)); };
   const align = () => props.up ? "up" as const : "left" as const;
   const cls = () => props.up ? "pop-up" : "pop-anchor";

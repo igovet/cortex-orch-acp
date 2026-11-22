@@ -527,91 +527,98 @@ must be handed to the Desktop QA owner after final stamping.
 
 ### Standalone Cortex Workspace desktop
 
-This second paid route is `desktop` only, when explicitly requested for the
-standalone Cortex Workspace 1.0.6 app. Record the exact candidate archive and
-digest (install only in an isolated environment), or the exact built desktop
-and service binaries from this checkout and their build identity. Use a
-separate disposable project, never this checkout or an existing owner project.
-Run on a private disposable virtual screen (private Xvfb or equivalent), never
-the owner's DISPLAY or WAYLAND session. Use a private session bus and prevent
-fallback to the owner's user manager or graphical session, including through
-external openers and desktop portals.
+This is the explicit-owner-approved `desktop` route for the 1.0.6 app. It runs
+the **Dev channel** package in the owner's real environment, as the owner: real
+HOME, session bus and keyring, the existing native Codex/Claude logins and the
+existing GitHub CLI login. There is no nested sandbox lab, no RootlessKit or
+namespace prerequisite and no owner preparation. Never install, modify or
+restart the release package or service, never touch production `~/.paseo`, and
+never use or change the owner's projects, settings, registrations or stores.
+Use a separate disposable Git project.
 
-**Before launching:**
+From the checkout, run via the host outside-command route:
 
-1. Record the approval reference and take a metadata-only baseline outside the
-   production roots. Inventory known production Cortex/Workspace config, state,
-   data, cache and runtime locations, including actual production XDG roots
-   and HOME fallbacks. Check `~/.config/cortex`, `~/.local/state/cortex`, and
-   `cortex-workspace` / `cortex-workspace-dev` under `~/.config`,
-   `~/.local/state`, `~/.local/share`, and `~/.cache`. Include the desktop's
-   channel identifiers `dev.cortex.workspace` and
-   `dev.cortex.workspace.development` when checking toolkit data and caches,
-   known user-unit paths and production project store roots. Record missing
-   paths as missing; compare the same paths after shutdown. Record path,
-   type, owner/mode, inode, size and modification/change times without
-   reading file contents, traversing symlinks or recording credentials.
-2. Give **both** desktop and service the owner's real `HOME` for native
-   accounts, and distinct, absolute, disposable `XDG_CONFIG_HOME`,
-   `XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_RUNTIME_DIR`
-   roots shared by that pair. Keep root ownership private, exclude production
-   overrides such as `CORTEX_ROUTING`, and register only the disposable project.
-   Leave remote access off. Do not connect to, modify or reuse the owner's
-   production Workspace installation, user service, config or stores, or
-   production `~/.paseo`. If the selected route requires production
-   Cortex-managed connection storage, stop; real HOME allows use of existing
-   native account directories, not reuse of production Cortex app state.
-3. Verify the candidate service and desktop use the private socket and the
-   expected project and runtime roots **before any paid call**. Verify native
-   login status for the selected connection without printing credentials.
-   If current host/account configuration prevents or leaves isolation or
-   the selected route unverified, stop before paying and record the blocker.
+```bash
+bash scripts/qualify-dev-deb.sh probe
+bash scripts/qualify-dev-deb.sh smoke
+bash scripts/qualify-dev-deb.sh smoke --archive newest
+bash scripts/qualify-dev-deb.sh smoke --archive /absolute/path/to/cortex-workspace-dev_...deb
+bash scripts/qualify-dev-deb.sh drive --archive newest -- /absolute/path/to/foreground-scenario-driver
+bash scripts/qualify-dev-deb.sh install --archive newest
+bash scripts/qualify-dev-deb.sh cleanup build-XXXXXXXX
+```
 
-**Path and launch details.** The release desktop talks over a Unix socket,
-not a configurable local TCP port: `$XDG_RUNTIME_DIR/cortex-workspace/service.sock`.
-Dev uses `cortex-workspace-dev` in the same place. The service keeps its
-registry and other machine state under `$XDG_STATE_HOME/<channel namespace>`.
-Release route config and state are under `$XDG_CONFIG_HOME/cortex` and
-`$XDG_STATE_HOME/cortex`; Dev uses the `cortex` subdirectory of
-`$XDG_CONFIG_HOME/cortex-workspace-dev` and
-`$XDG_STATE_HOME/cortex-workspace-dev/state`, respectively. Config/state
-roots otherwise fall back to `$HOME/.config` and `$HOME/.local/state`; the
-desktop requires an absolute runtime directory and the service has no
-public socket fallback. Keep data and cache roots disposable for the app
-and toolkit as well. These settings are not a filesystem sandbox: the
-service probes the owner's shell for PATH, and engine children receive the
-service's HOME and the selected native account directory, not the app's
-XDG isolation. See the [channel table](../../crates/workspace-protocol/channels.json),
-[service startup](../../crates/workspace-service/src/main.rs),
-[route environment](../../crates/workspace-service/src/native_routes.rs) and
-[engine environment](../../crates/cortex-engine/src/environment.rs).
+- `probe` prints host facts and never fails on a gap: tools, display and
+  session variables, exit codes of `gh auth status`, `codex login status`,
+  `claude auth status`, `sudo -n true` and `docker info`, free space of the
+  checkout and `/tmp`, and the newest local Dev archive. The runtime records the
+  same kind of facts for every task at start (see the
+  [environment section of the capsule](../features/recovery-capsules/index.md#native-retained-state-capsule-current-rust-runtime)),
+  so plans start from them instead of discovering them hours later.
+- `smoke` and `drive` use the exact archive: a fresh build without `--archive`,
+  the newest local Dev archive with `--archive newest`, or a given path. Reuse an
+  archive instead of rebuilding: every build is retained (the newest two per
+  channel; see [build hygiene](packaging.md#build-output-hygiene)). The launcher
+  checks that the package is `cortex-workspace-dev` and that its SHA-256 matches
+  its build manifest, runs the [no-paid bundled-engine check](packaging.md#offline-workspace-engines)
+  and extracts it with `dpkg-deb -x` (no maintainer scripts, no dpkg
+  registration). The [extracted Dev startup contract](../configuration.md#workspace-dev-extracted-package)
+  gives the run five private XDG roots and its own
+  `run/cortex-workspace-dev/service.sock`; the extracted app cannot fall back to
+  an installed unit, and `CORTEX_ROUTING` is unset. `GH_CONFIG_DIR` and
+  `DBUS_SESSION_BUS_ADDRESS` point at the owner's real gh configuration and
+  session bus, so logins and the keyring stay visible without copying anything.
+- The display is a private Xvfb by default (authenticated with an X cookie when
+  `xauth` exists), or the owner's display with `--real-display`. The service, Xvfb
+  and desktop each run in their own process group, which teardown stops; the
+  per-run scratch directory is removed and the archive and evidence are retained.
+- `smoke` writes private smoke settings (Codex `gpt-6-luna` as the only enabled
+  route and a matching portable coordinator default with `high` effort), waits for
+  the real adapter's observed catalog and reads back the route, effort and
+  default over the run's own socket, then clicks the window with XTEST and keeps a
+  screenshot. It sends no prompt and makes no paid call. The GitHub CLI login is
+  recorded as a fact, not a smoke requirement.
+- `drive` additionally runs a trusted absolute foreground executable (an absolute
+  interpreter and script are fine) for an explicitly authorized paid scenario,
+  bounded to 40 minutes. It receives HOME, the private XDG values, DISPLAY,
+  XAUTHORITY and `CWQ_PROJECTS` (allowed root), `CWQ_SOCKET`, `CWQ_WINDOW` (X11
+  window ID) and `CWQ_EVIDENCE` (write sanitized artifacts here). Register only a
+  disposable Git project under `CWQ_PROJECTS`, keep remote access off, pass no
+  secrets in argv or evidence and leave no background processes. Before paying,
+  the driver reads machine `config.read` on its own socket, checks the owner-selected
+  light route and default (also in the rendered app) and checks native login by
+  exit code. `--capture-opener` puts an `xdg-open` recorder first on the desktop's
+  PATH: it records one SHA-256 per HTTPS argument in `opener.sha256` (compare them
+  with an independent GitHub URL readback) and proves handoff, not navigation; an
+  opener that bypasses PATH is not captured. Without it, external openers may open
+  in the owner's browser.
+- `install` installs the exact Dev archive with `sudo apt-get install` when a
+  scenario needs installed-package behavior (desktop entry, the Dev user unit). It
+  refuses any package other than `cortex-workspace-dev`. With `SUDO_ASKPASS` set
+  (the owner password prompt) it uses `sudo -A`; otherwise `sudo -n`. Package
+  installation never touches Dev or release user data.
+- `cleanup` removes explicitly named local Dev build pairs; `cortex-xtask
+  clean-builds` keeps the newest per channel.
 
-On socket failure the [desktop bridge](../../apps/cortex-workspace-desktop/src-tauri/src/client.rs)
-can run `systemctl --user daemon-reload` and start the channel unit
-(`cortex-workspace.service` or `cortex-workspace-dev.service`). Changing
-XDG roots alone is not sufficient to isolate the user manager. Use an
-isolated manager and candidate filesystem for an installed run, or start
-the matching candidate service explicitly before launching the desktop
-and keep production user-manager access unavailable even if the service
-dies. For a built-binary run, service arguments are the disposable allowed
-root and the absolute source checkout as a runtime asset root only. A
-candidate extracted to an arbitrary directory does not make that directory
-an accepted installed runtime root: the service accepts a source checkout
-or the channel's canonical `/usr/lib/<package>/runtime` with the payload
-manifest. Never satisfy that requirement with the production bundle.
+**Environment problems are facts, not stops.** A missing display, tool or login
+does not end the run: the launcher records it as an unobserved step, continues
+with what it can observe (for example a service-only run without a display) and
+exits 3 with the list. The task then adapts: use a private Xvfb or the owner's
+display, install a missing tool (through the owner's password prompt when it needs
+`sudo`), ask the owner to log in through the question route while other work
+continues, or report the step as not run. Exit 1 is reserved for product or
+archive failures (wrong package, hash mismatch, socket or window never appearing,
+settings readback failing, the driver failing). An unobserved step is never a
+pass: apply the [qualification evidence rules](../../AGENTS.md#qualification-evidence-discipline)
+and bind results to the exact archive and session. A screenshot, rendered input,
+socket evidence, native auth and scenario completion are separate checks.
 
-**Evidence and cleanup.** Observe the actual app window using real input
-and screenshots or recordings of the relevant states; logs or protocol data
-alone cannot establish rendered behavior. Apply
-[Qualification evidence discipline](../../AGENTS.md#qualification-evidence-discipline)
-to each scenario. Bind each outcome to the exact artifact, session and
-observed action; retain failures and identify unrun or unverifiable cases.
-Stop only the disposable processes, take the after snapshot, and report
-every stray write and any missing snapshot coverage. An unchanged metadata
-snapshot is a check for stray writes in the listed paths, not proof of
-filesystem containment. This route does not replace the
-[installed desktop real-input gate](#installed-desktop-real-input-gate) or
-qualify a physical device, the owner's session or a release by itself.
+The evidence directory under `.workspace-build/dev-evidence.*` holds the ledger
+(commands, exit codes and output digests, never output bodies), the host facts,
+the archive digest, the readiness readback and the screenshot. A desktop window
+does not qualify phone-width behavior. This route is not the
+[installed desktop real-input gate](#installed-desktop-real-input-gate), a
+physical-device check or release acceptance.
 
 ## Paseo plugin (`integrations/paseo/`)
 

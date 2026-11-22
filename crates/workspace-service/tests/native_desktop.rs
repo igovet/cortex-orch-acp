@@ -558,6 +558,162 @@ async fn machine(service: &Service, op: &str, project: &str, params: Value) -> V
     assert_eq!(reply["ok"], true, "{op}: {reply}");
     reply["result"].clone()
 }
+
+/// Exercise the new sprint graph through the real coordinator broker.  The fake
+/// engine makes an authenticated `tools/call`, so this covers channel authority,
+/// tool advertisement and the runtime's sprint binding together.
+async fn sprint_cross_task_gateway() -> CoreResult<()> {
+    let f = Fixture::new();
+    std::fs::write(f.0.join("project/scenario.txt"), "sprint-cross-task-first").unwrap();
+    let service = Service::bind_native(f.config(), Arc::new(Routes))
+        .await
+        .unwrap();
+    let id = service
+        .register(&f.0.join("project"), "Sprint gateway")
+        .await
+        .unwrap()["projectId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    service.activate(&id).await.unwrap();
+    let sprint = machine(
+        &service,
+        "product.sprint",
+        &id,
+        json!({"action":"create","description":"Gateway graph fixture","runMode":"manual","checkout":{"kind":"main"}}),
+    )
+    .await["sprintId"]
+        .clone();
+    let make = |key: &str| {
+        command(
+            &id,
+            "tasks.create",
+            json!(id),
+            key,
+            json!({"description":format!("Sprint member {key}"),"checkout":{"kind":"main"}}),
+        )
+    };
+    let first = service.workspace(make("sprint-a")).await.unwrap()["target"].clone();
+    let second = service.workspace(make("sprint-b")).await.unwrap()["target"].clone();
+    let later = service.workspace(make("sprint-c")).await.unwrap()["target"].clone();
+    let third = service
+        .workspace(make("other-sprint-member"))
+        .await
+        .unwrap()["target"]
+        .clone();
+    let other=machine(&service,"product.sprint",&id,json!({"action":"create","description":"Separate sprint","runMode":"manual","checkout":{"kind":"main"}})).await["sprintId"].clone();
+    machine(
+        &service,
+        "product.task",
+        &id,
+        json!({"action":"sprint","taskId":third,"sprintId":other,"dependencies":[]}),
+    )
+    .await;
+    machine(&service,"product.sprint",&id,json!({"action":"patch","sprintId":other,"patch":{"planning":"created","materializedVersion":1,"taskIds":[third]}})).await;
+    std::fs::write(
+        f.0.join("project/.git/other-member"),
+        third.as_str().unwrap(),
+    )?;
+    machine(
+        &service,
+        "product.task",
+        &id,
+        json!({"action":"sprint","taskId":first,"sprintId":sprint,"dependencies":[]}),
+    )
+    .await;
+    machine(
+        &service,
+        "product.task",
+        &id,
+        json!({"action":"sprint","taskId":second,"sprintId":sprint,"dependencies":[first.clone()]}),
+    )
+    .await;
+    machine(
+        &service,
+        "product.task",
+        &id,
+        json!({"action":"sprint","taskId":later,"sprintId":sprint,"dependencies":[first,second]}),
+    )
+    .await;
+    machine(
+        &service,
+        "product.sprint",
+        &id,
+        json!({"action":"patch","sprintId":sprint,"patch":{"planning":"created","materializedVersion":1,"taskIds":[first.clone(),second,later]}}),
+    )
+    .await;
+    let start = command(
+        &id,
+        "tasks.start",
+        first.clone(),
+        "sprint-gateway-start",
+        json!({}),
+    );
+    let receipt = service.workspace(start).await.unwrap();
+    assert_eq!(receipt["outcome"], "recorded", "sprint start: {receipt}");
+    let runtime_task = {
+        let store = f.store();
+        store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT e.runtime_task_id FROM workspace_tasks w JOIN workspace_executions e ON e.execution_id=w.execution_id WHERE w.task_id=?",
+                    [first.as_str().unwrap()],
+                    |row| row.get::<_, String>(0),
+                )?)
+            })?
+    };
+    service.stop().await.unwrap();
+    drop(service);
+    let store = f.store();
+    let publisher = cortex_core::store::documents::Publisher::new(&store);
+    let draft = publisher.create_draft(&runtime_task, "fixture", "general", "sprint-report")?;
+    publisher.write_draft(
+        &runtime_task,
+        "fixture",
+        &draft.draft_id,
+        &format!(
+            "Cortex draft ID: `{}`\n\n{}\nDecision: graph handoff is authoritative.\n",
+            draft.draft_id,
+            "evidence ".repeat(520)
+        ),
+    )?;
+    publisher.publish(
+        &runtime_task,
+        "fixture",
+        &draft.draft_id,
+        "publish-sprint-report",
+        cortex_core::store::documents::Publication {
+            title: "Graph handoff",
+            summary: "Decision for the dependent task",
+            author: "fixture",
+            source_revision: 0,
+            artifacts: json!([]),
+        },
+    )?;
+    drop(store);
+    std::fs::write(f.0.join("project/scenario.txt"), "sprint-cross-task").unwrap();
+    let service = Service::bind_native(f.config(), Arc::new(Routes))
+        .await
+        .unwrap();
+    service.activate(&id).await.unwrap();
+    let start = command(
+        &id,
+        "tasks.start",
+        second,
+        "sprint-gateway-dependent-start",
+        json!({}),
+    );
+    let receipt = service.workspace(start).await.unwrap();
+    assert_eq!(receipt["outcome"], "recorded", "dependent start: {receipt}");
+    for _ in 0..240 {
+        if f.0.join("project/.git/sprint-tool-result").exists() {
+            service.stop().await.unwrap();
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("coordinator did not complete sprint_task_result gateway call");
+}
 /// Live D3 regression: Start refused every task (single or sprint) saved with a
 /// chosen model/effort (`native_start_options_unavailable`). A saved Claude
 /// `claude-sonnet-5` or Codex `gpt-6.1-sol` choice with a valid effort now
@@ -1027,7 +1183,13 @@ async fn queued_message_journey() {
             .read(|db| Ok(db.query_row(sql, [], |r| r.get::<_, i64>(0))?))
             .unwrap()
     };
-    assert_eq!(steering(&store, "SELECT count(*) FROM runtime_events WHERE type='USER_STEERING' AND json_extract(payload_json,'$.request')='queued-1'"), 0);
+    assert_eq!(
+        steering(
+            &store,
+            "SELECT count(*) FROM runtime_events WHERE type='USER_STEERING' AND json_extract(payload_json,'$.request')='queued-1'"
+        ),
+        0
+    );
     assert_eq!(
         steering(
             &store,
@@ -1162,40 +1324,74 @@ async fn degenerate_turn_journey(scenario: &str) {
          AND json_extract(payload_json,'$.rule')='{rule}' AND json_extract(payload_json,'$.role')='{role}'
          AND json_extract(payload_json,'$.message_id') LIKE 'degenerate-%' AND json_extract(payload_json,'$.chars')>0"
     ));
-    assert_eq!(trips, if twice { 2 } else { 1 }, "{scenario}");
+    // Twice: the no-stop policy then continues the task by itself (and the fixture's
+    // model keeps degenerating), so later trips may follow the first two.
+    if twice {
+        assert!(trips >= 2, "{scenario}: {trips}");
+    } else {
+        assert_eq!(trips, 1, "{scenario}");
+    }
     assert_eq!(
-        count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_TURN_DEGENERATE' AND instr(payload_json,'guner@guner@')>0"),
+        count(
+            "SELECT count(*) FROM runtime_events WHERE type='NATIVE_TURN_DEGENERATE' AND instr(payload_json,'guner@guner@')>0"
+        ),
         0
     );
     // The text after the trip never reaches the conversation.
     assert_eq!(
-        count("SELECT count(*) FROM host_transcript WHERE instr(text,'Runtime status:')>0 OR instr(text,'Further echoed')>0"),
+        count(
+            "SELECT count(*) FROM host_transcript WHERE instr(text,'Runtime status:')>0 OR instr(text,'Further echoed')>0"
+        ),
         0
     );
     if twice {
-        assert_eq!(
-            count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_DRIVER_STOPPED' AND json_extract(payload_json,'$.reason')='native_turn_degenerate'"),
-            1
+        assert!(
+            count(
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_DRIVER_STOPPED' AND json_extract(payload_json,'$.reason')='native_turn_degenerate'"
+            ) >= 1
         );
+        // No other model qualifies in this fixture: the stop is a continuation on an
+        // escalated rung that moves the coordinator, never an owner question or pause.
+        assert!(
+            count("SELECT count(*) FROM runtime_events WHERE type='AUTOMATIC_CONTINUATION' AND json_extract(payload_json,'$.reason')='native_turn_degenerate'
+                AND json_extract(payload_json,'$.strategy')='escalate_route' AND json_extract(payload_json,'$.switch_coordinator')=1")
+                >= 1
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM runtime_events WHERE type='AUTOMATIC_PAUSED'"),
+            0
+        );
+        assert_eq!(count("SELECT count(*) FROM pending_questions"), 0);
         assert_eq!(
             count("SELECT count(*) FROM runtime_events WHERE type='PLAN_ACCEPTED'"),
             0
         );
     } else if worker {
-        // The node keeps no result from the degenerate turn: the lost-worker path
-        // replaced it, and the fresh worker session finished it.
+        // The node keeps no result from the degenerate turn: it was retried as a
+        // `degenerate_turn` (a quality retry), and the fresh worker session finished it.
         assert_eq!(
-            count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_TURN_DEGENERATE' AND json_extract(payload_json,'$.node')='work' AND json_extract(payload_json,'$.revision')=1"),
+            count(
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_TURN_DEGENERATE' AND json_extract(payload_json,'$.node')='work' AND json_extract(payload_json,'$.revision')=1"
+            ),
             1
         );
-        assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='ASSIGNMENT_RETRIED' AND json_extract(payload_json,'$.failure_class')='worker_lost'"), 1);
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM runtime_events WHERE type='ASSIGNMENT_RETRIED' AND json_extract(payload_json,'$.failure_class')='degenerate_turn'"
+            ),
+            1
+        );
         assert_eq!(
             count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_DRIVER_STOPPED'"),
             0
         );
     } else {
         // The retry ran in a fresh engine session, configured after the degenerate one.
-        assert!(count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_SESSION_CONFIGURED' AND id<(SELECT min(id) FROM runtime_events WHERE type='PLAN_ACCEPTED')") >= 2);
+        assert!(
+            count(
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_SESSION_CONFIGURED' AND id<(SELECT min(id) FROM runtime_events WHERE type='PLAN_ACCEPTED')"
+            ) >= 2
+        );
         assert_eq!(
             count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_DRIVER_STOPPED'"),
             0
@@ -1331,13 +1527,13 @@ async fn controls(scenario: &str, action: &str) {
     tokio::time::timeout(Duration::from_secs(10),async {
         loop {
             let ready:bool=store.read(|db| Ok(db.query_row(
-                // A crash-looping worker is retried within its (shortened) window
-                // and the driver stops only once that window is spent.
-                if scenario=="exit" {"SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='NATIVE_DRIVER_STOPPED'
-                    AND json_extract(payload_json,'$.reason')='worker_retry_limit')
-                    AND EXISTS(SELECT 1 FROM runtime_events WHERE type='ASSIGNMENT_RETRIED'
-                    AND json_extract(payload_json,'$.failure_class')='worker_lost'
-                    AND json_extract(payload_json,'$.infrastructure_retry')>=1)"}
+                // A crash-looping worker (its engine exits unprompted: an infrastructure
+                // failure) is retried up to its lineage cap and then waits without a
+                // model call; it never stops the driver or takes a ladder rung.
+                if scenario=="exit" {"SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='ASSIGNMENT_RETRIED'
+                    AND json_extract(payload_json,'$.infrastructure_wait')=1)
+                    AND NOT EXISTS(SELECT 1 FROM runtime_events WHERE type='NATIVE_DRIVER_STOPPED'
+                    AND json_extract(payload_json,'$.reason')='worker_retry_limit')"}
                 else if scenario=="question" || scenario=="batch" || scenario=="reconcile-question" {"SELECT EXISTS(SELECT 1 FROM pending_questions WHERE status='open')"}
                 else {"SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id!='orchestrator' AND status='ready')"},
                 [],|r|r.get(0))?)).unwrap();
@@ -1374,7 +1570,10 @@ async fn controls(scenario: &str, action: &str) {
                 Ok(())
             }).unwrap();
         }
-        while count("SELECT count(*) FROM runtime_events WHERE type='WORKER_WAIT_CHANGED' AND json_extract(payload_json,'$.status')='resumed'")==0 {
+        while count(
+            "SELECT count(*) FROM runtime_events WHERE type='WORKER_WAIT_CHANGED' AND json_extract(payload_json,'$.status')='resumed'",
+        ) == 0
+        {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         let decision: String = store.read(|db| Ok(db.query_row("SELECT payload_json FROM runtime_events WHERE type='WORKER_CONTINUATION_STARTED'", [], |r| r.get(0))?)).unwrap();
@@ -1394,7 +1593,12 @@ async fn controls(scenario: &str, action: &str) {
             count("SELECT count(*) FROM runtime_events WHERE type='WORKER_CONTINUATION_STARTED'"),
             1
         );
-        assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type IN ('USER_QUESTION_REQUESTED','ASSIGNMENT_RETRIED','NATIVE_DRIVER_STOPPED')"),0);
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM runtime_events WHERE type IN ('USER_QUESTION_REQUESTED','ASSIGNMENT_RETRIED','NATIVE_DRIVER_STOPPED')"
+            ),
+            0
+        );
         let recorded: bool = store.read(|db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='WORKER_COMPLETED' AND json_extract(payload_json,'$.attempt_id')=?)",
             [wait["attempt_id"].as_str().unwrap()], |r| r.get(0))?)).unwrap();
         assert!(recorded);
@@ -1426,8 +1630,18 @@ async fn controls(scenario: &str, action: &str) {
         while count("SELECT count(*) FROM runtime_events WHERE type='WORKER_COMPLETED'") == 0 {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        assert_eq!(count("SELECT count(*) FROM runtime_requests WHERE request_key='pending-command' AND json_extract(result_json,'$.exit_code')=0"),1);
-        assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type IN ('ASSIGNMENT_RETRIED','NATIVE_DRIVER_STOPPED','USER_QUESTION_REQUESTED')"),0);
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM runtime_requests WHERE request_key='pending-command' AND json_extract(result_json,'$.exit_code')=0"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM runtime_events WHERE type IN ('ASSIGNMENT_RETRIED','NATIVE_DRIVER_STOPPED','USER_QUESTION_REQUESTED')"
+            ),
+            0
+        );
         service.stop().await.unwrap();
         runner.await.unwrap().unwrap();
         return;
@@ -1882,8 +2096,16 @@ async fn controls(scenario: &str, action: &str) {
                 "confirmation_required"
             );
         }
-        let receipt = service.control_execution(request.clone()).await.unwrap();
-        assert_eq!(service.control_execution(request).await.unwrap(), receipt);
+        match service.control_execution(request.clone()).await {
+            // No-stop policy: the stopped crash loop is a continuation that the runtime
+            // may already have relaunched by itself, so an explicit Retry can find the
+            // task running again (and the fixed scenario then completes it).
+            Err(error) if action == "retry" && error.to_string() == "retry_not_expected" => {}
+            receipt => {
+                let receipt = receipt.unwrap();
+                assert_eq!(service.control_execution(request).await.unwrap(), receipt);
+            }
+        }
     }
     let terminal = if action == "mark_resolved" {
         "CANCELLED"
@@ -2003,10 +2225,14 @@ async fn positive_owner_control(action: &str) {
         .unwrap();
     let execution = started["target"].as_str().unwrap();
     let store = f.store();
-    let checkpoint=match action {
-        "rerun_check"=>"SELECT EXISTS(SELECT 1 FROM runtime_tasks WHERE state='COMPLETED')",
-        "command_stop"=>"SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='NATIVE_COMMAND_STARTED' AND json_extract(payload_json,'$.argv[0]')='/usr/bin/cmp')",
-        _=>"SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')",
+    let checkpoint = match action {
+        "rerun_check" => "SELECT EXISTS(SELECT 1 FROM runtime_tasks WHERE state='COMPLETED')",
+        "command_stop" => {
+            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='NATIVE_COMMAND_STARTED' AND json_extract(payload_json,'$.argv[0]')='/usr/bin/cmp')"
+        }
+        _ => {
+            "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')"
+        }
     };
     async fn wait_for(store: &Store, sql: &str) {
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -2757,7 +2983,9 @@ async fn checkpoint_recovery(stage: usize, legacy: bool) {
         })
         .unwrap();
     service.stop().await.unwrap();
-    println!("durable checkpoint {stage}: native activation resumed execution/review/verification to completion without replay");
+    println!(
+        "durable checkpoint {stage}: native activation resumed execution/review/verification to completion without replay"
+    );
 }
 async fn restart_signal(store: &Store, sql: &str) {
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -3256,14 +3484,22 @@ async fn binary_journey(scenario: &str) {
             .unwrap()
             .unwrap()
             .success());
-        println!("service SIGKILL {scenario}: durable same command/output identity, observed status, no replay");
+        println!(
+            "service SIGKILL {scenario}: durable same command/output identity, observed status, no replay"
+        );
         return;
     }
     if scenario != "complete" {
         let signal = match scenario {
-            "hold" | "paused" => "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')",
-            "review-hold" => "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-code-reviewer' AND status='ready')",
-            "verify-slow" => "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='NATIVE_COMMAND_STARTED')",
+            "hold" | "paused" => {
+                "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')"
+            }
+            "review-hold" => {
+                "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-code-reviewer' AND status='ready')"
+            }
+            "verify-slow" => {
+                "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='NATIVE_COMMAND_STARTED')"
+            }
             "question" => "SELECT EXISTS(SELECT 1 FROM pending_questions WHERE status='open')",
             _ => unreachable!(),
         };
@@ -3434,7 +3670,9 @@ async fn binary_journey(scenario: &str) {
                 .unwrap()
                 .unwrap()
                 .success());
-            println!("service SIGKILL after settled Pause: hold retained without recovery barrier or replay; explicit Resume completed");
+            println!(
+                "service SIGKILL after settled Pause: hold retained without recovery barrier or replay; explicit Resume completed"
+            );
             return;
         }
         let before: i64 = store
@@ -3449,19 +3687,43 @@ async fn binary_journey(scenario: &str) {
         child.kill().await.unwrap();
         assert!(!child.wait().await.unwrap().success());
         // A real SIGKILL and observed child wait, not a synthetic host reopen.
+        let last_attempt: i64 = store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT coalesce(max(rowid),0) FROM delegation_provisioning",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
         child = spawn_service();
+        // A worker question keeps its own wait (a recovery barrier); anything else
+        // resumes in its state on the same rung (a restart is infrastructure), or, while
+        // a process or command is unconfirmed, is a continuation the runtime relaunches.
         restart_signal(
             &store,
-            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='NATIVE_RECOVERY_REQUIRED')",
+            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type IN ('NATIVE_RECOVERY_REQUIRED','AUTOMATIC_CONTINUATION') OR (type='NATIVE_RECOVERY_RESUMED' AND json_extract(payload_json,'$.restart_resume')=1))",
         )
         .await;
         store.read(|db| {
-            let (state,blocker):(String,String)=db.query_row("SELECT state,blocker FROM runtime_tasks",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            assert_eq!(state,"RECOVERING");
-            assert_eq!(blocker,if scenario=="verify-slow" {"native_verification_outcome_unknown"} else {"native_session_outcome_unknown"});
-            assert_eq!(db.query_row("SELECT count(*) FROM delegation_provisioning",[],|r|r.get::<_,i64>(0))?,before,"unknown session replayed");
-            assert_eq!(db.query_row("SELECT count(*) FROM trusted_channels WHERE revoked_at IS NULL",[],|r|r.get::<_,i64>(0))?,0);
+            // The interrupted sessions are never replayed: no earlier attempt is live again.
+            assert_eq!(db.query_row("SELECT count(*) FROM delegation_provisioning WHERE rowid<=? AND status='ready'",[last_attempt],|r|r.get::<_,i64>(0))?,0,"unknown session replayed");
+            assert!(db.query_row("SELECT count(*) FROM delegation_provisioning",[],|r|r.get::<_,i64>(0))?>=before);
+            if scenario!="question" {
+                let resumed:i64=db.query_row("SELECT count(*) FROM runtime_events WHERE type='NATIVE_RECOVERY_RESUMED' AND json_extract(payload_json,'$.restart_resume')=1",[],|r|r.get(0))?;
+                if resumed==0 {
+                    let reason:String=db.query_row("SELECT json_extract(payload_json,'$.reason') FROM runtime_events WHERE type='AUTOMATIC_CONTINUATION' ORDER BY id LIMIT 1",[],|r|r.get(0))?;
+                    assert!(matches!(reason.as_str(),"native_verification_outcome_unknown"|"native_session_outcome_unknown"|"native_service_interrupted"),"{scenario}: {reason}");
+                }
+                assert_eq!(db.query_row("SELECT count(*) FROM runtime_events WHERE type='AUTOMATIC_PAUSED'",[],|r|r.get::<_,i64>(0))?,0);
+                assert_eq!(db.query_row("SELECT count(*) FROM pending_questions WHERE status='open'",[],|r|r.get::<_,i64>(0))?,0);
+            }
             if scenario=="question" {
+                let (state,blocker):(String,String)=db.query_row("SELECT state,blocker FROM runtime_tasks",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                assert_eq!(state,"RECOVERING");
+                assert_eq!(blocker,"native_session_outcome_unknown");
+                assert_eq!(db.query_row("SELECT count(*) FROM delegation_provisioning",[],|r|r.get::<_,i64>(0))?,before,"unknown session replayed");
+                assert_eq!(db.query_row("SELECT count(*) FROM trusted_channels WHERE revoked_at IS NULL",[],|r|r.get::<_,i64>(0))?,0);
                 assert_eq!(db.query_row("SELECT count(*) FROM pending_questions WHERE status='open'",[],|r|r.get::<_,i64>(0))?,1);
                 let payload:String=db.query_row("SELECT payload_json FROM runtime_events WHERE type='WORKER_WAIT_CHANGED' ORDER BY id DESC LIMIT 1",[],|r|r.get(0))?;
                 let wait:Value=serde_json::from_str(&payload)?;
@@ -3478,7 +3740,9 @@ async fn binary_journey(scenario: &str) {
             .unwrap()
             .unwrap()
             .success());
-        println!("service SIGKILL during {scenario}: durable unknown retained, no session/command replay");
+        println!(
+            "service SIGKILL during {scenario}: no session/command replay; a continuation (or the question's own wait) carries the unknown outcome"
+        );
         return;
     }
     tokio::time::timeout(Duration::from_secs(20),async {
@@ -3504,7 +3768,9 @@ async fn binary_journey(scenario: &str) {
         .unwrap()
         .unwrap()
         .success());
-    println!("built service binary: native create/start/review/verify/completion through socket; private HOME/XDG, PATH fake engine");
+    println!(
+        "built service binary: native create/start/review/verify/completion through socket; private HOME/XDG, PATH fake engine"
+    );
 }
 async fn maintenance_admission() {
     let f = Fixture::new();
@@ -3588,7 +3854,9 @@ async fn maintenance_admission() {
         "maintenance_busy"
     );
     service.stop().await.unwrap();
-    println!("native maintenance: Start/resume/retry/prompt/rerun hold, Stop remains available; no engine or task admission");
+    println!(
+        "native maintenance: Start/resume/retry/prompt/rerun hold, Stop remains available; no engine or task admission"
+    );
 }
 fn main() {
     if std::env::args().nth(1).as_deref()
@@ -3616,6 +3884,21 @@ fn main() {
         peer::main();
         return;
     }
+    if mode.is_empty() || mode == "sprint-cross-task-probe" {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            tokio::time::timeout(Duration::from_secs(45), sprint_cross_task_gateway())
+                .await
+                .expect("sprint cross-task gateway timeout")
+                .expect("sprint cross-task gateway failed");
+        });
+        println!(
+            "sprint graph: authenticated coordinator read its dependency graph through the broker"
+        );
+        if !mode.is_empty() {
+            return;
+        }
+    }
+
     if mode == "attachments-probe" {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             tokio::time::timeout(Duration::from_secs(60), attachments_journey())
@@ -3627,7 +3910,9 @@ fn main() {
                     .expect("answer attachments journey timeout");
             }
         });
-        println!("owner attachments: draft Start, follow-up message and answer retained and delivered to the engine");
+        println!(
+            "owner attachments: draft Start, follow-up message and answer retained and delivered to the engine"
+        );
         return;
     }
     // The degenerate-turn watchdog: a coordinator-only stop runs on every host; the
@@ -3656,9 +3941,13 @@ fn main() {
                 .await
                 .expect("degenerate-worker journey timeout");
             });
-            println!("degenerate coordinator and worker turns retried once in a fresh session; the tasks completed");
+            println!(
+                "degenerate coordinator and worker turns retried once in a fresh session; the tasks completed"
+            );
         }
-        println!("degenerate coordinator turns: cancelled, recorded, retried once in a fresh session, then stopped");
+        println!(
+            "degenerate coordinator turns: cancelled, recorded, retried once in a fresh session, then continued on an escalated rung (no owner stop)"
+        );
         if mode == "degenerate-probe" {
             return;
         }
@@ -3875,7 +4164,9 @@ fn main() {
             "brokered-command restart probe: four service SIGKILL/attachment scenarios passed"
         );
     } else {
-        println!("native desktop Start: completion, independent review, bounded verification, versioned UI delta; zero retained-controller launches/mutations");
+        println!(
+            "native desktop Start: completion, independent review, bounded verification, versioned UI delta; zero retained-controller launches/mutations"
+        );
     }
 }
 

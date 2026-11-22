@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
-import { capabilityOf, FEATURES, machineDefaults, type CommandReceipt, type SprintRunMode, type TaskSettings } from "@cortex/workspace-domain";
+import { capabilityOf, effectiveCeiling, FEATURES, machineDefaults, routingFor, type CommandReceipt, type SprintRunMode, type TaskSettings } from "@cortex/workspace-domain";
 import { createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
 import { useWs } from "./ctx";
 import { FieldEdit } from "./field-edit";
@@ -7,6 +7,7 @@ import { createUnsent } from "./freshness";
 import { Tile } from "./frame";
 import { I, MenuItem, Pop } from "./kit";
 import { ActionBar, Toolbar } from "./layout";
+import { sessionOptions } from "./port/real";
 import type { Route } from "./router";
 import { sprintModeDescription, projectsOn, readyStep, sprintTitle } from "./selectors";
 
@@ -39,15 +40,6 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   const [runMode, setRunMode] = createSignal<SprintRunMode>("manual");
   const [chosenRoute, setSettings] = createSignal<TaskSettings>(defaults.settings);
   let routePicked = false;
-  createEffect(() => {
-    const options = ws.store.state().options.models.filter(m => !m.unavailable), values = machineDefaults(ws.machine()).settings;
-    setSettings(current => {
-      // Keep an explicit choice only while the machine still offers it.
-      const preferred = routePicked ? current : values;
-      const model = options.find(m => m.id === preferred.model) ?? options[0];
-      return { ...preferred, model: model?.id ?? "", effort: model ? model.efforts && !model.efforts.includes(preferred.effort) ? model.efforts[0] ?? "" : preferred.effort : "" };
-    });
-  });
   // With no choice per task, this is the machine's own, which may arrive after the page opens.
   const settings = () => ws.can(FEATURES.taskRoute) ? chosenRoute() : machineDefaults(ws.machine()).settings;
   const [sprintId, setSprintId] = createSignal<string | null>(props.route.sprint ?? null);
@@ -58,6 +50,22 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   const projects = createMemo(() => projectsOn(ws.store.index(), ws.machine().id).filter(s => s.project.activated !== false));
   const [picked, setPicked] = createSignal<string | null>(props.route.project);
   const summary = () => projects().find(p => p.project.id === picked()) ?? projects().find(p => !p.offline) ?? projects()[0];
+  const options = createMemo(() => {
+    const project = summary()?.project.id, machine = ws.machine();
+    return project && ws.store.mode === "real"
+      ? sessionOptions(machine.config, routingFor(machine, project), effectiveCeiling(machine, project).allowedRoutes)
+      : ws.store.state().options;
+  });
+  createEffect(() => {
+    const models = options().models.filter(m => !m.unavailable), values = machineDefaults(ws.machine()).settings;
+    setSettings(current => {
+      // Keep an explicit choice only while the selected project still offers it.
+      const preferred = routePicked ? current : values;
+      const model = models.find(m => m.id === preferred.model) ?? models[0];
+      const keepEffort = model !== undefined && model.id === preferred.model && (!model.efforts || model.efforts.includes(preferred.effort));
+      return { ...preferred, model: model?.id ?? "", effort: keepEffort ? preferred.effort : model?.efforts?.[0] ?? "" };
+    });
+  });
   const blocked = () => !summary() ? "Add a project to this machine first" : summary()!.offline ? `${summary()!.machine.name} is offline` : null;
   const empty = () => !text().trim();
   const draftTitle = () => ws.demo?.title.draft(text()) ?? "";
@@ -187,7 +195,7 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
     <div ref={form}><MessageComposer label={kind() === "sprint" ? "Describe the sprint" : "Describe the task"} placeholder={kind() === "sprint" ? "Describe the sprint, tag @files…" : "Describe the task. Tag @files, use /skills, paste images and logs, or attach files."}
       suggest={projectId() ? { projectId: projectId()!, skills: kind() !== "sprint" } : undefined}
       text={text()} onText={write} files={files} mic={mic} autofocus sendKey="mod-enter" attachOff={saving() ? "Saving…" : undefined}
-      route={<RouteBar id="new" disabled={ws.can(FEATURES.taskRoute) ? undefined : ws.t("machineRoute")} settings={settings()} onChange={patch => { routePicked = true; setSettings({ ...settings(), ...patch }); }} />}
+      route={<RouteBar id="new" options={options()} disabled={ws.can(FEATURES.taskRoute) ? undefined : ws.t("machineRoute")} settings={settings()} onChange={patch => { routePicked = true; setSettings({ ...settings(), ...patch }); }} />}
       send={kind() === "sprint" ? { label: "Start planning", needs: "create_sprint", go: () => submit(false, plane()) } : { label: "Save draft", needs: "create_task", go: () => submit(false, plane()) }} /></div>
     <div class="ws-slot"><Show when={tried() && (empty() || blocked())}><div class="err">{blocked() ?? "Describe what needs doing."}</div></Show></div>
 

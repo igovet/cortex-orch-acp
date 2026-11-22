@@ -10,7 +10,7 @@ use std::{
     ffi::OsString,
     fs::File,
     io::Read,
-    os::fd::AsRawFd,
+    os::{fd::AsRawFd, unix::fs::MetadataExt},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -44,6 +44,8 @@ pub(super) struct Output {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }
+/// How long a finished command's output may take to reach its end.
+const DRAIN: Duration = Duration::from_secs(30);
 async fn drain(
     mut stream: impl AsyncRead + Unpin,
     limit: usize,
@@ -119,7 +121,10 @@ async fn capture_limited(
     };
     let mut out = out;
     let mut err = err;
-    let drained = tokio::time::timeout(Duration::from_secs(1), async {
+    // The streams end once the last writer is gone. One second was too short under
+    // host load: a passing verifier command (exit 0) was recorded with its output
+    // unavailable, so its outcome unknown, and the task replanned (2026-11-21).
+    let drained = tokio::time::timeout(DRAIN, async {
         Ok::<_, CoreError>((
             (&mut out)
                 .await
@@ -189,6 +194,16 @@ async fn verify_in(
     cancel: tokio::sync::watch::Receiver<bool>,
     environment: Option<BTreeMap<OsString, OsString>>,
 ) -> CoreResult<Value> {
+    verify_with_deadline(root, argv, cancel, environment, VERIFICATION_DEADLINE).await
+}
+
+async fn verify_with_deadline(
+    root: PathBuf,
+    argv: &[String],
+    cancel: tokio::sync::watch::Receiver<bool>,
+    environment: Option<BTreeMap<OsString, OsString>>,
+    deadline: Duration,
+) -> CoreResult<Value> {
     let r = root.clone();
     let sandbox = tokio::task::spawn_blocking(move || {
         let ignored = crate::native_command_sandbox::ignored_directories(&r)?;
@@ -203,7 +218,7 @@ async fn verify_in(
     .map_err(|_| refused())?
     .map_err(|_| CoreError::Refused("native_verification_sandbox_unavailable"))?;
     let c = Command::from(sandbox.command(argv)?);
-    let result = capture(c, VERIFICATION_DEADLINE, cancel).await;
+    let result = capture(c, deadline, cancel).await;
     let receipt = match result {
         Ok(o) => json!({"complete":o.complete,"exit_code":o.code,"output_truncated":o.truncated,
             "failure":o.failure,"stdout":String::from_utf8_lossy(&o.stdout),"stderr":String::from_utf8_lossy(&o.stderr)}),
@@ -305,15 +320,52 @@ async fn verification_preflight_in(
     verification: &Value,
     environment: BTreeMap<OsString, OsString>,
 ) -> CoreResult<()> {
+    verification_preflight_checks(root, verification, environment, None).await
+}
+
+async fn verification_preflight_checks(
+    root: PathBuf,
+    verification: &Value,
+    environment: BTreeMap<OsString, OsString>,
+    qualification_deadline: Option<Duration>,
+) -> CoreResult<()> {
     for argv in cortex_core::lifecycle::plan::verification(verification)? {
+        // A launcher (`timeout 900 cargo ...`) finds its program on the same search
+        // path the launcher itself was found on: both are probed, so a program the
+        // verifier would not find is reported here, not as exit 127 at verification.
+        let mut programs = vec![argv[0].clone()];
+        // A relative inner path may be relative to a launcher-chosen directory
+        // (`env -C dir ./x`); only bare names and absolute paths are probed.
+        if let Some(inner) = cortex_core::lifecycle::completion::launched_program(&argv)
+            .filter(|p| !p.contains('/') || p.starts_with('/'))
+        {
+            programs.push(inner.to_owned());
+        }
+        for program in programs {
+            verification_program_available(&root, &program, &environment, qualification_deadline)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn verification_program_available(
+    root: &Path,
+    program: &str,
+    environment: &BTreeMap<OsString, OsString>,
+    qualification_deadline: Option<Duration>,
+) -> CoreResult<()> {
+    let root = root.to_path_buf();
+    {
+        let argv = [program.to_owned()];
         // A bare name resolves where the verifier's own launch resolves it: on the
         // sandbox's command search path (project tool directories, then the owner's
         // PATH), not a fixed system list. Relative search entries are not probed.
         let candidates: Vec<PathBuf> = if argv[0].contains('/') {
             vec![root.join(&argv[0])]
         } else {
-            let path = crate::native_command_sandbox::command_path(&root, &environment)
-                .unwrap_or_default();
+            let path =
+                crate::native_command_sandbox::command_path(&root, environment).unwrap_or_default();
             std::env::split_paths(&path)
                 .filter(|directory| directory.is_absolute())
                 .map(|directory| directory.join(&argv[0]))
@@ -326,7 +378,7 @@ async fn verification_preflight_in(
         let mut available = false;
         for executable in candidates {
             let (_cancel, receiver) = tokio::sync::watch::channel(false);
-            let probe = verify_in(
+            let probe = verify_with_deadline(
                 root.clone(),
                 &[
                     "/usr/bin/test".into(),
@@ -335,6 +387,7 @@ async fn verification_preflight_in(
                 ],
                 receiver,
                 Some(environment.clone()),
+                qualification_deadline.unwrap_or(VERIFICATION_DEADLINE),
             )
             .await?;
             if probe["observation"]["failure"] == "native_verification_sandbox_unavailable" {
@@ -342,7 +395,11 @@ async fn verification_preflight_in(
                     "native_verification_sandbox_unavailable",
                 ));
             }
-            if probe["observation"]["complete"] == true && probe["observation"]["exit_code"] == 0 {
+            let executable_confirmed =
+                probe["observation"]["complete"] == true && probe["observation"]["exit_code"] == 0;
+            if executable_confirmed
+                && (qualification_deadline.is_none() || clean_verifier_receipt(&probe, ""))
+            {
                 available = true;
                 break;
             }
@@ -353,6 +410,40 @@ async fn verification_preflight_in(
     }
     Ok(())
 }
+fn clean_verifier_receipt(receipt: &Value, stdout: &str) -> bool {
+    let observed = &receipt["observation"];
+    receipt["profile"] == "native-readonly-bubblewrap"
+        && observed["complete"] == true
+        && observed["output_truncated"] == false
+        && observed.get("failure") == Some(&Value::Null)
+        && observed["exit_code"] == 0
+        && observed["stdout"] == stdout
+        && observed["stderr"] == ""
+}
+
+/// Both the host control and extracted Dev startup use the real planning and
+/// verification paths, including the service's native environment and Bubblewrap.
+pub(crate) async fn qualification_verifier(root: PathBuf) -> CoreResult<String> {
+    const DEADLINE: Duration = Duration::from_secs(10);
+    let argv = ["/usr/bin/cat".to_owned(), "file".to_owned()];
+    verification_preflight_checks(
+        root.clone(),
+        &json!([argv]),
+        crate::tool_path::environment(),
+        Some(DEADLINE),
+    )
+    .await?;
+    let (_cancel, receiver) = tokio::sync::watch::channel(false);
+    let receipt = verify_with_deadline(root, &argv, receiver, None, DEADLINE).await?;
+    if !clean_verifier_receipt(&receipt, "confirmed") {
+        return Err(CoreError::Refused("qualification_verifier_incomplete"));
+    }
+    receipt["tool_call_ref"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or(CoreError::Refused("qualification_verifier_incomplete"))
+}
+
 pub(super) async fn git_ref(root: &Path, args: &[&str]) -> CoreResult<Output> {
     let mut argv = vec![
         "/usr/bin/git".into(),
@@ -427,6 +518,7 @@ impl Flags {
 struct Observed {
     digest: String,
     head: Option<String>,
+    branch: Option<String>,
     ignored: Option<String>,
     flags: Flags,
     /// Per-file identity of the top-level checkout (only when asked for): a content
@@ -441,6 +533,39 @@ enum ManifestMode {
     None,
     Identity,
     Review,
+    Commit,
+}
+
+/// An exact working-tree witness for the owner Git commit path, not a verification
+/// digest. The ordinary checkout digest remains sensitive to HEAD and the index.
+pub(super) struct CommitObservation {
+    pub digest: String,
+    pub content: String,
+    pub head: String,
+    pub branch: String,
+    pub entries: std::collections::BTreeMap<String, String>,
+}
+
+pub(super) async fn observe_commit(root: PathBuf) -> Option<CommitObservation> {
+    let listing = git_listing(&root, false).await.ok()?;
+    let o = observe_listed(root, 0, ManifestMode::Commit, false, listing)
+        .await
+        .ok()?;
+    if o.flags.incomplete || o.flags.metadata_only || o.flags.cap_reached {
+        return None;
+    }
+    let mut h = <sha2::Sha256 as sha2::Digest>::new();
+    for (path, identity) in o.manifest {
+        feed(&mut h, path.as_bytes());
+        feed(&mut h, identity.as_bytes());
+    }
+    Some(CommitObservation {
+        digest: o.digest,
+        content: hex(h),
+        head: o.head?,
+        branch: o.branch?,
+        entries: o.raw_manifest,
+    })
 }
 const NESTED_DEPTH: u8 = 4;
 pub(super) async fn observe(root: PathBuf) -> CoreResult<EvidenceSnapshot> {
@@ -858,6 +983,27 @@ async fn observe_listed(
         commit,
         digest_input,
     } = head;
+    let branch = digest_input
+        .splitn(2, |b| *b == 0)
+        .nth(1)
+        .and_then(|s| std::str::from_utf8(s).ok())
+        .and_then(|s| s.trim_end_matches('\n').strip_prefix("refs/heads/"))
+        .map(str::to_owned);
+    let for_commit = with_manifest == ManifestMode::Commit;
+    let git_oid_len = if for_commit {
+        Some(commit.as_ref().ok_or_else(refused)?.len())
+    } else {
+        None
+    };
+    let commit_listing = for_commit.then(|| {
+        (
+            paths.clone(),
+            index.clone(),
+            pruned.clone(),
+            digest_input.clone(),
+        )
+    });
+    let observed_root = root.clone();
     let digest = tokio::task::spawn_blocking(move || {
         let mut manifest = std::collections::BTreeMap::new();
         let mut raw_manifest = std::collections::BTreeMap::new();
@@ -869,14 +1015,28 @@ async fn observe_listed(
             &heads,
             (FILE_LIMIT, TOTAL_LIMIT, TIME_LIMIT),
             (with_manifest != ManifestMode::None).then_some(&mut manifest),
-            (with_manifest == ManifestMode::Review).then_some(&mut raw_manifest),
+            matches!(with_manifest, ManifestMode::Review | ManifestMode::Commit)
+                .then_some(&mut raw_manifest),
             pruned.as_ref(),
+            git_oid_len,
         )?;
         let i = ignored.and_then(|l| ignored_tree(&root, &l));
         Ok::<_, CoreError>((d, i, f, manifest, raw_manifest))
     })
     .await
     .map_err(|_| refused())??;
+    // A commit witness cannot bridge a mixed HEAD/index observation. The standard
+    // verifier's digest and its other observation modes stay byte-for-byte unchanged.
+    if let Some((paths, index, pruned, head)) = commit_listing {
+        let current = git_listing(&observed_root, false).await?;
+        if paths != current.paths
+            || index != current.index
+            || pruned != current.pruned
+            || head != current.head.digest_input
+        {
+            return Err(changed());
+        }
+    }
     let manifest = digest.3;
     let raw_manifest = digest.4;
     flags.merge(digest.2);
@@ -905,6 +1065,7 @@ async fn observe_listed(
     Ok(Observed {
         digest: digest.0,
         head: commit,
+        branch,
         ignored,
         flags,
         manifest,
@@ -962,6 +1123,7 @@ mod tests {
             (u64::MAX, u64::MAX, Duration::from_secs(60)),
             Some(&mut identity),
             Some(&mut raw),
+            None,
             None,
         )
         .unwrap();
@@ -1632,6 +1794,49 @@ mod tests {
         assert!(snap().await.incomplete);
     }
     #[tokio::test]
+    #[ignore = "requires a real host verifier; mandatory in extracted Dev qualification"]
+    async fn desktop_qualification_nested_verifier() {
+        let f = Fixture::new();
+        init_repo(&f.0);
+        let reference = qualification_verifier(f.0.clone())
+            .await
+            .expect("the candidate must produce a complete native verification receipt");
+        assert!(reference.starts_with("native-command:"));
+    }
+
+    #[test]
+    fn qualification_verifier_refuses_incomplete_or_different_receipts() {
+        let valid = json!({
+            "profile":"native-readonly-bubblewrap",
+            "observation":{"complete":true,"output_truncated":false,"failure":null,
+                "exit_code":0,"stdout":"confirmed","stderr":""}
+        });
+        assert!(clean_verifier_receipt(&valid, "confirmed"));
+        for (field, value) in [
+            ("complete", json!(false)),
+            ("output_truncated", json!(true)),
+            ("failure", json!("command_signalled")),
+            ("exit_code", json!(1)),
+            ("exit_code", Value::Null),
+            ("stdout", json!("confirmed\n")),
+            ("stderr", json!("diagnostic")),
+        ] {
+            let mut bad = valid.clone();
+            bad["observation"][field] = value;
+            assert!(!clean_verifier_receipt(&bad, "confirmed"), "{field}");
+        }
+        let mut missing_failure = valid.clone();
+        missing_failure["observation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("failure");
+        assert!(!clean_verifier_receipt(&missing_failure, "confirmed"));
+        let mut wrong_profile = valid;
+        wrong_profile["profile"] = json!("host");
+        assert!(!clean_verifier_receipt(&wrong_profile, "confirmed"));
+    }
+
+    #[tokio::test]
     async fn readonly_verifier_reads_project_but_cannot_mutate_or_read_private_store() {
         let f = Fixture::new();
         if !sandbox_available(&f.0).await {
@@ -1814,6 +2019,23 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(missing.code(), "verification_executable_unavailable");
+        // A launcher's program is resolved on the same path (cortex t_e308 274436:
+        // `timeout 900 cargo ...` exited 127 in verification).
+        verification_preflight_in(
+            project.clone(),
+            &json!([["timeout", "900", "cortex-fixture-tool", "--version"]]),
+            environment.clone(),
+        )
+        .await
+        .expect("a launcher's program on the command search path is available");
+        let wrapped = verification_preflight_in(
+            project.clone(),
+            &json!([["timeout", "900", "cortex-fixture-missing-tool"]]),
+            environment.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(wrapped.code(), "verification_executable_unavailable");
         // A link whose target is gone is not an installed program.
         std::fs::remove_file(&program).unwrap();
         let dangling =
@@ -2056,6 +2278,41 @@ fn hex(h: sha2::Sha256) -> String {
     use sha2::Digest;
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
+// Hash the exact bytes already opened by the no-follow observer as a Git blob;
+// unlike Git's working-tree comparison this runs no filters or normalization.
+enum GitBlob {
+    Sha1(sha1_smol::Sha1),
+    Sha256(sha2::Sha256),
+}
+
+impl GitBlob {
+    fn new(oid_len: usize, size: u64) -> Self {
+        use sha2::Digest;
+        let mut hash = if oid_len == 64 {
+            Self::Sha256(sha2::Sha256::new())
+        } else {
+            Self::Sha1(sha1_smol::Sha1::new())
+        };
+        hash.update(format!("blob {size}\0").as_bytes());
+        hash
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        use sha2::Digest;
+        match self {
+            Self::Sha1(hash) => hash.update(bytes),
+            Self::Sha256(hash) => hash.update(bytes),
+        }
+    }
+
+    fn finish(self) -> String {
+        match self {
+            Self::Sha1(hash) => hash.digest().to_string(),
+            Self::Sha256(hash) => hex(hash),
+        }
+    }
+}
+
 fn checked_name(name: &[u8]) -> CoreResult<&str> {
     let name =
         std::str::from_utf8(name).map_err(|_| CoreError::Refused("project_unobservable_path"))?;
@@ -2113,7 +2370,7 @@ fn tree_collect(
     manifest: Option<&mut std::collections::BTreeMap<String, String>>,
 ) -> CoreResult<(String, Flags)> {
     tree_collect_in(
-        root, paths, index, head, heads, limits, manifest, None, None,
+        root, paths, index, head, heads, limits, manifest, None, None, None,
     )
 }
 /// `tree_collect` whose empty-directory walk skips the `pruned` ignored directories.
@@ -2128,6 +2385,7 @@ fn tree_collect_in(
     mut manifest: Option<&mut std::collections::BTreeMap<String, String>>,
     mut raw_manifest: Option<&mut std::collections::BTreeMap<String, String>>,
     pruned: Option<&BTreeSet<Vec<u8>>>,
+    git_oid_len: Option<usize>,
 ) -> CoreResult<(String, Flags)> {
     use sha2::Digest;
     let mut flags = Flags::default();
@@ -2167,7 +2425,11 @@ fn tree_collect_in(
                         && started.elapsed() <= time_limit
                     {
                         let mut buffer = vec![0u8; 64 * 1024];
-                        let mut raw_entry = raw_manifest.as_ref().map(|_| sha2::Sha256::new());
+                        let mut raw_entry = raw_manifest
+                            .as_ref()
+                            .filter(|_| git_oid_len.is_none())
+                            .map(|_| sha2::Sha256::new());
+                        let mut git_entry = git_oid_len.map(|len| GitBlob::new(len, before.len()));
                         let mut read = 0u64;
                         loop {
                             let n = file.read(&mut buffer).map_err(|_| unreadable())?;
@@ -2183,17 +2445,32 @@ fn tree_collect_in(
                             if let Some(raw_entry) = raw_entry.as_mut() {
                                 raw_entry.update(&buffer[..n]);
                             }
+                            if let Some(git_entry) = git_entry.as_mut() {
+                                git_entry.update(&buffer[..n]);
+                            }
                         }
                         let after = file.metadata()?;
-                        if read != before.len() || before.modified()? != after.modified()? {
+                        if read != before.len()
+                            || before.modified()? != after.modified()?
+                            || (git_oid_len.is_some()
+                                && (before.ctime(), before.ctime_nsec())
+                                    != (after.ctime(), after.ctime_nsec()))
+                        {
                             return Err(changed());
                         }
                         hashed += read;
                         h.update(b"content");
-                        if let (Some(raw_manifest), Some(raw_entry)) =
-                            (raw_manifest.as_deref_mut(), raw_entry)
-                        {
-                            raw_manifest.insert(name.to_owned(), hex(raw_entry));
+                        if let Some(raw) = raw_manifest.as_deref_mut() {
+                            if let Some(blob) = git_entry {
+                                let mode = if seen.mode & 0o100 == 0 {
+                                    "100644"
+                                } else {
+                                    "100755"
+                                };
+                                raw.insert(name.to_owned(), format!("{mode} {}", blob.finish()));
+                            } else if let Some(raw_entry) = raw_entry {
+                                raw.insert(name.to_owned(), hex(raw_entry));
+                            }
                         }
                     } else {
                         // Over the limits: size, mtime and mode stand in for the content.
@@ -2209,6 +2486,11 @@ fn tree_collect_in(
                 LINK => {
                     feed(&mut h, &seen.target);
                     entry.update(&seen.target);
+                    if let (Some(len), Some(raw)) = (git_oid_len, raw_manifest.as_deref_mut()) {
+                        let mut blob = GitBlob::new(len, seen.target.len() as u64);
+                        blob.update(&seen.target);
+                        raw.insert(name.to_owned(), format!("120000 {}", blob.finish()));
+                    }
                 }
                 DIRECTORY => {
                     let nested = heads
@@ -2226,8 +2508,12 @@ fn tree_collect_in(
                 }
                 _ => {}
             }
-            if let Some(m) = manifest.as_deref_mut() {
-                m.insert(name.to_owned(), hex(entry));
+            // A pre-commit index can still list a deleted path. It is already
+            // absent from the working tree and won't be listed after committing.
+            if git_oid_len.is_none() || seen.kind != MISSING {
+                if let Some(m) = manifest.as_deref_mut() {
+                    m.insert(name.to_owned(), hex(entry));
+                }
             }
         }
         // Git does not track empty directories; creating or removing one is a project change.

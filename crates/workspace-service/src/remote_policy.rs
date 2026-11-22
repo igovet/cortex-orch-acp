@@ -10,7 +10,11 @@
 //! with the owner at the machine), `service.stop`, every `terminal.*` and `voice.*`
 //! method, anything that opens a native login, privilege prompt or desktop program on
 //! the machine, and every write into a checkout's files or Git state (Code is read-only
-//! from the phone in this version).
+//! from the phone in this version). The one privilege-related answer a phone may send is
+//! the owner's `sudo` password for an open prompt (`askpass.answer`), and only while the
+//! owner allows it; the same setting gates a sign-in token pasted for an owner action
+//! (`owner_actions.act` with `token`). `remote.sudo.set`, which changes that setting, is
+//! owner-only like every `remote.*` method.
 use serde_json::Value;
 
 /// Service methods a remote device may call. `machine.call` is decided per operation by
@@ -33,6 +37,10 @@ const METHODS: &[&str] = &[
     "executions.cancel",
     "executions.prompt",
     "executions.control",
+    // Open sudo password prompts (never their answers).
+    "askpass.list",
+    // Open owner actions (a missing login, sudo) of the machine's tasks.
+    "owner_actions.list",
 ];
 
 /// `machine.call` operations a remote device may call whatever their parameters.
@@ -74,7 +82,47 @@ pub fn allowed(method: &str, params: &Value) -> bool {
     if method == "machine.call" {
         return machine_call_allowed(params);
     }
+    if method == "askpass.answer" {
+        return sudo_answer_allowed(params, crate::native_askpass::phone_allowed());
+    }
+    if method == "owner_actions.act" {
+        return owner_action_allowed(params, crate::native_askpass::phone_allowed());
+    }
     METHODS.contains(&method)
+}
+
+/// A phone answers a `sudo` password prompt: a cancel always, a password only while the
+/// owner allows sudo passwords from paired phones (Settings, Remote access). The password
+/// then crosses the paired, end-to-end encrypted remote channel.
+pub fn sudo_answer_allowed(params: &Value, phone_passwords: bool) -> bool {
+    let Some(map) = params.as_object() else {
+        return false;
+    };
+    let id = map.get("promptId").is_some_and(Value::is_string);
+    match (map.len(), map.get("cancel"), map.get("password")) {
+        (2, Some(Value::Bool(true)), None) => id,
+        (2, None, Some(Value::String(_))) => id && phone_passwords,
+        _ => false,
+    }
+}
+
+/// A phone acts on an owner action: a check again or a dismissal always, a pasted
+/// sign-in token only while the owner allows passwords and tokens from paired phones (the
+/// same setting as sudo passwords), and never `terminal`, which opens the login in the
+/// desktop's own terminal. The service checks the exact shape again.
+pub fn owner_action_allowed(params: &Value, phone_tokens: bool) -> bool {
+    let Some(map) = params.as_object() else {
+        return false;
+    };
+    let named = map.get("projectId").is_some_and(Value::is_string)
+        && map.get("actionId").is_some_and(Value::is_string);
+    match (map.len(), map.get("action").and_then(Value::as_str)) {
+        (3, Some("recheck" | "dismiss")) => named,
+        (4, Some("token")) => {
+            named && map.get("token").is_some_and(Value::is_string) && phone_tokens
+        }
+        _ => false,
+    }
 }
 
 fn machine_call_allowed(params: &Value) -> bool {
@@ -210,6 +258,64 @@ mod tests {
             json!({"action":"acknowledge","id":"a","confirmed":true})
         ));
         assert!(!machine("maintenance", json!({})));
+    }
+
+    /// Exactly one new operation: listing prompts, and answering one, a password only
+    /// while the owner allows it. Its setting stays owner-only.
+    #[test]
+    fn a_phone_answers_a_sudo_prompt_only_as_the_owner_allows() {
+        assert!(allowed("askpass.list", &json!({})));
+        let password = json!({"promptId":"ab12","password":"x"});
+        let cancel = json!({"promptId":"ab12","cancel":true});
+        assert!(sudo_answer_allowed(&password, true));
+        assert!(!sudo_answer_allowed(&password, false));
+        assert!(sudo_answer_allowed(&cancel, false));
+        for bad in [
+            json!({"promptId":"ab12"}),
+            json!({"promptId":"ab12","cancel":false}),
+            json!({"promptId":"ab12","password":"x","cancel":true}),
+            json!({"promptId":"ab12","password":7}),
+            json!({"password":"x","other":"y"}),
+            json!("x"),
+        ] {
+            assert!(!sudo_answer_allowed(&bad, true), "{bad}");
+        }
+        assert!(!allowed("remote.sudo.set", &json!({"allowed":true})));
+        for method in ["askpass.other", "askpass", "askpass.list.all"] {
+            assert!(!allowed(method, &json!({})), "{method}");
+        }
+    }
+
+    /// Owner actions: listing, a check again and a dismissal pass; a token only while the
+    /// owner allows passwords and tokens from phones; the desktop terminal login never.
+    #[test]
+    fn a_phone_acts_on_owner_actions_only_as_the_owner_allows() {
+        assert!(allowed("owner_actions.list", &json!({})));
+        let act = |action: &str| json!({"projectId":"wp_1","actionId":"oa_1","action":action});
+        for action in ["recheck", "dismiss"] {
+            assert!(owner_action_allowed(&act(action), false), "{action}");
+        }
+        assert!(!owner_action_allowed(&act("terminal"), true));
+        let token = json!({"projectId":"wp_1","actionId":"oa_1","action":"token","token":"t"});
+        assert!(owner_action_allowed(&token, true));
+        assert!(!owner_action_allowed(&token, false));
+        for bad in [
+            json!({"projectId":"wp_1","actionId":"oa_1"}),
+            json!({"projectId":"wp_1","action":"recheck"}),
+            json!({"projectId":"wp_1","actionId":"oa_1","action":"recheck","token":"t"}),
+            json!({"projectId":"wp_1","actionId":"oa_1","action":"token","token":7}),
+            json!({"projectId":"wp_1","actionId":"oa_1","action":"other"}),
+            json!("x"),
+        ] {
+            assert!(!owner_action_allowed(&bad, true), "{bad}");
+        }
+        for method in [
+            "owner_actions",
+            "owner_actions.other",
+            "owner_actions.list.all",
+        ] {
+            assert!(!allowed(method, &json!({})), "{method}");
+        }
     }
 
     #[test]

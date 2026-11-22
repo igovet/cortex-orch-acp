@@ -21,11 +21,19 @@
 
 Conversation waits explain when decision details are unavailable and point to Answer in the header. Open decisions also render before their timeline reference arrives. In Workspace, a pinned decision stays above the message box even when **Latest** appears over the conversation. If a draft becomes read-only, the composer keeps the text and displays the reason separately. Sent attachment chips tolerate the whitespace normalization used by runtime history.
 
-In Workspace, Changes excludes target-only changes after **Update from target**, including when **Finish merge** confirms an update you committed in Git. See [IDE and Git](docs/cortex-workspace/ide-and-git.md).
+In Workspace, Changes excludes target-only changes after **Update from target**, including when **Finish merge** confirms an update you committed in Git. On a separate branch, **Git → Commit…** keeps an accepted result current when the commit contains exactly the accepted files; push it before choosing **Finish → Create a pull request**. See [IDE and Git](docs/cortex-workspace/ide-and-git.md).
 
 In Workspace, you can add a comment to a route choice without changing the selected route. Explicit refusals still apply. See [routing and consent](docs/project/native-incoming-acp.md#native-routing-and-retained-consent).
 
 Workspace result checks list recorded skips with their reasons, including checks that required authorization and did not run.
+
+For materialized sprints, a coordinator receives the current task's direct
+dependency context and can page through the authenticated sprint graph with
+`sprint_graph`. It can read a predecessor's durable outcome and immutable
+published reports with `sprint_task_result`. The runtime limits both reads to
+that sprint and keeps report content bounded. File availability is reported
+from recorded write receipts and exact bytes, with unknown evidence retained as
+unknown. This read surface does not change queue ordering or Hybrid acceptance.
 
 Workspace engine limits retain connected engines with an explicit Unavailable state when no provider usage is observed. Coordinator choices exclude switched-off engines. See [desktop engine controls](docs/cortex-workspace/maintenance-and-controls.md).
 
@@ -331,6 +339,9 @@ restricted explicit-pin subset. Its configured provider checks executable availa
 without launching an engine, including approved bare commands on absolute PATH entries.
 Automatic ranking, live account/quota checks and project/task ceilings remain incomplete;
 unsupported selection returns an explicit reason before Start admission.
+The Workspace new-task chooser reflects the selected project's routing and
+allowed-route list. Manual planning and recovery preserve the task's coordinator
+choice rather than requiring the machine default to remain available.
 Regenerate/check its instruction data with
 `scripts/cortex-xtask.sh generate-instructions write` / `check` after changing
 canonical profiles or skills.
@@ -351,12 +362,20 @@ Missing, untrusted, ambiguous or unsupported routes fail visibly without a Pytho
 mutation fallback. A built-binary socket test covers native create/start through
 completion with PATH fake engines and private HOME/XDG state; it does not qualify
 real engine accounts or a released application. Native worktree execution still fails closed rather than being ignored. Owner attachments (new task, follow-up and Request-changes messages, and question answers) are retained as private source bodies and delivered to the engine; the native service advertises `attachments: true` in its capabilities, and worker guidance carries no files.
+
+Every task finishes or keeps working: the runtime never parks a task for the owner because of its own failures, and there are no attempt, review-cycle, replan or repair caps. A runtime stop (a failed or lost worker, a failed check after its direct repairs, a blocking or stalled review, a degenerate model turn, an interrupted service, an effect with an unknown outcome) becomes a continuation that changes approach along a strategy ladder (repair, escalated routes, the senior consultant, another role and coordinator model) and resumes by itself; unknown effects are re-verified, never replayed; a review that cannot read an item with its tools records it as a disclosed unverified limit. When a route is unusable, the runtime waits and resumes it by itself
+(see [no-stop policy](docs/features/task-lifecycle/index.md#no-stop-policy-and-the-strategy-ladder)).
+Missing access can pause the affected work, but the owner can dismiss the action
+even for a registry or other named host without a built-in sign-in. A failing
+project test that prints an authentication error does not create an access action
+on that evidence alone.
+
 Native-owned task controls now use the same Rust host through the ordinary
 service handlers: send/steer, Stop/Pause/Resume, question answers, explicit Retry
 and confirmed Mark resolved/Close as is. Stop settles the owned process before
 replying; Resume continues the retained task (questions and worker waits stay answerable), while retry, and a message to a task that waits for the owner, is held or was reopened, use a fresh coordinator and plan; neither revives a revoked
 channel. A worker turn still running 10 seconds after the runtime revoked its channel is cancelled with `session/cancel` and, without a reply within 25 seconds, terminated, so recovery never waits for that engine to finish on its own
-(see [recovery cancels only live assignments](docs/features/failures-and-cancellation/index.md#recovery-cancels-only-live-assignments)). A coordinator or worker turn that echoes its own prompt, loops on the same text, writes one message of 16,000 characters without acting, or refuses is cancelled the same way, recorded as `NATIVE_TURN_DEGENERATE` (rule and size, never the text) and retried once in a fresh session; a second one stops the task with the `native_turn_degenerate` blocker
+(see [recovery cancels only live assignments](docs/features/failures-and-cancellation/index.md#recovery-cancels-only-live-assignments)). A coordinator or worker turn that echoes its own prompt, loops on the same text, writes one message of 16,000 characters without acting, or refuses is cancelled the same way, recorded as `NATIVE_TURN_DEGENERATE` (rule and size, never the text) and retried once in a fresh session; a second one moves the coordinator to another qualified model (a worker to another model or engine) and the task continues, never stops
 (see [degenerate model turns](docs/features/failures-and-cancellation/index.md#degenerate-model-turns)). A message to a working task interrupts nothing: workers, review and verification continue, and the coordinator receives it once at its next boundary; an explicit `deny-write: <path>` in it takes effect at once
 (see [steering](docs/features/steering-and-questions/index.md)). Answers continue the same waiting worker session. Exact request retries
 return receipts without replaying effects; incomplete intents remain unknown.
@@ -401,6 +420,7 @@ the 0.14.0 SDK's derived message and reasoning IDs are supported by the replay g
 For local desktop Debian builds, run `./scripts/build-dev-deb.sh` or
 `./scripts/build-prod-deb.sh`; archives stay under git-ignored `.workspace-build/`.
 Run the prod wrapper explicitly for a non-official production-channel build in a disposable environment; its Debian version ends in `.local` and is rejected by the GitHub publisher. Dev remains the default, with a separate store.
+To smoke-test a Dev archive in your real environment (real HOME, keyring and logins, private Dev XDG roots, a private Xvfb or your display), run `bash scripts/qualify-dev-deb.sh smoke --archive newest` (or `smoke` to build one first). Smoke sends no task: it reads settings, the observed light route and its matching coordinator default over the private socket, and records the GitHub CLI login exit code for the active github.com account as a fact. For an explicitly approved desktop scenario, first run `bash scripts/qualify-dev-deb.sh smoke --xvfb --archive newest`. Set `SMOKE_DIR` to the evidence directory printed by that successful smoke, then run `bash scripts/qualify-dev-deb.sh drive --archive newest --smoke-evidence "$SMOKE_DIR" -- /absolute/path/to/foreground-scenario-driver`. Drive requires the same archive digest and a private authenticated Xvfb. Drive records the same scoped fact; neither action invokes the broad host probe. Smoke and drive require a complete Bubblewrap verifier receipt from the running candidate service and a native View PR capture probe before desktop input. The extracted desktop records View PR addresses as SHA-256 digests; it does not open the browser for these actions. Missing displays, tools or logins are not passes; drive does not start its scenario while prerequisites are unobserved. `bash scripts/qualify-dev-deb.sh probe` prints the host facts only. See the [desktop procedure](docs/project/verification.md#standalone-cortex-workspace-desktop). Every successful package build keeps only the newest two builds and caches per channel; `scripts/cortex-xtask.sh clean-builds --dry-run` previews the same cleanup ([build hygiene](docs/project/packaging.md#build-output-hygiene)).
 Workspace can also be reached from an Android phone. Remote access is off by default; when the owner turns
 it on in Settings, Remote access, the desktop service pairs a phone with a single-use link (QR code, 5
 minutes, explicit Allow on the computer) and then serves it only through a closed allowlist of requests.
@@ -627,7 +647,7 @@ be moved manually only to Done, with “Done outside the app” confirmation aft
 durable owner decision is not acceptance, merging or passing checks; sprint dependencies can continue.
 Ordinary run closures without acceptance have a closing step: a failed or cancelled run offers
 Close task… in its title band, a runtime result that can never be accepted offers Close as is…, and
-Finish on the runtime's stop question counts as the owner's close as is (not verified), so it archives
+Finish on a runtime stop question an earlier version stored counts as the owner's close as is (not verified), so it archives
 and settles its sprint. Ordinary closed tasks offer Archive without another confirmation. The separate
 close for conflicting records does not enable Archive or satisfy a dependency. See
 [local review and Git behavior](docs/cortex-workspace/local-task-execution.md).
@@ -695,7 +715,7 @@ See [service-owned work](docs/cortex-workspace/local-task-execution.md#archive-a
 
 Routing marks stored references to disabled models as inactive without deleting them; its enabled-model picker excludes denied models. Routing settings use each exact model's observed effort levels, including ordered effort ladders. Unknown levels are marked; saved unsupported values remain visible and unchanged. See [configuration](docs/configuration.md#manage-settings-in-paseo).
 
-Workspace queues writers during independent review and verification of the same checkout. A review requires and binds only the task's own changes: files its tools wrote and paths that changed while its commands or writing-engine turns ran. Other uncommitted files in the checkout are listed as context and never refused, re-bound or invalidated; an edit of one of the task's files, by anyone, still makes Cortex schedule fresh review within its review-cycle limit. When a command's changes cannot be recorded completely, the review requires every changed file and binds the whole checkout, as before. A worker that ends its turn with a pending command can receive the final receipt in the same session. Reopened reviews include the task’s recorded writes from earlier plans and identify paths whose contents have since changed. Changes to git-ignored files (build outputs, dependencies, caches) do not make a review's change list incomplete; when the list still cannot be enumerated, the reviewer approves what it read and the result carries a "Check manually" limitation instead of a refusal. Local desktop builds reuse Cargo artifacts and npm downloads across invocations. See [desktop packaging](docs/project/packaging.md).
+Workspace queues writers during independent review and verification of the same checkout. A review requires and binds only the task's own changes: files its tools wrote and paths that changed while its commands or writing-engine turns ran. Other uncommitted files in the checkout are listed as context and never refused, re-bound or invalidated; an edit of one of the task's files, by anyone, still makes Cortex schedule fresh review within its review-cycle limit. When a command's or turn's changes cannot be recorded completely, the review still requires only the task's recorded changes; the packet tells the reviewer that unattributed files are context. A worker that ends its turn with a pending command can receive the final receipt in the same session. Reopened reviews include the task’s recorded writes from earlier plans and identify paths whose contents have since changed. Changes to git-ignored files (build outputs, dependencies, caches) do not make a review's change list incomplete; when the list still cannot be enumerated, the reviewer approves what it read and the result carries a "Check manually" limitation instead of a refusal. Local desktop builds reuse Cargo artifacts and npm downloads across invocations. See [desktop packaging](docs/project/packaging.md).
 
 ## Table of contents
 
@@ -926,7 +946,11 @@ restart the plugin/agent or use *Add connection* with its opt-in switch. Removin
 a connection disables automatic registration for that engine; only an explicit
 *Add connection* restores it. *Download engine* remains a manual retry (native
 Workspace npm is killed and reaped within its 30-second request budget). `CORTEX_ENGINE_UPDATE=off` skips the automatic setup pass. No credential
-is copied, and OpenCode remains manual.
+is copied, and OpenCode remains manual. Workspace prefers the verified adapter
+bundled with its package. In release builds, Settings discovery, Download engine
+and native-account recheck use the same `$XDG_DATA_HOME/cortex/engines` tree
+(`~/.local/share/cortex/engines` only when `XDG_DATA_HOME` is unset). Workspace
+Dev keeps its own adapter tree under its channel state directory.
 
 Settings checks only that the engine's login marker file exists, not that the login
 works, so press *Validate* on the new connection. Settings never asks for an API key.
@@ -1060,7 +1084,9 @@ adapters, their locked dependencies and checksum-verified Node 24.14.1 under `/u
 first activation needs neither npm nor an adapter download. Native logins stay in `~/.codex` and
 `~/.claude`, never copied. Models still require account access and network; missing login or failed
 discovery is shown separately from service connectivity. Installer, systemd and sandbox qualification
-limits are in [platforms](docs/cortex-workspace/platforms.md).
+limits are in [platforms](docs/cortex-workspace/platforms.md). For disposable testing only, the Dev
+binaries also support a [private extracted-package launch](docs/configuration.md#workspace-dev-extracted-package);
+it does not install or start the ordinary user unit.
 
 The real task conversation reads durable Cortex messages, plans, tool activity, questions and results. A
 long conversation opens on its latest part: the window reads it from its end (`history.earlier`, at most
@@ -1206,6 +1232,27 @@ For final runtime verification of this checkout, use the [bounded suite command 
 See [SECURITY.md](SECURITY.md) for the current ACP sandboxing and permission
 boundary, and [PRIVACY.md](PRIVACY.md) for data handling. Report
 vulnerabilities as described there rather than in a public issue.
+
+A task never stops merely because a command needs root or the command sandbox
+cannot run it: a writing worker's command that uses `sudo`, `pkexec` or `doas`, or
+that the sandbox could not start (the supervisor proves the payload never launched), is rerun on the host through the consent-backed
+outside route (Auto answers it); a command that already started in the sandbox is never
+replayed automatically, and refusal-looking output is only an advisory hint. `sudo` on the host asks the owner for the password
+in a "Password for sudo" card on the desktop or a paired phone. The password goes
+to sudo once and is never stored or shown to a model; Settings, Remote access can
+turn off phone answers. See [host rerouting and the sudo password
+prompt](docs/features/permissions-and-containment/index.md#host-rerouting-and-the-sudo-password-prompt).
+
+Nor does a task stop when it lacks access: a missing GitHub, Codex or Claude login,
+or sudo, becomes an owner action card on the desktop and paired phones ("Sign in to
+GitHub", for example). It opens the CLI's own login (`gh auth login`, `codex login`,
+`claude auth login`) in the app's project terminal, takes a pasted GitHub token for
+`gh auth login --with-token` (sent to that CLI's stdin once, never stored or shown
+to a model; from a phone only while "Passwords and tokens from phones" is on), or
+checks again; the machine also rechecks every 60 seconds, and once access is there
+the task retries the blocked work by itself. See [owner
+actions](SECURITY.md#owner-actions-sign-ins-and-pasted-tokens) and the [owner action
+card](docs/cortex-workspace/SCREENS.md#owner-action-card).
 
 ## License
 

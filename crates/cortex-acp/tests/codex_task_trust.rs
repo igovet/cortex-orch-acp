@@ -68,6 +68,7 @@ async fn task_session_leaves_owner_codex_config_byte_identical() {
         .success());
     let stderr = f.0.join("agent.stderr");
     let mut command = tokio::process::Command::from(f.command(EXE));
+    command.env("TMPDIR", &f.0);
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -215,6 +215,30 @@ pub fn request(
             if forms.is_empty() || forms.len() > 8 {
                 return refuse("question_batch_invalid");
             }
+            // A question the owner already answered (the same text and options) is
+            // not asked again: the reply carries the earlier answer
+            // (`waits::already_answered_tx`). A skill proposal has its own rules.
+            if proposal.is_none() {
+                let asked: Vec<super::waits::QuestionForm> = forms
+                    .iter()
+                    .filter_map(|f| {
+                        Some(super::waits::QuestionForm {
+                            question: f["question"].as_str()?.to_owned(),
+                            options: f["options"]
+                                .as_array()?
+                                .iter()
+                                .filter_map(|o| o.as_str().map(str::to_owned))
+                                .collect(),
+                        })
+                    })
+                    .collect();
+                if let Some(mut refused) =
+                    super::waits::already_answered_tx(db, task, None, &asked)?
+                {
+                    refused["state"] = json!(state);
+                    return Ok(refused);
+                }
+            }
             let mut questions = Vec::new();
             for f in forms {
                 if f["question"]

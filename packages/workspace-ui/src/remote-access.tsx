@@ -103,6 +103,11 @@ export function RemoteAccessBody() {
         <Show when={s().available} fallback={<div class="note-box plain" role="status"><I n="alert" s={14} class="faint" /><span>Remote access is unavailable on this machine.{s().reason ? ` ${s().reason}` : ""}</span></div>}>
           <div class="surface">
             <Srow t="Allow remote access" d="Off by default. Turning it off disconnects every device."><Sw label="Allow remote access" checked={s().enabled} disabled={busy() ? "Waiting for the machine" : undefined} onChange={turn} /></Srow>
+            <Show when={s().sudoFromPhone !== undefined}>
+              <Srow t="Passwords and tokens from phones" d="A paired phone can answer a sudo password prompt of a task's command or paste a sign-in token a task needs. It crosses the encrypted remote connection to this machine and is not saved. Off: only on this computer.">
+                <Sw label="Passwords and tokens from phones" checked={s().sudoFromPhone === true} disabled={busy() ? "Waiting for the machine" : undefined} onChange={on => void act("remote.sudo.set", { allowed: on })} />
+              </Srow>
+            </Show>
           </div>
           <Show when={s().enabled}>
             <Show when={s().relay.source === "none"}><div class="note-box plain"><I n="wifi-off" s={14} class="faint" /><span>No relay server is set, so pairing works on the same network only.</span></div></Show>

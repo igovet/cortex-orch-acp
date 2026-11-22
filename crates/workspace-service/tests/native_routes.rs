@@ -180,10 +180,34 @@ fn per_task_model_and_effort_require_existing_exact_eligible_catalog_values() {
         code(provider.task_route(&f.base.join("project"), &invalid)),
         "unsupported_dependent_setting"
     );
-    rules["deny"] = json!(["codex-acp/fixture-other"]);
-    f.write("config/cortex/routing.json", &rules);
+    // The project narrows routing away from the portable owner default.
+    let root = f.base.join("project");
+    let channel = workspace_protocol::channel::current();
+    let directory = if channel.is_dev() {
+        ".cortex-dev"
+    } else {
+        ".cortex"
+    };
+    if !channel.is_dev() {
+        std::fs::create_dir(root.join(directory)).unwrap();
+    }
+    let project_routing = format!("project/{directory}/routing.json");
+    rules["deny"] = json!(["codex-acp/fixture-model"]);
+    f.write(&project_routing, &rules);
     assert_eq!(
-        code(provider.task_route(&f.base.join("project"), &settings)),
+        code(provider.route(&root, "orchestrator")),
+        "portable_coordinator_unavailable"
+    );
+    let pinned = provider.coordinator_pin(&root, &settings).unwrap().unwrap();
+    assert_eq!(
+        provider.pinned_route(&root, &pinned, None).unwrap().model,
+        "fixture-other"
+    );
+
+    rules["deny"] = json!(["codex-acp/*"]);
+    f.write(&project_routing, &rules);
+    assert_eq!(
+        code(provider.task_route(&root, &settings)),
         "native_task_route_unavailable"
     );
 }
@@ -935,7 +959,12 @@ fn preset_routing_preferences_and_role_tiers_follow_complexity() {
                 assert_eq!(candidates.len(), standard.len());
             }
             if tier == "deep" {
-                assert_eq!(candidates.last().unwrap()["route"], "claude-agent-acp/opus");
+                // The preset does not list testing or writing for Opus, so it is no
+                // candidate for these roles at all (owner store 2026-11-21).
+                assert!(candidates
+                    .iter()
+                    .all(|c| c["route"] != "claude-agent-acp/opus"));
+                assert_eq!(candidates.len(), deep.len());
             }
             if let Some(effort) = effort {
                 assert_eq!(selected.parameters["thought_level"], effort);
@@ -1917,4 +1946,75 @@ fn a_reviewer_stays_on_review_preferred_models_and_independence_chooses_among_th
         "no_review_preferred_model"
     );
     assert!(!["sonnet", "sol"].contains(&s.model()), "{}", s.model());
+}
+
+/// Owner store 2026-11-21: an escalated QA node went to Fable, which the owner's
+/// settings list only for design. Escalation chooses the senior model among those
+/// the owner lists for the node's kind of work, never outside them.
+#[test]
+fn escalation_stays_within_the_models_listed_for_the_work_kind() {
+    let f = Fixture::new();
+    let mut registry = json!({"schema_version":1,"connections":{}});
+    let mut policy = json!({"enabled":{},"models":{}});
+    let models = |names: &[&'static str]| names.iter().map(|&name| (name, Value::Null)).collect();
+    f.routing_catalog(
+        &mut registry,
+        &mut policy,
+        [
+            (
+                "claude-agent-acp",
+                "cn_claude",
+                models(&["fable", "opus", "sonnet"]),
+            ),
+            ("codex-acp", "cn_fixture", models(&["gpt-6-luna"])),
+        ],
+    );
+    let routing = json!({"model_policy_version":2,"providers":["claude-agent-acp","codex-acp"],
+        "enabled":{"claude-agent-acp":["fable","opus","sonnet"],"codex-acp":["gpt-6-luna"]},
+        "models":{"claude-agent-acp":{"auto":["opus","fable","sonnet"],
+            "tiers":{"fable":"flagship","opus":["deep","standard"],"sonnet":["standard","light"]},
+            "policy":{"fable":{"preferred_for":["design"]},
+                      "opus":{"preferred_for":["testing","design"]},
+                      "sonnet":{"preferred_for":["testing"]}}},
+            "codex-acp":{"auto":["gpt-6-luna"],"tiers":{"gpt-6-luna":"light"},
+            "policy":{"gpt-6-luna":{"preferred_for":["investigation"]}}}}});
+    f.write("config/cortex/routing.json", &routing);
+    let resolver = f.load().unwrap();
+    let evidence = Default::default();
+    for escalated in [false, true] {
+        let selected = resolver
+            .choose(
+                "worker-qa-engineer",
+                &json!({"complexity":"high"}),
+                &evidence,
+                escalated,
+                None,
+            )
+            .unwrap();
+        let routes: Vec<&str> = selected.decision["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["route"].as_str().unwrap())
+            .collect();
+        assert!(
+            !routes.contains(&"claude-agent-acp/fable"),
+            "{escalated}: {routes:?}"
+        );
+        assert_eq!(
+            selected.decision["chosen"], "claude-agent-acp/opus",
+            "{escalated}"
+        );
+    }
+    // Design work may still escalate to Fable.
+    let design = resolver
+        .choose(
+            "worker-ux-designer",
+            &json!({"complexity":"high"}),
+            &evidence,
+            true,
+            None,
+        )
+        .unwrap();
+    assert_eq!(design.decision["chosen"], "claude-agent-acp/fable");
 }

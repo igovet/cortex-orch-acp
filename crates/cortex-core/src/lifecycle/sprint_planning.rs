@@ -97,17 +97,19 @@ pub fn submit_tx(
             return refuse("sprint_plan_unchanged");
         }
         // A planning task never accepts a new plan revision, which is what resets the
-        // review-cycle budget of other tasks. The owner's answer to a review-cycle
-        // stop ("continue") therefore grants a fresh budget at the first submission
-        // after it; without this every later submission stopped again at once.
-        // The stop reaches the owner either as the runtime's own question (WAITING_USER
-        // with the blocker) or, the first time, through the coordinator's question
-        // after `ASK_USER_REQUIRED` with the blocker: an answer after either grants.
+        // review-cycle budget of other tasks. The runtime's continuation after a
+        // review-cycle stop (`AUTOMATIC_CONTINUATION` with that reason, resumed by
+        // `AUTOMATIC_RESUMED`) therefore grants a fresh budget at the first submission
+        // after it; without this every later submission stopped again at once. An
+        // owner answer to an earlier version's stop question grants it too.
         let granted: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_events a WHERE a.task_id=?1 AND a.type='USER_ANSWER_RECEIVED'
-             AND a.id>(SELECT max(id) FROM runtime_events WHERE task_id=?1
-                 AND type IN ('TASK_STATE_CHANGED','ASK_USER_REQUIRED')
-                 AND json_valid(payload_json) AND json_extract(payload_json,'$.blocker')='review_cycle_limit')
+            "SELECT EXISTS(SELECT 1 FROM runtime_events a WHERE a.task_id=?1
+                 AND a.type IN ('USER_ANSWER_RECEIVED','AUTOMATIC_RESUMED')
+             AND a.id>(SELECT max(id) FROM runtime_events WHERE task_id=?1 AND json_valid(payload_json)
+                 AND (type IN ('TASK_STATE_CHANGED','ASK_USER_REQUIRED')
+                     AND json_extract(payload_json,'$.blocker')='review_cycle_limit'
+                  OR type='AUTOMATIC_CONTINUATION'
+                     AND json_extract(payload_json,'$.reason')='review_cycle_limit'))
              AND NOT EXISTS(SELECT 1 FROM runtime_events r WHERE r.task_id=?1
                  AND r.type='SPRINT_PLAN_REVIEW_SCHEDULED' AND r.id>a.id))",
             [task],

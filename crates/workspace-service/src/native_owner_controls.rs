@@ -930,7 +930,7 @@ impl Runtime {
         if !completed {
             return Ok(None);
         }
-        let record = match &self.maintenance_state {
+        let record = match &self.host.workspace_state {
             Some(state) => crate::machine::native_product(state, project)
                 .map(|p| p["tasks"][draft].clone())
                 .unwrap_or(Value::Null),
@@ -1022,7 +1022,7 @@ impl Runtime {
             }
         }
         let mut observing = Started(observing);
-        let (mut facts, completed) = recv(self.host.executor.read(move |db| {
+        let (mut facts, completed, accepted_ordinals) = recv(self.host.executor.read(move |db| {
             let tasks=db.prepare("SELECT t.task_id,e.execution_id,e.runtime_task_id,r.state,r.synthesis FROM workspace_tasks t
                 JOIN workspace_executions e ON e.execution_id=t.execution_id JOIN runtime_tasks r ON r.task_id=e.runtime_task_id ORDER BY t.rowid DESC LIMIT 1001")?
                 .query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?)))?
@@ -1039,6 +1039,7 @@ impl Runtime {
             let (cursor,msg_cursor)=(cursors.map(|c|c.0),cursors.map(|c|c.1));
             let mut workers=Vec::new();
             let mut completed=Vec::new();
+            let mut accepted_ordinals=Vec::new();
             // Edit lines share one bound per read, well inside the frame; beyond it an edit shows its counts only.
             let mut diff_budget:usize=1_000_000;
             let mut step_budget:usize=2_000_000;
@@ -1050,10 +1051,10 @@ impl Runtime {
                 if !workers_only {
                 let ordinal=result_ordinal(db,&task,None)?;
                 if state=="COMPLETED" { completed.push((draft.clone(),execution.clone(),synthesis.clone(),ordinal)); }
-                // Acceptance records the event id it accepted; the owner reads the result number.
+                // Keep the event id for freshness validation; only the DTO gets the result number.
                 if let Some(event)=product["tasks"][&draft]["acceptance"]["version"].as_str().and_then(|s|s.parse::<i64>().ok())
                     .or_else(||product["tasks"][&draft]["acceptance"]["version"].as_i64()) {
-                    product["tasks"][&draft]["acceptance"]["version"]=json!(result_ordinal(db,&task,Some(event))?);
+                    accepted_ordinals.push((draft.clone(),result_ordinal(db,&task,Some(event))?));
                 }
                 let settings:Option<String>=db.query_row("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='NATIVE_TASK_SETTINGS' ORDER BY id DESC LIMIT 1",
                     [&task],|r|r.get(0)).optional()?;
@@ -1086,6 +1087,10 @@ impl Runtime {
                 let guidance_floor=if more_queued {oldest} else {None};
                 if !workers_only {product["messages"].as_array_mut().ok_or(CoreError::Refused("state_unreadable"))?.extend(queued);}
                 if !wanted {continue;}
+                // What the task spent and since when it has made no progress, for the task page (`native_progress`).
+                if !workers_only && product["tasks"][&draft].is_object() {
+                    product["tasks"][&draft]["spend"]=crate::notifier::progress::read(db,&task,crate::notifier::progress::now_ms())?.json();
+                }
                 let nodes=db.prepare("SELECT n.assignment_ref,n.role,n.objective,n.status,p.status,n.scope_json,n.result_json,n.revision,p.attempt_id,n.node_id FROM runtime_nodes n
                     JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
                     WHERE n.task_id=? ORDER BY n.rowid DESC LIMIT 1001")?
@@ -1405,8 +1410,19 @@ impl Runtime {
             // that cannot be brought under the frame by that is refused.
             if fit_frame(&mut value)? {partial.insert("size".into(),json!(true));}
             if !partial.is_empty() {value["partial"]=Value::Object(partial);}
-            Ok((value,completed))
+            Ok((value,completed,accepted_ordinals))
         })?).await?;
+        // Review the saved acceptance before translating its event id to a display
+        // ordinal. These are different identities even for the same result.
+        let records = completed
+            .iter()
+            .map(|(draft, execution, _, _)| {
+                (execution.clone(), facts["product"]["tasks"][draft].clone())
+            })
+            .collect();
+        for (draft, ordinal) in accepted_ordinals {
+            facts["product"]["tasks"][&draft]["acceptance"]["version"] = json!(ordinal);
+        }
         // Native check receipts and Git presentation facts use different digest
         // domains. Compare native results with a fresh native observation only.
         if !completed.is_empty()
@@ -1436,12 +1452,6 @@ impl Runtime {
             };
             // A finished result carries the same review actions and acceptance
             // availability as Python's `result_projection`, never a fixed refusal.
-            let records = completed
-                .iter()
-                .map(|(draft, execution, _, _)| {
-                    (execution.clone(), facts["product"]["tasks"][draft].clone())
-                })
-                .collect();
             let reviews = self.reviews(project, records, current.clone()).await?;
             for ((draft, _, synthesis, ordinal), (mut actions, work)) in
                 completed.iter().zip(reviews)
@@ -1507,14 +1517,17 @@ impl Runtime {
                         && task["integration"]["method"] == "commit"
                         && task["integration"]["digest"].is_string()
                         && task["integration"]["digest"] == task["result"]["digest"];
+                    let ordinary_commit = task["reviewActions"]["acceptedCommitCurrent"] == true;
                     if let Some(actions) = task["reviewActions"].as_object_mut() {
                         actions.remove("ownWritesOnly");
+                        actions.remove("acceptedCommitCurrent");
                     }
-                    task["workspaceDigest"] = if placeholder || own_writes || committed {
-                        task["result"]["digest"].clone()
-                    } else {
-                        json!(current)
-                    };
+                    task["workspaceDigest"] =
+                        if placeholder || own_writes || committed || ordinary_commit {
+                            task["result"]["digest"].clone()
+                        } else {
+                            json!(current)
+                        };
                 }
             }
         }

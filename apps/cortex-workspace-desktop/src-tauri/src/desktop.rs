@@ -15,6 +15,7 @@ const SURFACE_LIGHT: Color = Color(0xff, 0xff, 0xff, 0xff);
 
 #[derive(Default)]
 struct Native {
+    extracted: bool,
     bridge: Mutex<Option<Arc<Bridge>>>,
     drop: Arc<std::sync::Mutex<Option<(std::time::Instant, Result<Value, String>)>>>,
     traffic: Arc<stall::Traffic>,
@@ -213,6 +214,9 @@ async fn workspace_notify(
         return Err("bridge_origin_refused".into());
     }
     let target = policy::notification_target(&label, target)?;
+    if state.extracted {
+        return Err("Desktop notifications are disabled for extracted Dev runs.".into());
+    }
     let notes = state.notes.clone();
     tauri::async_runtime::spawn_blocking(move || crate::notification::send(&notes, &label, target))
         .await
@@ -313,6 +317,31 @@ fn workspace_close(window: WebviewWindow, state: State<'_, Native>) -> Result<()
 }
 
 pub fn run() {
+    // Reject a bad extraction before GTK/WebKit can use the ordinary profile.
+    let extracted = match workspace_service::dev_extraction::DevExtraction::from_env() {
+        Ok(extraction) => extraction.is_some(),
+        Err(_) => {
+            eprintln!("cortex-workspace-desktop: dev_extraction_invalid");
+            std::process::exit(1);
+        }
+    };
+    // Probe and retain the same native Bridge that later handles both View PR
+    // actions. Fail before creating a window if the requested capture cannot write.
+    let qualified_bridge =
+        if extracted && std::env::var_os("CORTEX_WORKSPACE_QUALIFICATION_OPENER_DIR").is_some() {
+            match Bridge::for_user().and_then(|bridge| {
+                bridge.probe_qualification_opener()?;
+                Ok(Arc::new(bridge))
+            }) {
+                Ok(bridge) => Some(bridge),
+                Err(_) => {
+                    eprintln!("cortex-workspace-desktop: qualification_opener_failed");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            None
+        };
     tauri::Builder::default()
         .on_window_event(|window, event| {
             // Native/WM close must not bypass the frontend guard or WebKit teardown.
@@ -327,8 +356,12 @@ pub fn run() {
             workspace_notify,
             workspace_close
         ])
-        .setup(|app| {
-            app.manage(Native::default());
+        .setup(move |app| {
+            app.manage(Native {
+                extracted,
+                bridge: Mutex::new(qualified_bridge),
+                ..Native::default()
+            });
             let window =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title(&workspace_protocol::channel::current().title)
@@ -367,17 +400,21 @@ pub fn run() {
             watch_main_thread(window.clone(), traffic.clone());
             // A click on one of this window's notifications raises the window and opens its place.
             // Without a listener the window raises none (see notification::send).
-            let clicked = window.clone();
-            let _ =
-                crate::notification::listen(app.state::<Native>().notes.clone(), move |opened| {
-                    let window = clicked.clone();
-                    let _ = clicked.run_on_main_thread(move || {
-                        if let Ok(gtk) = window.gtk_window() {
-                            crate::notification::raise(&gtk, opened.token.as_deref());
-                        }
-                        let _ = window.emit("workspace-navigate", &opened.target);
-                    });
-                });
+            if !extracted {
+                let clicked = window.clone();
+                let _ = crate::notification::listen(
+                    app.state::<Native>().notes.clone(),
+                    move |opened| {
+                        let window = clicked.clone();
+                        let _ = clicked.run_on_main_thread(move || {
+                            if let Ok(gtk) = window.gtk_window() {
+                                crate::notification::raise(&gtk, opened.token.as_deref());
+                            }
+                            let _ = window.emit("workspace-navigate", &opened.target);
+                        });
+                    },
+                );
+            }
             tauri::async_runtime::spawn(async move {
                 loop {
                     if let Ok(bridge) = handle.state::<Native>().bridge().await {

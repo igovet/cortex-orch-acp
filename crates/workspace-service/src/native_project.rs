@@ -91,6 +91,14 @@ pub(super) fn writable(
         {
             return Err(CoreError::Refused("write_denied"));
         }
+        // The project's own agent/rule files (the path itself or below it), unless
+        // the owner named or lifted them. An ancestor directory such as `docs` stays writable.
+        if cortex_core::lifecycle::steering::rule_file_protections(db, &i.task)?
+            .iter()
+            .any(|p| path == p || path.starts_with(&format!("{p}/")))
+        {
+            return Err(CoreError::Refused("rule_file_protected"));
+        }
     }
     Ok(())
 }
@@ -942,6 +950,53 @@ mod recovery_tests {
             fs::remove_dir_all(&self.0).unwrap();
         }
     }
+    /// A writing worker's file write to a project rule file is refused with its own
+    /// code unless the owner lifted it; an ancestor directory and other files stay writable.
+    #[test]
+    fn rule_files_refuse_writes_until_the_owner_lifts_them() {
+        let f = Fixture::new();
+        let store = f.open();
+        TaskMachine::new(&store)
+            .create("t", "Implement the parser", "owner")
+            .unwrap();
+        let i = Identity {
+            task: "t".into(),
+            attempt: "a".into(),
+            principal: "worker".into(),
+            epoch: 1,
+            role: "worker".into(),
+            profile: Some("worker-backend-dev".into()),
+            stage: Some("execution".into()),
+            assignment: Some("as".into()),
+            session: None,
+        };
+        let check = |path: &'static str| {
+            let i = i.clone();
+            store
+                .write(move |db| writable(db, &i, Some(path)))
+                .err()
+                .map(|e| e.code())
+        };
+        for path in [
+            "AGENTS.md",
+            ".claude/settings.json",
+            "docs/project/verification.md",
+        ] {
+            assert_eq!(check(path), Some("rule_file_protected"), "{path}");
+        }
+        for path in ["docs", "src/lib.rs", "docs/guide.md", "crates/x/AGENTS.md"] {
+            assert_eq!(check(path), None, "{path}");
+        }
+        store
+            .write(|db| {
+                lifecycle::event_tx(db, "t", "USER_STEERING",
+                    json!({"text":"allow-write: AGENTS.md","allow_write":["AGENTS.md"],"request":"m"}))?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(check("AGENTS.md"), None);
+        assert_eq!(check("CLAUDE.md"), Some("rule_file_protected"));
+    }
     #[test]
     fn restart_reconciles_after_before_and_diverged_without_replaying() {
         let f = Fixture::new();
@@ -1476,6 +1531,13 @@ pub(crate) fn review_text(b: &[u8]) -> Option<&'static str> {
     if text.contains('\0') {
         return Some("binary");
     }
+    // An SVG is a picture: its markup is drawing data, not reviewable prose or code.
+    let head = text.trim_start_matches('\u{feff}').trim_start();
+    if (head.starts_with("<svg") || head.starts_with("<?xml") || head.starts_with("<!--"))
+        && text[..text.len().min(4096)].contains("<svg")
+    {
+        return Some("image");
+    }
     if b.len() < 8192 {
         return None;
     }
@@ -1494,6 +1556,24 @@ pub(crate) fn review_text(b: &[u8]) -> Option<&'static str> {
     let long = body.iter().filter(|l| l.len() >= 40).count();
     (body.iter().all(alphabet) && long * 10 >= body.len() * 9).then_some("opaque")
 }
+/// Text a review is not required to read completely: more than about eight
+/// `project_read` pages (8,000 bytes each) of required bytes. Large generated
+/// data (a 66 KiB page snapshot, twenty pages) had turned every review of a task
+/// into coverage refusals (owner store 2026-11-21); such a file is a disclosed
+/// limit (`review_content: "bulk"`) unless the review reads it completely.
+const BULK_BYTES: usize = 64 * 1024;
+/// Bytes of the lines in `ranges` (1-based, inclusive), as `project_read` counts lines.
+fn required_bytes(bytes: &[u8], ranges: &[[u64; 2]]) -> usize {
+    let lines: Vec<&[u8]> = bytes.split_inclusive(|b| *b == b'\n').collect();
+    ranges
+        .iter()
+        .map(|[start, end]| {
+            let first = (*start as usize).saturating_sub(1).min(lines.len());
+            let last = (*end as usize).min(lines.len()).max(first);
+            lines[first..last].iter().map(|l| l.len()).sum::<usize>()
+        })
+        .sum()
+}
 /// Adds `review_lines` to each modified, tracked file of a review packet whose
 /// changed lines are fewer than the whole file (`review_line_ranges`), and drops a
 /// stale one. Called whenever the packet names the files' current bytes.
@@ -1504,12 +1584,15 @@ pub(crate) fn review_text(b: &[u8]) -> Option<&'static str> {
 /// `current_sha256`) have no reviewable text with `review_content` (`review_text`):
 /// such a file is never a missing review read; an approval records it as an
 /// `unverified` limit (`completion::review_change_set_limits_tx`) unless the review
-/// read it completely (an image directly, so that it was shown).
+/// read it completely (an image directly, so that it was shown). Text whose required
+/// bytes (the `review_lines` ranges, or the whole file) exceed `BULK_BYTES` is
+/// marked `bulk` the same way.
 pub(crate) fn add_review_lines(root: &Path, base: Option<&str>, packet: &mut Value) {
     let Some(files) = packet["changed_files"]["files"].as_array_mut() else {
         return;
     };
     let mut any = false;
+    let mut bulk = false;
     for file in files {
         if let Some(entry) = file.as_object_mut() {
             entry.remove("review_lines");
@@ -1526,20 +1609,39 @@ pub(crate) fn add_review_lines(root: &Path, base: Option<&str>, packet: &mut Val
             .and_then(|(folder, name)| bytes(&folder, &name).ok().flatten())
             .map(|(b, _)| b)
             .filter(|b| digest(b) == hash);
-        if let Some(kind) = current.as_deref().and_then(review_text) {
+        let Some(current) = current else {
+            continue;
+        };
+        if let Some(kind) = review_text(&current) {
             file["review_content"] = json!(kind);
             continue;
         }
-        if file["change"] != "modified" {
+        let ranges = (file["change"] == "modified")
+            .then(|| base.and_then(|base| review_line_ranges(root, base, &path)))
+            .flatten();
+        // What the review would have to read: the changed ranges, or the whole file.
+        let required = match &ranges {
+            Some(ranges) => required_bytes(&current, ranges),
+            None => current.len(),
+        };
+        if required > BULK_BYTES {
+            file["review_content"] = json!("bulk");
+            bulk = true;
             continue;
         }
-        if let Some(ranges) = base.and_then(|base| review_line_ranges(root, base, &path)) {
+        if let Some(ranges) = ranges {
             file["review_lines"] = json!(ranges);
             any = true;
         }
     }
     if any {
         packet["changed_files"]["review_lines_guidance"] = json!("A file with review_lines needs only those line ranges of its current bytes read completely with project_read (offset and limit), not the whole file: they are every line that differs from the commit the task started on, with context. Read more of it when you need context. A file without review_lines must be read completely.");
+    }
+    if let Some(changed) = packet["changed_files"].as_object_mut() {
+        changed.remove("review_content_guidance");
+        if bulk {
+            changed.insert("review_content_guidance".into(), json!("A file with review_content bulk is generated data or longer than about eight project_read pages: it is not required reading. Read what you need of it; unless you read it completely, an approval discloses it as not reviewed in full."));
+        }
     }
 }
 /// The commit checked out when the task's execution started: the `head` of the
@@ -1562,4 +1664,72 @@ pub(crate) fn review_base(
         )
         .optional()?
         .flatten())
+}
+
+#[cfg(test)]
+mod svg_content_tests {
+    use super::review_text;
+
+    /// Owner store 2026-11-21: a review was refused five times for 32 small
+    /// generated SVG character parts. An SVG is a picture, never required text.
+    #[test]
+    fn an_svg_is_an_image_and_ordinary_markup_is_text() {
+        for svg in [
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle r=\"2\"/></svg>",
+            "<?xml version=\"1.0\"?>\n<svg viewBox=\"0 0 4 4\"></svg>\n",
+            "\u{feff}<!-- generated -->\n<svg></svg>",
+        ] {
+            assert_eq!(review_text(svg.as_bytes()), Some("image"), "{svg}");
+        }
+        for text in [
+            "<html><body><svg></svg></body></html>",
+            "fn main() {}\n",
+            "<?xml version=\"1.0\"?><project/>",
+        ] {
+            assert_eq!(review_text(text.as_bytes()), None, "{text}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod bulk_content_tests {
+    use super::{add_review_lines, digest, required_bytes, BULK_BYTES};
+    use serde_json::json;
+
+    /// AI-Frontier 2026-11-21: ~66 KiB generated Playwright page snapshots (about
+    /// twenty pages) were required reads in every review. Text past about eight pages
+    /// is `bulk`, a disclosed limit; ordinary text stays a required read.
+    #[test]
+    fn text_past_about_eight_pages_is_bulk_and_ordinary_text_is_required() {
+        let root = std::env::temp_dir().join(format!("bulk-content-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).unwrap();
+        let big: String = (0..2000)
+            .map(|i| format!("- generic [ref=e{i}]: Page snapshot line\n"))
+            .collect();
+        assert!(big.len() > BULK_BYTES);
+        let small = "fn main() {}\n";
+        std::fs::write(root.join("page.yml"), &big).unwrap();
+        std::fs::write(root.join("main.rs"), small).unwrap();
+        let mut packet = json!({"changed_files":{"files":[
+            {"path":"page.yml","change":"added","current_sha256":digest(big.as_bytes())},
+            {"path":"main.rs","change":"added","current_sha256":digest(small.as_bytes())},
+        ]}});
+        add_review_lines(&root, None, &mut packet);
+        let files = &packet["changed_files"]["files"];
+        assert_eq!(files[0]["review_content"], "bulk");
+        assert!(files[1]["review_content"].is_null());
+        assert!(packet["changed_files"]["review_content_guidance"]
+            .as_str()
+            .unwrap()
+            .contains("not required reading"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn required_bytes_count_only_the_ranges() {
+        let text = b"a\nbb\nccc\ndddd\n";
+        assert_eq!(required_bytes(text, &[[2, 3]]), 7);
+        assert_eq!(required_bytes(text, &[[1, 1], [4, 9]]), 7);
+    }
 }

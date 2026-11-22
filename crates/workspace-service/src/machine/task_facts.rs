@@ -451,8 +451,7 @@ fn record_actions(
         actions["ownerActions"] = json!(["ask_agent", "close_as_is"]);
         actions["asks"] = json!(["Ask the agent to try again. It continues from the recorded state, and review and verification run again before the task can finish."]);
     } else if status == Some("COMPLETED") {
-        actions = match result_evidence(store, root, project, execution, native, own_writes(record))
-        {
+        actions = match result_evidence(store, root, project, execution, native, record) {
             Ok((value, evidence, ..)) => {
                 work = evidence;
                 value
@@ -554,6 +553,7 @@ pub async fn read(root: &Path, state: &Path, project: &str, git: &mut Git) -> Re
                 map.remove("reviewWarnings");
                 map.remove("notRunChecks");
                 map.remove("ownWritesOnly");
+                map.remove("acceptedCommitCurrent");
             }
             record["reviewActions"] = actions;
         }
@@ -729,7 +729,7 @@ pub(super) fn integration_result(
     automatic: bool,
 ) -> Result<Value> {
     let (actions, work, warnings, counts) =
-        result_evidence(store, root, project, execution, native, own_writes(record))?;
+        result_evidence(store, root, project, execution, native, record)?;
     if actions["digest"] != *wanted
         || warnings
         || (automatic && actions["version"] != record["acceptance"]["version"])
@@ -774,12 +774,20 @@ fn result_evidence(
     project: &str,
     execution: &str,
     native: Option<&str>,
-    own_writes: bool,
+    record: &Value,
 ) -> Result<(Value, bool, bool, [u64; 3])> {
     store
         .read(|db| {
             result_evidence_db(
-                db, store, root, project, execution, native, own_writes, false,
+                db,
+                store,
+                root,
+                project,
+                execution,
+                native,
+                own_writes(record) && !record["acceptance"]["committedDigest"].is_string(),
+                false,
+                Some(&record["acceptance"]),
             )
         })
         .map_err(context::core)
@@ -794,6 +802,7 @@ pub(super) fn result_evidence_db(
     native: Option<&str>,
     own_writes: bool,
     automatic: bool,
+    acceptance: Option<&Value>,
 ) -> cortex_core::CoreResult<(Value, bool, bool, [u64; 3])> {
     let row:Option<(String,String,Option<String>,i64)>=db.query_row(
             "SELECT r.task_id,r.state,r.synthesis,coalesce((SELECT max(id) FROM runtime_events WHERE task_id=r.task_id),1)
@@ -819,8 +828,24 @@ pub(super) fn result_evidence_db(
         [&task],
         |r| r.get(0),
     )?;
-    let mut evidence =
-        super::task_facts_work::evaluate(db, store, &task, revision, native, own_writes)?;
+    // An ordinary Workspace commit proved the accepted content is exactly what
+    // landed. Keep its original evidence identity only for that result version and
+    // only while the complete post-commit checkout digest still matches.
+    let accepted_commit = acceptance
+        .filter(|a| a["version"] == version.to_string())
+        .filter(|a| native.is_some() && a["committedDigest"].as_str() == native)
+        .and_then(|a| a["digest"].as_str());
+    let mut evidence = super::task_facts_work::evaluate(
+        db,
+        store,
+        &task,
+        revision,
+        accepted_commit.or(native),
+        own_writes,
+    )?;
+    let accepted_commit_current = accepted_commit
+        .is_some_and(|digest| evidence.observed.as_deref() == Some(digest))
+        && !evidence.drifted;
     evidence.warnings |= oversized;
     let answer: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='ANSWER_SUBMITTED')",
@@ -909,6 +934,9 @@ pub(super) fn result_evidence_db(
     // presentation compares its result with those files, not the whole folder.
     if scoped {
         actions.0["ownWritesOnly"] = json!(true);
+    }
+    if accepted_commit_current {
+        actions.0["acceptedCommitCurrent"] = json!(true);
     }
     if !notes.is_empty() {
         actions.0["reviewWarnings"] = json!(notes);

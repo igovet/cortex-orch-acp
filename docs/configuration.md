@@ -14,8 +14,9 @@ roots through the same compiled-channel rule. Dev uses
 `$XDG_STATE_HOME/cortex-workspace-dev/state/cortex/`, and project `.cortex-dev`;
 missing XDG values first default to `~/.config` and `~/.local/state`. Release
 uses the table's ordinary paths. `CORTEX_WORKSPACE_CHANNEL` at process launch
-does not override a Rust binary's compiled channel. Explicit `CORTEX_ROUTING`
-and native-account HOME keep their existing meaning. Settings displays the
+does not override a Rust binary's compiled channel. An empty `CORTEX_ROUTING`
+is treated as unset. Outside extracted Dev, a valid absolute override still
+takes precedence over user routing. Native-account HOME is unchanged. Settings displays the
 resolved binding reported by `cortex-paseo-tools config --host`, not an inferred
 release path. Existing configuration is not copied or migrated across channels.
 
@@ -729,7 +730,56 @@ The registry JSON is intentionally an implementation format, not a hand-authored
 
 The closed fields and defaults are enforced by `connections.registry._parse_registry_bytes/_record_from_dict` and `ConnectionRecord`. Unknown fields fail closed.
 
+### Workspace Dev extracted package
+
+The Linux Dev service and desktop support a native, opt-in launch from a trusted
+`cortex-workspace-dev` Debian archive extracted without installation. Use a new,
+absolute, user-owned directory `$prefix`, without symlink components. Extract
+with `dpkg-deb -x "$archive" "$prefix"`, ensure the resulting prefix is mode
+0700, and create its `config`, `state`, `run`, `cache` and `data` directories
+with mode 0700 before launching either process. Use an appropriately short
+prefix for the filesystem Unix socket.
+
+Set these variables in **both** native processes, not globally in the user
+manager or login environment:
+
+| Variable | Value |
+| --- | --- |
+| `CORTEX_WORKSPACE_DEV_EXTRACTED_PREFIX` | `$prefix` |
+| `XDG_CONFIG_HOME` | `$prefix/config` |
+| `XDG_STATE_HOME` | `$prefix/state` |
+| `XDG_RUNTIME_DIR` | `$prefix/run` |
+| `XDG_CACHE_HOME` | `$prefix/cache` |
+| `XDG_DATA_HOME` | `$prefix/data` |
+
+From a caller-managed service (for example a uniquely named transient user unit),
+run `"$prefix/usr/bin/cortex-workspace-service-dev" "$allowed_root" "$prefix/usr/lib/cortex-workspace-dev/runtime"`.
+Use a disposable project under `$allowed_root`. Once
+`$prefix/run/cortex-workspace-dev/service.sock` is ready, launch
+`"$prefix/usr/bin/cortex-workspace-dev"` with the same values. The desktop does
+not start or reload the ordinary systemd unit if the socket is missing or lost
+(`extracted_dev_service_unavailable`). Native desktop notifications are disabled
+for this run. Missing, mismatched or unsafe roots refuse the opted-in launch; the
+release channel ignores the opt-in.
+
+In this mode the service ignores inherited `CORTEX_ROUTING` in both dispatch
+and machine settings. The qualification launcher also unsets it in every unit.
+The
+project registry, routes, settings and socket are separate from the persistent
+Dev installation. The package's adjacent `engines` and `voice` trees still
+supply its bundled assets. Verify archive identity and contents separately:
+startup validates layout, not provenance. HOME and the project-local
+`.cortex-dev` naming rule are unchanged; use a separate disposable project and
+do not copy native account files. This is not a sandbox for untrusted packages.
+
 ### Engine install records
+
+Native Workspace prefers the verified adapter in its channel's Debian bundle.
+For non-bundled adapters, release Settings discovery, download and native-account
+recheck use the same `$XDG_DATA_HOME/cortex/engines` tree, with the HOME fallback
+only when `XDG_DATA_HOME` is unset. Workspace Dev instead uses
+`<channel-state>/data/cortex/engines`. These are adapter paths, not native account
+paths; switching the Cortex data root does not move or copy a login.
 
 Setup commands install no engine. The Settings **Download engine** action, and the background updater, install the manifest-pinned `codex-acp` or `claude-agent-acp` npm package into Cortex's own owned root, `$XDG_DATA_HOME/cortex/engines` (or `~/.local/share/cortex/engines`). The Settings action is bounded to 60 seconds in the former Python implementation; native Workspace npm instead uses the remaining 30-second machine request budget with one second reserved for cleanup and reply. The action takes no package, version, path or binary from the request, never changes an existing connection and needs no install record. At plugin or agent start, Cortex also registers a native-account connection for an engine that has none once its owned qualified adapter and native login marker are present, unless the owner previously removed a connection for that engine. It observes models in the same background pass; no second session or manual refresh is needed on success. If npm or Node is missing or the install fails, Settings reports that the pinned installation failed and shows no npm output. OpenCode is a standalone binary, not an npm package, has no Cortex installer, and takes no install record: `scripts/cortex-paseo-tools.sh add-opencode-connection [--binary PATH] [--name NAME]` finds a trusted binary, reads its version in a network-less sandbox and registers the connection. `$CORTEX_OPENCODE_BINARY` names a binary for that search. For the npm engines: `add-connection --install-record FILE` takes an operator-recorded install of an engine you already installed by other means (for example `npm install @agentclientprotocol/codex-acp`). It holds absolute paths without symlink components and the SHA-256 of each pinned file. `verify_install()` re-hashes every file before launch. The JSON shape follows `CodexAcpInstall` or `ClaudeAcpInstall`: `node_binary`, `adapter_entry`, `package_json`, `package_version` (must equal the package's own `"version"`) and their digests, plus the bundled Codex binary and version for Codex only. `tests/fixtures/engine/codex/install-record.template.json` shows the shape without real hashes. The field-by-field recipes are in the [Codex adapter](features/codex-engine/index.md#current-runtime-gateway-policy) and [Claude adapter](features/claude-engine/index.md#pinned-install-requirements-manual-recipe-placeholder) pages.
 
@@ -875,7 +925,7 @@ writing configuration or dispatching work.
 - `models`: object mapping a supported engine id to an object with any of `auto`, `tiers` and `policy`, each keyed by the exact model id the engine reports (OpenCode ids are `<provider>/<model>`). Validation reports every problem with its field path.
   - `auto`: array of unique model ids. Present, it is the complete list of that engine's models automatic routing may use (`[]`: none), replacing the built-in OpenCode exclusion, `auto_allow` and newest-version-only routing for that engine; absent, the built-in rules apply. `deny` and `providers` still win; a `pin` or the model selector can still use any offered model.
   - `tiers`: model id to `flagship`, `deep`, `standard` or `light`, or to a non-empty list of them (for example `["standard", "deep"]`); it wins over the legacy top-level `tiers`, which wins over the built-in classification. A model given several tiers is an automatic-routing candidate of each (it is listed under each in `list_route_options`) and runs at the effort of the tier it was chosen for; a pin or explicit effort may use any effort one of its tiers permits, and it counts as flagship for a user's explicit flagship request when `flagship` is one of its tiers. Only this per-engine key takes a list; the legacy top-level `tiers` stays one tier per model. In Settings > Engines & models the tier control is a multi-select; clearing every tier removes the setting.
-  - `policy`: model id to an object of optional attributes, each overriding the model's built-in value (`null` removes it): `effort_floor` and `max_effort` (efforts `low`..`max`; without `max_effort` a flagship-tier model stops at `high`), `effort_ladder` (1-3 strictly ascending efforts a light model runs at for light work, standard work, and standard work that fell short once), `also_standard_for` (work kinds for which a light model is also a standard-tier candidate, only for explicitly configured work kinds), `preferred_for` (work kinds this model is preferred for: rank version 9 puts it ahead of new plan hints, plan usage and retry diversification within its tier; it yields for quota only when at least 95% used and more than 10 points worse than a known usable alternative; plan usage compares only the preferred models while they are honoured, and none once they are used up), `preferred_when` (optional owner-written condition, non-blank text of at most 500 characters, for example `"frontend changes without design work"`; see below) and `request_names` (1-16 lowercase extra spellings, Cyrillic stems taking Russian endings, that count as the user naming this model's family in an explicit flagship request; ordinary request, work or negation words are refused).
+  - `policy`: model id to an object of optional attributes, each overriding the model's built-in value (`null` removes it): `effort_floor` and `max_effort` (efforts `low`..`max`; without `max_effort` a flagship-tier model stops at `high`), `effort_ladder` (1-3 strictly ascending efforts a light model runs at for light work, standard work, and standard work that fell short once), `also_standard_for` (work kinds for which a light model is also a standard-tier candidate, only for explicitly configured work kinds), `preferred_for` (work kinds this model may do: a model that lists kinds is never a candidate for a node of another kind, including on retries and escalation, which choose the senior model among the eligible ones; a model without listed kinds serves every kind, and when no usable model lists a node's kind every usable model stays eligible so work never stops. Among eligible models it is also preferred: rank version 9 puts it ahead of new plan hints, plan usage and retry diversification within its tier; it yields for quota only when at least 95% used and more than 10 points worse than a known usable alternative; plan usage compares only the preferred models while they are honoured, and none once they are used up), `preferred_when` (optional owner-written condition, non-blank text of at most 500 characters, for example `"frontend changes without design work"`; see below) and `request_names` (1-16 lowercase extra spellings, Cyrillic stems taking Russian endings, that count as the user naming this model's family in an explicit flagship request; ordinary request, work or negation words are refused).
 
   `preferred_when` makes the preference conditional. The runtime cannot judge
   free text, so `list_route_options.preferred_when` gives the coordinator each

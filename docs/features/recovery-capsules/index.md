@@ -50,6 +50,26 @@ bounded by construction and never stops a task for size:
   rows, id `steering:<n>`, with their `deny_write`/`allow_write` paths and
   delivery), newest first, together with any constraint rows a store of the
   former runtime carries.
+- `owner_write_denials` lists the owner's `deny-write:` paths in force and
+  `rule_file_protection` the project's agent/rule files still write-protected for
+  this task (see [rule files](../steering-and-questions/index.md#project-rule-files-are-write-protected-by-default)).
+- `environment` carries the newest `ENVIRONMENT_PREFLIGHT` facts the runtime
+  recorded when the task started (bounded to 2,500 characters; `recorded:false`
+  when none exists): exit-code-only GitHub CLI, native Codex and Claude login
+  status, whether `sudo -n true` works (`passwordless`) or a password is needed
+  (`password_needed`, answered through the owner's password prompt), Docker,
+  free space of the project volume and `/tmp`, display/session variables and the
+  project's Git branch, upstream and change counts. They are facts for planning,
+  never blockers. The preflight (`crates/workspace-service/src/native_preflight.rs`)
+  runs every probe in parallel within 3 seconds in total with stdin, stdout and
+  stderr closed (only `git status` output is read, bounded), caches host facts once
+  per service start and refreshes them at each task start; a probe that times out
+  reports its cached value with `stale_seconds`. The Codex and Claude CLIs are
+  asked only where their native login files already exist (the marker settings
+  reads); elsewhere the fact is `not_logged_in` with
+  `source: "no_native_login_files"` (or `unknown`, `native_home_unusable`)
+  without launching a CLI that would create its native home. The event is not
+  restated in `retained_decisions`.
 - A follow-up owner message is written to both the internal `native_*` session
   and the ACP session so both histories display it; the capsule lists it once
   (an internal copy is skipped when an identical ACP copy exists at the same

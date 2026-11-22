@@ -25,4 +25,29 @@ observe the actual window with screenshots or recordings; logs alone do not
 qualify a rendered case. Virtual-screen evidence does not qualify the
 owner's Ubuntu session, GPU or a physical Android device.
 
+## Extracted Dev readiness gates
+
+Run `bash scripts/qualify-dev-deb.sh smoke --archive newest` on the exact candidate
+before any separately authorized desktop scenario. Both smoke and drive run a fixed
+no-task planning preflight and read-only Bubblewrap command on a disposable Git fixture
+inside the extracted service's own startup. A missing, incomplete, truncated, nonzero
+or unexpected verification receipt fails the run. The launcher keeps the service's
+fresh verifier reference in `nested-verifier.out`; a probe on the bare host is not
+a substitute.
+
+Both launch modes record local host facts and one bounded `gh auth status --active --hostname github.com` exit code in `host-facts.txt`. They discard GitHub CLI output and do not invoke the broad `probe` action. The login exit code is a diagnostic, not proof of repository access.
+
+Before window input, the actual extracted desktop bridge records one test address.
+The launcher checks the exact argument digest, retains it in `opener-probe.sha256`
+and starts the scenario's `opener.sha256` log empty. Both View PR controls use this
+same native handoff. No program is selected or run for View PR in the extracted app;
+an absent, inactive or unwritable recorder cannot fall back to a browser.
+`--capture-opener` is accepted for older drive commands but is no longer needed.
+
+`drive` requires a private authenticated Xvfb and never uses the owner's display: it refuses `--real-display`, a missing Xvfb or a missing `xauth` before any archive handling or driver dispatch. The launcher creates a per-run mode-0600 X authority cookie, starts Xvfb with it and with TCP disabled, and checks that the display belongs to the run's own Xvfb process and differs from the inherited `DISPLAY`. Before every click, capture or driver dispatch it checks that the target window belongs to the extracted desktop process. `smoke --xvfb` applies the same checks; only plain `smoke` may use another display. `bash scripts/test-qualify-dev-display.sh` exercises these refusals without paid calls.
+Compare each scenario record with the independently read GitHub URL. This proves
+the address handoff, not browser navigation, PR creation or a rendered click by itself.
+
+## Desktop and Android release qualification
+
 Desktop release qualification for the Ubuntu first release covers: test schemas and negative authorization; event replay and gaps; idempotency and races between desktop clients; crash and ambiguous external outcomes; files and leases; Git conflicts and push; the fake-ACP desktop scenario (CW-Q01a); the desktop fault and race matrix (CW-Q02a); rendered Ubuntu accessibility, long histories and performance (CW-Q03a); installer, service and authorization checks (CW-Q04a); and a desktop migration and rollback rehearsal on copies (CW-Q05). The owner pilot is the Ubuntu checklist (CW-Q06a). Mobile qualification is separate and waits for Gate M: enrollment, relay, revoke and network transitions; push unavailable and delivery; the fake-ACP phone leg (CW-Q01b); the phone and device fault rows (CW-Q02b); physical Android accessibility, long histories, APK upgrade and rollback (CW-Q03b and CW-Q04b); and the Android pilot (CW-Q06b). Record exact version, device, commands, outcome and missing evidence. Do not treat mocked or CLI-only results as rendered/mobile qualification. Paid or live external operations need separate authorization.

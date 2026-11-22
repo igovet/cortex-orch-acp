@@ -585,6 +585,26 @@ impl<'a> Publisher<'a> {
         let _lock = self.lock(false)?;
         let dir = self.directory(task, false)?;
         self.reconcile_locked(task, &dir)?;
+        self.catalogue(task, cursor, count, false)
+    }
+    /// Committed immutable reports only. A reader in another task cannot recover
+    /// publication intents or clean the author's private drafts.
+    pub fn immutable_reports(
+        &self,
+        task: &str,
+        cursor: Option<&str>,
+        count: usize,
+    ) -> CoreResult<Catalogue> {
+        limit(count, 100)?;
+        self.catalogue(task, cursor, count, true)
+    }
+    fn catalogue(
+        &self,
+        task: &str,
+        cursor: Option<&str>,
+        count: usize,
+        immutable_only: bool,
+    ) -> CoreResult<Catalogue> {
         self.store.read(|db| {
             let ceiling:u64=db.query_row("SELECT coalesce(max(e.sequence),0) FROM editions e JOIN reports r ON r.id=e.report_id WHERE r.task_id=?",[task],|r|r.get::<_,i64>(0))? as u64;
             let (before,high)=if let Some(c)=cursor {
@@ -593,8 +613,8 @@ impl<'a> Publisher<'a> {
                 let b=parse(p[2])?;let h=parse(p[3])?;
                 if b==0 || h>ceiling || b>h.saturating_add(1) {return refuse("invalid_cursor");} (b,h)
             } else {(ceiling+1,ceiling)};
-            let mut stmt=db.prepare("SELECT r.id,r.kind,e.title,e.summary,e.author,e.digest,e.size_bytes,coalesce(p.source_revision,0),coalesce(p.artifacts,'[]'),e.sequence FROM reports r JOIN editions e ON e.report_id=r.id LEFT JOIN report_provenance p ON p.edition_sequence=e.sequence WHERE r.task_id=? AND r.kind IN ('report','pipeline') AND e.sequence=(SELECT max(sequence) FROM editions WHERE report_id=r.id AND sequence<=?) AND e.sequence<? ORDER BY e.sequence DESC LIMIT ?")?;
-            let mut rows=stmt.query((task,high as i64,before as i64,(count+1) as i64))?;let mut items=Vec::new();
+            let mut stmt=db.prepare("SELECT r.id,r.kind,e.title,e.summary,e.author,e.digest,e.size_bytes,coalesce(p.source_revision,0),coalesce(p.artifacts,'[]'),e.sequence FROM reports r JOIN editions e ON e.report_id=r.id LEFT JOIN report_provenance p ON p.edition_sequence=e.sequence WHERE r.task_id=? AND r.kind IN ('report','pipeline') AND (NOT ? OR r.kind='report') AND e.sequence=(SELECT max(sequence) FROM editions WHERE report_id=r.id AND sequence<=?) AND e.sequence<? ORDER BY e.sequence DESC LIMIT ?")?;
+            let mut rows=stmt.query((task,immutable_only,high as i64,before as i64,(count+1) as i64))?;let mut items=Vec::new();
             while let Some(r)=rows.next()? {
                 items.push((ReportMetadata {report_id:r.get(0)?,kind:r.get(1)?,title:r.get(2)?,summary:r.get(3)?,author:r.get(4)?,sha256:r.get(5)?,size_bytes:r.get::<_,i64>(6)? as u64,source_revision:r.get(7)?,artifacts:serde_json::from_str(&r.get::<_,String>(8)?)?},r.get::<_,i64>(9)? as u64));
             }
@@ -614,9 +634,33 @@ impl<'a> Publisher<'a> {
         let _lock = self.lock(false)?;
         let dir = self.directory(task, false)?;
         self.reconcile_locked(task, &dir)?;
+        self.published_page(task, id, cursor, count, &dir, false)
+    }
+    /// Read only a committed, digest-matching report; never follow a caller's
+    /// filesystem path or perform recovery effects on the publishing task.
+    pub fn immutable_report_page(
+        &self,
+        task: &str,
+        id: &str,
+        cursor: Option<&str>,
+        count: usize,
+    ) -> CoreResult<ContentPage> {
+        limit(count, 4000)?;
+        let dir = self.directory(task, false)?;
+        self.published_page(task, id, cursor, count, &dir, true)
+    }
+    fn published_page(
+        &self,
+        task: &str,
+        id: &str,
+        cursor: Option<&str>,
+        count: usize,
+        dir: &Path,
+        immutable_only: bool,
+    ) -> CoreResult<ContentPage> {
         let row:Option<(String,String,String)>=self.store.read(|db| Ok(db.query_row(
-            "SELECT r.filename,r.kind,e.digest FROM reports r JOIN editions e ON e.report_id=r.id WHERE r.task_id=? AND r.id=? ORDER BY e.sequence DESC LIMIT 1",
-            (task,id),|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?))?;
+            "SELECT r.filename,r.kind,e.digest FROM reports r JOIN editions e ON e.report_id=r.id WHERE r.task_id=? AND r.id=? AND (NOT ? OR r.kind='report') ORDER BY e.sequence DESC LIMIT 1",
+            (task,id,immutable_only),|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?))?;
         let Some((filename, kind, digest)) = row else {
             return refuse("not_found");
         };

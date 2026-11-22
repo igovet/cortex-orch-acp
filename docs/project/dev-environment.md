@@ -292,7 +292,8 @@ detached children. See [command profiles](../features/permissions-and-containmen
 This guide covers Paseo only. A paid Paseo check requires an approval reference
 naming the owner's request. The
 [standalone Cortex Workspace desktop route](verification.md#standalone-cortex-workspace-desktop)
-is separately authorized and does not use Paseo.
+does not use Paseo or a persistent Workspace installation. Its extracted-archive
+smoke is no-paid; its paid desktop scenarios require separate authorization.
 
 Default verification is no-paid. The 2026-09-24 standing approval was revoked
 on 2026-09-28. Run a paid live check only when the owner explicitly requests it

@@ -40,8 +40,9 @@ pub fn preflight_result_tx(
     if !current {
         return Ok(None);
     }
-    // What the review binds: its task files' bytes, or the whole checkout when its
-    // packet could not attribute the change set (`completion::review_bound_files`).
+    // What the review binds: its task files' bytes, or the whole checkout for a
+    // packet recorded before task-file bindings or one with too many task files
+    // (`completion::review_bound_files`).
     // An unrelated file another actor changes never re-binds a task-file binding.
     let (d, _) = super::completion::review_digest_tx(db, task, assignment, e).map_err(|e| {
         if e.code() == "project_revision_unavailable" {
@@ -79,6 +80,24 @@ pub fn preflight_result_tx(
     if bindings.last().unwrap()["revision_digest"] == d {
         return Ok(None);
     }
+    // A change by another actor outside the task's own files (a whole-checkout
+    // binding, no writer of this task since the review first bound) is marked on the
+    // refusal's record: it is charged to the runtime, never to the reviewer
+    // (`checkout_drift_tx`).
+    let first: i64 = db.query_row(
+        "SELECT coalesce(min(id),0) FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED'
+         AND json_extract(payload_json,'$.assignment_ref')=?",
+        (task, assignment),
+        |r| r.get(0),
+    )?;
+    let external = super::completion::review_bound_files(db, task, assignment)?.is_none()
+        && !task_wrote_since(db, task, first)?;
+    let tag = |mut v: Value| {
+        if external {
+            v["drift"] = json!("external");
+        }
+        v
+    };
     if bindings.len() > MAX_REVIEW_REBINDS {
         // Past the rebind budget the project counts as unstable while it keeps
         // changing between submissions. Once a submission finds the same digest as
@@ -103,8 +122,8 @@ pub fn preflight_result_tx(
                 db,
                 task,
                 "REVIEW_REVISION_UNSTABLE",
-                json!({"assignment_ref":assignment,"observed_digest":d,
-                    "bound_digest":bindings.last().unwrap()["revision_digest"],"refused_request_key":key}),
+                tag(json!({"assignment_ref":assignment,"observed_digest":d,
+                    "bound_digest":bindings.last().unwrap()["revision_digest"],"refused_request_key":key})),
             )?;
             return Ok(Some(
                 json!({"outcome":"refused","error":"review_project_revision_unstable"}),
@@ -115,9 +134,9 @@ pub fn preflight_result_tx(
         db,
         task,
         "REVIEW_STARTED",
-        json!({"assignment_ref":assignment,"revision_digest":d,
+        tag(json!({"assignment_ref":assignment,"revision_digest":d,
         "rebound_from":bindings.last().unwrap()["revision_digest"],"rebind":bindings.len(),"refused_request_key":key,
-        "after_unstable":bindings.len() > MAX_REVIEW_REBINDS}),
+        "after_unstable":bindings.len() > MAX_REVIEW_REBINDS})),
     )?;
     Ok(Some(
         json!({"outcome":"refused","error":"review_project_revision_changed"}),
@@ -151,6 +170,54 @@ fn matches(path: &str, scope: &str) -> bool {
     }
     dp[p.len()]
 }
+/// A test file wherever it lives: under a `tests`/`test` folder, or named like a
+/// test (`*.test.*`, `*.spec.*`, `*_test.*`, `test_*`).
+fn test_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    path.split('/')
+        .rev()
+        .skip(1)
+        .any(|d| d == "tests" || d == "test" || d == "__tests__")
+        || name.contains(".test.")
+        || name.contains(".spec.")
+        || name.contains("_test.")
+        || name.starts_with("test_")
+}
+
+/// The developer for product code a review finding names: frontend sources to the
+/// frontend developer, scripts and CI to DevOps, a mix of frontend and other code
+/// to the full-stack developer, anything else to the backend developer.
+fn code_role(files: &[String]) -> &'static str {
+    let ext = |p: &str| p.rsplit_once('.').map_or("", |(_, e)| e).to_owned();
+    let frontend = |p: &String| {
+        [
+            "ts", "tsx", "js", "jsx", "mjs", "css", "scss", "html", "vue", "svelte",
+        ]
+        .contains(&ext(p).as_str())
+    };
+    let ops = |p: &String| {
+        p.starts_with("scripts/")
+            || p.starts_with(".github/")
+            || p.rsplit('/')
+                .next()
+                .is_some_and(|n| n.starts_with("Dockerfile"))
+            || ext(p) == "sh"
+    };
+    let code: Vec<&String> = files
+        .iter()
+        .filter(|p| !p.ends_with(".md") && !p.starts_with("docs/") && !test_file(p))
+        .collect();
+    if !code.is_empty() && code.iter().all(|p| ops(p)) {
+        "worker-devops-engineer"
+    } else if !code.is_empty() && code.iter().all(|p| frontend(p)) {
+        "worker-frontend-dev"
+    } else if code.iter().any(|p| frontend(p)) {
+        "worker-fullstack-dev"
+    } else {
+        "worker-backend-dev"
+    }
+}
+
 fn strings(v: &Value) -> CoreResult<Vec<String>> {
     v.as_array()
         .ok_or(CoreError::Refused("invalid_review_findings"))?
@@ -238,6 +305,263 @@ fn actionable_findings(result: &Value) -> bool {
                     .is_some_and(|files| !files.is_empty())
         })
 }
+/// The first plan revision of the current task lineage: the one after the newest
+/// reopen, or the first revision when the task was never reopened. Budgets and
+/// no-progress checks that span revisions count from here, never from a plan
+/// acceptance or a continuation.
+pub(crate) fn lineage_start_tx(db: &rusqlite::Connection, task: &str) -> CoreResult<i64> {
+    Ok(db.query_row(
+        "SELECT coalesce((SELECT json_extract(payload_json,'$.revision')+1 FROM runtime_events
+           WHERE task_id=? AND type='TASK_REOPENED' ORDER BY id DESC LIMIT 1),0)",
+        [task],
+        |r| r.get(0),
+    )?)
+}
+/// The id of the newest event that starts a fresh window for repeat detection: a
+/// reopen or an owner message (0 when there is none).
+pub(crate) fn repeat_window_tx(db: &rusqlite::Connection, task: &str) -> CoreResult<i64> {
+    Ok(db.query_row(
+        "SELECT coalesce(max(id),0) FROM runtime_events WHERE task_id=? AND type IN ('TASK_REOPENED','USER_STEERING')",
+        [task],
+        |r| r.get(0),
+    )?)
+}
+/// A stable loop key: the digest of `kind`, the node without its fix-round prefix
+/// and the normalized subject.
+pub(crate) fn loop_key(kind: &str, node: &str, subject: &str) -> String {
+    let mut base = node;
+    while let Some(rest) = base.strip_prefix("_fix_") {
+        base = rest.split_once('_').map_or(rest, |(_, r)| r);
+    }
+    let base = if base.starts_with("_review_") {
+        "_review"
+    } else {
+        base
+    };
+    crate::digest(format!("{kind}|{base}|{}", normalize_text(subject)).as_bytes())
+}
+/// Lowercased text with whitespace collapsed.
+pub(crate) fn normalize_text(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+/// A dead-end item's name without the reviewer's detail: `change_set (host could not …)`
+/// and `change_set: changed paths …` both name `change_set`.
+pub fn dead_end_item(item: &str) -> String {
+    let end = [item.find(" ("), item.find(": ")]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(item.len());
+    item[..end]
+        .trim()
+        .chars()
+        .take(160)
+        .collect::<String>()
+        .to_lowercase()
+}
+/// The file names a dead-end item or decision text mentions: the last component of
+/// every path-like token (`a/b/c.json, d.json and e/f.mjs` names `c.json`, `d.json`
+/// and `f.mjs`), lowercased. Rewording an item ("the three twins" split into one item
+/// per file) keeps its names.
+pub(crate) fn named_files(text: &str) -> BTreeSet<String> {
+    text.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '(' | ')' | '`' | '"' | '\''))
+        .map(|t| t.trim_matches(|c: char| matches!(c, '.' | ':' | '[' | ']' | '«' | '»')))
+        .filter(|t| {
+            t.contains('/')
+                || t.rsplit_once('.').is_some_and(|(stem, ext)| {
+                    !stem.is_empty()
+                        && (1..=5).contains(&ext.len())
+                        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                        && ext.chars().any(|c| c.is_ascii_alphabetic())
+                })
+        })
+        .filter_map(|t| t.trim_end_matches('/').rsplit('/').next())
+        .filter(|t| t.len() > 2 && !t.starts_with("pq_"))
+        .map(str::to_lowercase)
+        .collect()
+}
+/// Owner question ids (`pq_` and 32 hexadecimal digits) cited in `text`.
+pub(crate) fn cited_questions(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("pq_") {
+        let id: String = rest[at + 3..]
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect();
+        if id.len() == 32 {
+            out.push(format!("pq_{id}"));
+        }
+        rest = &rest[at + 3..];
+    }
+    out
+}
+/// The owner's recorded answer text to question `id`, when it was answered.
+pub(crate) fn answer_text_tx(
+    db: &rusqlite::Connection,
+    task: &str,
+    id: &str,
+) -> CoreResult<Option<String>> {
+    Ok(db
+        .query_row(
+            "SELECT coalesce(answer_text,'') FROM pending_questions WHERE task_id=? AND id=? AND status='answered'",
+            (task, id),
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+/// The answer to the first owner question answered after event `after`: its text,
+/// or an empty string when the answer event names no recorded answer text.
+pub(crate) fn answer_after_tx(
+    db: &rusqlite::Connection,
+    task: &str,
+    after: i64,
+) -> CoreResult<Option<String>> {
+    let id: Option<Option<String>> = db
+        .query_row(
+            "SELECT json_extract(payload_json,'$.question_id') FROM runtime_events WHERE task_id=? AND id>?
+             AND type IN ('USER_ANSWER_RECEIVED','WORKER_USER_ANSWER_RECEIVED') ORDER BY id LIMIT 1",
+            (task, after),
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(id) = id else { return Ok(None) };
+    Ok(Some(match id {
+        Some(id) => answer_text_tx(db, task, &id)?.unwrap_or_default(),
+        None => String::new(),
+    }))
+}
+/// Whether an `owner_decision` dead end of a review is one the owner already decided,
+/// and the owner's answer when so. It is decided when its text cites an owner question
+/// that was answered, or when an earlier review of this task (since the newest reopen
+/// or owner message) routed the same item as an `owner_decision` dead end and an owner
+/// answer followed. The same item is matched after rewording: the same item name
+/// without the reviewer's detail ([`dead_end_item`]), or only file names the earlier
+/// decided items already named ([`named_files`]); owner store 2026-11-21: three
+/// generated twins routed as one item were split into one item per file by the next
+/// review, and the owner was asked again.
+pub fn decided_owner_item_tx(
+    db: &rusqlite::Connection,
+    task: &str,
+    item: &str,
+    reason: &str,
+) -> CoreResult<Option<String>> {
+    if item.trim().is_empty() {
+        return Ok(None);
+    }
+    for id in cited_questions(&format!("{item}\n{reason}")) {
+        if let Some(answer) = answer_text_tx(db, task, &id)? {
+            return Ok(Some(answer));
+        }
+    }
+    let since = repeat_window_tx(db, task)?;
+    let rows = db
+        .prepare(
+            "SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_DEAD_END_ROUTED'
+             AND id>? AND json_valid(payload_json) ORDER BY id DESC LIMIT 64",
+        )?
+        .query_map((task, since), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let name = dead_end_item(item);
+    let files = named_files(item);
+    let mut decided_files = BTreeSet::new();
+    let mut answer = None;
+    for (id, raw) in rows {
+        let Some(found) = answer_after_tx(db, task, id)? else {
+            continue;
+        };
+        let event: Value = serde_json::from_str(&raw)?;
+        for b in event["blocked"].as_array().into_iter().flatten() {
+            if b["blocker"] != "owner_decision" {
+                continue;
+            }
+            let earlier = b["item"].as_str().unwrap_or_default();
+            if !earlier.trim().is_empty() && dead_end_item(earlier) == name {
+                return Ok(Some(found));
+            }
+            decided_files.extend(named_files(earlier));
+            answer.get_or_insert_with(|| found.clone());
+        }
+    }
+    if !files.is_empty() && files.is_subset(&decided_files) {
+        return Ok(answer);
+    }
+    Ok(None)
+}
+/// Review refusal codes caused by the project changing under a running review.
+pub const DRIFT_REFUSALS: &[&str] = &[
+    "review_project_revision_changed",
+    "review_project_revision_unstable",
+    "review_resubmit_required",
+];
+/// Whether a writer of this task changed project files after event `after`: a
+/// gateway file write, a command whose run changed paths, or a writing turn that
+/// changed paths.
+fn task_wrote_since(db: &rusqlite::Connection, task: &str, after: i64) -> CoreResult<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1 AND id>?2 AND json_valid(payload_json) AND (
+            type IN ('NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED')
+         OR type='NATIVE_WRITER_TURN_CHANGES' AND coalesce(json_array_length(json_extract(payload_json,'$.changed_paths')),0)>0
+         OR type='NATIVE_COMMAND_FINISHED'
+            AND coalesce(json_array_length(json_extract(payload_json,'$.receipt.observation.changed_paths')),0)>0))",
+        (task, after),
+        |r| r.get(0),
+    )?)
+}
+/// The decision for review refusals caused by another actor changing the checkout
+/// outside the task's own files (infrastructure, not the reviewer's failure). It
+/// applies when the review binds the whole checkout (attribution was incomplete, see
+/// `completion::review_bound_files`), no writer of this task changed a file since the
+/// review first bound its revision, and the reviewer's assignment was refused for a
+/// changed or unstable revision. A task-file binding only re-binds when one of the
+/// task's own files changed, which the reviewer must re-read, so it never qualifies.
+/// `Some` carries the evidence: such refusals, and a review that ends because of
+/// them, are retried on the runtime's budget, never the reviewer's (no review cycle,
+/// no rung of the strategy ladder).
+pub fn checkout_drift_tx(
+    db: &rusqlite::Connection,
+    task: &str,
+    assignment: &str,
+) -> CoreResult<Option<Value>> {
+    if super::completion::review_bound_files(db, task, assignment)?.is_some() {
+        return Ok(None);
+    }
+    let first: Option<i64> = db.query_row(
+        "SELECT min(id) FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED'
+         AND json_extract(payload_json,'$.assignment_ref')=?",
+        (task, assignment),
+        |r| r.get(0),
+    )?;
+    let Some(first) = first else { return Ok(None) };
+    let refusals = db
+        .prepare(
+            "SELECT json_extract(payload_json,'$.code') FROM runtime_events WHERE task_id=? AND type='WORKER_RESULT_REFUSED'
+             AND json_extract(payload_json,'$.assignment_ref')=? ORDER BY id",
+        )?
+        .query_map((task, assignment), |r| r.get::<_, Option<String>>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let drift = refusals
+        .iter()
+        .filter(|c| c.as_deref().is_some_and(|c| DRIFT_REFUSALS.contains(&c)))
+        .count();
+    if drift == 0 || task_wrote_since(db, task, first)? {
+        return Ok(None);
+    }
+    let rebinds: i64 = db.query_row(
+        "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED'
+         AND json_extract(payload_json,'$.assignment_ref')=? AND json_extract(payload_json,'$.rebind') IS NOT NULL",
+        (task, assignment),
+        |r| r.get(0),
+    )?;
+    Ok(Some(
+        json!({"cause":"external_drift","charged":"runtime","binding":"checkout",
+        "drift_refusals":drift,"rebinds":rebinds,
+        "last_refusal":refusals.last().cloned().flatten()}),
+    ))
+}
 /// One finding's identity: the plan task, its files and the requested fix, with
 /// case and spacing normalized.
 fn finding_key(finding: &Value) -> (String, Vec<String>, String) {
@@ -261,33 +585,100 @@ fn finding_key(finding: &Value) -> (String, Vec<String>, String) {
         fix,
     )
 }
-/// Whether this review shows no progress over the previous completed review of the
-/// same revision (the one whose findings the last fixes addressed): the reviewed
-/// bytes are unchanged, or the same findings came back. `None` when this is the
-/// first review of the revision or something changed.
+/// A finding's identity across revisions: its files and requested fix. A replan may
+/// rename the plan task that owns the same files, so the node is left out.
+fn finding_subject(finding: &Value) -> (Vec<String>, String) {
+    let (_, files, fix) = finding_key(finding);
+    (files, fix)
+}
+fn finding_subjects(result: &Value) -> BTreeSet<(Vec<String>, String)> {
+    result["findings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(finding_subject)
+        .collect()
+}
+/// The loop key of a review's findings set (`review_findings`).
+fn findings_key(result: &Value) -> String {
+    let subject = finding_subjects(result)
+        .into_iter()
+        .map(|(files, fix)| format!("{}:{fix}", files.join(",")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    loop_key("review_findings", "_review", &subject)
+}
+/// Whether a completed review asked for changes with findings to repair.
+fn requests_changes(result: &Value) -> bool {
+    result["verdict"] == "REQUEST_CHANGES"
+        || result["verdict"] == "INCOMPLETE" && actionable_findings(result)
+}
+/// Completed reviews of the task lineage ([`lineage_start_tx`]) other than `review`
+/// of `revision`, newest first, of the same kind (plan reviews or change reviews).
+fn lineage_reviews_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    revision: i64,
+    review: &str,
+) -> CoreResult<Vec<(i64, Value)>> {
+    let plan_review = super::sprint_planning::is_plan_review(review);
+    let start = lineage_start_tx(db, task)?;
+    let rows = db
+        .prepare(
+            "SELECT revision,node_id,result_json FROM runtime_nodes WHERE task_id=? AND stage='review'
+             AND status='completed' AND result_json IS NOT NULL AND revision>=? AND revision<=?
+             AND NOT (revision=? AND node_id=?) ORDER BY revision DESC, rowid DESC LIMIT 256",
+        )?
+        .query_map((task, start, revision, revision, review), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut out = Vec::new();
+    for (rev, node, raw) in rows {
+        // A plan review compares only with plan reviews of its own revision.
+        if super::sprint_planning::is_plan_review(&node) != plan_review
+            || plan_review && rev != revision
+        {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+            out.push((rev, v));
+        }
+    }
+    Ok(out)
+}
+/// Whether this review shows no progress over the previous completed review (the one
+/// whose findings the last fixes addressed): within the revision the reviewed bytes
+/// are unchanged, or, in this revision or an earlier one of the task lineage, the same
+/// findings (files and fix) came back. Comparing across revisions matters because a
+/// continuation after a stop plans a new revision: without it, identical findings in
+/// each new revision repeated the whole fix cycle forever. `None` when this is the
+/// first review or something changed; otherwise the reason and the previous
+/// review's revision.
 fn no_progress_tx(
     db: &Transaction<'_>,
     task: &str,
     revision: i64,
     review: &str,
     result: &Value,
-) -> CoreResult<Option<&'static str>> {
-    let previous: Option<String> = db
-        .query_row(
-            "SELECT result_json FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='review'
-             AND status='completed' AND node_id!=? AND result_json IS NOT NULL ORDER BY rowid DESC LIMIT 1",
-            (task, revision, review),
-            |r| r.get(0),
-        )
-        .optional()?;
-    let Some(previous) = previous else {
+) -> CoreResult<Option<(&'static str, i64)>> {
+    let Some((previous_revision, previous)) = lineage_reviews_tx(db, task, revision, review)?
+        .into_iter()
+        .next()
+    else {
         return Ok(None);
     };
-    let previous: Value = serde_json::from_str(&previous)?;
     if !matches!(
         previous["verdict"].as_str(),
         Some("REQUEST_CHANGES" | "INCOMPLETE")
     ) {
+        return Ok(None);
+    }
+    if previous_revision != revision {
+        let current = finding_subjects(result);
+        if !current.is_empty() && current == finding_subjects(&previous) {
+            return Ok(Some(("repeated_findings", previous_revision)));
+        }
         return Ok(None);
     }
     // What each review bound: its task files when both have that binding (another
@@ -304,7 +695,7 @@ fn no_progress_tx(
             .map(str::to_owned)
     };
     if digest(result).is_some() && digest(result) == digest(&previous) {
-        return Ok(Some("unchanged_files"));
+        return Ok(Some(("unchanged_files", revision)));
     }
     let keys = |v: &Value| -> BTreeSet<(String, Vec<String>, String)> {
         v["findings"]
@@ -316,9 +707,44 @@ fn no_progress_tx(
     };
     let current = keys(result);
     if !current.is_empty() && current == keys(&previous) {
-        return Ok(Some("repeated_findings"));
+        return Ok(Some(("repeated_findings", revision)));
     }
     Ok(None)
+}
+/// The review-cycle budget of the task lineage. `review_cycle` counts the reviews of
+/// one plan revision (it names review and fix nodes and bounds one revision's
+/// reviews); a new plan revision restarts that count but not this budget. Once
+/// [`MAX_REVIEW_CYCLES`] change-requesting reviews were recorded in the lineage
+/// (this one included), a further fix round is granted only while the findings
+/// strictly shrink: this review names fewer distinct findings than the previous
+/// change-requesting review. A strictly decreasing count cannot cycle. Before this,
+/// each continuation's new revision started a fresh budget, and one task ran nine
+/// review-cycle ladders with eighteen change requests (owner store 2026-11-21).
+/// `Some((rounds, previous, current))` when the budget refuses another round.
+fn lineage_budget_exhausted_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    revision: i64,
+    review: &str,
+    result: &Value,
+) -> CoreResult<Option<(usize, usize, usize)>> {
+    let earlier: Vec<Value> = lineage_reviews_tx(db, task, revision, review)?
+        .into_iter()
+        .map(|(_, v)| v)
+        .filter(requests_changes)
+        .collect();
+    let rounds = earlier.len() + 1;
+    if rounds < MAX_REVIEW_CYCLES {
+        return Ok(None);
+    }
+    let current = finding_subjects(result).len();
+    let previous = earlier
+        .first()
+        .map_or(usize::MAX, |p| finding_subjects(p).len());
+    if current < previous {
+        return Ok(None);
+    }
+    Ok(Some((rounds, previous, current)))
 }
 /// The parts of the change a review reports it did not cover, as given in its
 /// `not_covered`.
@@ -327,6 +753,58 @@ fn uncovered(result: &Value) -> Vec<Value> {
         .as_array()
         .cloned()
         .unwrap_or_default()
+}
+/// A review that could not reach some items with its tools, and found nothing to
+/// repair: those items become disclosed unverified limits of the review, appended
+/// to its result as `unverified` runtime checks that the final result must disclose
+/// (`REVIEW_LIMIT_DISCLOSED`), and the task continues to verification. The review
+/// itself is not waived: everything it could read was reviewed, and its verdict and
+/// binding stay those of that review.
+fn disclose_review_limits_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    revision: i64,
+    review: &str,
+    result: &Value,
+    blocked: &[Value],
+) -> CoreResult<()> {
+    let limits: Vec<Value> = blocked
+        .iter()
+        .map(|b| {
+            let item = b["item"].as_str().unwrap_or("an item").chars().take(200).collect::<String>();
+            let reason = b["reason"].as_str().unwrap_or("").chars().take(400).collect::<String>();
+            if b["blocker"] == "owner_decision" {
+                return json!({"name":format!("Review did not read {item}"),"outcome":"unverified",
+                    "blocker":format!("The owner decided that {item} is not reviewed{}; it is not covered by the review.",
+                        if reason.is_empty() { String::new() } else { format!(" ({reason})") }),
+                    "source":"runtime"});
+            }
+            json!({"name":format!("Review could not read {item}"),"outcome":"unverified",
+                "blocker":if reason.is_empty() {
+                    format!("The reviewer's tools could not reach {item}; it is not covered by the review.")
+                } else {
+                    format!("The reviewer's tools could not reach {item} ({reason}); it is not covered by the review.")
+                },
+                "source":"runtime"})
+        })
+        .collect();
+    let mut result = result.clone();
+    match result["checks"].as_array_mut() {
+        Some(checks) => checks.extend(limits.iter().cloned()),
+        None => result["checks"] = json!(limits),
+    }
+    result["review_limit_disclosed"] = json!(true);
+    db.execute(
+        "UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND revision=? AND node_id=?",
+        (result.to_string(), task, revision, review),
+    )?;
+    event_tx(
+        db,
+        task,
+        "REVIEW_LIMIT_DISCLOSED",
+        json!({"review":review,"revision":revision,"report_ref":result["report_ref"],"limits":limits}),
+    )?;
+    domain::state_tx(db, task, TaskState::Verifying, None)
 }
 /// Select the latest review's outcome. Approval enables final verification;
 /// request-changes schedules bounded scoped fixes; BLOCK with findings asks about the
@@ -355,7 +833,15 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
     // plan to its coordinator for a revision within the same bounded rules.
     let plan_review = super::sprint_planning::is_plan_review(&review);
     match result["verdict"].as_str() {
-        Some("APPROVE") => return domain::state_tx(db, task, TaskState::Verifying, None),
+        Some("APPROVE") => {
+            event_tx(
+                db,
+                task,
+                "TASK_PROGRESS",
+                json!({"kind":"review_passed","node":review,"revision":revision}),
+            )?;
+            return domain::state_tx(db, task, TaskState::Verifying, None);
+        }
         Some("BLOCK")
             if plan_review && result["findings"].as_array().is_some_and(|f| !f.is_empty()) => {}
         // A BLOCK with confirmed problems goes to the coordinator to address them.
@@ -368,10 +854,13 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
         Some("INCOMPLETE") if actionable_findings(&result) => {}
         // A reviewer finishes its own review: result_submit refuses a part it can still
         // cover. What remains is a dead end it named with its blocker. Another reviewer
-        // of the same bytes would meet the same dead end, so none is scheduled: the
-        // stop goes the task's run-mode way (Automatic: coordinator, then the senior
-        // consultant, then the owner; otherwise the owner's stop question). A legacy
-        // result without blockers, or a BLOCK naming no problem, takes the same stop.
+        // of the same bytes would meet the same dead end, so none is scheduled.
+        // Items its tools cannot reach (`tool_unavailable`) and nothing else: the
+        // runtime records them as disclosed unverified limits of the review and the
+        // task continues to verification; the final result must disclose them. Any
+        // other dead end (access, another role's work, a decision) is a continuation
+        // that changes approach (no-stop policy), never a stop for the owner. A legacy
+        // result without blockers, or a BLOCK naming no problem, takes the same route.
         Some("INCOMPLETE" | "BLOCK") => {
             let blocked: Vec<Value> = uncovered(&result)
                 .into_iter()
@@ -384,6 +873,50 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
                 json!({"review":review,"revision":revision,"report_ref":result["report_ref"],
                     "verdict":result["verdict"],"blocked":blocked}),
             )?;
+            // An owner decision the owner already made is not asked again
+            // (`decided_owner_item_tx`: the same item, also reworded, routed before
+            // with an owner answer since, or a reason citing an answered question;
+            // owner store 2026-11-21: the owner answered "close as is" ten times
+            // while each closing review re-raised the same declined reads).
+            let mut reachable = !blocked.is_empty();
+            let mut decided = Vec::new();
+            for b in &blocked {
+                if b["blocker"] == "tool_unavailable" {
+                    continue;
+                }
+                let answer = if b["blocker"] == "owner_decision" {
+                    decided_owner_item_tx(
+                        db,
+                        task,
+                        b["item"].as_str().unwrap_or_default(),
+                        b["reason"].as_str().unwrap_or_default(),
+                    )?
+                } else {
+                    None
+                };
+                match answer {
+                    Some(answer) => decided.push((b.clone(), answer)),
+                    None => {
+                        reachable = false;
+                        break;
+                    }
+                }
+            }
+            if !plan_review && result["verdict"] == "INCOMPLETE" && reachable {
+                for (b, answer) in &decided {
+                    let item = b["item"].as_str().unwrap_or_default();
+                    event_tx(
+                        db,
+                        task,
+                        "LOOP_BROKEN",
+                        json!({"key":loop_key("owner_decision", &review, &dead_end_item(item)),
+                            "kind":"owner_decision","node":review,"action":"disclosed_limit",
+                            "answer":answer.chars().take(400).collect::<String>(),
+                            "limits":[format!("Review did not read {}", item.chars().take(200).collect::<String>())]}),
+                    )?;
+                }
+                return disclose_review_limits_tx(db, task, revision, &review, &result, &blocked);
+            }
             domain::stop_tx(db, task, "review_incomplete")?;
             return Ok(());
         }
@@ -396,17 +929,47 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
     // let the run mode escalate (coordinator, senior consultant, owner).
     // A plan review sees unchanged project files by design; the plan itself changed
     // (an unchanged plan is refused at submission), so only repeated findings count.
-    if let Some(reason) = no_progress_tx(db, task, revision, &review, &result)?
-        .filter(|reason| !(plan_review && *reason == "unchanged_files"))
+    if let Some((reason, previous_revision)) = no_progress_tx(db, task, revision, &review, &result)?
+        .filter(|(reason, _)| !(plan_review && *reason == "unchanged_files"))
     {
+        let key = findings_key(&result);
         event_tx(
             db,
             task,
             "REVIEW_NO_PROGRESS",
-            json!({"review":review,"revision":revision,"reason":reason,"report_ref":result["report_ref"]}),
+            json!({"review":review,"revision":revision,"reason":reason,"report_ref":result["report_ref"],
+                "previous_revision":previous_revision,"across_revisions":previous_revision!=revision,
+                "key":key}),
         )?;
+        if reason == "repeated_findings" {
+            let count = 1 + lineage_reviews_tx(db, task, revision, &review)?
+                .iter()
+                .filter(|(_, v)| findings_key(v) == key)
+                .count();
+            event_tx(
+                db,
+                task,
+                "LOOP_OBSERVED",
+                json!({"key":key,"kind":"review_findings","node":review,"count":count}),
+            )?;
+        }
         domain::stop_tx(db, task, "review_no_progress")?;
         return Ok(());
+    }
+    if !plan_review {
+        if let Some((rounds, previous, current)) =
+            lineage_budget_exhausted_tx(db, task, revision, &review, &result)?
+        {
+            event_tx(
+                db,
+                task,
+                "LOOP_OBSERVED",
+                json!({"key":loop_key("review_cycle", "_review", ""),"kind":"review_cycle",
+                    "node":review,"count":rounds,"previous_findings":previous,"findings":current}),
+            )?;
+            domain::stop_tx(db, task, "review_cycle_limit")?;
+            return Ok(());
+        }
     }
     let cycle: i64 = db.query_row(
         "SELECT review_cycle FROM runtime_tasks WHERE task_id=?",
@@ -552,23 +1115,64 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
             objectives.insert(node.clone(), objective);
         }
     }
+    let docs = |p: &String| p.starts_with("docs/") || p == "docs" || p.ends_with(".md");
+    let tests = |p: &String| p.starts_with("tests/") || p == "tests";
+    // The files the findings for one fix name: its own findings, or every finding
+    // when the fix is not targeted.
+    let named = |id: &str| -> CoreResult<(Vec<String>, BTreeSet<String>)> {
+        let items: Vec<&Value> = match grouped.get(id) {
+            Some(items) if fallback.is_none() => items.clone(),
+            _ => findings.into_iter().flatten().collect(),
+        };
+        let mut files = Vec::new();
+        let mut proposed = BTreeSet::new();
+        for item in &items {
+            files.extend(strings(&item["files"])?);
+            // The reviewer's choice of specialist, kept only for a writing role.
+            proposed.insert(
+                item["role"]
+                    .as_str()
+                    .map(|r| format!("worker-{}", r.trim_start_matches("worker-")))
+                    .filter(|r| !read_only(r, "execution"))
+                    .unwrap_or_default(),
+            );
+        }
+        Ok((files, proposed))
+    };
     let mut fixes = Vec::new();
     for (id, role, _, _, _) in &rows {
         if fallback.is_none() && !grouped.contains_key(id) {
             continue;
         }
         let scope = &scopes[id];
-        let role = if !read_only(role, "execution") {
-            role.as_str()
-        } else if scope
-            .iter()
-            .all(|p| p.starts_with("docs/") || p == "docs" || p.ends_with(".md"))
-        {
+        // A fix goes to the writing specialist every one of its findings proposes,
+        // else to the specialist for the files they name (owner store 2026-11-21:
+        // four documentation findings on a QA node were routed to QA, and the
+        // coordinator had to replan them to a technical writer), else to the
+        // node's own writing role.
+        let (files, proposed) = named(id)?;
+        let some = !files.is_empty();
+        let unanimous = match proposed.len() {
+            1 => proposed.first().filter(|r| !r.is_empty()).cloned(),
+            _ => None,
+        };
+        let role = if let Some(chosen) = unanimous.as_deref() {
+            chosen
+        } else if some && files.iter().all(docs) {
             "worker-technical-writer"
-        } else if scope
-            .iter()
-            .all(|p| p.starts_with("tests/") || p == "tests")
+        } else if some && files.iter().all(|p| test_file(p)) {
+            "worker-qa-engineer"
+        } else if some
+            && (read_only(role, "execution")
+                || ["worker-qa-engineer", "worker-technical-writer"].contains(&role.as_str()))
         {
+            // Product code named on a testing or writing node goes to a developer.
+            code_role(&files)
+        } else if !read_only(role, "execution") {
+            role.as_str()
+        } else if scope.iter().all(docs) {
+            "worker-technical-writer"
+        } else if scope.iter().all(tests) {
             "worker-qa-engineer"
         } else {
             "worker-backend-dev"

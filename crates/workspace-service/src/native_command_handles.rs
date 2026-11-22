@@ -51,12 +51,26 @@ fn directory(store: &Store, task: &str) -> PathBuf {
     store.key().directory().join(task).join(".native-output")
 }
 
-/// Output signatures of a program that tried to create its own user-namespace
-/// sandbox inside the command sandbox and was refused. Ubuntu's
-/// `bwrap-userns-restrict` AppArmor profile confines everything bubblewrap
-/// starts so that it cannot create another user namespace, however loose the
-/// command's mounts are. Matching is advisory only: it never changes the
-/// command's outcome, reruns it or widens its authority.
+/// Only this evidence permits automatic host routing after a sandbox attempt.
+/// It is written after an explicit launcher failure on the supervisor's private
+/// control pipe, before the final `go`. Payload stdout/stderr never reach it.
+pub(super) const PRESTART_LAUNCHER_FAILURE: &str = "supervisor_launcher_failed_before_release";
+
+fn launcher_failure(cause: Option<&str>) -> bool {
+    matches!(
+        cause,
+        Some(
+            "sandbox_unavailable:bubblewrap_missing"
+                | "sandbox_unavailable:bubblewrap_launch_failed"
+                | "sandbox_unavailable:namespace_or_mount_setup_failed"
+                | "sandbox_unavailable:setup_timeout"
+        )
+    )
+}
+
+/// Output signatures consistent with a refused nested user namespace. Because a
+/// payload can print these strings itself, matches are diagnostic only and never
+/// establish why a run failed or that it had no effects.
 const NESTED_SANDBOX_DENIALS: &[&str] = &[
     "bwrap: No permissions to cre",
     "bwrap: setting up uid map: Permission denied",
@@ -66,9 +80,7 @@ const NESTED_SANDBOX_DENIALS: &[&str] = &[
     "No usable sandbox!",
 ];
 
-/// Structured hint for a receipt whose output shows a refused nested sandbox.
-/// A writing profile may rerun the same argv through the existing consent-backed
-/// `outside_command` route; read-only profiles have no such route.
+/// Advisory hint for output consistent with a refused nested sandbox.
 pub(super) fn nested_sandbox_hint(profile: &str, output: &[&[u8]]) -> Option<Value> {
     let signature = NESTED_SANDBOX_DENIALS.iter().find(|s| {
         output
@@ -79,12 +91,40 @@ pub(super) fn nested_sandbox_hint(profile: &str, output: &[&[u8]]) -> Option<Val
     Some(json!({
         "code": "nested_sandbox_denied",
         "signature": signature,
-        "explanation": "A program in this command tried to create its own namespace sandbox (bubblewrap, flatpak, unshare, rootless containers, Chromium/Electron, a nested Cortex) and the host refused it inside the command sandbox. This is a host nesting limit, not a defect of that program, and repeating command_run will not change it.",
+        "explanation": "The output matches a known nested-sandbox denial. It does not prove that the command had no effects.",
         "outside_command": if writer { "offered" } else { "not_offered" },
         "next": if writer {
-            "If the work needs this program's own sandbox, run the same argv with outside_command; the user confirms it on a permission card (Auto answers it itself) and a refusal means it did not run."
+            "The runtime does not replay this command. Check for prior effects before considering a separate outside_command request under its normal authorization rules."
         } else {
             "This role cannot run commands outside the sandbox: report the check as not run with this blocker, or leave it to a writing specialist."
+        },
+    }))
+}
+/// Output signatures of a privileged program (`sudo`, `pkexec`, `doas`) refused root
+/// inside the command sandbox, which runs with no_new_privs and nosuid mounts.
+const PRIVILEGE_DENIALS: &[&str] = &[
+    "\"no new privileges\" flag is set",
+    "sudo: effective uid is not 0",
+    "pkexec must be setuid root",
+    "doas: not installed setuid",
+];
+
+/// Advisory hint for output consistent with a privileged program refused in the sandbox.
+pub(super) fn privilege_hint(profile: &str, output: &[&[u8]]) -> Option<Value> {
+    let signature = PRIVILEGE_DENIALS.iter().find(|s| {
+        output
+            .iter()
+            .any(|chunk| chunk.windows(s.len()).any(|w| w == s.as_bytes()))
+    })?;
+    let writer = matches!(profile, "development" | "guarded");
+    Some(json!({
+        "code": "privilege_refused_in_sandbox",
+        "signature": signature,
+        "explanation": "The output matches a known refusal of privileges inside the sandbox. It does not prove that the command had no effects.",
+        "next": if writer {
+            "The runtime does not replay this command on the host. Check for prior effects before considering a separate outside_command request under its normal authorization rules."
+        } else {
+            "This role cannot run privileged commands: report the check as not run with this blocker, or leave it to a writing specialist."
         },
     }))
 }
@@ -308,6 +348,9 @@ fn settle(
     if let Some(hint) = nested_sandbox_hint(h["profile"].as_str().unwrap_or(""), &[&prefix, &tail])
     {
         value["nested_sandbox"] = hint;
+    }
+    if let Some(hint) = privilege_hint(h["profile"].as_str().unwrap_or(""), &[&prefix, &tail]) {
+        value["sandbox_privilege"] = hint;
     }
     if let Some(hint) = missing_program_hint(code, &[&prefix, &tail]) {
         value["missing_program"] = hint;
@@ -549,6 +592,13 @@ pub(super) async fn execute(
                 unreleased.reference.clone(),
             );
             let cause = cause.unwrap_or_else(|| store_cause(&error));
+            // A timeout, lost pipe or authority failure is not an explicit
+            // launcher failure, even when we never released the payload.
+            let evidence = if launcher_failure(Some(&cause)) {
+                PRESTART_LAUNCHER_FAILURE
+            } else {
+                "payload_never_released"
+            };
             let timings = Value::Object(timings);
             if let Ok(reply) = ex.write(move |db| {
                 native_commands::settle_unrecorded_tx(
@@ -559,7 +609,7 @@ pub(super) async fn execute(
                     Some(&r),
                     "command_not_started",
                     None,
-                    "payload_never_released",
+                    evidence,
                     Some(&cause),
                     &timings,
                 )
@@ -1419,6 +1469,20 @@ mod resettle_tests {
             &[b"bwrap is mentioned", b"no namespaces here"]
         )
         .is_none());
+    }
+
+    #[test]
+    fn privilege_hint_names_root_refused_in_the_sandbox() {
+        let sudo: &[u8] = b"sudo: The \"no new privileges\" flag is set, which prevents sudo from running as root.\n";
+        let writer = privilege_hint("development", &[b"", sudo]).unwrap();
+        assert_eq!(writer["code"], "privilege_refused_in_sandbox");
+        assert!(writer["next"].as_str().unwrap().contains("on the host"));
+        let reader = privilege_hint("read_only", &[sudo]).unwrap();
+        assert!(reader["next"]
+            .as_str()
+            .unwrap()
+            .contains("cannot run privileged"));
+        assert!(privilege_hint("development", &[b"sudo apt install make"]).is_none());
     }
 
     #[test]

@@ -70,6 +70,10 @@ impl Fixture {
         reply["result"].clone()
     }
     async fn start(&mut self, routing_override: bool) {
+        let path = routing_override.then(|| self.config().join("cortex/override.json"));
+        self.start_with_override(path.as_deref()).await;
+    }
+    async fn start_with_override(&mut self, routing_override: Option<&Path>) {
         self.child = Some(
             Command::new(env!("CARGO_BIN_EXE_workspace-service"))
                 .arg(self.root.join("projects"))
@@ -82,10 +86,7 @@ impl Fixture {
                 )
                 .env_clear()
                 .env("HOME", self.root.join("home"))
-                .envs(
-                    routing_override
-                        .then(|| ("CORTEX_ROUTING", self.config().join("cortex/override.json"))),
-                )
+                .envs(routing_override.map(|path| ("CORTEX_ROUTING", path)))
                 .env("PATH", self.root.join("bin"))
                 .env("XDG_CONFIG_HOME", self.root.join("config"))
                 .env("XDG_STATE_HOME", self.root.join("state"))
@@ -252,6 +253,54 @@ async fn native_defaults_socket_matches_full_oracle_replies_and_files() {
     assert!(!f.root.join("projects/.cortex-dev").exists());
     f.stop().await;
 }
+#[tokio::test]
+async fn machine_settings_empty_routing_override_matches_unset() {
+    let mut fixture = Fixture::new();
+    for routing in [None, Some(Path::new(""))] {
+        fixture.start_with_override(routing).await;
+        let read = fixture
+            .rpc("machine.call", json!({"op":"config.read","params":{}}))
+            .await;
+        assert_eq!(read["ok"], true, "routing={routing:?}: {read}");
+        assert!(read["result"]["config"].is_object());
+        fixture.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn machine_settings_preserves_absolute_routing_override_and_refuses_relative_path() {
+    let mut fixture = Fixture::new();
+    let path = fixture.config().join("override.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        r#"{"model_policy_version":2,"enabled":{},"deny":["codex-acp/*"]}"#,
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    fixture.start_with_override(Some(&path)).await;
+    let read = fixture
+        .rpc("machine.call", json!({"op":"config.read","params":{}}))
+        .await;
+    assert_eq!(read["ok"], true, "{read}");
+    assert_eq!(
+        read["result"]["config"]["surfaces"]["routing"]["deny"],
+        json!(["codex-acp/*"])
+    );
+    fixture.stop().await;
+
+    fixture
+        .start_with_override(Some(Path::new("override.json")))
+        .await;
+    let read = fixture
+        .rpc("machine.call", json!({"op":"config.read","params":{}}))
+        .await;
+    assert_eq!(read["ok"], false);
+    assert_eq!(read["code"], "unsafe_storage");
+    fixture.stop().await;
+}
+
 #[tokio::test]
 async fn native_routing_mcp_socket_matches_full_oracle_replies_and_files() {
     let corpus: Value =

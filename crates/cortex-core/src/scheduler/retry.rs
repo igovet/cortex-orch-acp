@@ -6,8 +6,80 @@ use crate::{
     ports::ProcessObservation,
     CoreError, CoreResult, TaskState,
 };
-use rusqlite::{OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
+/// Why an attempt ended, when it is not the model's failure: the engine, the
+/// transport, the session vanishing without the model ending its turn, a lost
+/// login, no capacity, the owner pausing, the runtime restarting, the sandbox not
+/// being prepared, or the verifier's environment. A retry after one of these never
+/// escalates the node, never takes a ladder rung and never replans.
+pub const INFRASTRUCTURE_CLASSES: [&str; 9] = [
+    "engine_failure",
+    "transport_failure",
+    "worker_lost",
+    "authorization_loss",
+    "capacity_unavailable",
+    "owner_paused",
+    "runtime_restart",
+    "sandbox_unavailable",
+    "verifier_environment",
+];
+/// Whether a recorded failure class is infrastructure (see [`INFRASTRUCTURE_CLASSES`]).
+/// Every other class (`result_refused`, `degenerate_turn`, `indeterminate`, ...) is
+/// the attempt's own quality and may escalate its node.
+pub fn infrastructure_class(class: &str) -> bool {
+    INFRASTRUCTURE_CLASSES.contains(&class)
+}
+/// Infrastructure retries of one node lineage (the node and its review fixes, in
+/// every plan revision since the task was last reopened) that run on the ordinary
+/// backoff. After this many the node keeps waiting on a long, growing delay
+/// ([`INFRASTRUCTURE_WAIT_FIRST`]) instead of stopping: no rung, no replan.
+pub const INFRASTRUCTURE_RETRY_CAP: usize = 6;
+/// The first delay of an exhausted lineage's infrastructure wait, in seconds; it
+/// doubles with every further loss up to [`INFRASTRUCTURE_WAIT_MAX`].
+pub const INFRASTRUCTURE_WAIT_FIRST: f64 = 300.0;
+pub const INFRASTRUCTURE_WAIT_MAX: f64 = 3600.0;
+/// Classes that are not a failure of the node at all (the owner paused, the runtime
+/// restarted): retried at once and never counted toward [`INFRASTRUCTURE_RETRY_CAP`].
+fn interruption(class: &str) -> bool {
+    matches!(class, "owner_paused" | "runtime_restart")
+}
+/// The node a review fix `_fix_<n>_<node>` repairs, else the node itself.
+pub fn node_base(node: &str) -> &str {
+    node.strip_prefix("_fix_")
+        .and_then(|rest| rest.split_once('_'))
+        .filter(|(n, _)| n.parse::<u32>().is_ok())
+        .map(|(_, base)| base)
+        .unwrap_or(node)
+}
+/// The infrastructure retries already counted for `node`'s lineage since the task
+/// was last reopened, across plan revisions.
+pub fn lineage_infrastructure_retries(
+    db: &Connection,
+    task: &str,
+    node: &str,
+) -> CoreResult<usize> {
+    let base = node_base(node);
+    let rows = db
+        .prepare(
+            "SELECT json_extract(payload_json,'$.node'),coalesce(json_extract(payload_json,'$.failure_class'),'')
+             FROM runtime_events WHERE task_id=?1 AND type='ASSIGNMENT_RETRIED'
+             AND json_extract(payload_json,'$.failed_at') IS NOT NULL
+             AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='TASK_REOPENED'),0)",
+        )?
+        .query_map([task], |r| {
+            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows
+        .iter()
+        .filter(|(n, class)| {
+            n.as_deref().is_some_and(|n| node_base(n) == base)
+                && infrastructure_class(class)
+                && !interruption(class)
+        })
+        .count())
+}
 #[derive(Debug, Clone, Copy)]
 pub struct RetryWindow {
     pub first_delay: f64,
@@ -198,14 +270,7 @@ pub fn retry_lost_tx(
         return refuse("engine_authentication_required");
     }
     let route = class == "capacity_unavailable" || failure["route_failure"] == true;
-    let infrastructure = [
-        "engine_failure",
-        "transport_failure",
-        "worker_lost",
-        "authorization_loss",
-    ]
-    .contains(&class)
-        && !route;
+    let infrastructure = infrastructure_class(class) && !route;
     let ordinary = retries
         .iter()
         .filter(|r| {
@@ -213,25 +278,42 @@ pub fn retry_lost_tx(
                 && r["failed_at"].is_null()
                 && r["auth_retry"] != true
                 && r["owner_wait_continuation"] != true
+                && r["obstacle_retry"] != true
         })
         .count();
     let mut retry = json!({"node":node,"revision":revision,"retry":retries.len()+1,"previous_assignment":assignment,
         "observed_session":if provision.is_some(){"absent"}else{"not_provisioned"},"failure_class":class});
+    // Why the attempt ended, as the runtime observed it (engine exit, transport close,
+    // runtime cancel, owner pause, restart, a bounded redacted stderr tail).
+    if failure["ending"].is_object() {
+        retry["ending"] = failure["ending"].clone();
+    }
     if continuing {
         retry["owner_wait_continuation"] = json!(true);
     } else if route {
-        if retries
+        let routed = retries
             .iter()
             .filter(|r| r["route_failure"] == true)
-            .count()
-            >= 6
-        {
-            return refuse("worker_retry_limit");
-        }
+            .count();
         if auth {
             return refuse("engine_authentication_required");
         }
         retry["route_failure"] = json!(true);
+        if routed >= INFRASTRUCTURE_RETRY_CAP {
+            // No capacity for this node is an outage, never the model's failure: the
+            // node waits on a growing delay without a rung (no worker_retry_limit).
+            let delay = infrastructure_wait(routed - INFRASTRUCTURE_RETRY_CAP);
+            retry["infrastructure_wait"] = json!(true);
+            retry["retry_not_before"] = json!(observed.now + delay);
+            if routed == INFRASTRUCTURE_RETRY_CAP {
+                loop_broken_tx(db, task, &node, class, routed + 1, delay)?;
+            }
+        }
+    } else if infrastructure && interruption(class) {
+        // The owner paused or the runtime restarted: not a failure of the node.
+        retry["failed_at"] = json!(observed.now);
+        retry["retry_not_before"] = json!(observed.now);
+        retry["infrastructure_retry"] = json!(0);
     } else if infrastructure {
         let mut times = retries
             .iter()
@@ -240,12 +322,30 @@ pub fn retry_lost_tx(
         times.push(observed.now);
         times.sort_by(f64::total_cmp);
         let decision = windowed_retry(&times, observed.now, observed.window)?;
-        if !decision.may_retry {
-            return refuse("worker_retry_limit");
-        }
+        let lineage = lineage_infrastructure_retries(db, task, &node)?;
         retry["failed_at"] = json!(observed.now);
-        retry["retry_not_before"] = json!(observed.now + decision.delay);
         retry["infrastructure_retry"] = json!(decision.retry_number);
+        retry["lineage_infrastructure_retry"] = json!(lineage + 1);
+        if lineage >= INFRASTRUCTURE_RETRY_CAP {
+            // The lineage's ordinary infrastructure budget is spent (across plan
+            // revisions, not only inside one window): an infrastructure wait without
+            // a rung or a replan, rechecked by the runtime when the delay ends.
+            let delay = infrastructure_wait(lineage - INFRASTRUCTURE_RETRY_CAP);
+            retry["infrastructure_wait"] = json!(true);
+            retry["retry_not_before"] = json!(observed.now + delay);
+            if lineage == INFRASTRUCTURE_RETRY_CAP {
+                loop_broken_tx(db, task, &node, class, lineage + 1, delay)?;
+            }
+        } else {
+            // A streak that kept failing for a whole window waits the longest
+            // ordinary delay; it is never turned into the model's failure.
+            let delay = if decision.may_retry {
+                decision.delay
+            } else {
+                observed.window.max_delay
+            };
+            retry["retry_not_before"] = json!(observed.now + delay);
+        }
     } else if ordinary >= 2 {
         return refuse("worker_retry_limit");
     }
@@ -255,19 +355,45 @@ pub fn retry_lost_tx(
     if let Some(attempt) = observed.attempt {
         let receipts = db
             .prepare(
-                "SELECT r.result_json FROM runtime_requests r JOIN trusted_channels c ON c.channel_id=r.actor
+                "SELECT r.request_key,r.operation,r.result_json FROM runtime_requests r JOIN trusted_channels c ON c.channel_id=r.actor
             WHERE r.task_id=? AND c.attempt_id=? AND r.operation IN
             ('command_run','project_write','project_edit','project_mkdir','project_delete','project_skill_link','draft_write','external_call')
             AND coalesce(json_extract(r.result_json,'$.complete'),0)!=1 AND coalesce(json_extract(r.result_json,'$.status'),'')!='complete'",
             )?
-            .query_map((task, attempt), |r| r.get::<_, String>(0))?
+            .query_map((task, attempt), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
-        // An unparsable receipt is never a known outcome.
-        let unknown = receipts.iter().any(|raw| {
-            !serde_json::from_str::<Value>(raw).is_ok_and(|receipt| action_outcome_known(&receipt))
-        });
-        if unknown {
+        let mut reverify = Vec::new();
+        for (request, operation, raw) in receipts {
+            // An unparsable receipt is never a known outcome.
+            let Ok(receipt) = serde_json::from_str::<Value>(&raw) else {
+                return refuse("lost_worker_action_outcome_unknown");
+            };
+            if action_outcome_known(&receipt) {
+                continue;
+            }
+            // After a service restart the runtime settled what the gone session left
+            // open for re-verification (`settled_by: runtime_reverify`): the same node
+            // resumes and its fresh attempt re-verifies these before redoing anything.
+            if class == "runtime_restart" && receipt["settled_by"] == "runtime_reverify" {
+                let mut item = json!({"request":request,"operation":operation});
+                for key in ["path", "argv", "cwd", "tool_call_ref"] {
+                    if !receipt[key].is_null() {
+                        item[key] = receipt[key].clone();
+                    }
+                }
+                reverify.push(item);
+                continue;
+            }
             return refuse("lost_worker_action_outcome_unknown");
+        }
+        if !reverify.is_empty() {
+            retry["reverify"] = json!(reverify);
         }
         // Release is justified by this exact confirmed process observation.
         db.execute("UPDATE capacity_reservations SET state='released',updated_at=?,release_observation='process_exited'
@@ -310,5 +436,102 @@ pub fn retry_lost_tx(
         return refuse("lost_worker_result_changed");
     }
     event_tx(db, task, "ASSIGNMENT_RETRIED", retry)?;
+    Ok(())
+}
+/// The delay of the `n`-th (0-based) loss after a lineage's infrastructure budget
+/// is spent: [`INFRASTRUCTURE_WAIT_FIRST`] doubling up to [`INFRASTRUCTURE_WAIT_MAX`].
+pub fn infrastructure_wait(n: usize) -> f64 {
+    (INFRASTRUCTURE_WAIT_FIRST * 2f64.powi(n.min(16) as i32)).min(INFRASTRUCTURE_WAIT_MAX)
+}
+/// The loop key of a repeated failure: `kind | node lineage | subject`.
+pub fn loop_key(kind: &str, node: &str, subject: &str) -> String {
+    crate::digest(format!("{kind}|{}|{subject}", node_base(node)).as_bytes())
+}
+/// `LOOP_BROKEN` for a lineage whose infrastructure budget is spent: the node keeps
+/// waiting on the runtime's growing delay, without a rung, a replan or a model call
+/// until the delay ends.
+fn loop_broken_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    node: &str,
+    class: &str,
+    count: usize,
+    delay: f64,
+) -> CoreResult<()> {
+    event_tx(
+        db,
+        task,
+        "LOOP_BROKEN",
+        json!({"key":loop_key("worker_lost",node,class),"kind":"worker_lost","node":node,"count":count,
+            "action":"infrastructure_wait","limits":[],"failure_class":class,"retry_delay":delay}),
+    )?;
+    Ok(())
+}
+/// Record why an attempt of `assignment` ended without an accepted result, as the
+/// `assignment_failed` event [`retry_lost_tx`] classifies its retry by: `cause` (what
+/// the runtime observed), its failure `class` (see [`INFRASTRUCTURE_CLASSES`]; the
+/// rest are quality classes) and the bounded `ending` facts (exit status or signal,
+/// transport close, runtime cancel, stderr tail). Once per attempt; an attempt with
+/// a recorded worker result records nothing.
+pub fn record_attempt_ending_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    assignment: &str,
+    attempt: &str,
+    cause: &str,
+    class: &str,
+    ending: &Value,
+) -> CoreResult<bool> {
+    let published: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=? AND event_type='worker_result'
+         AND superseded=0 AND assignment_ref IN (?,?))",
+        (task, assignment, attempt),
+        |r| r.get(0),
+    )?;
+    if published {
+        return Ok(false);
+    }
+    let payload = json!({"error":cause,"failure_class":class,"attempt":attempt,"ending":ending});
+    let changed = db.execute(
+        "INSERT OR IGNORE INTO task_events(task_id,event_type,assignment_ref,dedup_key,payload_json,origin,created_at)
+         VALUES (?,'assignment_failed',?,?,?,'native-runtime',?)",
+        (
+            task,
+            assignment,
+            format!("attempt-ended:{attempt}"),
+            payload.to_string(),
+            crate::now(),
+        ),
+    )?;
+    if changed == 1 {
+        event_tx(
+            db,
+            task,
+            "ATTEMPT_ENDED",
+            json!({"assignment_ref":assignment,"attempt":attempt,"cause":cause,"failure_class":class,"ending":ending}),
+        )?;
+    }
+    Ok(changed == 1)
+}
+/// An infrastructure pause of the task (`AUTOMATIC_PAUSED`, `pause_kind:
+/// infrastructure`): no rung, no replan and no model call; the runtime rechecks it
+/// itself and the no-progress notice tells the owner. `details` carries the reason,
+/// the loop key and what repeated.
+pub fn infrastructure_pause_tx(db: &Transaction<'_>, task: &str, details: Value) -> CoreResult<()> {
+    let (state, revision) = domain::task_tx(db, task)?;
+    if state.terminal() || matches!(state, TaskState::Paused | TaskState::WaitingUser) {
+        return Ok(());
+    }
+    let mut details = details;
+    details["pause_kind"] = json!("infrastructure");
+    details["revision"] = json!(revision);
+    details["previous"] = json!(state);
+    event_tx(db, task, "AUTOMATIC_PAUSED", details)?;
+    domain::state_tx(
+        db,
+        task,
+        TaskState::Recovering,
+        Some("automatic_continuation_paused"),
+    )?;
     Ok(())
 }

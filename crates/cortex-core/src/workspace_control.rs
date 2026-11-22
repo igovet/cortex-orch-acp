@@ -87,14 +87,16 @@ mod coordinator_card_tests {
             .unwrap();
         store
             .write(|db| {
-                for answer in ["Stop", "stop", "finish now", "Стоп"] {
+                for (answer, which) in [("Stop", "web"), ("stop", "worker"), ("finish now", "relay"), ("Стоп", "cache")] {
                     let q = lifecycle::skill_proposals::request(
                         db,
                         &root,
                         "t",
                         "c",
                         &format!("ask-{answer}"),
-                        &json!({"question":"Stop the daemon first or keep it?","options":["Stop","Keep"]}),
+                        // A distinct question per answer: a repeat of an answered one is
+                        // refused (`question_already_answered`).
+                        &json!({"question":format!("Stop the {which} daemon first or keep it?"),"options":["Stop","Keep"]}),
                     )?;
                     assert!(waits::answer_tx(db, "t", q["question_id"].as_str().unwrap(), answer, "text", None)?);
                     assert_ne!(domain::task_tx(db, "t")?.0, TaskState::Cancelled, "{answer} cancelled the task");
@@ -105,10 +107,9 @@ mod coordinator_card_tests {
                     )?;
                     assert_eq!(forced, 0);
                 }
-                // The runtime's own stop question keeps its finish keywords.
+                // A runtime stop question an earlier version recorded keeps its finish keywords.
                 domain::state_tx(db, "t", TaskState::Executing, None)?;
-                domain::stop_tx(db, "t", "native_session_start_failed")?;
-                domain::state_tx(db, "t", TaskState::WaitingUser, None)?;
+                domain::legacy_stop_question_tx(db, "t", "native_session_start_failed")?;
                 let id: String = db.query_row(
                     "SELECT id FROM pending_questions WHERE task_id='t' AND status='open' AND dedup_key LIKE 'runtime:stop:%'",
                     [],
@@ -149,7 +150,12 @@ mod coordinator_card_tests {
                         lifecycle::event_tx(db, task, "NATIVE_TASK_SETTINGS", json!({"settings":{"language":language}}))?;
                     }
                     domain::state_tx(db, task, TaskState::Executing, None)?;
-                    domain::stop_tx(db, task, "native_session_start_failed")?;
+                    // The runtime itself never asks: the stop is a continuation.
+                    assert_eq!(domain::stop_tx(db, task, "native_session_start_failed")?, TaskState::Recovering);
+                    assert_eq!(db.query_row("SELECT count(*) FROM pending_questions WHERE task_id=?", [task], |r| r.get::<_, i64>(0))?, 0);
+                    // A stored question of an earlier version still reads in the task language.
+                    domain::state_tx(db, task, TaskState::Executing, None)?;
+                    domain::legacy_stop_question_tx(db, task, "native_session_start_failed")?;
                     let (text, options): (String, String) = db.query_row(
                         "SELECT text,options_json FROM pending_questions WHERE task_id=? AND status='open'",
                         [task],
@@ -272,8 +278,8 @@ mod coordinator_card_tests {
             db.execute("UPDATE runtime_tasks SET state='REVIEWING',revision=1 WHERE task_id='t'",[])?;
             db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'_review_1','worker-code-reviewer','Review','[]','[\"**\"]','review','completed','rv',?)",
                 [json!({"verdict":"BLOCK","summary":"Not traced.","report_ref":"r_0123456789ab"}).to_string()])?;
-            domain::stop_tx(db,"t","native_session_start_failed")?;
-            domain::stop_tx(db,"t","review_blocked")?;
+            domain::legacy_stop_question_tx(db,"t","native_session_start_failed")?;
+            domain::legacy_stop_question_tx(db,"t","review_blocked")?;
             let b=Binding{task:"t".into(),draft:"d".into(),session:"s".into(),owner:owner.clone(),version:1,execution_version:1,goal:"g".into()};
             let cards=decisions_tx(db,&b)?;
             assert_eq!(cards.len(),2);
@@ -590,7 +596,15 @@ pub fn settle_unknown(
                 if !matches!(
                     request["action"].as_str(),
                     Some("task_settings" | "worker_message" | "rerun_check" | "pause" | "stop")
-                ) {
+                ) && !lifecycle::automatic::held(db, &b.task)?
+                    // No-stop policy: the unknown control outcome is a continuation that
+                    // records it; only a paused or waiting task keeps it as its barrier.
+                    && !lifecycle::automatic::continue_unsettled_tx(
+                        db,
+                        &b.task,
+                        "native_control_outcome_unknown",
+                    )?
+                {
                     domain::native_recovery_required_tx(
                         db,
                         &b.task,
@@ -705,6 +719,18 @@ pub fn admit_input(
                     domain::owner_pause_tx(db,&b.task,&b.owner,&format!("desktop:{}",key(request)?),true,version)?;
                 },
                 "retry" => {
+                    // A node waiting out an infrastructure retry delay retries at once on
+                    // the owner's Retry: the delay only spares model calls, never the owner.
+                    if state==TaskState::Executing {
+                        let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64());
+                        let waiting:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events e JOIN runtime_tasks t USING(task_id)
+                            WHERE e.task_id=?1 AND e.type='ASSIGNMENT_RETRIED' AND json_extract(e.payload_json,'$.revision')=t.revision
+                            AND json_extract(e.payload_json,'$.retry_not_before')>?2
+                            AND e.id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='OWNER_RETRY_REQUESTED'),0))",
+                            (&b.task, now), |r| r.get(0))?;
+                        if !waiting { return refuse("retry_not_expected"); }
+                        lifecycle::event_tx(db,&b.task,"OWNER_RETRY_REQUESTED",json!({"request":key(request)?}))?;
+                    } else {
                     if !matches!(state,TaskState::Recovering|TaskState::WaitingUser|TaskState::Blocked) { return refuse("retry_not_expected"); }
                     // Retry is the owner's explicit acknowledgement of effects whose outcome
                     // stayed unknown (e.g. a command interrupted by a restart). Record them as
@@ -719,6 +745,7 @@ pub fn admit_input(
                         lifecycle::event_tx(db,&b.task,"OWNER_ACKNOWLEDGED_UNKNOWN_EFFECTS",json!({"count":acknowledged,"request":key(request)?}))?;
                     }
                     domain::interrupt_tx(db,&b.task)?;
+                    }
                 },
                 "prompt" | "incoming_prompt" => {
                     let text=request["text"].as_str().filter(|s|!s.trim().is_empty()&&s.chars().count()<=32_000).ok_or(CoreError::Refused("invalid_message"))?;

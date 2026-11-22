@@ -12,6 +12,8 @@ export type RemoteDevice = { deviceId: string; name: string; pairedAt: number; l
 export type RemoteStatus = {
   available: boolean; reason?: string; enabled: boolean; machineId: string;
   relay: RemoteRelay; pairing: null | RemotePairing; pending: RemotePending[]; devices: RemoteDevice[];
+  /** Whether a paired phone may answer a sudo password prompt (the owner's setting). Absent from an older service. */
+  sudoFromPhone?: boolean;
 };
 export type RemoteRequests = {
   "remote.status": Record<string, never>;
@@ -21,9 +23,10 @@ export type RemoteRequests = {
   "remote.pairing.decide": { requestId: string; allow: boolean };
   "remote.devices.revoke": { deviceId: string };
   "remote.relay.set": { url: string | null };
+  "remote.sudo.set": { allowed: boolean };
 };
 export type RemoteOperation = keyof RemoteRequests;
-export const REMOTE_OPERATIONS: readonly RemoteOperation[] = ["remote.status", "remote.enable", "remote.pairing.start", "remote.pairing.cancel", "remote.pairing.decide", "remote.devices.revoke", "remote.relay.set"];
+export const REMOTE_OPERATIONS: readonly RemoteOperation[] = ["remote.status", "remote.enable", "remote.pairing.start", "remote.pairing.cancel", "remote.pairing.decide", "remote.devices.revoke", "remote.relay.set", "remote.sudo.set"];
 
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const isStr = (v: unknown): v is string => typeof v === "string";
@@ -39,11 +42,13 @@ export function readRemoteStatus(raw: unknown): RemoteStatus {
   if (p !== null && (!p || !isStr(p.link) || !Array.isArray(p.qr) || !p.qr.every(row => isStr(row) && /^[01]+$/.test(row)) || !isNum(p.expiresAt))) throw bad("pairing");
   if (!Array.isArray(r.pending) || !r.pending.every(x => x && isStr(x.requestId) && isStr(x.deviceName) && isStr(x.fingerprint) && isNum(x.requestedAt))) throw bad("pending");
   if (!Array.isArray(r.devices) || !r.devices.every(x => x && isStr(x.deviceId) && isStr(x.name) && isNum(x.pairedAt) && (x.lastSeenAt === null || isNum(x.lastSeenAt)) && typeof x.connected === "boolean")) throw bad("devices");
+  if (r.sudoFromPhone !== undefined && typeof r.sudoFromPhone !== "boolean") throw bad("sudoFromPhone");
   return {
     available: r.available, ...(isStr(r.reason) ? { reason: r.reason } : {}), enabled: r.enabled, machineId: r.machineId,
     relay: { url: relay.url as string | null, source: relay.source as RemoteRelay["source"] },
     pairing: p === null ? null : { link: p.link as string, qr: [...(p.qr as string[])], expiresAt: p.expiresAt as number },
     pending: (r.pending as RemotePending[]).map(x => ({ requestId: x.requestId, deviceName: x.deviceName, fingerprint: x.fingerprint, requestedAt: x.requestedAt })),
     devices: (r.devices as RemoteDevice[]).map(x => ({ deviceId: x.deviceId, name: x.name, pairedAt: x.pairedAt, lastSeenAt: x.lastSeenAt, connected: x.connected })),
+    ...(typeof r.sudoFromPhone === "boolean" ? { sudoFromPhone: r.sudoFromPhone } : {}),
   };
 }

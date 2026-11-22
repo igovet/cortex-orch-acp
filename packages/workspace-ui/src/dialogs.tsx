@@ -8,7 +8,7 @@ import { createAttachments, createDictation, MessageComposer } from "./composer"
 import { useWs } from "./ctx";
 import { I, MenuItem, Modal, Pop, useWantOverview } from "./kit";
 import { ActionBar, Row, Whole } from "./layout";
-import { behindTarget, checksLine, conflictFacts, fileName, needsOverride, repoOf, targetOptions, taskCheckout, worktreeWork } from "./review-model";
+import { behindTarget, checksLine, conflictFacts, fileName, finishBlocked, needsOverride, repoOf, targetOptions, taskCheckout, worktreeWork } from "./review-model";
 import { automaticFinishOffer, clock, ownerHold, sameBranch } from "./selectors";
 import { same as sameData } from "./stable";
 import { acceptBlocked } from "./review-model";
@@ -183,7 +183,10 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
   const pending = () => !t().acceptance;
   const [sure, setSure] = createSignal(false);
   const overrides = () => pending() && (t().reviewActions?.acknowledgeOpenChecks ?? needsOverride(t().result?.checks ?? []));
-  const why = () => same() && !t().integrationFacts?.commitAvailable ? t().integrationFacts?.reason ?? "Refresh the task before committing." : pending() ? acceptBlocked(t()) ?? (overrides() && !sure() ? "Tick the box about the open checks first" : null) : null;
+  const why = () => finishBlocked(t())
+    ?? (same() && !t().integrationFacts?.commitAvailable ? t().integrationFacts?.reason ?? "Refresh the task before committing." : null)
+    ?? (!same() && how() === "pr" && t().integration?.method === "pr" ? "A pull request is already open for this version" : null)
+    ?? (overrides() && !sure() ? "Tick the box about the open checks first" : null);
   // The target is the one part of the label that can be long, so only it shortens; the whole label stays the button's name.
   const label = () => same() ? `Confirm commit to ${target()}` : pending() ? `Accept v${t().result?.version} and ${how() === "squash" ? `merge into ${target()}` : "create PR"}` : how() === "squash" ? `Confirm merge into ${target()}` : ws.store.mode === "demo" ? "Push and create PR" : "Create PR (no push)";
   const noGh = () => !same() && how() === "pr" && gh() !== "yes";

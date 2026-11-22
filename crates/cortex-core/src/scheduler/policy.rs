@@ -234,7 +234,8 @@ impl SchedulingPolicy for NativePolicy {
             (task,task,node),|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
         let held:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events e JOIN runtime_tasks t USING(task_id)
             WHERE e.task_id=? AND e.type='ASSIGNMENT_RETRIED' AND json_extract(e.payload_json,'$.revision')=t.revision
-            AND json_extract(e.payload_json,'$.node')=? AND json_extract(e.payload_json,'$.retry_not_before')>?)",
+            AND json_extract(e.payload_json,'$.node')=? AND json_extract(e.payload_json,'$.retry_not_before')>?
+            AND e.id>coalesce((SELECT max(o.id) FROM runtime_events o WHERE o.task_id=e.task_id AND o.type='OWNER_RETRY_REQUESTED'),0))",
             (task,node,self.now_seconds),|r|r.get(0))?;
         if held {
             return Ok(false);
@@ -404,7 +405,8 @@ pub fn claim_obstacles_tx(
         let backoff: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'
              AND json_extract(payload_json,'$.revision')=? AND json_extract(payload_json,'$.node')=?
-             AND json_extract(payload_json,'$.retry_not_before')>?)",
+             AND json_extract(payload_json,'$.retry_not_before')>?
+             AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='OWNER_RETRY_REQUESTED'),0))",
             (task, revision, &node, now_seconds),
             |r| r.get(0),
         )?;

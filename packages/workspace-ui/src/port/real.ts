@@ -1,8 +1,9 @@
 import { wireAttachments as checkedAttachments } from "../attachments";
 import { capabilities as localCapabilities, decodeResponse, negotiate, PROTOCOL, validate } from "@cortex/workspace-contract";
 import type { Answer as WireAnswer, Decision as WireDecision, Receipt as WireReceipt, Result as WireResult, Task as WireTask, HistoryRow, WireTypes } from "@cortex/workspace-contract";
-import { ACCESS_MODES, readRemoteStatus, capabilityOf, checksPassed, DomainError, effortLabel, ENGINE_KEYS, engineLabel, FEATURES, LANGUAGES, LOCAL_MACHINE_ID, MACHINE_COMMANDS, mapProjectSlice, readableCheckReason, emptySession, overlayTask, validatePlan, WIRE_OPERATIONS } from "@cortex/workspace-domain";
+import { ACCESS_MODES, readRemoteStatus, readSudoPrompts, capabilityOf, checksPassed, DomainError, effortLabel, ENGINE_KEYS, engineLabel, FEATURES, LANGUAGES, LOCAL_MACHINE_ID, MACHINE_COMMANDS, mapProjectSlice, readableCheckReason, routeIdOf, emptySession, overlayTask, validatePlan, WIRE_OPERATIONS } from "@cortex/workspace-domain";
 import { nativeDelta, nativeVersion } from "./native";
+import { readOwnerActionReply, readOwnerActions, type OwnerActionRequests } from "@cortex/workspace-domain";
 import { applyNativeTaskDelta, weeklyUsage } from "@cortex/workspace-domain";
 import type { NativeTaskDelta, NativeTaskSnapshot } from "@cortex/workspace-domain";
 import { conversationOf } from "./history";
@@ -166,12 +167,12 @@ export function planFrom(text: string): PlanItem[] | null {
   } catch (error) { if (error instanceof SyntaxError || error instanceof DomainError) return null; throw error; }
 }
 /** The choices the machine's engines report, in the words the session uses. An engine that reported nothing offers nothing. */
-function sessionOptions(config: MachineConfig): SessionOptions {
-  const rules = config.surfaces?.routing;
+export function sessionOptions(config: MachineConfig, rules = config.surfaces?.routing, allowedRoutes: string[] | null = null): SessionOptions {
   const reported = ENGINE_KEYS.flatMap(engine => {
     if (config.setup?.[engine]?.status !== "connected" || config.catalogue?.[engine]?.failed || !rules) return [];
     return (config.catalogue?.[engine]?.models ?? []).filter(m => rules.engines[engine].enabled.includes(m.id)
-      && !rules.deny.some(token => token === m.id || token === m.routeId || token === `${engine}/${m.id}` || token === `${engine}/*`))
+      && !rules.deny.some(token => token === m.id || token === m.routeId || token === `${engine}/${m.id}` || token === `${engine}/*`)
+      && (allowedRoutes === null || allowedRoutes.includes(routeIdOf(engine, m.id)) || (m.routeId !== undefined && allowedRoutes.includes(m.routeId))))
       .map(m => ({ ...m, engine: engineLabel(engine) }));
   });
   const models = reported.map(({ id, routeId, label, engine, efforts }) => ({ id: routeId ?? id, label, engine, efforts }));
@@ -974,7 +975,9 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       // `workspaceDigest` rides in the machine's overlay beside the result (it is not one of the saved fields).
       const { result, reviewActions, integrationFacts } = known, workspaceDigest = (known as { workspaceDigest?: unknown }).workspaceDigest;
       return [id, { ...(result !== undefined ? { result } : {}), ...(reviewActions !== undefined ? { reviewActions } : {}),
-        ...(workspaceDigest !== undefined ? { workspaceDigest } : {}), ...(integrationFacts !== undefined ? { integrationFacts } : {}), ...saved }];
+        ...(workspaceDigest !== undefined ? { workspaceDigest } : {}), ...(integrationFacts !== undefined ? { integrationFacts } : {}),
+        // The task's spend is a facts read's too.
+        ...(known.spend !== undefined ? { spend: known.spend } : {}), ...saved }];
     }));
     return {...previous,projectId:project.projectId,openBranch:previous?.openBranch ?? "",defaultBranch:previous?.defaultBranch ?? "",
       repo:previous?.repo ?? null,workers:previous?.workers ?? [],reviews:previous?.reviews ?? [],
@@ -1581,6 +1584,41 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   const toReceipt = (requestId: string, wire: WireReceipt, operation: string): CommandReceipt => ({
     requestId, ok: RECORDED.has(wire.outcome), outcome: wire.outcome, message: wire.reason ?? (operation === "tasks.start" && wire.outcome === "busy" ? "This task was already started. Refresh to see its execution." : OUTCOME_WORDS[wire.outcome] ?? OUTCOME_WORDS.unknown), entityId: wire.target, entityVersion: wire.entityVersion,
   });
+  /** One answer to a sudo prompt, sent once. The message is not kept; a refusal comes back in words, never with the message. */
+  const SUDO_WORDS: Record<string, string> = {
+    unknown_sudo_prompt: "This prompt already closed: it was answered, cancelled or expired, or its command ended.",
+    invalid_sudo_password: "The password could not be sent: it is empty, too long or spans more than one line.",
+    remote_operation_refused: "Passwords and tokens from phones are turned off on the computer. Answer on the computer, or cancel.",
+  };
+  /** Owner actions: words for the service's refusals. A token is sent once and never kept or echoed. */
+  const OWNER_WORDS: Record<string, string> = {
+    unknown_owner_action: "This action already closed: it was resolved or its task ended.",
+    owner_token_refused: "The sign-in did not accept this token. Check the token and try again.",
+    owner_token_unsupported: "This service has no sign-in with a token. Use the terminal sign-in instead.",
+    invalid_owner_token: "The token could not be sent: it is empty, too long or spans more than one line.",
+    project_not_found: "This project is no longer on the machine.",
+    remote_operation_refused: "Passwords and tokens from phones are turned off on the computer. Do this on the computer.",
+  };
+  const ownerAct = async (message: OwnerActionRequests["owner_actions.act"]) => {
+    if (!serviceMethods.includes("owner_actions.act")) throw new Refusal("unsupported", "This machine cannot take this action.");
+    let reply: unknown;
+    try { reply = await transport.request("owner_actions.act", message); }
+    catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      const code = Object.keys(OWNER_WORDS).find(key => text.includes(key));
+      throw new Refusal("refused", code ? OWNER_WORDS[code] : "The machine did not take this action.");
+    }
+    return readOwnerActionReply(reply);
+  };
+  const sudoAnswer = async (message: { promptId: string; password: string } | { promptId: string; cancel: true }) => {
+    if (!serviceMethods.includes("askpass.answer")) throw new Refusal("unsupported", "This machine cannot take a sudo password.");
+    try { await transport.request("askpass.answer", message); }
+    catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      const code = Object.keys(SUDO_WORDS).find(key => text.includes(key));
+      throw new Refusal("refused", code ? SUDO_WORDS[code] : "The machine did not take the answer.");
+    }
+  };
 
   return {
     mode: "real",
@@ -1793,6 +1831,24 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         return readRemoteStatus(reply);
       },
       watch: listener => transport.subscribe(event => { if (event.type === "refresh") listener(); }),
+    },
+    sudoPrompts: {
+      // The machine's sudo password prompts. An older service has none: nothing to show, nothing to send.
+      async list() {
+        if (!serviceMethods.includes("askpass.list")) return null;
+        return readSudoPrompts(await transport.request("askpass.list", {}));
+      },
+      async answer(promptId, password) { await sudoAnswer({ promptId, password }); },
+      async cancel(promptId) { await sudoAnswer({ promptId, cancel: true }); },
+    },
+    ownerActions: {
+      // Access the machine's tasks lack. An older service has none: nothing to show, nothing to send.
+      async list() {
+        if (!serviceMethods.includes("owner_actions.list")) return null;
+        return readOwnerActions(await transport.request("owner_actions.list", {}));
+      },
+      act: (projectId, actionId, action) => ownerAct({ projectId, actionId, action }),
+      token: (projectId, actionId, token) => ownerAct({ projectId, actionId, action: "token", token }),
     },
     presented: () => Promise.all([...lateReads]).then(() => {}),
     watchOverview() {

@@ -18,12 +18,37 @@ fn text<'a>(v: &'a Value, field: &str) -> CoreResult<&'a str> {
         .as_str()
         .ok_or(CoreError::Refused("invalid_native_result"))
 }
+#[cfg(test)]
 fn validate_result(
     store: &Store,
     c: &Credential,
     i: &Identity,
     args: &Value,
     evidence: &EvidenceSnapshot,
+) -> CoreResult<Vec<Value>> {
+    validate_result_with(store, c, i, args, evidence, &Relief::default())
+}
+/// What the runtime relaxes for a submission after the same correctable refusal
+/// repeated [`SAME_REFUSAL_LIMIT`] times in one attempt (see [`relieve`]): it never
+/// turns a failed or unverified check into a pass, only records what stays open.
+#[derive(Default)]
+struct Relief {
+    /// Unread required predecessor reports are disclosed as an `unverified` limit
+    /// instead of refused.
+    disclose_unread_reports: bool,
+    /// A writer's failed assignment with an open verified failed check is recorded
+    /// without the one repair offer (`failed_check_repair_required`).
+    skip_repair_offer: bool,
+    /// Runtime limits (`outcome: unverified`, `source: runtime`) recorded with the result.
+    limits: Vec<Value>,
+}
+fn validate_result_with(
+    store: &Store,
+    c: &Credential,
+    i: &Identity,
+    args: &Value,
+    evidence: &EvidenceSnapshot,
+    relief: &Relief,
 ) -> CoreResult<Vec<Value>> {
     if i.role != "worker" || !matches!(i.stage.as_deref(), Some("execution" | "review")) {
         return Err(CoreError::Refused("worker_required"));
@@ -193,7 +218,7 @@ fn validate_result(
              AND json_extract(payload_json,'$.attempt')=? AND json_extract(payload_json,'$.code')='failed_check_repair_required')",
             (&i.task, &i.attempt), |r| r.get::<_, bool>(0),
         )?))?;
-        if !offered {
+        if !offered && !relief.skip_repair_offer {
             return Err(CoreError::Refused("failed_check_repair_required"));
         }
     }
@@ -201,7 +226,9 @@ fn validate_result(
     // without a named dead end, is refused with exactly what is outstanding; the
     // channel stays open and the same session continues.
     if let Some((code, _)) = outstanding(store, c, i, args)? {
-        return Err(CoreError::Refused(code));
+        if !(code == "review_predecessor_reports_required" && relief.disclose_unread_reports) {
+            return Err(CoreError::Refused(code));
+        }
     }
     Ok(checks)
 }
@@ -1111,7 +1138,7 @@ pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Va
         "review_resubmit_required" => "This request_key belongs to a refused submission of this review. Submit again with a fresh request_key.",
         "review_predecessor_reports_required" => "Read each required predecessor report listed in missing (your review packet's predecessor_reports; optional_reports are not required) through its final page with read_report. A report the runtime cannot read is not required and is retained on your result instead. This review stays active in this session; then submit again.",
         "review_coverage_unfinished" => "The not_covered parts listed in missing name no dead end, so you can still cover them. Review each one now in this session, then submit again; keep in not_covered only parts you cannot reach yourself, each with its blocker.",
-        "review_file_coverage_required" => "The changed files listed in missing were not read completely in their current state. Read each one with project_read in this session and submit again (for a file with review_lines in the review packet, reading those line ranges of its current bytes is enough); a part you genuinely cannot reach goes in not_covered with its blocker under verdict INCOMPLETE.",
+        "review_file_coverage_required" => "The changed files listed in missing were not read completely in their current state. Read them with project_read in this session, up to 8 files per read_batch call as inline project_read items, and submit again (for a file with review_lines in the review packet, reading those line ranges of its current bytes is enough); a part you genuinely cannot reach goes in not_covered with its blocker under verdict INCOMPLETE. After repeated refusals the result is recorded with every file still unread disclosed as unverified.",
         "review_block_findings_required" => "A BLOCK must name each confirmed problem in findings. Name them, or finish the review and choose the verdict your evidence supports.",
         "review_not_covered_required" => "not_covered goes with verdict INCOMPLETE only, and INCOMPLETE needs at least one not_covered part with its blocker.",
         "assignment_blocker_required" => "A failed assignment needs blocker: the dead end (kind and concrete detail) you cannot clear within your role and permissions. If you can still finish the work, finish it and submit the completed result instead.",
@@ -1278,15 +1305,328 @@ fn refresh_rebound_review_packet_tx(
     lifecycle::event_tx(db, task, "REVIEW_PACKET", event)?;
     Ok(())
 }
-/// Only called after schema validation, on the serial writer lane. Re-authenticate
-/// before every phase; external epoch changes may fence a publication in progress.
-/// Such a publication remains retained, but is never promoted to a node result.
+/// The same correctable refusal (same code, same named items) at most this many
+/// times in one attempt. At the limit a disclosable refusal is recorded with its
+/// items as `unverified` runtime limits, and a failed-check refusal as a failed
+/// assignment (or, for a review, an INCOMPLETE verdict) whose blocker is the open
+/// check, never as a pass. Stricter per-code bounds stay: report sections and
+/// changed-file coverage (2), the repair offer of a failed check (1).
+pub(super) const SAME_REFUSAL_LIMIT: usize = 3;
+/// Refusals that name a failed check the worker could not close.
+const FAILED_CHECK_CODES: [&str; 5] = [
+    "open_failed_check",
+    "omitted_failed_check",
+    "failed_check_repair_required",
+    "invalid_check_retraction",
+    "invalid_check_supersession",
+];
+fn copy_evidence(e: &EvidenceSnapshot) -> EvidenceSnapshot {
+    EvidenceSnapshot {
+        project_digest: e.project_digest.clone(),
+        ignored_digest: e.ignored_digest.clone(),
+        head: e.head.clone(),
+        metadata_only: e.metadata_only,
+        cap_reached: e.cap_reached,
+        incomplete: e.incomplete,
+        artifacts: e.artifacts.clone(),
+        workers: e.workers.clone(),
+        task_files: e.task_files.clone(),
+    }
+}
+/// Only called after schema validation, on the serial writer lane. A correctable
+/// refusal that already repeated identically ([`SAME_REFUSAL_LIMIT`]) is relieved
+/// once ([`relieve`]): the submission is recorded with what stays open disclosed,
+/// and `LOOP_BROKEN` names the loop. Every other outcome is the submission's own.
 pub(super) fn submit(
     store: &Store,
     credential: &Credential,
     expected: &Identity,
     args: &Value,
+    evidence: EvidenceSnapshot,
+) -> CoreResult<Value> {
+    let spare = copy_evidence(&evidence);
+    let first = submit_once(
+        store,
+        credential,
+        expected,
+        args,
+        evidence,
+        &Relief::default(),
+    );
+    let code = match &first {
+        Err(error) if correctable(error.code()) => error.code(),
+        _ => return first,
+    };
+    let Ok(Some((relieved, relief, action, missing))) =
+        relieve(store, credential, expected, args, code)
+    else {
+        return first;
+    };
+    let outcome = submit_once(store, credential, expected, &relieved, spare, &relief);
+    if outcome.is_ok() {
+        let attempt = expected.attempt.clone();
+        let _ = store.write(|db| {
+            let node: Option<String> = expected
+                .assignment
+                .as_deref()
+                .map(|a| {
+                    db.query_row(
+                        "SELECT node_id FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
+                        (&expected.task, a),
+                        |r| r.get(0),
+                    )
+                })
+                .transpose()
+                .unwrap_or(None);
+            let mut items = missing.clone();
+            items.sort();
+            let subject = format!("{code}|{}", items.join("|"));
+            lifecycle::event_tx(
+                db,
+                &expected.task,
+                "LOOP_BROKEN",
+                json!({"key":cortex_core::scheduler::retry::loop_key("result_refusal",node.as_deref().unwrap_or(""),&subject),
+                    "kind":"result_refusal","node":node,"attempt":attempt,"code":code,"count":SAME_REFUSAL_LIMIT,
+                    "action":action,"limits":relief.limits,"missing":missing.iter().take(32).collect::<Vec<_>>()}),
+            )?;
+            Ok(())
+        });
+    }
+    outcome
+}
+/// The relief for the `code` refusal of `args` once it is the
+/// [`SAME_REFUSAL_LIMIT`]-th identical one of this attempt: the arguments to record,
+/// what the runtime relaxes, the action (`disclosed` or `failed_assignment`) and the
+/// named items. `None` below the limit or for a refusal nothing can relieve (a
+/// malformed submission, a moving checkout, a command still running).
+fn relieve(
+    store: &Store,
+    c: &Credential,
+    i: &Identity,
+    args: &Value,
+    code: &'static str,
+) -> CoreResult<Option<(Value, Relief, &'static str, Vec<String>)>> {
+    // A checkout that another writer keeps changing (`review_project_revision_*`,
+    // `drift: external`) is not the reviewer's to correct and never counts toward
+    // this limit; neither does a command that is still running.
+    if matches!(
+        code,
+        "review_project_revision_changed"
+            | "review_project_revision_unstable"
+            | "review_resubmit_required"
+            | "command_not_settled"
+    ) {
+        return Ok(None);
+    }
+    let missing = refusal_missing(store, c, i, args, code);
+    // The caller names these items in the refusal it records; keep them for it.
+    if matches!(code, "open_failed_check" | "omitted_failed_check") {
+        if let Some(items) = &missing {
+            refusal_details(&c.channel_id, code, items.clone());
+        }
+    }
+    let items = missing.clone().unwrap_or_default();
+    let named = if items.is_empty() {
+        Value::Null
+    } else {
+        json!(items.iter().take(32).collect::<Vec<_>>())
+    };
+    let prior: Vec<String> = store.read(|db| {
+        Ok(db
+            .prepare(
+                "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='WORKER_RESULT_REFUSED'
+                 AND json_extract(payload_json,'$.attempt')=? AND json_extract(payload_json,'$.code')=?",
+            )?
+            .query_map((&i.task, &i.attempt, code), |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?)
+    })?;
+    let same = prior
+        .iter()
+        .filter_map(|raw| serde_json::from_str::<Value>(raw).ok())
+        .filter(|p| p["missing"] == named)
+        .count();
+    if same + 1 < SAME_REFUSAL_LIMIT {
+        return Ok(None);
+    }
+    let review = i.stage.as_deref() == Some("review");
+    let shown = |items: &[String]| -> String {
+        let mut text = items
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        if items.len() > 10 {
+            text.push_str(&format!("; and {} more", items.len() - 10));
+        }
+        text
+    };
+    let limit = |name: &str, blocker: String| json!({"name":name,"outcome":"unverified","blocker":blocker,"source":"runtime"});
+    let mut relieved = args.clone();
+    let mut relief = Relief::default();
+    // A review part left open is recorded as not covered, with the reviewer's own
+    // words, under a dead end the next plan owns (`other_role_work`).
+    let close_gaps = |relieved: &mut Value| {
+        if let Some(gaps) = relieved["not_covered"].as_array_mut() {
+            for gap in gaps {
+                if !lifecycle::review::valid_blocker(&gap["blocker"]) {
+                    gap["blocker"] = json!("other_role_work");
+                    if gap["reason"].as_str().is_none_or(|r| r.trim().is_empty()) {
+                        gap["reason"] = json!("The reviewer named no dead end for this part.");
+                    }
+                }
+            }
+        }
+    };
+    let action = match code {
+        "check_blocker_required" => {
+            for check in relieved["checks"].as_array_mut().into_iter().flatten() {
+                if matches!(check["outcome"].as_str(), Some("not_run" | "unverified"))
+                    && check["blocker"]
+                        .as_str()
+                        .is_none_or(|s| s.trim().is_empty())
+                {
+                    check["blocker"] = json!("No blocker was given for this check; the runtime recorded it unverified after repeated identical refusals.");
+                }
+            }
+            "disclosed"
+        }
+        "review_predecessor_reports_required" if review => {
+            relief.disclose_unread_reports = true;
+            relief.limits.push(limit(
+                "Predecessor reports not read",
+                format!("The reviewer did not read these required predecessor reports to their last page after repeated identical refusals: {}.", shown(&items)),
+            ));
+            "disclosed"
+        }
+        "review_coverage_unfinished"
+        | "review_not_covered_required"
+        | "review_block_findings_required"
+            if review =>
+        {
+            let incomplete = |v: &Value| {
+                v["verdict"]
+                    .as_str()
+                    .is_some_and(|v| v.eq_ignore_ascii_case("INCOMPLETE"))
+            };
+            let blocks = lifecycle::review::block_without_findings(&relieved);
+            if blocks || !incomplete(&relieved) {
+                // Never a pass: a BLOCK without findings, or a verdict that left parts
+                // uncovered, is recorded as INCOMPLETE.
+                relieved["verdict"] = json!("INCOMPLETE");
+            }
+            let mut gaps = relieved["not_covered"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if blocks {
+                gaps.push(json!({"item":"Blocking problems the reviewer did not name","blocker":"other_role_work",
+                    "reason":"The reviewer returned BLOCK without naming a finding after repeated identical refusals."}));
+            }
+            if gaps.is_empty() {
+                gaps.push(json!({"item":"Parts the reviewer did not name","blocker":"other_role_work",
+                    "reason":"The reviewer returned INCOMPLETE without naming what it did not cover after repeated identical refusals."}));
+            }
+            relieved["not_covered"] = json!(gaps);
+            close_gaps(&mut relieved);
+            let open: Vec<String> = relieved["not_covered"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|g| g["item"].as_str().map(str::to_owned))
+                .collect();
+            relief.limits.push(limit(
+                "Review parts not covered",
+                format!("The review was recorded INCOMPLETE after repeated identical refusals; these parts stay uncovered: {}.", shown(&open)),
+            ));
+            "disclosed"
+        }
+        "assignment_blocker_required" => {
+            let detail = relieved["blocker"]["detail"].as_str().filter(|d| !d.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| "The worker reported the assignment failed without naming a dead end; the runtime recorded the failure after repeated identical refusals.".into());
+            relieved["blocker"] = json!({"kind":"other_role_work","detail":detail});
+            "failed_assignment"
+        }
+        code if FAILED_CHECK_CODES.contains(&code) => {
+            if code == "omitted_failed_check" {
+                // The runtime cites the failed runs the submission left out, as failed.
+                let refs: Vec<String> = items
+                    .iter()
+                    .filter_map(|item| {
+                        item.strip_prefix('[')
+                            .and_then(|rest| rest.split_once(']'))
+                            .map(|(r, _)| r.to_owned())
+                    })
+                    .collect();
+                if refs.is_empty() {
+                    return Ok(None);
+                }
+                let checks = relieved["checks"]
+                    .as_array_mut()
+                    .ok_or(CoreError::Refused("invalid_native_result"))?;
+                for reference in refs {
+                    checks.push(json!({"name":format!("Earlier failed run {reference}"),"outcome":"failed","tool_call_ref":reference}));
+                }
+            }
+            if matches!(
+                code,
+                "invalid_check_retraction" | "invalid_check_supersession"
+            ) {
+                for check in relieved["checks"].as_array_mut().into_iter().flatten() {
+                    if let Some(check) = check.as_object_mut() {
+                        check.remove("invocation_error");
+                        check.remove("command_correction");
+                    }
+                }
+            }
+            let open = if items.is_empty() {
+                "an open failed check".to_owned()
+            } else {
+                shown(&items)
+            };
+            if review {
+                if relieved["verdict"]
+                    .as_str()
+                    .is_some_and(|v| v.eq_ignore_ascii_case("APPROVE"))
+                {
+                    relieved["verdict"] = json!("INCOMPLETE");
+                    let mut gaps = relieved["not_covered"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    gaps.push(json!({"item":"Open failed check","blocker":"other_role_work",
+                        "reason":format!("A failed check stayed open after repeated identical refusals: {open}.")}));
+                    relieved["not_covered"] = json!(gaps);
+                }
+                close_gaps(&mut relieved);
+            } else {
+                relieved["assignment_outcome"] = json!("failed");
+                let own = relieved["blocker"]["detail"]
+                    .as_str()
+                    .filter(|d| !d.trim().is_empty())
+                    .map(str::to_owned);
+                relieved["blocker"] = json!({"kind":"other_role_work","detail":format!(
+                    "The open failed check could not be closed in this attempt after repeated identical refusals: {open}. Its repair belongs to the next plan.{}",
+                    own.map(|o| format!(" Worker: {o}")).unwrap_or_default())});
+                relief.skip_repair_offer = true;
+            }
+            "failed_assignment"
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some((relieved, relief, action, items)))
+}
+/// Only called after schema validation, on the serial writer lane. Re-authenticate
+/// before every phase; external epoch changes may fence a publication in progress.
+/// Such a publication remains retained, but is never promoted to a node result.
+fn submit_once(
+    store: &Store,
+    credential: &Credential,
+    expected: &Identity,
+    args: &Value,
     mut evidence: EvidenceSnapshot,
+    relief: &Relief,
 ) -> CoreResult<Value> {
     let i = store
         .read(|db| channels::authenticate(db, &credential.channel_id, credential.secret(), true))?;
@@ -1299,7 +1639,9 @@ pub(super) fn submit(
     if active && args["assignment_outcome"] != "failed" {
         return Err(CoreError::Refused("command_not_settled"));
     }
-    let checks = validate_result(store, credential, &i, args, &evidence)?;
+    let mut checks = validate_result_with(store, credential, &i, args, &evidence, relief)?;
+    // What the runtime recorded open after repeated identical refusals stays visible.
+    checks.extend(relief.limits.iter().cloned());
     let assignment = i
         .assignment
         .as_deref()
@@ -1612,5 +1954,156 @@ mod rebound_packet_tests {
         refresh();
         assert_eq!(packets(&store).len(), 2);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+#[cfg(test)]
+mod refusal_limit_tests {
+    use super::*;
+    use cortex_core::{
+        lifecycle::{FoundationGuards, TaskMachine},
+        OpenMode, ProjectKey, StoreChannel, TaskState,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    fn fixture(stage: &str) -> (std::path::PathBuf, Store, Credential, Identity) {
+        let root = std::env::temp_dir().join(format!(
+            "native-refusal-limit-{}",
+            crate::native_effects::identity().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = Store::open(
+            ProjectKey::new(&root, StoreChannel::Dev).unwrap(),
+            OpenMode::Initialize,
+        )
+        .unwrap();
+        let owner = TaskMachine::new(&store)
+            .create("t", "goal", "owner")
+            .unwrap();
+        TaskMachine::new(&store)
+            .transition(
+                "t",
+                &owner,
+                "planning",
+                TaskState::Planning,
+                None,
+                &FoundationGuards,
+            )
+            .unwrap();
+        let c = store
+            .write(|db| channels::issue_tx(db, "t", &owner, channels::Principal::Coordinator))
+            .unwrap();
+        let i = Identity {
+            task: "t".into(),
+            attempt: "xa_fixture".into(),
+            principal: "fixture".into(),
+            epoch: 1,
+            role: "worker".into(),
+            profile: Some(
+                if stage == "review" {
+                    "worker-code-reviewer"
+                } else {
+                    "worker-backend-dev"
+                }
+                .into(),
+            ),
+            stage: Some(stage.into()),
+            assignment: Some("a".into()),
+            session: None,
+        };
+        (root, store, c, i)
+    }
+    /// Owner stores (audit 2026-11-22): `review_coverage_unfinished`,
+    /// `assignment_blocker_required`, `open_failed_check` and others were refused
+    /// without bound inside one turn. The third identical refusal is relieved: a
+    /// review is recorded INCOMPLETE with the parts disclosed, a failed check makes
+    /// the assignment failed with that check as its blocker; never a pass.
+    #[test]
+    fn the_third_identical_refusal_is_relieved_never_as_a_pass() {
+        let (root, store, c, i) = fixture("review");
+        let args = json!({"verdict":"INCOMPLETE","report":"r","summary":"s","checks":[],
+            "not_covered":[{"item":"channels/life-is-broken/README.md","reason":"not read yet"}]});
+        let code = "review_coverage_unfinished";
+        let items = vec!["channels/life-is-broken/README.md".to_string()];
+        assert!(relieve(&store, &c, &i, &args, code).unwrap().is_none());
+        record_refusal(&store, &c, &i, code, Some(&items)).unwrap();
+        assert!(relieve(&store, &c, &i, &args, code).unwrap().is_none());
+        // A different item set is a different loop.
+        record_refusal(&store, &c, &i, code, Some(&["other".to_string()])).unwrap();
+        assert!(relieve(&store, &c, &i, &args, code).unwrap().is_none());
+        record_refusal(&store, &c, &i, code, Some(&items)).unwrap();
+        let (relieved, relief, action, missing) =
+            relieve(&store, &c, &i, &args, code).unwrap().unwrap();
+        assert_eq!(action, "disclosed");
+        assert_eq!(missing, items);
+        assert_eq!(relieved["verdict"], "INCOMPLETE");
+        assert_eq!(relieved["not_covered"][0]["blocker"], "other_role_work");
+        assert_eq!(relief.limits[0]["outcome"], "unverified");
+        assert_eq!(relief.limits[0]["source"], "runtime");
+        assert!(lifecycle::review::unfinished_coverage(&relieved).is_empty());
+        // An APPROVE carrying an open failed check becomes INCOMPLETE, never a pass.
+        let approve = json!({"verdict":"APPROVE","report":"r","summary":"s","checks":[]});
+        for _ in 0..2 {
+            record_refusal(&store, &c, &i, "open_failed_check", None).unwrap();
+        }
+        let (relieved, _, action, _) = relieve(&store, &c, &i, &approve, "open_failed_check")
+            .unwrap()
+            .unwrap();
+        assert_eq!(action, "failed_assignment");
+        assert_eq!(relieved["verdict"], "INCOMPLETE");
+        // Checkout drift is never the reviewer's to correct and is never relieved.
+        for _ in 0..3 {
+            record_refusal(&store, &c, &i, "review_project_revision_unstable", None).unwrap();
+        }
+        assert!(
+            relieve(&store, &c, &i, &approve, "review_project_revision_unstable")
+                .unwrap()
+                .is_none()
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn an_execution_worker_with_an_open_failed_check_fails_with_that_check_as_blocker() {
+        let (root, store, c, i) = fixture("execution");
+        let args = json!({"report":"r","summary":"s","checks":[{"name":"tests","outcome":"failed","tool_call_ref":"f"}]});
+        for _ in 0..2 {
+            record_refusal(&store, &c, &i, "open_failed_check", None).unwrap();
+        }
+        let (relieved, relief, action, _) = relieve(&store, &c, &i, &args, "open_failed_check")
+            .unwrap()
+            .unwrap();
+        assert_eq!(action, "failed_assignment");
+        assert_eq!(relieved["assignment_outcome"], "failed");
+        assert_eq!(relieved["blocker"]["kind"], "other_role_work");
+        assert_eq!(relieved["checks"][0]["outcome"], "failed");
+        assert!(relief.skip_repair_offer);
+        // A failed outcome without a dead end is recorded with one.
+        let failed = json!({"report":"r","summary":"s","checks":[],"assignment_outcome":"failed"});
+        for _ in 0..2 {
+            record_refusal(&store, &c, &i, "assignment_blocker_required", None).unwrap();
+        }
+        let (relieved, _, _, _) = relieve(&store, &c, &i, &failed, "assignment_blocker_required")
+            .unwrap()
+            .unwrap();
+        assert!(lifecycle::review::valid_blocker(
+            &relieved["blocker"]["kind"]
+        ));
+        // A check without a blocker is recorded unverified with the runtime's disclosure.
+        let unblocked =
+            json!({"report":"r","summary":"s","checks":[{"name":"live","outcome":"not_run"}]});
+        for _ in 0..2 {
+            record_refusal(&store, &c, &i, "check_blocker_required", None).unwrap();
+        }
+        let (relieved, _, action, _) =
+            relieve(&store, &c, &i, &unblocked, "check_blocker_required")
+                .unwrap()
+                .unwrap();
+        assert_eq!(action, "disclosed");
+        assert_eq!(relieved["checks"][0]["outcome"], "not_run");
+        assert!(relieved["checks"][0]["blocker"]
+            .as_str()
+            .is_some_and(|b| !b.is_empty()));
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

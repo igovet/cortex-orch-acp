@@ -793,7 +793,13 @@ every routing decision is the same as before rank version 8.
   ladder holding `max` permits `max` outside the light tier),
   `also_standard_for` (work kinds for which a light model is also a
   standard-tier candidate: the stretch rule below), `preferred_for` (work
-  kinds the owner prefers this model for: rank key `purpose` below),
+  kinds the owner allows this model for: a model that lists kinds is never a
+  candidate for a node of another kind, so tiers and escalation choose only
+  among the models listed for the node's kind; a model without listed kinds
+  serves every kind, and when no usable model lists the kind every usable model
+  stays eligible so work never stops; among eligible models it is also rank key
+  `purpose` below; owner store 2026-11-21: an escalated QA node went to Fable,
+  listed only for design),
   `preferred_when` (an owner-written condition that makes that preference
   conditional on the coordinator naming the route; see `purpose` below) and
   `request_names` (extra spellings for the
@@ -831,7 +837,7 @@ Plan hint previews and route audits report the effective classification.
 The default preset places Astra only in flagship and lists frontend-with-design
 only in Opus's `preferred_for`. Opus's conditional preference still requires
 the coordinator's exact route hint, and quality escalation still ignores such
-conditions. This is not a strict ban on other models, nor an automatic promotion
+conditions. `preferred_for` is an eligibility rule, not an automatic promotion
 from the light tier. Existing version-2 files and profiles accept legacy
 `implementation` preferences, stretch allowances and affinity: effective reads
 expand it to all three new kinds without rewriting saved files. Editable source

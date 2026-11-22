@@ -3,7 +3,7 @@
 //! effect is final: nothing is delegated or retried.
 use super::conflicts;
 use crate::machine::{
-    git::Git,
+    git::{full_commit_id, valid_branch, Git},
     integration_squash::{self, IndexSnapshot},
     native::*,
     settings,
@@ -14,6 +14,7 @@ use std::{
     process::Stdio,
     time::Duration,
 };
+use tokio::io::AsyncReadExt;
 
 pub(super) struct Plan<'a> {
     pub root: &'a Path,
@@ -206,7 +207,7 @@ pub(super) async fn apply(plan: &Plan<'_>, product: &mut Value, git: &mut Git) -
         return update_from_target(plan, product, &source_head, git).await;
     }
     if plan.method == "pr" {
-        return pull_request(plan, product, git).await;
+        return pull_request(plan, product, &source_head, git).await;
     }
     squash(plan, product, &source_head, git).await
 }
@@ -270,7 +271,12 @@ async fn update_from_target(
         "The task branch was updated from the target. Rerun checks and review it before merging.",
     ))
 }
-async fn pull_request(plan: &Plan<'_>, product: &mut Value, git: &mut Git) -> Result<Value> {
+async fn pull_request(
+    plan: &Plan<'_>,
+    product: &mut Value,
+    source_head: &str,
+    git: &mut Git,
+) -> Result<Value> {
     let path = plan.path;
     let record = &product["tasks"][plan.task];
     if super::truth(&record["prAttempt"]) || record["integration"]["method"] == "pr" {
@@ -279,198 +285,372 @@ async fn pull_request(plan: &Plan<'_>, product: &mut Value, git: &mut Git) -> Re
             "A pull request was already attempted. Check GitHub before creating another.",
         ));
     }
-    // No push is hidden here. gh requires the branch to have been pushed explicitly.
-    if !git
-        .success(path, &["rev-parse", "--verify", "@{u}"])
-        .await?
-        || !git
-            .out(path, &["rev-list", "@{u}..HEAD"])
-            .await?
-            .trim()
-            .is_empty()
-    {
-        return Err(refuse(
-            "push_required",
-            "Push this task branch from Git first, then create the pull request.",
-        ));
+    if let Some(accepted) = record["acceptance"]["committedDigest"].as_str() {
+        if super::super::task_facts::native_observation(path)
+            .await
+            .as_deref()
+            != Some(accepted)
+        {
+            return Err(refuse(
+                "stale_result",
+                "This result or its workspace changed. Rerun checks and review the new result.",
+            ));
+        }
     }
+    let remote_ref = format!("refs/heads/{}", plan.source);
+    let witness = &product["originPushWitnesses"][&remote_ref];
+    if !valid_branch(plan.source)
+        || !full_commit_id(source_head)
+        || witness["commit"] != source_head
+        || witness["ref"] != remote_ref
+    {
+        return Err(push_required());
+    }
+    let repository = origin_repository(path, git).await?;
+    let push_url = git
+        .out(path, &["remote", "get-url", "--push", "--all", "origin"])
+        .await
+        .map_err(|_| invalid_pr_remote())?;
+    if GitHubRepository::from_remote(&push_url).as_ref() != Some(&repository) {
+        return Err(invalid_pr_remote());
+    }
+    let repo_arg = repository.qualified_name();
+    if witness["repository"] != repo_arg {
+        return Err(push_required());
+    }
+    // Only branches accepted by confirmed Push can reach this lookup. Check
+    // the exact ref and its repository-qualified API self link as well as the
+    // SHA, so a redirect or a different ref is not evidence for this branch.
+    let remote = repository
+        .get(path, &format!("git/ref/heads/{}", plan.source))
+        .await
+        .ok_or_else(push_required)?;
+    if remote["ref"] != remote_ref
+        || remote["object"]["type"] != "commit"
+        || remote["object"]["sha"] != source_head
+        || !remote["url"]
+            .as_str()
+            .is_some_and(|url| repository.matches_ref_url(url, plan.source))
+    {
+        return Err(push_required());
+    }
+
+    // The provider can still move the branch between this read and creation.
+    // Persist the attempt before dispatch and never replay a mutation on doubt.
     product["tasks"][plan.task]["prAttempt"] =
         json!({"state":"unknown","target":plan.target,"head":plan.source});
     save(plan, product)?;
     let title = plan.message.lines().next().unwrap_or("");
     let body = plan.params["body"].as_str().unwrap_or("");
-    let mut command = tokio::process::Command::new("gh");
-    command
-        .args([
-            "pr",
-            "create",
-            "--base",
-            plan.target,
-            "--head",
-            plan.source,
-            "--title",
-            title,
-            "--body",
-            body,
-        ])
-        .current_dir(path)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .stdin(Stdio::null())
-        // gh prints the new pull request's address; nothing else of its output is kept.
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
+    let mut command = repository.github_command(path);
+    command.args([
+        "pr",
+        "create",
+        "--repo",
+        &repo_arg,
+        "--base",
+        plan.target,
+        "--head",
+        plan.source,
+        "--title",
+        title,
+        "--body",
+        body,
+    ]);
     if super::truth(&plan.params["draft"]) {
         command.arg("--draft");
     }
-    let outcome = match command.spawn() {
-        Err(_) => return Err(refuse(
-            "gh_failed",
-            "GitHub CLI could not create the pull request. Check gh login and repository access.",
-        )),
-        Ok(child) => tokio::time::timeout(Duration::from_secs(25), child.wait_with_output()).await,
-    };
-    let printed = match outcome {
+    let printed = match github_output(command).await {
+        Ok(Some(output)) => output,
         Err(_) => {
             return Err(refuse(
                 "unknown_outcome",
                 "GitHub did not answer. Check your pull requests before retrying.",
             ))
         }
-        Ok(Ok(output)) if output.status.success() => output.stdout,
-        Ok(_) => return Err(refuse(
+        Ok(None) => return Err(refuse(
             "gh_failed",
             "GitHub CLI could not create the pull request. Check gh login and repository access.",
         )),
     };
-    let mut integration = json!({"method":"pr","targetBranch":plan.target,
-        "digest":plan.params["digest"],"title":plan.message});
-    // Recorded only when it is an https address on this repository's remote host; an
-    // address that cannot be checked is left out, never guessed.
-    let remote = git
-        .out(plan.root, &["remote", "get-url", "origin"])
+    let reported = std::str::from_utf8(&printed)
+        .ok()
+        .and_then(|text| text.lines().rfind(|line| !line.trim().is_empty()))
+        .and_then(|line| repository.pull_request_url(line.trim()));
+    let Some(url) = reported else {
+        return Err(refuse(
+            "pull_request_unsafe",
+            "GitHub CLI did not return a valid pull request address for this repository. Check GitHub before retrying.",
+        ));
+    };
+    let number = url.rsplit('/').next().unwrap_or("");
+    let expected_repository = format!("{}/{}", repository.owner, repository.repo);
+    if !repository
+        .get(path, &format!("pulls/{number}"))
         .await
-        .unwrap_or_default();
-    let reported = String::from_utf8_lossy(&printed[..printed.len().min(65536)]).into_owned();
-    if let Some(url) = reported
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .and_then(|l| pull_request_url(l.trim(), &remote))
+        .is_some_and(|pr| {
+            let matches_repo = |side: &str| {
+                pr[side]["repo"]["full_name"]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&expected_repository))
+            };
+            matches_repo("head")
+                && matches_repo("base")
+                && pr["head"]["ref"] == plan.source
+                && pr["head"]["sha"] == source_head
+                && pr["base"]["ref"] == plan.target
+                && pr["state"] == "open"
+                && pr["html_url"] == url
+        })
     {
-        integration["url"] = json!(url);
+        return Err(refuse(
+            "pull_request_unsafe",
+            "GitHub did not confirm the expected open pull request and commit. Check GitHub before retrying.",
+        ));
     }
-    product["tasks"][plan.task]["integration"] = integration;
+    product["tasks"][plan.task]["integration"] = json!({"method":"pr","targetBranch":plan.target,
+        "digest":plan.params["digest"],"title":plan.message,"url":url});
     save(plan, product)?;
     Ok(json!({"done":true}))
 }
-/// The host of a Git remote address: `https://[user@]host[:port]/…`,
-/// `ssh://[user@]host[:port]/…` or the scp form `[user@]host:path`, lowercased.
-fn remote_host(remote: &str) -> Option<String> {
-    let remote = remote.trim();
-    let authority = match remote.split_once("://") {
-        Some((_, rest)) => rest.split('/').next()?,
-        None if !remote.starts_with('/') && !remote.starts_with('.') => remote.split_once(':')?.0,
-        None => return None,
-    };
-    let host = authority.rsplit('@').next()?;
-    let host = host.split(':').next()?;
-    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+
+fn push_required() -> Refused {
+    refuse(
+        "push_required",
+        "Workspace could not verify a confirmed push of this exact commit to origin. Check the remote and push this branch from Git before creating the pull request.",
+    )
 }
-/// `text` when it is a pull request address this app may hand to the system browser:
-/// `https`, no credentials or port, the remote's own host, and the path of one pull
-/// request (`/<owner>/<repository>/pull/<number>`). `None` otherwise.
-pub(super) fn pull_request_url(text: &str, remote: &str) -> Option<String> {
-    if text.len() > 2048 || text.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return None;
+
+/// Bound both the local wait and captured output; never expose CLI diagnostics
+/// or replay a call whose effect is unknown. Dropping the child terminates it.
+async fn github_output(
+    mut command: tokio::process::Command,
+) -> std::result::Result<Option<Vec<u8>>, tokio::time::error::Elapsed> {
+    tokio::time::timeout(Duration::from_secs(25), async {
+        let mut child = command.spawn().ok()?;
+        let mut stdout = child.stdout.take()?.take(256 * 1024 + 1);
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await.ok()?;
+        if bytes.len() > 256 * 1024 || !child.wait().await.ok()?.success() {
+            return None;
+        }
+        Some(bytes)
+    })
+    .await
+}
+
+fn invalid_pr_remote() -> Refused {
+    refuse(
+        "pull_request_unsafe",
+        "Configure origin to fetch and push to the same single GitHub repository before creating a pull request.",
+    )
+}
+
+pub(super) async fn origin_repository(path: &Path, git: &mut Git) -> Result<GitHubRepository> {
+    let remote = git
+        .out(path, &["remote", "get-url", "--all", "origin"])
+        .await
+        .map_err(|_| invalid_pr_remote())?;
+    GitHubRepository::from_remote(&remote).ok_or_else(invalid_pr_remote)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::machine) struct GitHubRepository {
+    host: String,
+    owner: String,
+    repo: String,
+}
+
+impl GitHubRepository {
+    pub(in crate::machine) fn from_remote(remote: &str) -> Option<Self> {
+        // Git emits one effective URL per line. Reject ambiguity rather than
+        // selecting the first URL from a multi-destination origin.
+        let remote = remote.strip_suffix('\n').unwrap_or(remote);
+        if remote.len() > 2048 || remote.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return None;
+        }
+        let (host, path) = match remote.split_once("://") {
+            Some((scheme @ ("https" | "ssh"), rest)) => {
+                let (authority, path) = rest.split_once('/')?;
+                let authority = authority.rsplit('@').next()?;
+                let host = if let Some((host, port)) = authority.split_once(':') {
+                    match (scheme, port.parse::<u16>().ok()?) {
+                        ("https", 443) | ("ssh", 1..=65535) => host,
+                        _ => return None,
+                    }
+                } else {
+                    authority
+                };
+                (host, path)
+            }
+            Some(_) => return None,
+            None => {
+                let (authority, path) = remote.split_once(':')?;
+                (authority.rsplit('@').next()?, path)
+            }
+        };
+        let (owner, repo) = path.split_once('/')?;
+        let repo = repo.strip_suffix(".git").unwrap_or(repo);
+        if !Self::valid_host(host) || !Self::valid_name(owner) || !Self::valid_name(repo) {
+            return None;
+        }
+        Some(Self {
+            host: host.to_ascii_lowercase(),
+            owner: owner.to_ascii_lowercase(),
+            repo: repo.to_ascii_lowercase(),
+        })
     }
-    let rest = text.strip_prefix("https://")?;
-    let (host, path) = rest.split_once('/')?;
-    if host.is_empty()
-        || !host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-        || remote_host(remote).as_deref() != Some(host.to_ascii_lowercase().as_str())
-    {
-        return None;
+
+    fn valid_host(host: &str) -> bool {
+        host.len() <= 253
+            && host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
     }
-    let parts: Vec<&str> = path.split('/').collect();
-    let name = |s: &str| {
-        !s.is_empty()
-            && !s.starts_with('.')
-            && s.bytes()
+
+    fn valid_name(name: &str) -> bool {
+        !name.is_empty()
+            && !name.starts_with('.')
+            && name
+                .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-    };
-    let shaped = parts.len() == 4
-        && name(parts[0])
-        && name(parts[1])
-        && parts[2] == "pull"
-        && !parts[3].is_empty()
-        && parts[3].len() <= 12
-        && parts[3].bytes().all(|b| b.is_ascii_digit());
-    shaped.then(|| text.to_owned())
+    }
+
+    pub(in crate::machine) fn qualified_name(&self) -> String {
+        format!("{}/{}/{}", self.host, self.owner, self.repo)
+    }
+
+    fn github_command(&self, path: &Path) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("gh");
+        command
+            .current_dir(path)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("LC_ALL", "C")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env_remove("GH_REPO")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        if std::env::var("GH_HOST").as_deref() != Ok(self.host.as_str()) {
+            command.env_remove("GH_HOST");
+        }
+        command
+    }
+
+    async fn get(&self, path: &Path, suffix: &str) -> Option<Value> {
+        let endpoint = format!("repos/{}/{}/{suffix}", self.owner, self.repo);
+        let mut command = self.github_command(path);
+        command.args([
+            "api",
+            "--method",
+            "GET",
+            "--hostname",
+            &self.host,
+            &endpoint,
+        ]);
+        let bytes = github_output(command).await.ok()??;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    fn matches_ref_url(&self, url: &str, branch: &str) -> bool {
+        let root = if self.host == "github.com" {
+            "https://api.github.com/repos/".to_owned()
+        } else {
+            format!("https://{}/api/v3/repos/", self.host)
+        };
+        url.strip_prefix(&root)
+            .and_then(|suffix| suffix.split_once("/git/refs/heads/"))
+            .is_some_and(|(name, reference)| {
+                name.eq_ignore_ascii_case(&format!("{}/{}", self.owner, self.repo))
+                    && reference == branch
+            })
+    }
+
+    /// Only the exact repository's HTTPS PR route can be saved or opened.
+    pub(super) fn pull_request_url<'a>(&self, text: &'a str) -> Option<&'a str> {
+        if text.len() > 2048 || text.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return None;
+        }
+        let (host, path) = text.strip_prefix("https://")?.split_once('/')?;
+        let mut parts = path.split('/');
+        let (owner, repo, kind, number) =
+            (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+        (host.eq_ignore_ascii_case(&self.host)
+            && owner.eq_ignore_ascii_case(&self.owner)
+            && repo.eq_ignore_ascii_case(&self.repo)
+            && kind == "pull"
+            && !number.is_empty()
+            && number.len() <= 12
+            && number.bytes().all(|b| b.is_ascii_digit())
+            && parts.next().is_none())
+        .then_some(text)
+    }
 }
 #[cfg(test)]
 mod address_tests {
-    use super::pull_request_url;
+    use super::GitHubRepository;
+
     #[test]
-    fn only_an_https_pull_request_address_on_the_remote_host_is_kept() {
+    fn pull_request_address_requires_the_exact_remote_repository() {
         let ok = "https://github.com/owner/repo/pull/42";
         for remote in [
             "https://github.com/owner/repo.git",
-            "https://user@GitHub.com:443/owner/repo",
+            "https://user@GitHub.com:443/Owner/Repo",
             "git@github.com:owner/repo.git",
             "ssh://git@github.com/owner/repo.git",
         ] {
-            assert_eq!(
-                pull_request_url(ok, remote).as_deref(),
-                Some(ok),
-                "{remote}"
-            );
+            let repo = GitHubRepository::from_remote(remote).unwrap();
+            assert_eq!(repo.qualified_name(), "github.com/owner/repo", "{remote}");
+            assert_eq!(repo.pull_request_url(ok), Some(ok), "{remote}");
         }
-        for (url, remote) in [
-            (
-                "http://github.com/owner/repo/pull/42",
-                "git@github.com:o/r.git",
-            ),
-            (
-                "https://evil.example/owner/repo/pull/42",
-                "git@github.com:o/r.git",
-            ),
-            ("https://github.com/owner/repo/pull/42", "/srv/git/repo.git"),
-            ("https://github.com/owner/repo/pull/42", ""),
-            (
-                "https://user:pw@github.com/owner/repo/pull/42",
-                "git@github.com:o/r.git",
-            ),
-            (
-                "https://github.com:8443/owner/repo/pull/42",
-                "git@github.com:o/r.git",
-            ),
-            (
-                "https://github.com/owner/repo/issues/42",
-                "git@github.com:o/r.git",
-            ),
-            (
-                "https://github.com/owner/repo/pull/42?x=1",
-                "git@github.com:o/r.git",
-            ),
-            (
-                "https://github.com/owner/repo/pull/42 x",
-                "git@github.com:o/r.git",
-            ),
-            (
-                "https://github.com/../repo/pull/42",
-                "git@github.com:o/r.git",
-            ),
-            ("javascript:alert(1)", "git@github.com:o/r.git"),
+
+        let repository = GitHubRepository::from_remote("git@github.com:owner/repo.git").unwrap();
+        let mixed_case = "https://GitHub.com/Owner/Repo/pull/42";
+        assert_eq!(repository.pull_request_url(mixed_case), Some(mixed_case));
+        for url in [
+            "http://github.com/owner/repo/pull/42",
+            "https://evil.example/owner/repo/pull/42",
+            "https://github.com/owner/other/pull/42",
+            "https://github.com/another/repo/pull/42",
+            "https://user:pw@github.com/owner/repo/pull/42",
+            "https://github.com:8443/owner/repo/pull/42",
+            "https://github.com/owner/repo/issues/42",
+            "https://github.com/owner/repo/pull/42?x=1",
+            "https://github.com/owner/repo/pull/42 x",
+            "https://github.com/../repo/pull/42",
+            "https://github.com/owner/repo/pull/42/extra",
+            "javascript:alert(1)",
         ] {
-            assert_eq!(pull_request_url(url, remote), None, "{url} {remote}");
+            assert_eq!(repository.pull_request_url(url), None, "{url}");
         }
+    }
+
+    #[test]
+    fn pull_request_origin_rejects_ambiguous_or_unsupported_remote_urls() {
+        for remote in [
+            "",
+            "/srv/git/repo.git",
+            "http://github.com/owner/repo.git",
+            "https://github.com:8443/owner/repo.git",
+            "https://github.com/owner/nested/repo.git",
+            "https://github.com/owner/repo.git?query=1",
+            "https://github.com/owner/repo.git\nhttps://github.com/owner/other.git\n",
+        ] {
+            assert!(GitHubRepository::from_remote(remote).is_none(), "{remote}");
+        }
+        let enterprise =
+            GitHubRepository::from_remote("ssh://git@github.example:2222/Owner/Repo.git").unwrap();
+        assert_eq!(enterprise.qualified_name(), "github.example/owner/repo");
     }
 }
 async fn squash(

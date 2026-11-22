@@ -2,8 +2,8 @@ import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack, 
 import { useWs } from "./ctx";
 import { onScreen } from "./freshness";
 import { Strip } from "./layout";
-import { NOTIFICATION_KINDS, openPlace, parseTarget, reveal, targetPlace, type Notification, type NotificationClicks, type NotificationKind, type NotificationReport, type NotificationService } from "./notification-target";
-import { Srow, Sw } from "./settings-kit";
+import { NOTIFICATION_KINDS, openPlace, parseTarget, reveal, STALL_DEFAULT, STALL_HOURS, targetPlace, type Notification, type NotificationClicks, type NotificationKind, type NotificationReport, type NotificationService } from "./notification-target";
+import { Seg, Srow, Sw } from "./settings-kit";
 import { persisted } from "./theme";
 import type { Tabs } from "./workspace-tabs";
 export type { Notification, NotificationClicks, NotificationService, NotificationTarget, Notify } from "./notification-target";
@@ -14,13 +14,24 @@ let kindsPref: [Accessor<NotificationKind[]>, (kinds: NotificationKind[]) => voi
 export const notificationKinds = () => kindsPref ??= persisted<NotificationKind[]>("cw.ws.notificationKinds", ALL_KINDS,
   v => Array.isArray(v) && v.every(k => ALL_KINDS.includes(k as NotificationKind)));
 
-/** One switch per kind, under the Notifications switch. */
+let stallPref: [Accessor<number>, (hours: number) => void] | undefined;
+/** After how many hours without progress a working task is announced on this computer; 0 is off. 3 hours at first. */
+export const stallHours = () => stallPref ??= persisted<number>("cw.ws.stallHours", STALL_DEFAULT,
+  v => typeof v === "number" && (STALL_HOURS as readonly number[]).includes(v));
+const STALL_OPTIONS = STALL_HOURS.map(h => ({ id: String(h), label: h === 0 ? "Off" : `${h} h` }));
+
+/** One switch per kind, under the Notifications switch, and the no-progress threshold. */
 export function NotificationKinds(props: { disabled?: string }) {
   const [kinds, setKinds] = notificationKinds();
-  return <For each={NOTIFICATION_KINDS}>{k =>
-    <Srow t={k.label}><Sw label={k.label} checked={kinds().includes(k.id)} disabled={props.disabled}
-      onChange={on => setKinds(on ? ALL_KINDS.filter(x => x === k.id || kinds().includes(x)) : kinds().filter(x => x !== k.id))} /></Srow>
-  }</For>;
+  const [hours, setHours] = stallHours();
+  return <>
+    <For each={NOTIFICATION_KINDS}>{k =>
+      <Srow t={k.label}><Sw label={k.label} checked={kinds().includes(k.id)} disabled={props.disabled}
+        onChange={on => setKinds(on ? ALL_KINDS.filter(x => x === k.id || kinds().includes(x)) : kinds().filter(x => x !== k.id))} /></Srow>
+    }</For>
+    <Srow t="Tasks with no progress" d="Tell me when a working task has made no new result for this long, with what it spent and what its last attempts hit, and again every 3 hours while it stays stuck. The task keeps working; nothing is paused or stopped.">
+      <Seg label="No progress for" value={String(hours())} options={STALL_OPTIONS} disabled={props.disabled} onChange={v => setHours(Number(v))} /></Srow>
+  </>;
 }
 
 /** Where this app keeps the questions it has already seen, so a relaunch does not announce them again. */
@@ -51,6 +62,7 @@ export function QuestionNotifications(props: { tabs?: Pick<Tabs, "ids" | "active
   const ws = useWs(), seen = new Set<string>(readSeen());
   const [error, setError] = createSignal("");
   const [kinds] = notificationKinds();
+  const [stallHoursValue] = stallHours();
   // Whether the machine service raises the notifications. Until it has answered the window raises none of its own, so a
   // question is never announced twice; a service without them leaves this window's own question notifications.
   const [serviceRaises, setServiceRaises] = createSignal<boolean | null>(props.service ? null : false);
@@ -79,7 +91,9 @@ export function QuestionNotifications(props: { tabs?: Pick<Tabs, "ids" | "active
       const place = !focused() ? null : planned ? { project: planned.projectId, sprint: planned.id } : task ? { project: task.projectId, task: task.id }
         : r.name === "sprint" ? { project: r.project, sprint: r.sprint }
         : r.name === "project" && r.scope.kind === "sprint" ? { project: r.project, sprint: r.scope.id } : null;
-      return { focused: place, kinds: on ? kinds() : [] };
+      // The no-progress threshold travels with the kinds; Off leaves `stalled` out.
+      const hours = stallHoursValue();
+      return { focused: place, kinds: on ? [...kinds(), ...(hours > 0 ? ["stalled" as const] : [])] : [], ...(hours > 0 ? { stallHours: hours } : {}) };
     }, undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
     const send = (value: NotificationReport) => void service.report(value)
       // A refused report (a service without the method) leaves the window's own notifications; a lost one changes nothing.

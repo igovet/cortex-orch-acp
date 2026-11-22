@@ -176,6 +176,7 @@ async fn settle(
                 native.as_deref(),
                 task_facts::own_writes(&record),
                 true,
+                None,
             ) {
                 Ok(evidence) => evidence,
                 Err(cortex_core::CoreError::Refused("result_unavailable")) => return Ok(Err("The result evidence could not be read. Refresh the task or request a new result.".to_owned())),
@@ -266,6 +267,7 @@ fn validate(
         native,
         task_facts::own_writes(record),
         false,
+        None,
     )
     .map_err(|e| {
         if e.code() == "result_unavailable" {
@@ -408,8 +410,17 @@ async fn accept_inner(
         )
     })?;
     let record = product["tasks"][task].clone();
-    // Native verification is bound in the native digest domain (no effect).
-    let native = task_facts::native_observation(root).await;
+    // Native verification keeps its full-checkout identity. In the project folder,
+    // also retain an exact content witness for ordinary Commit when available.
+    let source = if record["checkout"]["kind"].as_str().unwrap_or("main") == "main" {
+        crate::native_effects::observe_commit(root.to_owned()).await
+    } else {
+        None
+    };
+    let native = match &source {
+        Some(source) => Some(source.digest.clone()),
+        None => task_facts::native_observation(root).await,
+    };
     let native = native.as_deref();
     // Preserve result/version refusal order before resolving the checkout.
     store
@@ -437,7 +448,7 @@ async fn accept_inner(
     }
     store.write(|db| Ok((|| {
         // Start/owner replacement cannot race evidence validation and overlay replacement.
-        let (_, counts) = validate(db, &store, root, project, task, &record, p, native)?;
+        let (actions, counts) = validate(db, &store, root, project, task, &record, p, native)?;
         let observed = super::legacy_source::capture(&path).map_err(context::core)?
             .ok_or_else(|| refuse("workspace_unobservable", "The workspace could not be observed; acceptance was not recorded."))?;
         let record = &mut product["tasks"][task];
@@ -445,6 +456,11 @@ async fn accept_inner(
         record["status"] = json!("ready_to_merge");
         record["acceptance"] = json!({"version":p["version"],"digest":p["digest"],"at":now_ms(),
             "open":{"failed":counts[0],"not_run":counts[1],"unverified":counts[2]}});
+        if let Some(source) = source.filter(|s| p["digest"] == s.digest) {
+            record["acceptance"]["version"] = actions["version"].clone();
+            record["acceptance"]["commitSource"] =
+                json!({"head":source.head,"branch":source.branch,"content":source.content});
+        }
         if automatic {
             record["acceptance"]["automatic"] = json!(true);
         } else if let Some(consent) = finish_consent.as_ref() {
@@ -518,6 +534,10 @@ mod native_acceptance_tests {
     use std::sync::Arc;
 
     async fn completed() -> (std::path::PathBuf, Arc<Runtime>, String) {
+        completed_in_checkout(false).await
+    }
+
+    async fn completed_in_checkout(tracked: bool) -> (std::path::PathBuf, Arc<Runtime>, String) {
         let root =
             std::env::temp_dir().join(format!("native-accept-{}", crate::identity().unwrap()));
         std::fs::create_dir(&root).unwrap();
@@ -528,6 +548,24 @@ mod native_acceptance_tests {
             .status()
             .unwrap()
             .success());
+        if tracked {
+            for (key, value) in [
+                ("user.name", "Fixture"),
+                ("user.email", "fixture@example.invalid"),
+                ("commit.gpgsign", "false"),
+                ("core.hooksPath", "/dev/null"),
+                ("core.excludesFile", "/dev/null"),
+            ] {
+                git_fixture(&root, &["config", "--local", key, value]);
+            }
+            std::fs::write(root.join(".git/info/exclude"), "/.cortex/\n/.cortex-dev/\n").unwrap();
+            git_fixture(&root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+            std::fs::write(root.join("work.txt"), "before\n").unwrap();
+            git_fixture(&root, &["add", "--", "work.txt"]);
+            git_fixture(&root, &["commit", "-qm", "Base"]);
+            git_fixture(&root, &["switch", "-qc", "qa/task"]);
+            std::fs::write(root.join("work.txt"), "after").unwrap();
+        }
         let path = root.clone();
         let runtime = Arc::new(
             tokio::task::spawn_blocking(move || {
@@ -896,6 +934,38 @@ mod native_acceptance_tests {
                 "failed": 0, "not_run": 0, "unverified": 0
             })
         );
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Owner store 2026-11-22: a completed task whose review disclosed unread files
+    /// ("... after repeated coverage refusals ...") held the Automatic sprint for the
+    /// owner because "refus" read as a policy restriction. A limitation the runtime
+    /// itself disclosed is a manual note: the result is accepted, never as passed.
+    #[tokio::test]
+    async fn automatic_acceptance_takes_runtime_disclosed_limits_as_notes() {
+        let (root, runtime, draft) = completed().await;
+        let state = automatic_state(&root);
+        let mut product = sprint_product(&draft, "automatic");
+        report_checks(
+            &runtime,
+            json!([]),
+            json!([{"name":"Changed files the reviewer did not read","outcome":"unverified","source":"runtime",
+                "blocker":"70 changed files were still unread after repeated coverage refusals and are not reviewed: a.rs; inspect them directly."}]),
+        )
+        .await;
+        let result = automatic(
+            &root,
+            "project",
+            &draft,
+            &state,
+            &mut product,
+            &mut Git::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["accepted"], true, "{result}");
         runtime.shutdown().await;
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
@@ -2663,6 +2733,80 @@ mod native_acceptance_tests {
         runtime.shutdown().await;
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn git_fixture(root: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("/usr/bin/git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    #[tokio::test]
+    async fn ordinary_tracked_commit_keeps_the_native_accepted_result_current() {
+        let (root, runtime, draft) = completed_in_checkout(true).await;
+        let state = automatic_state(&root);
+        let mut product = json!({"tasks":{},"sprints":[],"messages":[],"drafts":{}});
+        product["tasks"][&draft] = json!({"checkout":{"kind":"main"},"targetBranch":"main"});
+        let shown = presented_with(&runtime, &draft, product["tasks"][&draft].clone()).await;
+        let result = &shown["result"];
+        assert_eq!(shown["workspaceDigest"], result["digest"]);
+        let mut git = Git::new();
+        accept(
+            &root,
+            "project",
+            &draft,
+            &state,
+            &mut product,
+            &json!({"digest":result["digest"],"version":result["sourceVersion"]}),
+            &mut git,
+        )
+        .await
+        .unwrap();
+        let parent = git_fixture(&root, &["rev-parse", "HEAD"]);
+        git.action(
+            &root,
+            "project",
+            &state,
+            &json!({"action":"commit","checkoutId":"project:main","message":"Commit accepted edit"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(git_fixture(&root, &["rev-parse", "HEAD^"]), parent);
+        assert_eq!(
+            git_fixture(
+                &root,
+                &["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"]
+            ),
+            "M\twork.txt"
+        );
+        assert_eq!(git_fixture(&root, &["show", "HEAD:work.txt"]), "after");
+        assert_eq!(git_fixture(&root, &["status", "--porcelain"]), "");
+        let record =
+            super::super::native::product(&state, "project").unwrap()["tasks"][&draft].clone();
+        assert!(record["acceptance"]["committedDigest"].is_string());
+        let after = presented_with(&runtime, &draft, record.clone()).await;
+        std::fs::write(root.join("work.txt"), "changed after commit").unwrap();
+        let changed = presented_with(&runtime, &draft, record).await;
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(after["result"]["version"], result["version"]);
+        assert_eq!(after["result"]["sourceVersion"], result["sourceVersion"]);
+        assert_eq!(after["acceptance"]["version"], result["version"]);
+        assert_eq!(after["status"], "ready_to_merge");
+        assert_eq!(after["result"]["checks"], result["checks"]);
+        assert_eq!(after["result"]["digest"], result["digest"]);
+        assert_ne!(after["reviewActions"]["workspaceChanged"], true, "{after}");
+        assert_eq!(after["workspaceDigest"], result["digest"], "{after}");
+        assert!(after["reviewActions"]["acceptedCommitCurrent"].is_null());
+        assert_eq!(changed["reviewActions"]["workspaceChanged"], true);
+        assert_ne!(changed["workspaceDigest"], changed["result"]["digest"]);
     }
 
     /// Live run: after Accept and the app's own "Commit to main" of exactly that result,

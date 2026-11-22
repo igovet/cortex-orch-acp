@@ -6,6 +6,164 @@ use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path};
 
+type RecordedContent = BTreeMap<String, (Option<String>, Option<i64>)>;
+
+fn recorded_content(
+    db: &rusqlite::Connection,
+    task: &str,
+) -> cortex_core::CoreResult<Option<RecordedContent>> {
+    let runtime: Option<String> = db
+        .query_row(
+            "SELECT e.runtime_task_id FROM workspace_tasks t JOIN workspace_executions e
+            ON e.execution_id=t.execution_id WHERE t.task_id=?",
+            [task],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(runtime) = runtime else {
+        return Ok(Some(BTreeMap::new()));
+    };
+    // Gateway tool receipts name their channel as the actor; the native runtime's own
+    // file tools record NATIVE_PROJECT_WRITTEN with the channel in the payload.
+    let rows=db.prepare("SELECT e.type,e.payload_json,cast(strftime('%s',e.created_at) as integer) FROM runtime_events e
+            JOIN trusted_channels c ON c.task_id=e.task_id AND c.channel_id=CASE e.type WHEN 'TOOL_COMPLETED' THEN e.actor
+                ELSE json_extract(e.payload_json,'$.channel_id') END
+            WHERE e.task_id=? AND e.type IN ('TOOL_COMPLETED','NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED') ORDER BY e.id LIMIT 1001")?
+            .query_map([&runtime],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<i64>>(2)?)))?
+            .collect::<std::result::Result<Vec<_>,_>>()?;
+    if rows.len() > 1000 {
+        return Ok(None);
+    }
+    let digest = |s: &str| {
+        s.len() == 64
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let mut content = BTreeMap::new();
+    // The n-th write of one content to one path by one channel is that channel's
+    // n-th completed write request recording it (both commit together).
+    let mut seen = std::collections::HashMap::<(String, String, String), i64>::new();
+    for (kind, raw, at) in rows {
+        let v: Value = serde_json::from_str(&raw)?;
+        // A deletion through the native project_delete tool is the path's latest
+        // recorded content: absent. Confirmed only by its completed receipt.
+        if kind == "NATIVE_PROJECT_CHANGED" {
+            if v["operation"] != "project_delete" {
+                continue;
+            }
+            let Some(name) = v["path"].as_str() else {
+                return Ok(None);
+            };
+            if relative(name).is_err() {
+                return Ok(None);
+            }
+            let channel = v["channel_id"].as_str().unwrap_or_default();
+            let confirmed:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?
+                    AND operation='project_delete' AND json_valid(result_json) AND json_extract(result_json,'$.complete')=1
+                    AND json_extract(result_json,'$.reply.structuredContent.deleted')=1
+                    AND json_extract(result_json,'$.reply.structuredContent.path')=?)",
+                    rusqlite::params![&runtime,channel,v["request_key"].as_str().unwrap_or_default(),name],|r|r.get(0))?;
+            content.insert(name.to_owned(), (confirmed.then(|| DELETED.to_owned()), at));
+            continue;
+        }
+        if kind == "NATIVE_PROJECT_WRITTEN" {
+            let Some(name) = v["path"].as_str() else {
+                return Ok(None);
+            };
+            if relative(name).is_err() {
+                return Ok(None);
+            }
+            let channel = v["channel_id"].as_str().unwrap_or_default().to_owned();
+            let sha = v["sha256"]
+                .as_str()
+                .filter(|s| digest(s))
+                .map(str::to_owned);
+            // Exact bytes Cortex wrote: the event and its completed request receipt must agree
+            // on the path and the full-content digest. Anything else stays unconfirmed.
+            let confirmed = match &sha {
+                None => false,
+                Some(sha) => {
+                    let nth = seen
+                        .entry((channel.clone(), name.to_owned(), sha.clone()))
+                        .or_insert(0);
+                    let found:Option<i64>=db.query_row("SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND operation IN ('project_write','project_edit')
+                            AND json_valid(result_json) AND json_extract(result_json,'$.complete')=1
+                            AND json_extract(result_json,'$.reply.structuredContent.path')=?
+                            AND json_extract(result_json,'$.reply.structuredContent.sha256')=? ORDER BY rowid LIMIT 1 OFFSET ?",
+                            rusqlite::params![&runtime,&channel,name,sha,*nth],|r|r.get(0)).optional()?;
+                    *nth += 1;
+                    found.is_some()
+                }
+            };
+            content.insert(name.to_owned(), (sha.filter(|_| confirmed), at));
+            continue;
+        }
+        if !matches!(
+            v["operation"].as_str(),
+            Some("project_write" | "project_edit" | "project_delete")
+        ) {
+            continue;
+        }
+        let Some(name) = v["path"].as_str() else {
+            return Ok(None);
+        };
+        if relative(name).is_err() {
+            return Ok(None);
+        }
+        let sha = v["result"]["full_content_sha256"]
+            .as_str()
+            .filter(|s| digest(s))
+            .map(str::to_owned);
+        content.insert(name.to_owned(), (sha, at));
+    }
+    Ok(if content.len() > 100 {
+        None
+    } else {
+        Some(content)
+    })
+}
+
+/// Compare only the final content covered by this task’s attributable receipts.
+/// A mismatch describes the recorded bytes, including when another writer later
+/// changed them. It does not establish the availability of equivalent code.
+pub(super) fn sprint_availability(
+    db: &rusqlite::Connection,
+    draft: &str,
+    recipient: &Path,
+) -> cortex_core::CoreResult<Value> {
+    let content = recorded_content(db, draft)?;
+    let Some(content) = content.filter(|items| !items.is_empty()) else {
+        return Ok(
+            json!({"scope":"recorded_paths","status":"unknown","reason":"no_complete_write_evidence"}),
+        );
+    };
+    let mut paths = Vec::with_capacity(content.len());
+    for (path, (expected, _)) in content {
+        let status = match expected {
+            None => "unknown",
+            Some(expected) => match files::checkout_digest(recipient, &path) {
+                Ok(observed)
+                    if observed.as_deref()
+                        == (expected != DELETED).then_some(expected.as_str()) =>
+                {
+                    "confirmed"
+                }
+                Ok(_) => "missing",
+                Err(_) => "unknown",
+            },
+        };
+        paths.push(json!({"path":path,"status":status}));
+    }
+    let status = if paths.iter().any(|p| p["status"] == "missing") {
+        "missing"
+    } else if paths.iter().any(|p| p["status"] == "unknown") {
+        "unknown"
+    } else {
+        "confirmed"
+    };
+    Ok(json!({"scope":"recorded_paths","status":status,"paths":paths}))
+}
+
 pub async fn read(root: &Path, record: &Value, task: &str, git: &mut Git) -> Result<Value> {
     let mut facts = read_for_finish(root, record, task, git).await?;
     // The scheduler uses these paths to request repair. Keep the public facts shape stable.
@@ -321,72 +479,9 @@ async fn same_branch(
         facts["reason"] = json!(unrecorded);
         return Ok(());
     };
-    let content=store.read(|db|{
-        let runtime:Option<String>=db.query_row("SELECT e.runtime_task_id FROM workspace_tasks t JOIN workspace_executions e
-            ON e.execution_id=t.execution_id WHERE t.task_id=?",[task],|r|r.get(0)).optional()?;
-        let Some(runtime)=runtime else {return Ok(Some(BTreeMap::new()));};
-        // Gateway tool receipts name their channel as the actor; the native runtime's own
-        // file tools record NATIVE_PROJECT_WRITTEN with the channel in the payload.
-        let rows=db.prepare("SELECT e.type,e.payload_json,cast(strftime('%s',e.created_at) as integer) FROM runtime_events e
-            JOIN trusted_channels c ON c.task_id=e.task_id AND c.channel_id=CASE e.type WHEN 'TOOL_COMPLETED' THEN e.actor
-                ELSE json_extract(e.payload_json,'$.channel_id') END
-            WHERE e.task_id=? AND e.type IN ('TOOL_COMPLETED','NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED') ORDER BY e.id LIMIT 1001")?
-            .query_map([&runtime],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<i64>>(2)?)))?
-            .collect::<std::result::Result<Vec<_>,_>>()?;
-        if rows.len()>1000{return Ok(None);}
-        let digest=|s:&str|s.len()==64&&s.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b));
-        let mut content=BTreeMap::new();
-        // The n-th write of one content to one path by one channel is that channel's
-        // n-th completed write request recording it (both commit together).
-        let mut seen=std::collections::HashMap::<(String,String,String),i64>::new();
-        for(kind,raw,at)in rows {
-            let v:Value=serde_json::from_str(&raw)?;
-            // A deletion through the native project_delete tool is the path's latest
-            // recorded content: absent. Confirmed only by its completed receipt.
-            if kind=="NATIVE_PROJECT_CHANGED" {
-                if v["operation"]!="project_delete"{continue;}
-                let Some(name)=v["path"].as_str()else{return Ok(None);};
-                if relative(name).is_err(){return Ok(None);}
-                let channel=v["channel_id"].as_str().unwrap_or_default();
-                let confirmed:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?
-                    AND operation='project_delete' AND json_valid(result_json) AND json_extract(result_json,'$.complete')=1
-                    AND json_extract(result_json,'$.reply.structuredContent.deleted')=1
-                    AND json_extract(result_json,'$.reply.structuredContent.path')=?)",
-                    rusqlite::params![&runtime,channel,v["request_key"].as_str().unwrap_or_default(),name],|r|r.get(0))?;
-                content.insert(name.to_owned(),(confirmed.then(||DELETED.to_owned()),at));
-                continue;
-            }
-            if kind=="NATIVE_PROJECT_WRITTEN" {
-                let Some(name)=v["path"].as_str()else{return Ok(None);};
-                if relative(name).is_err(){return Ok(None);}
-                let channel=v["channel_id"].as_str().unwrap_or_default().to_owned();
-                let sha=v["sha256"].as_str().filter(|s|digest(s)).map(str::to_owned);
-                // Exact bytes Cortex wrote: the event and its completed request receipt must agree
-                // on the path and the full-content digest. Anything else stays unconfirmed.
-                let confirmed=match &sha {
-                    None=>false,
-                    Some(sha)=>{
-                        let nth=seen.entry((channel.clone(),name.to_owned(),sha.clone())).or_insert(0);
-                        let found:Option<i64>=db.query_row("SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND operation IN ('project_write','project_edit')
-                            AND json_valid(result_json) AND json_extract(result_json,'$.complete')=1
-                            AND json_extract(result_json,'$.reply.structuredContent.path')=?
-                            AND json_extract(result_json,'$.reply.structuredContent.sha256')=? ORDER BY rowid LIMIT 1 OFFSET ?",
-                            rusqlite::params![&runtime,&channel,name,sha,*nth],|r|r.get(0)).optional()?;
-                        *nth+=1;
-                        found.is_some()
-                    }
-                };
-                content.insert(name.to_owned(),(sha.filter(|_|confirmed),at));
-                continue;
-            }
-            if !matches!(v["operation"].as_str(),Some("project_write"|"project_edit"|"project_delete")){continue;}
-            let Some(name)=v["path"].as_str()else{return Ok(None);};
-            if relative(name).is_err(){return Ok(None);}
-            let sha=v["result"]["full_content_sha256"].as_str().filter(|s|digest(s)).map(str::to_owned);
-            content.insert(name.to_owned(),(sha,at));
-        }
-        Ok(if content.len()>100 {None}else{Some(content)})
-    }).map_err(context::core)?;
+    let content = store
+        .read(|db| recorded_content(db, task))
+        .map_err(context::core)?;
     let Some(content) = content else {
         return Ok(());
     };
@@ -615,4 +710,121 @@ async fn landings(
         }
     }
     Ok(Some((pending, unknown)))
+}
+
+#[cfg(test)]
+mod sprint_availability_tests {
+    use super::*;
+    use std::{
+        fs,
+        process::Command,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    fn scratch() -> std::path::PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "cortex-sprint-availability-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        assert!(Command::new("git")
+            .current_dir(root)
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false"
+            ])
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    fn fixture() -> (rusqlite::Connection, std::path::PathBuf, String) {
+        let root = scratch();
+        let source = root.join("source");
+        let recipient = root.join("recipient");
+        fs::create_dir_all(&source).unwrap();
+        git(&source, &["init", "-q", "-b", "source"]);
+        fs::write(source.join("api.txt"), b"v1\n").unwrap();
+        git(&source, &["add", "api.txt"]);
+        git(&source, &["commit", "-qm", "base"]);
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "consumer",
+                recipient.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE workspace_tasks(task_id TEXT, execution_id TEXT); CREATE TABLE workspace_executions(execution_id TEXT, runtime_task_id TEXT); CREATE TABLE trusted_channels(task_id TEXT, channel_id TEXT); CREATE TABLE runtime_events(id INTEGER PRIMARY KEY, task_id TEXT, type TEXT, actor TEXT, payload_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP); CREATE TABLE runtime_requests(task_id TEXT, actor TEXT, request_key TEXT, operation TEXT, result_json TEXT);").unwrap();
+        db.execute("INSERT INTO workspace_tasks VALUES ('draft','exec')", [])
+            .unwrap();
+        db.execute(
+            "INSERT INTO workspace_executions VALUES ('exec','runtime')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO trusted_channels VALUES ('runtime','channel')",
+            [],
+        )
+        .unwrap();
+        (db, recipient, source.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn worktree_missing_then_integrated_is_reported_exactly() {
+        let (db, recipient, source) = fixture();
+        fs::write(std::path::Path::new(&source).join("api.txt"), b"v2\n").unwrap();
+        let bytes = fs::read(std::path::Path::new(&source).join("api.txt")).unwrap();
+        let sha = files::revision(&bytes);
+        db.execute("INSERT INTO runtime_events(id,task_id,type,actor,payload_json) VALUES (1,'runtime','NATIVE_PROJECT_WRITTEN','channel',?)", [json!({"operation":"project_write","path":"api.txt","channel_id":"channel","request_key":"write-1","sha256":sha}).to_string()]).unwrap();
+        db.execute("INSERT INTO runtime_requests VALUES ('runtime','channel','write-1','project_write',?)", [json!({"complete":true,"reply":{"structuredContent":{"path":"api.txt","sha256":sha}}}).to_string()]).unwrap();
+        let before = sprint_availability(&db, "draft", &recipient).unwrap();
+        assert_eq!(before["status"], "missing");
+        git(Path::new(&source), &["commit", "-qam", "implement API"]);
+        git(&recipient, &["merge", "--ff-only", "-q", "source"]);
+        let after = sprint_availability(&db, "draft", &recipient).unwrap();
+        assert_eq!(after["status"], "confirmed");
+        fs::remove_file(recipient.join("api.txt")).unwrap();
+        std::os::unix::fs::symlink(
+            Path::new(&source).join("api.txt"),
+            recipient.join("api.txt"),
+        )
+        .unwrap();
+        assert_eq!(
+            sprint_availability(&db, "draft", &recipient).unwrap()["status"],
+            "unknown"
+        );
+        fs::remove_dir_all(Path::new(&source).parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn unconfirmed_write_and_unreadable_file_stay_unknown() {
+        let (db, recipient, source) = fixture();
+        let bytes = fs::read(std::path::Path::new(&source).join("api.txt")).unwrap();
+        let sha = files::revision(&bytes);
+        db.execute("INSERT INTO runtime_events(id,task_id,type,actor,payload_json) VALUES (1,'runtime','NATIVE_PROJECT_WRITTEN','channel',?)", [json!({"operation":"project_write","path":"api.txt","channel_id":"channel","request_key":"write-1","sha256":sha}).to_string()]).unwrap();
+        fs::write(recipient.join("api.txt"), bytes).unwrap();
+        assert_eq!(
+            sprint_availability(&db, "draft", &recipient).unwrap()["status"],
+            "unknown"
+        );
+        let _ = fs::remove_dir_all(std::path::Path::new(&source).parent().unwrap());
+    }
 }

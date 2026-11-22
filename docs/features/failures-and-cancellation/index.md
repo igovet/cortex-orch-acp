@@ -98,7 +98,7 @@ enforcement does not depend on how a failure is reported. After the channel is
 authenticated, a handler failure is an `isError` tool result whose structured
 content carries `code`, the offending `field` when known and a short corrective
 `hint`, for example `request_key_conflict`, `gateway_write_conflict`,
-`invalid_scope`, `replan_limit_requires_user_input`, `synthesis_gaps_undisclosed`
+`invalid_scope`, `synthesis_gaps_undisclosed`
 (with the current gap names) or `pipeline_missing`. Authority failures stay
 JSON-RPC `-32001` refusals named `authority_refused: <code>` with
 `data: {code, retryable: false, hint}`: a channel that is no longer current, a
@@ -191,17 +191,85 @@ failure more than 10 minutes after the previous one starts a new streak.
   reopening the session if it died, and the chat shows `⟳ The coordinator's
   engine failed before answering …`. A turn that already streamed or called
   a tool may have acted, so it is not resent. It blocks as before.
-- **Workers.** In `retry_lost`, an assignment that
-  failed with class `engine_failure`, `transport_failure` or `worker_lost`
-  is retried within the same window. This includes a worker engine that
-  would not start and recorded no route failure. These retries do not use
-  up `MAX_ATTEMPT_RETRIES`. The `ASSIGNMENT_RETRIED` event records
-  `failed_at`, `retry_not_before` and `infrastructure_retry`.
+- **Workers.** In `retry_lost`, an assignment whose attempt ended for an
+  infrastructure reason (see [Why a worker attempt ended](#why-a-worker-attempt-ended))
+  is retried on the runtime's backoff. The `ASSIGNMENT_RETRIED` event records
+  `failure_class`, the observed `ending`, `failed_at`, `retry_not_before` and
+  `infrastructure_retry`. These retries never escalate the node, never take a
+  rung of the strategy ladder and never end in `worker_retry_limit`: a streak
+  longer than the 600 s window waits the longest ordinary delay (60 s), and a
+  node lineage (the node and its review fixes, in every plan revision since the
+  task was last reopened) has 6 ordinary infrastructure retries. After that the
+  node waits on a growing delay (5 minutes, doubling up to one hour;
+  `infrastructure_wait: true`, one `LOOP_BROKEN` with action
+  `infrastructure_wait`) and is retried by the runtime when the delay ends,
+  without a replan, or at once when the owner chooses Retry (`OWNER_RETRY_REQUESTED`
+  ends every pending delay of the task). A route failure (`capacity_unavailable`) is bounded the same
+  way. An owner pause (`owner_paused`) or a restart (`runtime_restart`) is
+  retried at once and not counted. A model that lost the same node lineage twice
+  is routed away from on the next dispatch (another model when one is usable,
+  preferably another engine) without raising the tier. A quality retry
+  (`result_refused`, `degenerate_turn`, `indeterminate`) escalates the node, and
+  after two quality retries of a node in one plan revision the next quality
+  failure stops with `worker_retry_limit` (a rung of the strategy ladder).
   `TaskMachine._ready_nodes` holds the node until its delay ends, with the
-  scheduler wait reason `retry_backoff`. The hold lives in the runtime
-  process, so an idle scheduler pass costs no extra read; a restarted
-  runtime retries the node at once. The chat shows that wait as a card
+  scheduler wait reason `retry_backoff`. The chat shows that wait as a card
   titled `Retry N: <node> — the worker's engine failed`.
+
+### Why a worker attempt ended
+
+When a worker attempt ends without an accepted result, the runtime records why
+(`ATTEMPT_ENDED`, and the attempt's `assignment_failed` event that `retry_lost`
+classifies): how the turn ended (the model ended it, the engine process exited,
+the owner stopped the worker, the service stopped, the task was interrupted,
+or a turn error code), the engine's exit status or signal, whether it exited
+before the host asked, the transport close reason, a runtime cancel of one of
+its permission requests under the read-only rule, the results it had refused
+(count and last code), and the last 400 characters of its already redacted
+stderr tail. No credential, argument or output text is kept.
+
+| Class | Recorded when | Kind |
+| --- | --- | --- |
+| `result_refused` | the model ended its turn after refused results and no accepted one | quality |
+| `degenerate_turn` | the turn tripped the degenerate-turn watchdog | quality |
+| `indeterminate` | the model ended its turn without submitting anything | quality |
+| `worker_lost` | the process vanished without the model ending its turn, or the only refusals were for a checkout that kept changing | infrastructure |
+| `sandbox_unavailable` | the attempt's last command could not get a sandbox (`native_command_sandbox_unavailable`, `git_context_unavailable`) | infrastructure |
+| `owner_paused` | the owner stopped the worker or paused the task | infrastructure |
+| `runtime_restart` | the service stopped or restarted, or the driver was cancelled | infrastructure |
+| `transport_failure` | the turn ended with an unknown outcome or a transport error | infrastructure |
+| `engine_failure` | any other engine error | infrastructure |
+
+The infrastructure classes are `engine_failure`, `transport_failure`,
+`worker_lost`, `authorization_loss`, `capacity_unavailable`, `owner_paused`,
+`runtime_restart`, `sandbox_unavailable` and `verifier_environment`. An attempt
+with an accepted result records nothing.
+
+### Repeated refusals inside one attempt
+
+A worker may correct a refused `result_submit` and submit again in the same
+turn. When the same correctable refusal (the same code and the same named items)
+reaches its third occurrence in one attempt, the runtime records the submission
+instead, with what stays open disclosed, and records `LOOP_BROKEN` (kind
+`result_refusal`). It never records a pass:
+
+- A check without a blocker is recorded as not run or unverified with a runtime
+  blocker; unread required predecessor reports are disclosed as an `unverified`
+  runtime limit.
+- A review whose parts stay uncovered, that returned INCOMPLETE without naming
+  them, or that returned BLOCK without findings, is recorded INCOMPLETE with those
+  parts not covered (dead end `other_role_work`) and an `unverified` limit.
+- A failed check that stays open (`open_failed_check`, `omitted_failed_check`, an
+  invalid retraction or supersession) makes an execution assignment failed, with
+  the open check as its blocker (`other_role_work`; the omitted failed runs are
+  cited as failed), and an approving review INCOMPLETE. A failed outcome without a
+  dead end is recorded with one.
+
+Stricter bounds stay: two refusals for missing report sections or unread changed
+files, one repair offer for a failed check. A refusal for a checkout another
+writer keeps changing (`review_project_revision_*`, `review_resubmit_required`),
+a command that is still running (`command_not_settled`) and a malformed
+submission are never relieved this way and never count toward this limit.
 
 ### Native authentication loss
 
@@ -306,7 +374,7 @@ attempt that is already failed with its first reason and records no
 
 `/cortex-stop` permanently marks the task CANCELLED before cleanup. It closes
 pending questions, fences late publications and cancels capacity-queued opens.
-A captured `/cortex-finish` command or the Finish answer to the runtime's own stop question
+A captured `/cortex-finish` command or the Finish answer to a runtime stop question an earlier version stored (the runtime asks none now; see the [no-stop policy](../task-lifecycle/index.md#no-stop-policy-and-the-strategy-ladder))
 uses the same cancellation cleanup, but also records `USER_FORCE_FINISHED`
 with unfinished work. It is terminal `CANCELLED`, never verified `COMPLETED`.
 A worker opened concurrently with cancellation is closed before its first prompt.
@@ -355,17 +423,22 @@ retried once in a fresh engine session:
   changed the task (an accepted plan, a question) stands, and the driver
   continues from that state.
 - A worker turn ends with its node still open and its session terminated, so the
-  lost-worker path (`ASSIGNMENT_RETRIED`, failure class `worker_lost`) replaces the
-  assignment in a fresh session at the next step.
+  lost-worker path (`ASSIGNMENT_RETRIED`, failure class `degenerate_turn`, a quality
+  class) replaces the assignment in a fresh session on an escalated route at the
+  next step.
 
-A second degenerate turn (the coordinator's retry, or the same worker node again
-in the same plan revision) stops the task with the blocker
-`native_turn_degenerate`, whose owner question says the model's output was
-unusable twice and suggests choosing another model before continuing. In
-Automatic mode that stop pauses the task as `owner_blocker` instead of
-continuing on the same route: unlike an `external_blocker`, the runtime never
-resumes it when the route qualifies again; only the owner's Allow more attempts
-(which renews the budget) or Close as is… does. Direct `SessionDriver::prompt` callers outside the
+A degenerate turn never stops the task and never runs a third time on the same
+model. When the coordinator's retry degenerates too, the coordinator moves to
+another qualified model, preferably on another engine or account
+(`NATIVE_COORDINATOR_ESCALATED`; later coordinator turns stay there until the
+owner chooses a model again), and the turn runs there. Only when no other model
+qualifies, or that one degenerates as well, does the turn end with
+`native_turn_degenerate`, which the [no-stop policy](../task-lifecycle/index.md#no-stop-policy-and-the-strategy-ladder)
+records as a continuation on at least the `escalate_route` rung that again moves
+the coordinator to another model. A worker node that degenerates again is
+replaced each time on an escalated route (another model or engine than the
+previous attempt), and the lost-worker retries then continue on the strategy
+ladder. Direct `SessionDriver::prompt` callers outside the
 runtime's turn loop still see a `refusal` stop reason as an ordinary reply.
 
 
@@ -401,6 +474,33 @@ process is confirmed gone (Resume refuses `native_shutdown_unconfirmed`
 otherwise) it then continues like an owner message: the coordinator is
 relaunched to replan from the retained state, instead of the task silently
 staying in RECOVERING with no driver.
+
+### Service restarts
+
+A service restart is infrastructure, never the model's failure. When recovery
+finds a task that was planning, executing or reviewing, interrupted by the
+restart or left with an unknown session or effect outcome, and every process it
+owned is confirmed gone, the task resumes in the same state on the same rung of
+the strategy ladder, without a continuation or a new plan revision
+(`NATIVE_RECOVERY_RESUMED` with `restart_resume: true`):
+
+- effects the gone sessions left without a final receipt are settled once with
+  outcome `unknown` (`settled_by: runtime_reverify`, `RUNTIME_UNCERTAINTY_RECORDED`);
+- each attempt the restart ended without a result is recorded as
+  `runtime_restart`, so its node is retried at once, uncounted and not escalated;
+  the retry carries those effects (`reverify`) and the fresh attempt is told to
+  re-verify them from the files, Git state and receipts before redoing anything.
+
+A command receipt that is still unsettled, a process that is not confirmed gone,
+an open question or wait, an answer being delivered, a legacy start, a
+verification or a desktop control keep the recovery rules above. When restarts
+find the task at the same plan revision a fourth time without progress
+(`boot_recovery` loop key; `LOOP_OBSERVED` from the second), the task pauses
+instead (`AUTOMATIC_PAUSED`, `pause_kind: infrastructure`, `LOOP_BROKEN` with
+action `infrastructure_pause`) for the runtime's own recheck, without a model
+call. `NATIVE_RECOVERY_REQUIRED` is recorded once per restart burst: a restart
+that finds the task held for the same reason in the same state, with nothing
+recorded for it since, adds no event.
 
 ## Terminal resource cleanup
 

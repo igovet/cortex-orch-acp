@@ -22,6 +22,7 @@ pub(crate) fn authority(code: &str) -> bool {
             | "stale_worker_authority"
             | "stale_epoch"
             | "tool_refused"
+            | "task_outside_sprint"
             | "tool_not_offered"
             | "unknown_session_role"
             | "invalid_native_tool"
@@ -75,7 +76,8 @@ fn field(code: &str) -> Option<&'static str> {
         | "outside_symlink_refused"
         | "outside_path_unavailable"
         | "outside_path_inside_project"
-        | "outside_parent_unavailable" => "path",
+        | "outside_parent_unavailable"
+        | "rule_file_protected" => "path",
         "invalid_cwd" | "outside_cwd_unavailable" => "cwd",
         "skill_link_name_invalid" | "skill_source_missing" => "name",
         "skill_link_occupied" | "skill_link_conflict" => "replace_symlink_target",
@@ -114,6 +116,8 @@ fn hint(code: &str) -> &'static str {
         "not_found" => "Use an exact report_id from list_reports or from a result's report_ref.",
         "use_read_source" => "This document is a captured source, not a report; read it with read_source.",
         "pipeline_missing" => "This task has no pipeline document yet. list_reports lists the task's published reports; read one with its report_id.",
+        "sprint_membership_required" => "Sprint reads need a current Workspace sprint member. Continue from the current task context.",
+        "sprint_membership_changed" => "The sprint membership changed during this read. Read the current graph again.",
         "tool_not_available" => "That tool is not offered to this channel; tools_discover without a name lists the offered tools.",
         "invalid_scope" => "Each scope entry must be a project-relative path without wildcards, '..' or private runtime storage.",
         "scope_conflicts_with_user_policy" => "A requested path is protected by the owner. Remove it from the request.",
@@ -126,6 +130,7 @@ fn hint(code: &str) -> &'static str {
         "synthesis_disclosure_in_text" => "Put verification-gap disclosures only in not_verified, not in text.",
         "invalid_not_verified" | "synthesis_blocker_required" => "Each not_verified entry needs the exact check name and a concrete blocker.",
         "plan_not_expected" => "A plan is accepted only while planning; end the turn and wait for the runtime.",
+        "owner_question_required" => "A decision only the owner can make blocks this work (capsule obstacles.owner_decisions). Ask it first with user_question_request: one question with concrete options. Plan the blocked work after the answer.",
         "verification_failed_check_missing" | "automatic_required_check_missing" => "Keep the unresolved verification commands in the repair plan with their exact argv. Assign the underlying code fix to a writing worker so the runtime can verify it again.",
         "verification_repair_not_expected" => "No verification repair is expected now; end the turn and wait for the runtime.",
         "unknown_model_hint" => "Use a model from list_route_options, or omit the model hint.",
@@ -149,7 +154,9 @@ fn hint(code: &str) -> &'static str {
         "invalid_cwd" => "cwd must be an existing absolute directory without '..' components.",
         "verification_executable_unavailable" => "The program was not found on the verification command path (the project's .venv/bin, venv/bin and node_modules/.bin, then the owner's tool search path, which already includes the existing usual per-user tool folders such as ~/.local/bin, ~/.cargo/bin and the default nvm, fnm or Volta Node). Install it project-privately without system changes or choose another executable check; ask the owner if neither is possible.",
         "invalid_verification_command" | "verification_shell_syntax" => "Supply one literal argv: no shell operators, redirections or command substitution.",
-        "native_command_sandbox_unavailable" => "The command did not start: its sandbox could not be prepared (host namespaces unavailable, or the host too busy to prepare it in time). Nothing ran. Retry the identical command once; if it is refused again, report the check as not run with this blocker.",
+        "native_command_sandbox_unavailable" => "The command did not start: its supervisor could not prepare or confirm the sandbox before release. Nothing ran. This refusal does not authorize running on the host. Report the preparation blocker; a fresh contained attempt is appropriate only if the problem has cleared and the original receipt confirms it never launched.",
+        "rule_file_protected" => "This is a project rule file (AGENTS.md, CLAUDE.md, .agents/, .claude/, docs/project/verification.md…). Tasks don't edit it unless the owner's task names it or the owner sends `allow-write: <path>`. Leave it unchanged and propose rule changes in your result.",
+        "outside_action_not_confirmed" => "The user did not allow this to run outside the sandbox, or no one could answer the permission card. Nothing ran. Do not repeat it; report the check as not run with this blocker.",
         "native_verification_sandbox_unavailable" =>"The verification sandbox could not run the probe; this does not show that the program is missing.",
         "skill_link_name_invalid" => "Use the exact skill directory name under .agents/skills: 1-64 lowercase letters, digits and single hyphens.",
         "skill_source_missing" => "Write .agents/skills/<name>/SKILL.md as a regular file in a real directory first.",
@@ -255,14 +262,13 @@ mod tests {
         let ok = json!({"content":[],"isError":false});
         assert_eq!(enrich(ok.clone()), ok);
     }
-    /// A command whose sandbox could not be prepared did not run: the model is told so
-    /// and may retry it once, instead of being told to "correct the call".
     #[test]
-    fn an_unprepared_command_sandbox_says_nothing_ran_and_allows_one_retry() {
+    fn an_unprepared_command_sandbox_does_not_authorize_host_execution() {
         let reply = reply("native_command_sandbox_unavailable");
         let hint = reply["structuredContent"]["hint"].as_str().unwrap();
         assert!(hint.contains("did not start") && hint.contains("Nothing ran"));
-        assert!(hint.contains("Retry the identical command once"));
+        assert!(hint.contains("does not authorize running on the host"));
+        assert!(hint.contains("original receipt confirms it never launched"));
         assert!(!hint.contains("Correct the call"));
     }
 }

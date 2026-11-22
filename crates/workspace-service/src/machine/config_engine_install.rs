@@ -177,13 +177,7 @@ fn name(path: &Path) -> &str {
 impl Host {
     pub(super) fn from_config(config: &crate::Config) -> Result<Self> {
         let route = super::super::config_read::environment(config)?;
-        // The retained child environment: release has no XDG_DATA_HOME or
-        // CORTEX_NODE_BINARY; dev uses only its channel-local data root.
-        let data = if workspace_protocol::channel::current().is_dev() {
-            config.state_dir.join("data")
-        } else {
-            route.home.join(".local/share")
-        };
+        let data = super::super::config_read::engine_data(config, &route.home)?;
         let runtime = config
             .launch
             .runtime_root()
@@ -354,6 +348,7 @@ fn install_pin(
         return Err(unavailable());
     };
     let root = host.data.join("cortex/engines").join(engine);
+    SetupEnvironment::validate_data(&host.route.home, &root).map_err(|_| failed())?;
     fs::create_dir_all(&root).map_err(|_| failed())?;
     let lock = OpenOptions::new()
         .write(true)

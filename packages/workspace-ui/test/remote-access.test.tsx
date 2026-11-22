@@ -15,7 +15,7 @@ const settle = async () => { for (let i = 0; i < 10; i++) await flush(); };
 const all = (selector: string) => [...document.querySelectorAll<HTMLElement>(selector)];
 const button = (text: string, within: ParentNode = document) => [...within.querySelectorAll<HTMLElement>("button")].find(b => b.textContent?.trim() === text);
 const page = () => document.querySelector<HTMLElement>(".set-page")!;
-const REMOTE = ["remote.status", "remote.enable", "remote.pairing.start", "remote.pairing.cancel", "remote.pairing.decide", "remote.devices.revoke", "remote.relay.set"];
+const REMOTE = ["remote.status", "remote.enable", "remote.pairing.start", "remote.pairing.cancel", "remote.pairing.decide", "remote.devices.revoke", "remote.relay.set", "remote.sudo.set"];
 
 const base = (patch: Partial<RemoteStatus> = {}): RemoteStatus => ({ available: true, enabled: true, machineId: "m-1", relay: { url: "https://relay.example.org", source: "default" }, pairing: null, pending: [], devices: [], ...patch });
 /** A 21 x 21 matrix with finder-like corners, so the module count is known. */
@@ -66,6 +66,22 @@ describe("remote access of this computer", () => {
     toggle.click(); await settle();
     expect(sent(s, "remote.enable")).toEqual([{ enabled: true }]);
     expect(button("Show QR code")).toBeTruthy();
+  });
+
+  it("lets the owner turn passwords and tokens from phones off and on, and hides it from an older service", async () => {
+    let status = base({ sudoFromPhone: true });
+    const s = machine(() => status);
+    await mount(s);
+    const toggle = page().querySelector<HTMLInputElement>('input[aria-label="Passwords and tokens from phones"]')!;
+    expect(toggle.checked).toBe(true);
+    expect(page().textContent).toContain("paste a sign-in token a task needs. It crosses the encrypted remote connection");
+    status = base({ sudoFromPhone: false });
+    toggle.click(); await settle();
+    expect(sent(s, "remote.sudo.set")).toEqual([{ allowed: false }]);
+    expect(page().querySelector<HTMLInputElement>('input[aria-label="Passwords and tokens from phones"]')!.checked).toBe(false);
+    dispose?.(); dispose = undefined; document.body.innerHTML = "";
+    await mount(machine(() => base()));
+    expect(page().querySelector('input[aria-label="Passwords and tokens from phones"]')).toBeNull();
   });
 
   it("says pairing works on the same network only when no relay is set", async () => {

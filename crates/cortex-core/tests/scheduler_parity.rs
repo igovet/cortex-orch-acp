@@ -469,10 +469,10 @@ fn unprovisioned_worker_loss_has_windowed_budget_and_fresh_assignment_ids() {
                 },
             )
         });
-        assert_eq!(outcome.is_ok(), now < 0.3);
-        if now >= 0.3 {
-            assert_eq!(outcome.unwrap_err().code(), "worker_retry_limit");
-        }
+        // A streak longer than the window is an infrastructure loss, never the
+        // model's failure: it keeps retrying (bounded per node lineage, then an
+        // infrastructure wait), never `worker_retry_limit`.
+        outcome.unwrap();
     }
     assert_eq!(
         ids.iter().collect::<std::collections::BTreeSet<_>>().len(),

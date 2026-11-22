@@ -114,6 +114,71 @@ impl Env {
         );
         digest
     }
+    async fn accept_native(&self) -> String {
+        self.evidence(&[]).await;
+        let digest = crate::native_effects::observe_digest(self.root.clone())
+            .await
+            .unwrap();
+        let store = context::open(&self.root, OpenMode::RuntimeValidate)
+            .unwrap()
+            .unwrap();
+        store.write(|db| {
+            cortex_core::lifecycle::event_tx(db, "r1", "TASK_CREATED", json!({"execution_host":"rust"}))?;
+            db.execute("UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+                [json!({"verification":[["/bin/true"]]}).to_string()])?;
+            cortex_core::lifecycle::event_tx(db, "r1", "VERIFICATION_PASSED",
+                json!({"revision":0,"revision_digest":digest,"checks":[{"argv":["/bin/true"],"complete":true,
+                    "exit_code":0,"revision_digest":digest}]}))?;
+            Ok(())
+        }).unwrap();
+        drop(store);
+        self.save(record(
+            self,
+            &digest,
+            json!({"acceptance":null,"status":"review"}),
+        ));
+        let (facts, _) = super::super::task_facts::native_review(
+            &self.root,
+            "p1",
+            "e1",
+            "COMPLETED",
+            &self.overlay(),
+            Some(&digest),
+        );
+        assert_eq!(facts["accept"], true, "{facts}");
+        let mut product = super::super::native::product(&self.state, "p1").unwrap();
+        super::super::task_review::accept(
+            &self.root,
+            "p1",
+            "t1",
+            &self.state,
+            &mut product,
+            &json!({"version":facts["version"],"digest":digest}),
+            &mut Git::new(),
+        )
+        .await
+        .unwrap();
+        assert!(self.overlay()["acceptance"]["commitSource"].is_object());
+        digest
+    }
+    async fn git_action(&self, params: Value) {
+        Git::new()
+            .action(&self.root, "p1", &self.state, &params)
+            .await
+            .unwrap();
+    }
+    async fn review_actions(&self) -> Value {
+        let native = super::super::task_facts::native_observation(&self.root).await;
+        super::super::task_facts::native_review(
+            &self.root,
+            "p1",
+            "e1",
+            "COMPLETED",
+            &self.overlay(),
+            native.as_deref(),
+        )
+        .0
+    }
     fn save(&self, record: Value) {
         let mut tasks = serde_json::Map::new();
         tasks.insert("t1".into(), record);
@@ -442,21 +507,95 @@ async fn unsupported_method_and_helper_data_in_the_index_are_refused_before_effe
     assert_eq!(git(&target, &["rev-parse", "main"]), env.base_revision());
 }
 #[tokio::test]
-async fn pull_request_requires_a_pushed_branch_and_records_one_attempt() {
-    let env = Env::new("pr");
-    let bin = env.base.join("bin");
+async fn pull_request_binds_origin_and_records_only_matching_url() {
+    const SCENARIO: &str = "CORTEX_TEST_PR_REPOSITORY_SCENARIO";
+    if let Ok(scenario) = std::env::var(SCENARIO) {
+        assert_eq!(
+            std::env::var("GH_REPO").unwrap(),
+            "github.com/ambient/wrong"
+        );
+        assert_eq!(std::env::var("GH_HOST").unwrap(), "ambient.example.invalid");
+        pull_request_fixture(&scenario).await;
+        return;
+    }
+
+    // Start an isolated test process so neither the fake PATH nor the ambient gh
+    // overrides affect other tests. The fake gh takes precedence in the child.
+    let fixture = Env::new("pr-cli");
+    let bin = fixture.base.join("bin");
     fs::create_dir(&bin).unwrap();
     let gh = bin.join("gh");
     fs::write(
         &gh,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\necho 'Creating pull request for task into main'\necho 'https://github.com/owner/repo/pull/7'\n",
-            env.base.join("gh-args").display()
-        ),
+        r#"#!/bin/sh
+set -eu
+[ "${GH_REPO-unset}" = unset ] && [ "${GH_HOST-unset}" = unset ] || exit 3
+case "$1" in
+  api)
+    [ "$#" -eq 6 ] && [ "$2 $3 $4 $5" = "--method GET --hostname github.com" ] || exit 4
+    printf '%s\n' "$6" >> ../gh-api
+    case "$6" in
+      repos/owner/repo/git/ref/heads/task)
+        sha=$(git --git-dir=../remote.git rev-parse --verify refs/heads/task)
+        printf '{"ref":"refs/heads/task","url":"https://api.github.com/repos/Owner/Repo/git/refs/heads/task","object":{"type":"commit","sha":"%s"}}\n' "$sha"
+        ;;
+      repos/owner/repo/pulls/7)
+        sha=$(git --git-dir=../remote.git rev-parse --verify refs/heads/task)
+        [ "$CORTEX_TEST_PR_REPOSITORY_SCENARIO" != wrong-readback ] ||
+          sha=$(git --git-dir=../remote.git rev-parse --verify refs/heads/task^)
+        printf '{"html_url":"https://github.com/owner/repo/pull/7","state":"open","head":{"ref":"task","sha":"%s","repo":{"full_name":"Owner/Repo"}},"base":{"ref":"main","repo":{"full_name":"Owner/Repo"}}}\n' "$sha"
+        ;;
+      *) exit 5 ;;
+    esac
+    ;;
+  pr)
+    printf '%s\n' "$@" >> ../gh-args
+    cat ../gh-url
+    ;;
+  *) exit 6 ;;
+esac
+"#,
     )
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    for scenario in ["matching-repository", "wrong-repository", "wrong-readback"] {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "machine::integration::tests::pull_request_binds_origin_and_records_only_matching_url",
+            ])
+            .env("PATH", std::env::join_paths(&paths).unwrap())
+            .env("GH_REPO", "github.com/ambient/wrong")
+            .env("GH_HOST", "ambient.example.invalid")
+            .env(SCENARIO, scenario)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+            "fixture {scenario}: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+}
+
+async fn pull_request_fixture(scenario: &str) {
+    let env = Env::new("pr");
+    let gh_args = env.base.join("gh-args");
+    let gh_api = env.base.join("gh-api");
+    let ref_lookup = "repos/owner/repo/git/ref/heads/task\n";
+    fs::write(
+        env.base.join("gh-url"),
+        if scenario == "wrong-repository" {
+            "https://github.com/owner/unrelated/pull/7\n"
+        } else {
+            "https://github.com/owner/repo/pull/7\n"
+        },
+    )
+    .unwrap();
     let remote = env.base.join("remote.git");
     git(
         &env.base,
@@ -471,7 +610,22 @@ async fn pull_request_requires_a_pushed_branch_and_records_one_attempt() {
             "https://github.com/owner/repo.git",
         ],
     );
-    // Pushes go to the local bare repository; nothing contacts the remote host.
+    // Run actual Git push and receive-pack with a GitHub-shaped SSH URL and
+    // an isolated transport that never calls ssh or connects to the network.
+    let transport = env.base.join("fixture-ssh");
+    fs::write(
+        &transport,
+        "#!/bin/sh\n[ \"$#\" -eq 2 ] && [ \"$1\" = git@github.com ] && [ \"$2\" = \"git-receive-pack 'Owner/Repo.git'\" ] || exit 3\nexec git receive-pack ../remote.git\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&transport, fs::Permissions::from_mode(0o700)).unwrap();
+    git(
+        &env.root,
+        &["config", "core.sshCommand", transport.to_str().unwrap()],
+    );
+    git(&env.root, &["config", "ssh.variant", "simple"]);
+    let witness_url = "git@github.com:Owner/Repo.git";
     git(
         &env.root,
         &[
@@ -482,30 +636,125 @@ async fn pull_request_requires_a_pushed_branch_and_records_one_attempt() {
             remote.to_str().unwrap(),
         ],
     );
-    let digest = env.evidence(&[]).await;
-    env.save(record(&env, &digest, json!({})));
+    // Accept the edit of a tracked file, then commit using the ordinary Git
+    // menu path, not Finish's own commit. Only that exact head can be pushed for PR.
+    fs::write(env.root.join("a.txt"), b"accepted bytes\n").unwrap();
+    let digest = env.accept_native().await;
+    let before = git(&env.root, &["rev-parse", "HEAD"]);
+    env.git_action(
+        json!({"action":"commit","checkoutId":"p1:main","message":"Commit accepted work"}),
+    )
+    .await;
+    assert_eq!(git(&env.root, &["rev-parse", "HEAD^"]), before);
+    assert_eq!(git(&env.root, &["show", "HEAD:a.txt"]), "accepted bytes");
+    assert_clean(&env.root);
+    assert!(env.overlay()["acceptance"]["committedDigest"].is_string());
+    let facts = env.review_actions().await;
+    assert_eq!(facts["digest"], digest, "{facts}");
+    assert_ne!(facts["workspaceChanged"], true, "{facts}");
     let mut params = squash(&digest);
     params["method"] = json!("pr");
     params["body"] = json!("Body text");
     params["draft"] = json!(true);
-    let old = std::env::var_os("PATH").unwrap();
-    let mut paths = vec![bin.clone()];
-    paths.extend(std::env::split_paths(&old));
-    std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
-    // Not pushed: refused before the attempt is recorded.
+    let head = git(&env.root, &["rev-parse", "HEAD"]);
+    let push = json!({"action":"push","checkoutId":"p1:main","remote":"origin","branch":"task","confirmed":true});
+    // Reproduce the old false success: a real confirmed push to a local
+    // remote updates the tracking ref; changing only pushurl cannot make it
+    // an approved push to GitHub.
+    env.git_action(push.clone()).await;
+    assert_eq!(git(&remote, &["rev-parse", "refs/heads/task"]), head);
+    assert_eq!(
+        git(&env.root, &["rev-parse", "refs/remotes/origin/task"]),
+        head
+    );
+    git(
+        &env.root,
+        &["remote", "set-url", "--push", "origin", witness_url],
+    );
     let error = env.run(params.clone()).await.unwrap_err();
     assert_eq!(error.code, "push_required");
-    assert!(env.overlay().get("prAttempt").is_none());
-    git(&env.root, &["push", "-q", "-u", "origin", "task"]);
-    params["requestId"] = json!("two");
-    assert_eq!(env.run(params.clone()).await.unwrap(), json!({"done":true}));
-    std::env::set_var("PATH", old);
-    let args = fs::read_to_string(env.base.join("gh-args")).unwrap();
+    assert!(env.overlay()["prAttempt"].is_null());
+    assert!(!gh_api.exists() && !gh_args.exists());
+
+    git(&remote, &["update-ref", "-d", "refs/heads/task"]);
+    env.git_action(push.clone()).await;
+    assert_eq!(git(&remote, &["rev-parse", "refs/heads/task"]), head);
+    let saved = product(&env.state, "p1").unwrap();
+    assert_eq!(
+        saved["originPushWitnesses"]["refs/heads/task"],
+        json!({"repository":"github.com/owner/repo","commit":head,"ref":"refs/heads/task"})
+    );
+
+    // A different push URL alone is refused before any gh dispatch.
+    let set_origin = |push: bool, url: &str| {
+        let mut args = vec!["remote", "set-url"];
+        if push {
+            args.push("--push");
+        }
+        args.extend(["origin", url]);
+        git(&env.root, &args);
+    };
+    let unrelated = "https://github.com/owner/unrelated.git";
+    set_origin(true, unrelated);
+    params["requestId"] = json!("wrong-push-target");
+    assert_eq!(
+        env.run(params.clone()).await.unwrap_err().code,
+        "pull_request_unsafe"
+    );
+    assert!(env.overlay()["prAttempt"].is_null());
+    assert!(!gh_api.exists() && !gh_args.exists());
+
+    // Even coherent current URLs cannot change the witness's destination.
+    set_origin(false, unrelated);
+    params["requestId"] = json!("retargeted-origin");
+    assert_eq!(
+        git(&env.root, &["rev-parse", "refs/remotes/origin/task"]),
+        head
+    );
+    assert_eq!(
+        env.run(params.clone()).await.unwrap_err().code,
+        "push_required"
+    );
+    assert!(env.overlay()["prAttempt"].is_null());
+    assert!(!gh_api.exists() && !gh_args.exists());
+
+    set_origin(false, "https://github.com/owner/repo.git");
+    set_origin(true, witness_url);
+    git(
+        &remote,
+        &[
+            "update-ref",
+            "refs/heads/task",
+            &git(&env.root, &["rev-parse", "HEAD^"]),
+        ],
+    );
+    params["requestId"] = json!("remote-tip-moved");
+    assert_eq!(
+        env.run(params.clone()).await.unwrap_err().code,
+        "push_required"
+    );
+    assert!(env.overlay()["prAttempt"].is_null());
+    assert!(!gh_args.exists());
+    assert_eq!(fs::read_to_string(&gh_api).unwrap(), ref_lookup);
+
+    // A new owner-confirmed push restores the exact remote head. Also check
+    // that an explicit already-up-to-date push can produce the same witness.
+    env.git_action(push.clone()).await;
+    env.git_action(push).await;
+    assert_eq!(
+        product(&env.state, "p1").unwrap()["originPushWitnesses"],
+        saved["originPushWitnesses"]
+    );
+    params["requestId"] = json!("create-pr");
+    let result = env.run(params.clone()).await;
+    let args = fs::read_to_string(&gh_args).unwrap();
     assert_eq!(
         args.lines().collect::<Vec<_>>(),
         [
             "pr",
             "create",
+            "--repo",
+            "github.com/owner/repo",
             "--base",
             "main",
             "--head",
@@ -517,13 +766,52 @@ async fn pull_request_requires_a_pushed_branch_and_records_one_attempt() {
             "--draft"
         ]
     );
+    let lookups = format!(
+        "{ref_lookup}{ref_lookup}{}",
+        if scenario == "wrong-repository" {
+            ""
+        } else {
+            "repos/owner/repo/pulls/7\n"
+        }
+    );
+    assert_eq!(fs::read_to_string(&gh_api).unwrap(), lookups);
+
+    if scenario != "matching-repository" {
+        assert_eq!(result.unwrap_err().code, "pull_request_unsafe");
+        assert_eq!(
+            env.run(params.clone()).await.unwrap_err().code,
+            "pull_request_unsafe"
+        );
+        assert!(env.overlay()["integration"].is_null());
+        assert_eq!(env.overlay()["prAttempt"]["state"], "unknown");
+        assert_eq!(
+            pull_request_address(
+                &env.root,
+                "p1",
+                &env.state,
+                &json!({"pullRequest":"t1"}),
+                &mut Git::new(),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "no_pull_request"
+        );
+        params["requestId"] = json!("retry-pr");
+        assert_eq!(env.run(params).await.unwrap_err().code, "unknown_outcome");
+        assert_eq!(fs::read_to_string(gh_args).unwrap(), args);
+        assert_eq!(fs::read_to_string(gh_api).unwrap(), lookups);
+        return;
+    }
+
+    assert_eq!(result.unwrap(), json!({"done":true}));
     let saved = env.overlay();
     assert_eq!(saved["integration"]["method"], "pr");
     assert_eq!(saved["integration"]["title"], "Integrate completed task");
     assert_eq!(saved["prAttempt"]["state"], "unknown");
     // Status is not "done": a pull request only starts review.
     assert_eq!(saved["status"], "ready_to_merge");
-    // The address gh printed is recorded, because it is https on the remote's own host.
+    // Record the address gh printed for the exact origin repository.
     assert_eq!(
         saved["integration"]["url"],
         "https://github.com/owner/repo/pull/7"
@@ -539,14 +827,14 @@ async fn pull_request_requires_a_pushed_branch_and_records_one_attempt() {
     .await
     .unwrap();
     assert_eq!(found, json!({"url":"https://github.com/owner/repo/pull/7"}));
-    // Checked again when it is opened: a remote moved to another host no longer vouches for it.
+    // Checked again when it is opened: another repository on the same host does not vouch for it.
     git(
         &env.root,
         &[
             "remote",
             "set-url",
             "origin",
-            "git@gitlab.example.invalid:owner/repo.git",
+            "git@github.com:owner/unrelated.git",
         ],
     );
     let refused = pull_request_address(
@@ -580,6 +868,141 @@ async fn pull_request_requires_a_pushed_branch_and_records_one_attempt() {
         "pull_request_unknown"
     );
 }
+#[tokio::test]
+async fn accepted_git_commit_refuses_real_content_drift() {
+    let env = Env::new("commit-drift");
+    let proof = env.root.join("proof.txt");
+    let extra = env.root.join("extra.txt");
+    fs::write(&proof, b"accepted").unwrap();
+    // A deletion and explicit staging after acceptance are legitimate if the
+    // resulting Git tree contains the exact accepted state.
+    fs::remove_file(env.root.join("b.txt")).unwrap();
+    let digest = env.accept_native().await;
+    env.git_action(json!({"action":"stage","path":"proof.txt","staged":true}))
+        .await;
+    env.git_action(json!({"action":"stage","path":"b.txt","staged":true}))
+        .await;
+    env.git_action(
+        json!({"action":"commit","message":"Commit the accepted addition and deletion"}),
+    )
+    .await;
+    assert_eq!(env.review_actions().await["digest"], digest);
+    assert_eq!(
+        super::super::legacy_source::capture(&env.root)
+            .unwrap()
+            .as_deref(),
+        env.overlay()["acceptedRevision"].as_str(),
+    );
+    let check = || async {
+        let mut params = squash(&digest);
+        params["method"] = json!("pr");
+        assert_eq!(env.run(params).await.unwrap_err().code, "stale_result");
+        assert_eq!(env.review_actions().await["workspaceChanged"], true);
+        assert!(env.overlay()["prAttempt"].is_null());
+    };
+    fs::write(&proof, b"different bytes").unwrap();
+    check().await;
+    fs::remove_file(&proof).unwrap();
+    check().await;
+    fs::write(&proof, b"accepted").unwrap();
+    fs::write(&extra, b"not accepted").unwrap();
+    check().await;
+    fs::remove_file(&extra).unwrap();
+    assert_eq!(env.review_actions().await["digest"], digest);
+    let head = git(&env.root, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        env.run(squash(&digest)).await.unwrap(),
+        json!({"done":true})
+    );
+    assert_eq!(env.overlay()["integration"]["sourceHead"], head);
+    assert_eq!(git(&env.root, &["show", "main:proof.txt"]), "accepted");
+}
+
+#[tokio::test]
+async fn accepted_git_commit_refuses_extra_content_in_an_otherwise_clean_commit() {
+    let env = Env::new("commit-extra");
+    fs::write(env.root.join("proof.txt"), b"accepted").unwrap();
+    let digest = env.accept_native().await;
+    fs::write(env.root.join("extra.txt"), b"not accepted").unwrap();
+    env.git_action(json!({"action":"commit","message":"Commit an additional file"}))
+        .await;
+    assert_clean(&env.root);
+    assert!(env.overlay()["acceptance"]["committedDigest"].is_null());
+    assert_eq!(env.review_actions().await["workspaceChanged"], true);
+    let mut params = squash(&digest);
+    params["method"] = json!("pr");
+    assert_eq!(env.run(params).await.unwrap_err().code, "stale_result");
+    assert!(env.overlay()["prAttempt"].is_null());
+}
+
+#[tokio::test]
+async fn accepted_git_commit_refuses_an_index_variant_even_if_git_status_is_clean() {
+    let env = Env::new("commit-staged-variant");
+    let proof = env.root.join("proof.txt");
+    fs::write(&proof, b"accepted").unwrap();
+    let digest = env.accept_native().await;
+    fs::write(&proof, b"different").unwrap();
+    git(&env.root, &["add", "proof.txt"]);
+    fs::write(&proof, b"accepted").unwrap();
+    git(
+        &env.root,
+        &["update-index", "--assume-unchanged", "proof.txt"],
+    );
+    env.git_action(json!({"action":"commit","message":"Commit a different staged blob"}))
+        .await;
+    assert_clean(&env.root);
+    assert_eq!(git(&env.root, &["show", "HEAD:proof.txt"]), "different");
+    assert!(env.overlay()["acceptance"]["committedDigest"].is_null());
+    assert_eq!(env.review_actions().await["workspaceChanged"], true);
+    let mut params = squash(&digest);
+    params["method"] = json!("pr");
+    assert_eq!(env.run(params).await.unwrap_err().code, "stale_result");
+}
+
+#[tokio::test]
+async fn accepted_git_commit_refuses_the_wrong_parent_and_amend() {
+    for amend in [false, true] {
+        let env = Env::new(if amend {
+            "commit-amend"
+        } else {
+            "commit-parent"
+        });
+        let accepted_head = git(&env.root, &["rev-parse", "HEAD"]);
+        fs::write(env.root.join("a.txt"), b"accepted bytes\n").unwrap();
+        let digest = env.accept_native().await;
+        if amend {
+            // An external commit has the right parent and bytes, but no Workspace
+            // proof. Amending it must not grant that proof, even with the same tree.
+            git(&env.root, &["commit", "-qam", "External commit"]);
+        } else {
+            // Advance HEAD without changing the tree or the accepted worktree bytes.
+            git(
+                &env.root,
+                &["commit", "--allow-empty", "-qm", "Intervening commit"],
+            );
+        }
+        let prior = git(&env.root, &["rev-parse", "HEAD"]);
+        env.git_action(json!({"action":"commit","checkoutId":"p1:main",
+                "message":"Commit the exact accepted bytes", "amend":amend}))
+            .await;
+        assert_clean(&env.root);
+        assert_eq!(git(&env.root, &["show", "HEAD:a.txt"]), "accepted bytes");
+        assert_ne!(git(&env.root, &["rev-parse", "HEAD"]), prior);
+        assert_eq!(
+            git(&env.root, &["rev-parse", "HEAD^"]),
+            if amend { accepted_head } else { prior }
+        );
+        assert!(env.overlay()["acceptance"]["committedDigest"].is_null());
+        assert_eq!(env.review_actions().await["workspaceChanged"], true);
+        for method in ["squash", "pr"] {
+            let mut params = squash(&digest);
+            params["method"] = json!(method);
+            assert_eq!(env.run(params).await.unwrap_err().code, "stale_result");
+        }
+        assert!(env.overlay()["prAttempt"].is_null());
+    }
+}
+
 #[tokio::test]
 async fn private_index_sees_non_ascii_helper_names() {
     // Git quotes non-ASCII names by default; a quoted name must not hide helper data.

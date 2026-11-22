@@ -2,7 +2,7 @@
 use super::worker_checks::{self, Run};
 use crate::{error::refuse, CoreError, CoreResult};
 use rusqlite::{Connection, Transaction};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 fn receipt(db: &Connection, task: &str, assignment: &str, reference: &str) -> CoreResult<Run> {
     let mut query = db.prepare(
@@ -30,41 +30,90 @@ fn receipt(db: &Connection, task: &str, assignment: &str, reference: &str) -> Co
     Ok(run)
 }
 
+/// One failed verified check of an earlier failed execution revision.
+struct Prior {
+    run: Run,
+    check: Value,
+    assignment: String,
+    node: String,
+    revision: i64,
+}
+/// A worker's own diagnostic probe (an inline `python -c` / `sh -c` script, a
+/// `git status`/`git diff` scope probe), as opposed to a project test, lint or build.
+fn probe(run: &Run) -> bool {
+    let argv: Vec<&str> = run.receipt["argv"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let program = argv
+        .first()
+        .map(|p| p.rsplit('/').next().unwrap_or(p))
+        .unwrap_or("");
+    (matches!(program, "python" | "python3" | "sh" | "bash") && argv.iter().any(|a| *a == "-c"))
+        || (program == "git"
+            && argv
+                .iter()
+                .skip(1)
+                .find(|a| !a.starts_with('-'))
+                .is_some_and(|sub| matches!(*sub, "status" | "diff")))
+}
+
 /// Call only after checking the current workers' results and the final verification
 /// against the reviewed digest. A final verifier can cover a project command only
 /// when its native output receipt also establishes the exact working directory.
-pub(super) fn require_prior_worker_repairs(
+///
+/// A failed verified check of an earlier failed revision is resolved by a later
+/// verified pass of the same intent on the current revision: the same argv and
+/// working directory (any profile, `command_run` or `outside_command`), or a pass
+/// under the same check name. Otherwise it returns the task to the coordinator once
+/// (`completion_unresolved_prior_worker_check`); after that one continuation it is
+/// disclosed (`PRIOR_WORKER_CHECK_DISCLOSED`) as an `unverified` runtime limit
+/// instead of blocking completion forever. It is never turned into a pass.
+pub fn require_prior_worker_repairs(
     db: &Transaction<'_>,
     task: &str,
     revision: i64,
     verification: &Value,
 ) -> CoreResult<()> {
     let mut query = db.prepare(
-        "SELECT n.assignment_ref,c.value FROM runtime_nodes n, json_each(n.result_json,'$.checks') c
+        "SELECT n.assignment_ref,c.value,n.node_id,n.revision FROM runtime_nodes n, json_each(n.result_json,'$.checks') c
          WHERE n.task_id=?1 AND n.revision<?2 AND n.status='failed' AND n.stage='execution'
          AND n.revision>coalesce((SELECT max(json_extract(payload_json,'$.revision')) FROM runtime_events
            WHERE task_id=?1 AND type='TASK_REOPENED' AND json_extract(payload_json,'$.previous')='COMPLETED'),0)
          AND json_extract(c.value,'$.outcome')='failed' AND json_extract(c.value,'$.evidence_strength')='verified'",
     )?;
     let rows = query.query_map((task, revision), |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+        ))
     })?;
     let mut failures = Vec::new();
     for row in rows {
-        let (assignment, raw) = row?;
+        let (assignment, raw, node, failed_revision) = row?;
         let check: Value = serde_json::from_str(&raw)?;
         if !worker_checks::resolved(&check) {
             let reference = check["tool_call_ref"].as_str().ok_or(CoreError::Refused(
                 "completion_unresolved_prior_worker_check",
             ))?;
-            failures.push(receipt(db, task, &assignment, reference)?);
+            failures.push(Prior {
+                run: receipt(db, task, &assignment, reference)?,
+                check,
+                assignment,
+                node,
+                revision: failed_revision,
+            });
         }
     }
     if failures.is_empty() {
         return Ok(());
     }
     let mut current = db.prepare(
-        "SELECT n.assignment_ref,json_extract(c.value,'$.tool_call_ref') FROM runtime_nodes n, json_each(n.result_json,'$.checks') c
+        "SELECT n.assignment_ref,json_extract(c.value,'$.tool_call_ref'),json_extract(c.value,'$.name') FROM runtime_nodes n, json_each(n.result_json,'$.checks') c
          WHERE n.task_id=? AND n.revision=? AND n.status='completed'
          AND json_extract(c.value,'$.outcome')='passed' AND json_extract(c.value,'$.evidence_strength')='verified'
          AND json_extract(c.value,'$.revision_digest')=?",
@@ -75,12 +124,21 @@ pub(super) fn require_prior_worker_repairs(
         .as_str()
         .or(verification["revision_digest"].as_str());
     let rows = current.query_map((task, revision, checkout), |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+        ))
     })?;
     for row in rows {
-        let (assignment, reference) = row?;
+        let (assignment, reference, name) = row?;
         let run = receipt(db, task, &assignment, &reference)?;
-        failures.retain(|failed| !failed.same(&run));
+        failures.retain(|failed| {
+            !(failed.run.same_intent(&run)
+                || name
+                    .as_deref()
+                    .is_some_and(|n| !n.trim().is_empty() && failed.check["name"] == n))
+        });
     }
     for check in verification["checks"].as_array().into_iter().flatten() {
         if failures.is_empty() {
@@ -106,15 +164,53 @@ pub(super) fn require_prior_worker_repairs(
             .collect::<Result<Vec<_>, _>>()?;
         if let [cwd] = dirs.as_slice() {
             failures.retain(|f| {
-                !(f.operation == "command_run"
-                    && f.receipt["argv"] == check["argv"]
-                    && f.receipt["cwd"] == cwd.as_str())
+                !(f.run.operation == "command_run"
+                    && f.run.receipt["argv"] == check["argv"]
+                    && f.run.receipt["cwd"] == cwd.as_str())
             });
         }
     }
-    if !failures.is_empty() {
-        return refuse("completion_unresolved_prior_worker_check");
+    if failures.is_empty() {
+        return Ok(());
     }
+    // One continuation per failure: the coordinator was already sent back for it
+    // (after its attempt started) and nothing reran or superseded it since.
+    let mut returned = db.prepare(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events r WHERE r.task_id=?1
+           AND r.type IN ('RETURNED_TO_COORDINATOR','AUTOMATIC_CONTINUATION')
+           AND json_extract(r.payload_json,'$.reason')='unresolved_prior_worker_check'
+           AND r.id>coalesce((SELECT min(id) FROM runtime_events WHERE task_id=?1 AND type='ASSIGNMENT_CREATED'
+             AND json_extract(payload_json,'$.assignment_ref')=?2),0))",
+    )?;
+    // A worker's own diagnostic probe from an earlier failed revision is disclosed at
+    // once: sending the coordinator back for it only cost a whole plan revision
+    // (owner store 2026-11-22). A project check still gets its one continuation.
+    for failed in failures.iter().filter(|f| !probe(&f.run)) {
+        if !returned.query_row((task, &failed.assignment), |r| r.get::<_, bool>(0))? {
+            return refuse("completion_unresolved_prior_worker_check");
+        }
+    }
+    let limits: Vec<Value> = failures
+        .iter()
+        .map(|f| {
+            let name = f.check["name"].as_str().unwrap_or("check");
+            let kind = if probe(&f.run) { "worker probe" } else { "project check" };
+            json!({"name":format!("Earlier failed check: {name}"),"outcome":"unverified","source":"runtime",
+                "blocker":if probe(&f.run) {
+                    format!("This {kind} failed in plan revision {} (node {}) and was not rerun or superseded; it is disclosed as not verified, never as passed.", f.revision, f.node)
+                } else {
+                    format!("This {kind} failed in plan revision {} (node {}) and was neither rerun nor superseded after one continuation; it is disclosed as not verified, never as passed.", f.revision, f.node)
+                },
+                "tool_call_ref":f.check["tool_call_ref"],"node":f.node,"revision":f.revision,
+                "kind":if probe(&f.run) {"probe"} else {"project_check"}})
+        })
+        .collect();
+    super::event_tx(
+        db,
+        task,
+        "PRIOR_WORKER_CHECK_DISCLOSED",
+        json!({"revision":revision,"limits":limits}),
+    )?;
     Ok(())
 }
 

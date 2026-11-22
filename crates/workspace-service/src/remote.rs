@@ -34,6 +34,7 @@ enum Request {
     Decide { request_id: String, allow: bool },
     Revoke(String),
     Relay(Option<String>),
+    SudoFromPhone(bool),
 }
 
 #[derive(Deserialize)]
@@ -57,6 +58,11 @@ struct Revoke {
 struct Relay {
     url: Option<String>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SudoFromPhone {
+    allowed: bool,
+}
 
 fn bounded_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= ID_BYTES && id.bytes().all(|b| b.is_ascii_graphic())
@@ -74,6 +80,7 @@ fn parse(method: &str, params: Value) -> io::Result<Request> {
         "remote.pairing.cancel" if empty => Request::PairingCancel,
         "remote.status" | "remote.pairing.start" | "remote.pairing.cancel" => return Err(invalid()),
         "remote.enable" => Request::Enable(decode::<Enable>(params)?.enabled),
+        "remote.sudo.set" => Request::SudoFromPhone(decode::<SudoFromPhone>(params)?.allowed),
         "remote.pairing.decide" => {
             let p: Decide = decode(params)?;
             if !bounded_id(&p.request_id) {
@@ -229,7 +236,18 @@ pub(crate) async fn call(
     method: &str,
     params: Value,
 ) -> io::Result<Value> {
-    let request = parse(method, params)?;
+    let mut request = parse(method, params)?;
+    // A machine setting, not the host's: it applies whether or not the host runs.
+    if let Request::SudoFromPhone(allowed) = request {
+        crate::native_askpass::set_phone_allowed(allowed)
+            .map_err(|_| failure("remote_state_unavailable"))?;
+        request = Request::Status;
+    }
+    let mut status = answer(remote, request).await?;
+    status["sudoFromPhone"] = json!(crate::native_askpass::phone_allowed());
+    Ok(status)
+}
+async fn answer(remote: Option<&Remote>, request: Request) -> io::Result<Value> {
     let host = match remote {
         Some(Remote::Running(host)) => host,
         Some(Remote::Unavailable(reason)) => {
@@ -248,7 +266,7 @@ pub(crate) async fn call(
         }
     };
     match request {
-        Request::Status => (),
+        Request::Status | Request::SudoFromPhone(_) => (),
         Request::Enable(enabled) => host.set_enabled(enabled).await.map_err(code)?,
         Request::PairingStart => {
             host.pairing_start().await.map_err(code)?;
@@ -304,6 +322,12 @@ mod tests {
         assert!(parse("remote.relay.set", json!({})).is_err());
         assert!(parse("remote.relay.set", json!({"url":""})).is_err());
         assert!(parse("remote.relay.set", json!({"url":"x".repeat(2049)})).is_err());
+        assert!(matches!(
+            parse("remote.sudo.set", json!({"allowed":false})),
+            Ok(Request::SudoFromPhone(false))
+        ));
+        assert!(parse("remote.sudo.set", json!({})).is_err());
+        assert!(parse("remote.sudo.set", json!({"allowed":"no"})).is_err());
         assert!(parse("remote.unknown", json!({})).is_err());
     }
 

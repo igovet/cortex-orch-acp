@@ -84,6 +84,23 @@ fn the_window_reports_focus_and_kinds_and_takes_a_click_target_in_exact_shapes()
     )
     .is_ok());
     assert!(call("notifications.take", json!({})).is_ok());
+    // The no-progress kind and its threshold, in one of the offered hours.
+    let with_stalled =
+        json!(["question", "stop", "result", "failed", "planning", "paused", "stalled"]);
+    for hours in [1, 2, 3, 6] {
+        assert!(call(
+            "notifications.report",
+            json!({"focused":null,"kinds":with_stalled,"stallHours":hours})
+        )
+        .is_ok());
+    }
+    for hours in [json!(0), json!(4), json!("3"), json!(null)] {
+        assert!(call(
+            "notifications.report",
+            json!({"focused":null,"kinds":["stalled"],"stallHours":hours})
+        )
+        .is_err());
+    }
     for (operation, message) in [
         (
             "notifications.report",
@@ -754,6 +771,11 @@ fn every_request_the_real_port_sends_is_allowed() {
             "remote.pairing.decide" => json!({"requestId":"pr1","allow":true}),
             "remote.devices.revoke" => json!({"deviceId":"d1"}),
             "remote.relay.set" => json!({"url":"https://relay.example"}),
+            "remote.sudo.set" => json!({"allowed":false}),
+            "askpass.list" => json!({}),
+            "askpass.answer" => json!({"promptId":"ab12","cancel":true}),
+            "owner_actions.list" => json!({}),
+            "owner_actions.act" => json!({"projectId":"wp_1","actionId":"oa_1","action":"recheck"}),
             "capabilities.get" => json!({"protocol":protocol,"requestId":"read-capabilities"}),
             "reports.read" => {
                 let mut q = query("reports.read");

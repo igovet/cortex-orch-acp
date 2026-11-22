@@ -226,7 +226,9 @@ fn askpass(s: &mut Sandbox, home: Option<&Path>) -> io::Result<()> {
         )
     };
     let p = q(&program.to_string_lossy());
-    let script=format!("#!/bin/sh\nprompt=\u{24}{{1:-Password:}}\ncase \u{24}{{SSH_ASKPASS_PROMPT:-}} in\n confirm) exec {p} {confirm} ;;\n none) exec {p} {notice} ;;\nesac\ncase $prompt in\n *\"(yes/no\"*|*[Uu]sername*) exec {p} {visible} ;;\nesac\nexec {p} {hidden}\n");
+    let script = format!(
+        "#!/bin/sh\nprompt=\u{24}{{1:-Password:}}\ncase \u{24}{{SSH_ASKPASS_PROMPT:-}} in\n confirm) exec {p} {confirm} ;;\n none) exec {p} {notice} ;;\nesac\ncase $prompt in\n *\"(yes/no\"*|*[Uu]sername*) exec {p} {visible} ;;\nesac\nexec {p} {hidden}\n"
+    );
     let dir = s.scratch.join("ssh-askpass");
     fs::create_dir(&dir)?;
     let path = dir.join("ssh-askpass");

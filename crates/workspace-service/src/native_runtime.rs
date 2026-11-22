@@ -146,6 +146,455 @@ pub(crate) fn retry_window() -> cortex_core::scheduler::retry::RetryWindow {
         .unwrap_or_default()
 }
 
+fn unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// The models (`{engine, model}`) on which `node`'s lineage (the node and its review
+/// fixes, in every plan revision since the task was last reopened) was lost to
+/// infrastructure at least twice: a fresh attempt is routed away from them.
+pub fn lost_models(db: &rusqlite::Connection, task: &str, node: &str) -> CoreResult<Vec<Value>> {
+    use cortex_core::scheduler::retry::{infrastructure_class, node_base};
+    let rows = db
+        .prepare(
+            "SELECT json_extract(r.payload_json,'$.node'),coalesce(json_extract(r.payload_json,'$.failure_class'),''),
+                json_extract(s.payload_json,'$.route_engine'),json_extract(s.payload_json,'$.model')
+             FROM runtime_events r JOIN runtime_events s ON s.task_id=r.task_id AND s.type='NATIVE_ROUTE_SELECTED'
+               AND json_extract(s.payload_json,'$.assignment_ref')=json_extract(r.payload_json,'$.previous_assignment')
+             WHERE r.task_id=?1 AND r.type='ASSIGNMENT_RETRIED' AND json_extract(r.payload_json,'$.failed_at') IS NOT NULL
+               AND r.id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='TASK_REOPENED'),0)",
+        )?
+        .query_map([task], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let base = node_base(node);
+    let mut counts: std::collections::BTreeMap<(Option<String>, String), usize> =
+        Default::default();
+    for (lost, class, engine, model) in rows {
+        let (Some(lost), Some(model)) = (lost, model) else {
+            continue;
+        };
+        if node_base(&lost) != base
+            || !infrastructure_class(&class)
+            || matches!(class.as_str(), "owner_paused" | "runtime_restart")
+        {
+            continue;
+        }
+        *counts.entry((engine, model)).or_default() += 1;
+    }
+    Ok(counts
+        .into_iter()
+        .filter(|(_, n)| *n >= 2)
+        .map(|((engine, model), n)| json!({"engine":engine,"model":model,"losses":n}))
+        .collect())
+}
+/// At most this many characters (the last lines) of an engine's already redacted
+/// stderr tail are kept with an attempt's end.
+pub const ENDING_STDERR_CHARS: usize = 400;
+/// The last lines of an engine's redacted stderr tail, bounded by
+/// [`ENDING_STDERR_CHARS`] characters.
+pub fn stderr_tail(redacted: &str) -> String {
+    let chars: Vec<char> = redacted.trim_end().chars().collect();
+    let start = chars.len().saturating_sub(ENDING_STDERR_CHARS);
+    chars[start..].iter().collect()
+}
+/// Facts the store holds about how one worker attempt ended: the results it had
+/// refused (count and the last code), a runtime cancel of one of its permission
+/// requests under the read-only rule, a degenerate turn, an owner pause after it
+/// started, and whether its last command could not get a sandbox.
+pub fn worker_ending_facts(
+    db: &rusqlite::Connection,
+    task: &str,
+    channel: &str,
+    attempt: &str,
+) -> CoreResult<Value> {
+    use rusqlite::OptionalExtension;
+    // A refusal because the checkout kept changing (`review::DRIFT_REFUSALS`) is the
+    // environment's, never the worker's quality.
+    let (refused, drift, last): (i64, i64, Option<String>) = db.query_row(
+        "SELECT coalesce(sum(coalesce(json_extract(payload_json,'$.code'),'') NOT IN ('review_project_revision_changed','review_project_revision_unstable','review_resubmit_required')),0),
+            coalesce(sum(coalesce(json_extract(payload_json,'$.code'),'') IN ('review_project_revision_changed','review_project_revision_unstable','review_resubmit_required')),0),
+            (SELECT json_extract(payload_json,'$.code') FROM runtime_events WHERE task_id=?1
+            AND type='WORKER_RESULT_REFUSED' AND json_extract(payload_json,'$.attempt')=?2 ORDER BY id DESC LIMIT 1)
+         FROM runtime_events WHERE task_id=?1 AND type='WORKER_RESULT_REFUSED' AND json_extract(payload_json,'$.attempt')=?2",
+        (task, attempt),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let cancelled: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='NATIVE_PERMISSION_DECIDED'
+         AND json_extract(payload_json,'$.channel_id')=? AND json_extract(payload_json,'$.decider')='runtime'
+         AND json_extract(payload_json,'$.outcome.optionId')='cancel')",
+        (task, channel),
+        |r| r.get(0),
+    )?;
+    let degenerate: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='NATIVE_TURN_DEGENERATE'
+         AND json_extract(payload_json,'$.channel_id')=?)",
+        (task, channel),
+        |r| r.get(0),
+    )?;
+    let paused: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events p WHERE p.task_id=?1 AND p.type='OWNER_TASK_PAUSED'
+         AND p.id>coalesce((SELECT min(id) FROM runtime_events WHERE task_id=?1 AND type='NATIVE_ATTEMPT_DELIVERY'
+            AND json_extract(payload_json,'$.attempt')=?2),
+          (SELECT max(id) FROM runtime_events WHERE task_id=?1)))",
+        (task, attempt),
+        |r| r.get(0),
+    )?;
+    let last_failure: Option<String> = db
+        .query_row(
+            "SELECT coalesce(json_extract(result_json,'$.failure'),json_extract(result_json,'$.reply.structuredContent.failure'))
+             FROM runtime_requests WHERE task_id=? AND actor=? AND operation IN ('command_run','outside_command')
+             ORDER BY rowid DESC LIMIT 1",
+            (task, channel),
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let sandbox = last_failure.as_deref().is_some_and(|f| {
+        f.contains("sandbox_unavailable") || f.starts_with("git_context_unavailable")
+    });
+    Ok(
+        json!({"refused_results":refused,"drift_refusals":drift,"last_refusal":last,
+        "runtime_cancel":if cancelled {json!("read_only_permission")} else {Value::Null},
+        "degenerate":degenerate,"owner_paused":paused,"sandbox_unavailable":sandbox}),
+    )
+}
+/// The failure class of a worker attempt that ended without an accepted result, from
+/// how its turn ended (`cause`) and [`worker_ending_facts`]. Only `result_refused`,
+/// `degenerate_turn` and `indeterminate` are the attempt's own quality; every other
+/// class is infrastructure (`cortex_core::scheduler::retry::INFRASTRUCTURE_CLASSES`).
+pub fn worker_ending_class(cause: &str, facts: &Value) -> &'static str {
+    let refused = facts["refused_results"].as_i64().unwrap_or(0) > 0;
+    let sandbox = facts["sandbox_unavailable"] == true;
+    match cause {
+        "native_turn_degenerate" => "degenerate_turn",
+        _ if facts["degenerate"] == true => "degenerate_turn",
+        "owner_stopped" => "owner_paused",
+        "native_task_interrupted" if facts["owner_paused"] == true => "owner_paused",
+        "native_service_stopped" | "native_task_interrupted" => "runtime_restart",
+        // The model ended its turn: refused results without an accepted one are its own.
+        "turn_ended" if refused => "result_refused",
+        "turn_ended" if sandbox => "sandbox_unavailable",
+        // Only refused for another actor's checkout drift: retried on the runtime's budget.
+        "turn_ended" if facts["drift_refusals"].as_i64().unwrap_or(0) > 0 => "worker_lost",
+        "turn_ended" => "indeterminate",
+        // The process vanished without the model ending its turn.
+        "process_exited" if sandbox => "sandbox_unavailable",
+        "process_exited" => "worker_lost",
+        code if code.ends_with("outcome_unknown") || code.contains("transport") => {
+            "transport_failure"
+        }
+        code if code.contains("authentication") => "authorization_loss",
+        _ => "engine_failure",
+    }
+}
+
+/// Per-task backoff of environment rechecks for open owner actions (in memory: a
+/// restart rechecks once at once, which is harmless).
+static ENVIRONMENT_RECHECKS: std::sync::Mutex<
+    Option<std::collections::HashMap<String, (std::time::Instant, usize)>>,
+> = std::sync::Mutex::new(None);
+
+fn environment_recheck_due(task: &str) -> bool {
+    let mut map = ENVIRONMENT_RECHECKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let map = map.get_or_insert_with(Default::default);
+    let now = std::time::Instant::now();
+    match map.get(task).copied() {
+        Some((at, n))
+            if now.duration_since(at).as_secs()
+                < cortex_core::lifecycle::obstacles::backoff(n.saturating_sub(1)) as u64 =>
+        {
+            false
+        }
+        Some((_, n)) => {
+            map.insert(task.to_owned(), (now, n + 1));
+            true
+        }
+        None => {
+            map.insert(task.to_owned(), (now, 1));
+            true
+        }
+    }
+}
+
+/// One public address for this attempt, or refuse the entire DNS answer if
+/// it contains a non-public destination. Do not reinterpret mapped/tunnel
+/// addresses or scope identifiers as public IPv6 addresses.
+fn pinned_external_address(
+    addresses: impl IntoIterator<Item = std::net::SocketAddr>,
+) -> Result<std::net::SocketAddr, &'static str> {
+    use std::net::SocketAddr;
+    let mut first = None;
+    for address in addresses {
+        let public = match address {
+            SocketAddr::V4(addr) => {
+                let ip = addr.ip();
+                let [a, b, c, _] = ip.octets();
+                !ip.is_private()
+                    && !ip.is_loopback()
+                    && !ip.is_link_local()
+                    && !ip.is_documentation()
+                    && !matches!(
+                        (a, b, c),
+                        (0 | 224..=255, _, _)
+                            | (100, 64..=127, _)
+                            | (192, 0, 0)
+                            | (192, 88, 99)
+                            | (198, 18..=19, _)
+                    )
+            }
+            SocketAddr::V6(addr) => {
+                let [a, b, ..] = addr.ip().segments();
+                addr.scope_id() == 0
+                    && (0x2000..=0x3fff).contains(&a)
+                    // Protocol assignments (incl. Teredo), documentation, and 6to4.
+                    && !matches!((a, b), (0x2001, 0..=0x01ff | 0x0db8) | (0x2002, _) | (0x3fff, _))
+            }
+        };
+        if !public || address.port() != 443 {
+            return Err("outage probe refused a non-public or mismatched DNS address");
+        }
+        first.get_or_insert(address);
+    }
+    first.ok_or("outage probe DNS returned no addresses")
+}
+
+fn configure_external_head(
+    command: &mut tokio::process::Command,
+    host: &str,
+    address: std::net::SocketAddr,
+) {
+    let port = address.port();
+    let ip = match address.ip() {
+        std::net::IpAddr::V4(ip) => ip.to_string(),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    command
+        .env_clear()
+        .args([
+            "-q", // Must be first: even with no HOME, curl may otherwise read curlrc.
+            "--silent",
+            "--head",
+            "--output",
+            "/dev/null",
+            "--max-time",
+            "10",
+            "--proto",
+            "=https",
+            "--noproxy",
+            "*",
+            "--no-location",
+            "--resolve",
+            &format!("{host}:{port}:{ip}"),
+            "--write-out",
+            "%{http_code}",
+            "--",
+            &format!("https://{host}:{port}/"),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+}
+
+/// A wait (including a retained wait from a previous version) is not proof of
+/// destination authority. Validate before any DNS lookup and bound the whole
+/// probe, including DNS, to 10 seconds.
+pub(crate) async fn probe_external(wait: &Value) -> (bool, String) {
+    probe_external_with_lookup(wait, |host| tokio::net::lookup_host((host, 443))).await
+}
+
+async fn probe_external_with_lookup<A, L, F>(wait: &Value, lookup: L) -> (bool, String)
+where
+    A: IntoIterator<Item = std::net::SocketAddr>,
+    L: FnOnce(&'static str) -> F,
+    F: std::future::Future<Output = io::Result<A>>,
+{
+    use cortex_core::lifecycle::obstacles::external_probe_host;
+    let host = wait["host"].as_str().unwrap_or("");
+    let scheme = wait["scheme"].as_str().unwrap_or("");
+    let port = wait["port"].as_u64().and_then(|p| u16::try_from(p).ok());
+    let Some(host) = port.and_then(|p| external_probe_host(host, scheme, p)) else {
+        return (false, "outage probe destination unsupported".into());
+    };
+    let Some(probe @ ("tcp" | "http")) = wait["probe"].as_str() else {
+        return (false, "outage probe kind unsupported".into());
+    };
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let addresses = lookup(host).await.map_err(|_| "outage probe DNS failed")?;
+        let address = pinned_external_address(addresses)?;
+        if probe == "tcp" {
+            tokio::net::TcpStream::connect(address)
+                .await
+                .map_err(|_| "outage probe connect failed")?;
+            return Ok((true, format!("{host}:443 accepts connections")));
+        }
+        // The URL retains the fixed TLS server name; --resolve supplies the
+        // exact checked address, so curl neither looks it up again nor uses a proxy.
+        let mut command = tokio::process::Command::new("/usr/bin/curl");
+        configure_external_head(&mut command, host, address);
+        let out = command
+            .output()
+            .await
+            .map_err(|_| "outage HEAD unavailable")?;
+        if !out.status.success() {
+            return Err("outage HEAD failed");
+        }
+        let code = std::str::from_utf8(&out.stdout)
+            .ok()
+            .and_then(|status| status.trim().parse::<u16>().ok())
+            .filter(|code| (200..600).contains(code))
+            .ok_or("outage HEAD returned no final HTTP status")?;
+        Ok((code < 500 && code != 429, format!("HTTP {code}")))
+    })
+    .await;
+    match result {
+        Ok(Ok(result)) => result,
+        Ok(Err(detail)) => (false, detail.into()),
+        Err(_) => (false, "outage probe timed out".into()),
+    }
+}
+
+#[cfg(test)]
+mod external_probe_tests {
+    use super::*;
+    use std::{future::ready, net::SocketAddr};
+
+    #[tokio::test]
+    async fn unsupported_stored_targets_do_not_reach_dns() {
+        for (host, scheme, port, probe) in [
+            ("untrusted.example", "https", 443, "http"),
+            ("api.github.com.untrusted.example", "https", 443, "tcp"),
+            ("api.github.com", "http", 443, "http"),
+            ("api.github.com", "https", 8443, "tcp"),
+            ("api.github.com", "https", 65_979, "http"),
+            ("api.github.com", "https", 443, "unknown"),
+        ] {
+            let wait = json!({"host":host,"scheme":scheme,"port":port,"probe":probe});
+            let result = probe_external_with_lookup(
+                &wait,
+                |_| -> std::future::Ready<io::Result<Vec<SocketAddr>>> {
+                    panic!("unsupported wait must not resolve");
+                },
+            )
+            .await;
+            assert!(!result.0);
+            assert!(result.1.ends_with("unsupported"));
+        }
+    }
+
+    #[tokio::test]
+    async fn allowed_hostname_with_non_public_dns_cannot_connect() {
+        let wait = json!({"host":"api.github.com","scheme":"https","port":443,"probe":"http"});
+        for address in [
+            "0.0.0.0:443",
+            "10.0.0.1:443",
+            "127.0.0.1:443",
+            "169.254.169.254:443",
+            "172.16.0.1:443",
+            "192.168.0.1:443",
+            "100.64.0.1:443",
+            "[::]:443",
+            "[::1]:443",
+            "[::ffff:127.0.0.1]:443",
+            "[fe80::1]:443",
+            "[fc00::1]:443",
+            "[ff02::1]:443",
+            "[64:ff9b::a00:1]:443",
+        ] {
+            let result = probe_external_with_lookup(&wait, |host| {
+                assert_eq!(host, "api.github.com");
+                // Even a mixed response cannot authorize a connection.
+                ready(Ok([
+                    "1.1.1.1:443".parse::<SocketAddr>().unwrap(),
+                    address.parse::<SocketAddr>().unwrap(),
+                ]))
+            })
+            .await;
+            assert_eq!(
+                result,
+                (
+                    false,
+                    "outage probe refused a non-public or mismatched DNS address".into()
+                ),
+                "{address}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_probe_selects_only_a_numeric_public_address() {
+        let first: SocketAddr = "[2606:4700::1]:443".parse().unwrap();
+        let second: SocketAddr = "1.1.1.1:443".parse().unwrap();
+        assert_eq!(pinned_external_address([first, second]), Ok(first));
+        assert!(pinned_external_address([]).is_err());
+        assert!(pinned_external_address(["1.1.1.1:8443".parse().unwrap()]).is_err());
+    }
+
+    #[tokio::test]
+    async fn head_uses_a_config_free_client_with_an_exact_dns_pin() {
+        for (address, pin) in [
+            ("1.1.1.1:443", "api.github.com:443:1.1.1.1"),
+            ("[2606:4700::1]:443", "api.github.com:443:[2606:4700::1]"),
+        ] {
+            let mut command = tokio::process::Command::new("/usr/bin/curl");
+            configure_external_head(&mut command, "api.github.com", address.parse().unwrap());
+            let command = command.as_std();
+            assert_eq!(command.get_program(), "/usr/bin/curl");
+            assert_eq!(command.get_envs().count(), 0);
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                [
+                    "-q",
+                    "--silent",
+                    "--head",
+                    "--output",
+                    "/dev/null",
+                    "--max-time",
+                    "10",
+                    "--proto",
+                    "=https",
+                    "--noproxy",
+                    "*",
+                    "--no-location",
+                    "--resolve",
+                    pin,
+                    "--write-out",
+                    "%{http_code}",
+                    "--",
+                    "https://api.github.com:443/",
+                ]
+            );
+        }
+
+        // Execute only a local environment oracle, not curl. printenv treats
+        // our HEAD arguments as further names after its own end-of-options.
+        let mut oracle = tokio::process::Command::new("/usr/bin/printenv");
+        oracle
+            .args(["--", "HOME", "PATH", "HTTPS_PROXY", "CORTEX_TEST_SENTINEL"])
+            .env("CORTEX_TEST_SENTINEL", "synthetic");
+        configure_external_head(
+            &mut oracle,
+            "api.github.com",
+            "1.1.1.1:443".parse().unwrap(),
+        );
+        let out = oracle.output().await.unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stdout.is_empty());
+    }
+}
+
 /// Trusted embedding authorization, not a route candidate or desktop JSON.
 /// Implementations must qualify every returned engine/account/model and role.
 /// Generate the absent first-run profile from routing/defaults/MCP/connections
@@ -196,6 +645,17 @@ pub trait NativeRoutes: Send + Sync {
         _effort: Option<&str>,
     ) -> CoreResult<SessionRoute> {
         self.route(root, "orchestrator")
+    }
+    /// A durable coordinator pin `{route_id, parameters}` for another qualified model
+    /// than `current` (preferably another engine or account), for the no-stop policy's
+    /// change of approach (a degenerate model, the `reassign` rung, an unavailable
+    /// coordinator route). None: no other model qualifies.
+    fn alternate_coordinator_pin(
+        &self,
+        _root: &Path,
+        _current: &SessionRoute,
+    ) -> CoreResult<Option<Value>> {
+        Ok(None)
     }
     fn worker_route(
         &self,
@@ -346,7 +806,6 @@ pub(crate) enum RepairAdmission {
 }
 pub(crate) struct Runtime {
     pub(super) host: Arc<NativeHost>,
-    pub(super) maintenance_state: Option<PathBuf>,
     pub(super) routes: Arc<dyn NativeRoutes>,
     pub(super) controls: Mutex<()>,
     pub(super) command_controls: Mutex<()>,
@@ -360,6 +819,9 @@ pub(crate) struct Runtime {
     pub(super) exit_recheck: std::sync::Mutex<crate::native_recovery::ExitRecheck>,
     /// Backoff of the live re-settle of orphaned command receipts (`native_recovery`).
     pub(super) command_recheck: std::sync::Mutex<crate::native_recovery::CommandRecheck>,
+    /// Whether a driver's end starts a continuation follower (the no-stop policy).
+    /// Only scheduler fixtures that drive every pass themselves turn it off.
+    pub(super) followers: std::sync::atomic::AtomicBool,
 }
 struct Pump {
     cancel: watch::Sender<bool>,
@@ -390,12 +852,13 @@ pub(crate) fn legacy(root: &Path) -> CoreResult<bool> {
         [], |r| r.get(0))?))
 }
 impl Runtime {
+    #[cfg(test)]
     pub(crate) fn open(
         root: &Path,
         project: &str,
         routes: Arc<dyn NativeRoutes>,
     ) -> CoreResult<Self> {
-        Self::open_with(root, project, routes, false)
+        Self::open_with(root, project, routes, false, None)
     }
     /// Incoming ACP agents may share a project: see `StoreExecutor::open_shared`.
     pub(crate) fn open_shared(
@@ -403,19 +866,21 @@ impl Runtime {
         project: &str,
         routes: Arc<dyn NativeRoutes>,
     ) -> CoreResult<Self> {
-        Self::open_with(root, project, routes, true)
+        Self::open_with(root, project, routes, true, None)
     }
     fn open_with(
         root: &Path,
         project: &str,
         routes: Arc<dyn NativeRoutes>,
         shared: bool,
+        workspace_state: Option<PathBuf>,
     ) -> CoreResult<Self> {
-        let host = if shared {
+        let mut host = if shared {
             NativeHost::open_shared_for_recovery(key(root)?, routes.mcp_registry()?)?
         } else {
             NativeHost::open_for_recovery(key(root)?, routes.mcp_registry()?)?
         };
+        host.workspace_state = workspace_state;
         *host.routes.write().unwrap() = Some(routes.clone());
         let project = project.to_owned();
         let root = root.to_string_lossy().into_owned();
@@ -431,7 +896,6 @@ impl Runtime {
         let (stop, _) = watch::channel(false);
         Ok(Self {
             host: Arc::new(host),
-            maintenance_state: None,
             routes,
             controls: Mutex::new(()),
             command_controls: Mutex::new(()),
@@ -442,12 +906,17 @@ impl Runtime {
             jobs: Mutex::new(Vec::new()),
             stop,
             exit_recheck: Default::default(),
+            followers: std::sync::atomic::AtomicBool::new(true),
             command_recheck: Default::default(),
         })
     }
-    pub(crate) fn with_maintenance_state(mut self, state: PathBuf) -> Self {
-        self.maintenance_state = Some(state);
-        self
+    pub(crate) fn open_workspace(
+        root: &Path,
+        project: &str,
+        routes: Arc<dyn NativeRoutes>,
+        state: PathBuf,
+    ) -> CoreResult<Self> {
+        Self::open_with(root, project, routes, false, Some(state))
     }
     pub(crate) async fn draft_attachments(
         &self,
@@ -648,7 +1117,7 @@ impl Runtime {
         let (send, reply) = tokio::sync::oneshot::channel();
         let runtime = self.clone();
         jobs.push(tokio::spawn(async move {
-            let maintenance = runtime.maintenance_state.clone();
+            let maintenance = runtime.host.workspace_state.clone();
             let admitted = async {
                 host.executor
                     .publication(move |store| {
@@ -705,6 +1174,12 @@ impl Runtime {
                             let _ = reply.await;
                         }
                     }
+                    crate::native_preflight::record(
+                        &runtime.host.executor,
+                        &task,
+                        &runtime.host.root,
+                    )
+                    .await;
                     let (cancel, cancelled) = watch::channel(false);
                     let (done, finished) = watch::channel(false);
                     runtime.install_pump(task.clone(), cancel, finished).await;
@@ -721,6 +1196,7 @@ impl Runtime {
                             .stop_after_error(&task, &owner, error, cancelled.clone())
                             .await;
                     }
+                    runtime.driver_ended(&task, &cancelled).await;
                     done.send_replace(true);
                 }
             }
@@ -730,14 +1206,17 @@ impl Runtime {
             .await
             .map_err(|_| failure("native_start_outcome_unknown"))?
     }
-    /// One runtime turn with the degenerate-turn watchdog's single retry (see
+    /// One runtime turn with the degenerate-turn watchdog (see
     /// `native_sessions::degenerate`). A coordinator turn that degenerated without
     /// changing the task's state or plan revision runs once more, with the same
-    /// prompt, in a fresh engine session. A worker's degenerate turn ends with its node
-    /// still open and its session terminated, so the lost-worker path replaces it in a
-    /// fresh session at the next step. A second degenerate turn (the coordinator's
-    /// retry, or the same node again in the same plan revision) stops the task with
-    /// the `native_turn_degenerate` blocker.
+    /// prompt, in a fresh engine session; when that degenerates too, the coordinator
+    /// moves to another qualified model (`NATIVE_COORDINATOR_ESCALATED`, preferably
+    /// the other engine) and runs the turn there. Only when no other model exists, or
+    /// it degenerates as well, does the turn end with `native_turn_degenerate`, which
+    /// the no-stop policy turns into a continuation on an escalated rung, never an
+    /// owner hold. A worker's degenerate turn ends with its node still open and its
+    /// session terminated, so the lost-worker path replaces it in a fresh session on
+    /// an escalated route (another model or engine) at the next step, every time.
     async fn turn(
         &self,
         task: &str,
@@ -761,22 +1240,9 @@ impl Runtime {
             Err(error) if error.code() == DEGENERATE => {}
             other => return other,
         }
-        if let Some(assignment) = assignment {
-            let t = task.to_owned();
-            let repeated: i64 = self.host.executor.read(move |db| {
-                Ok(db.query_row(
-                    "SELECT count(*) FROM runtime_events e JOIN runtime_nodes n ON n.task_id=e.task_id
-                     AND json_extract(e.payload_json,'$.node')=n.node_id AND json_extract(e.payload_json,'$.revision')=n.revision
-                     WHERE e.task_id=? AND e.type='NATIVE_TURN_DEGENERATE' AND n.assignment_ref=?",
-                    (&t, &assignment),
-                    |r| r.get(0),
-                )?)
-            })?.await.map_err(|_| CoreError::Refused("native_host_closed"))??;
-            return if repeated >= 2 {
-                Err(CoreError::Refused(DEGENERATE))
-            } else {
-                Ok(())
-            };
+        if assignment.is_some() {
+            // The replacement routes as an escalated redispatch of the same node.
+            return Ok(());
         }
         // A degenerate turn that still changed the task (a plan, a question) stands;
         // the driver continues from that state as after any other turn.
@@ -788,7 +1254,32 @@ impl Runtime {
                 task,
                 owner,
                 SessionRole::Coordinator,
-                retry,
+                retry.clone(),
+                prompt,
+                cancelled.clone(),
+            )
+            .await
+        {
+            Err(error) if error.code() == DEGENERATE => {}
+            other => return other,
+        }
+        if self.turn_marker(task).await? != before {
+            return Ok(());
+        }
+        // Never the same model a third time: move the coordinator to another one.
+        let current = self.coordinator_route(task, Some(retry)).await?;
+        let Some(alternate) = self
+            .escalate_coordinator(task, &current, DEGENERATE)
+            .await?
+        else {
+            return Err(CoreError::Refused(DEGENERATE));
+        };
+        match self
+            .turn_once(
+                task,
+                owner,
+                SessionRole::Coordinator,
+                alternate,
                 prompt,
                 cancelled,
             )
@@ -797,6 +1288,39 @@ impl Runtime {
             Err(error) if error.code() == DEGENERATE => Err(CoreError::Refused(DEGENERATE)),
             other => other,
         }
+    }
+    /// Move the task's coordinator to another qualified model than `current`
+    /// (preferably another engine or account), recorded as
+    /// `NATIVE_COORDINATOR_ESCALATED`. Later coordinator turns of the task use it
+    /// until the owner chooses a model again. `None` when no other model qualifies.
+    pub(super) async fn escalate_coordinator(
+        &self,
+        task: &str,
+        current: &SessionRoute,
+        reason: &str,
+    ) -> CoreResult<Option<SessionRoute>> {
+        let Some(pin) = self
+            .routes
+            .alternate_coordinator_pin(&self.host.root, current)?
+        else {
+            return Ok(None);
+        };
+        let route = match self.routes.pinned_route(&self.host.root, &pin, None) {
+            Ok(route) => route,
+            Err(_) => return Ok(None),
+        };
+        let t = task.to_owned();
+        let record = json!({"pin":pin,"reason":reason,"from":{"connection":current.connection,"model":current.model},
+            "to":{"connection":route.connection,"model":route.model}});
+        self.host
+            .executor
+            .write(move |db| {
+                cortex_core::lifecycle::event_tx(db, &t, "NATIVE_COORDINATOR_ESCALATED", record)?;
+                Ok(())
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        Ok(Some(route))
     }
     /// The task's state and plan revision: what a turn changed, if anything.
     async fn turn_marker(&self, task: &str) -> CoreResult<(String, i64)> {
@@ -859,6 +1383,24 @@ a question to the owner (question text and option labels). Write reports, report
         });
         let mut prompt = prompt.to_owned();
         if matches!(role, SessionRole::Coordinator) {
+            if let Some(state) = self.host.workspace_state.clone() {
+                let t = task.to_owned();
+                let summary = self
+                    .host
+                    .executor
+                    .read(move |db| {
+                        crate::machine::sprint_graph::Scope::load(db, &state, &t)?
+                            .map(|scope| scope.start(db))
+                            .transpose()
+                    })?
+                    .await
+                    .map_err(|_| CoreError::Refused("native_host_closed"))?;
+                match summary {
+                    Ok(Some(summary)) => prompt.push_str(&format!("\n\nSprint dependencies (Workspace records). Use sprint_graph to explore the graph and sprint_task_result to read a member’s outcome.\n{summary}")),
+                    Ok(None) => {},
+                    Err(error) => prompt.push_str(&format!("\n\nSprint context unavailable ({}).", error.code())),
+                }
+            }
             let t = task.to_owned();
             let instruction = self
                 .host
@@ -905,7 +1447,8 @@ a question to the owner (question text and option labels). Write reports, report
         };
         driver.treat_refusal_as_degenerate();
         let mut stop = self.stop.subscribe();
-        let turn = if *stop.borrow_and_update() || *cancelled.borrow() {
+        // How the turn ended, as the runtime observed it; recorded for a worker below.
+        let turn: CoreResult<&'static str> = if *stop.borrow_and_update() || *cancelled.borrow() {
             Err(CoreError::Refused("native_service_stopped"))
         } else {
             tokio::select! {
@@ -927,7 +1470,7 @@ a question to the owner (question text and option labels). Write reports, report
                                 // noticed now, not when the answer arrives. The turn ends
                                 // and the exited process is settled; the lost-worker path
                                 // then replaces the assignment and retires its wait.
-                                _ = driver.process_exited(), if is_worker => break,
+                                _ = driver.process_exited(), if is_worker => return Ok("process_exited"),
                                 Some(message) = guidance.recv() => {
                                     let result = driver.prompt(&crate::native_owner_controls::guidance_prompt(&message)).await;
                                     driver.guidance_delivery(message, result.is_ok(), false).await?;
@@ -937,7 +1480,7 @@ a question to the owner (question text and option labels). Write reports, report
                             _ if is_worker && continuations < 2 => {
                                 let next=tokio::select!{
                                     result=driver.command_continuation(handled_refusal)=>result?,
-                                    _=driver.process_exited()=>break,
+                                    _=driver.process_exited()=>return Ok("process_exited"),
                                 };
                                 let Some((id,message))=next else {break;};
                                 handled_refusal=id;
@@ -947,20 +1490,38 @@ a question to the owner (question text and option labels). Write reports, report
                             _ => break,
                         }
                     }
-                    Ok(())
+                    Ok("turn_ended")
                 } => result,
                 _ = stop.changed() => Err(CoreError::Refused("native_service_stopped")),
                 _ = cancelled.changed() => Err(CoreError::Refused("native_task_interrupted")),
-                _ = worker_cancelled.changed() => Ok(()),
+                _ = worker_cancelled.changed() => Ok("owner_stopped"),
             }
         };
         // Always observe the owned wait, including prompt failure or service shutdown.
         if let Some(a) = &assignment {
             self.guidance.lock().await.remove(a);
         }
+        let diagnostics = driver.diagnostics();
+        let channel = driver.channel_id().to_owned();
         let settled = driver.shutdown().await;
         if settled.is_ok() {
             worker_done.send_replace(true);
+        }
+        if let Some(a) = &assignment {
+            // Why this attempt ended, for the lost-worker path's classification.
+            let cause = match &turn {
+                Ok(cause) => *cause,
+                Err(error) => error.code(),
+            };
+            if let Err(error) = self
+                .record_worker_ending(task, a, &channel, cause, diagnostics.snapshot())
+                .await
+            {
+                eprintln!(
+                    "workspace-service: the end of a worker attempt was not recorded ({})",
+                    error.code()
+                );
+            }
         }
         if let Some(a) = assignment {
             self.worker_stops.lock().await.remove(&a);
@@ -975,10 +1536,76 @@ a question to the owner (question text and option labels). Write reports, report
         }
         Ok(())
     }
-    /// Stop a driver that failed. A first completion gap returns the task to its
-    /// coordinator (`ASK_USER_REQUIRED`) so that it asks the owner: drive
-    /// that coordinator turn here, or nothing ever asks and the task hangs. A second
-    /// stop asks the owner directly (WAITING_USER); every round ends in a stop.
+    /// Records why a worker attempt that has no accepted result ended
+    /// (`scheduler::retry::record_attempt_ending_tx`): the turn's end as the runtime
+    /// observed it, with the engine's exit status or signal, transport close, a runtime
+    /// cancel of a permission, an owner pause and a short redacted stderr tail. A turn
+    /// that ended after refused results is the attempt's own quality
+    /// (`result_refused`), as is a degenerate one (`degenerate_turn`); a process that
+    /// vanished without the model ending its turn is `worker_lost`; the owner's pause
+    /// or stop is `owner_paused`, a service stop `runtime_restart`, a command sandbox
+    /// that could not be prepared `sandbox_unavailable`.
+    async fn record_worker_ending(
+        &self,
+        task: &str,
+        assignment: &str,
+        channel: &str,
+        cause: &str,
+        diagnostics: cortex_engine::engine::DiagnosticSnapshot,
+    ) -> CoreResult<()> {
+        let (t, a, ch, cause) = (
+            task.to_owned(),
+            assignment.to_owned(),
+            channel.to_owned(),
+            cause.to_owned(),
+        );
+        self.host
+            .executor
+            .write(move |db| {
+                use rusqlite::OptionalExtension;
+                let Some(attempt) = db
+                    .query_row(
+                        "SELECT attempt_id FROM trusted_channels WHERE task_id=? AND channel_id=?",
+                        (&t, &ch),
+                        |r| r.get::<_, Option<String>>(0),
+                    )
+                    .optional()?
+                    .flatten()
+                else {
+                    return Ok(());
+                };
+                let open: bool = db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=? AND assignment_ref=?
+                     AND result_json IS NULL AND status IN ('running','failed'))",
+                    (&t, &a),
+                    |r| r.get(0),
+                )?;
+                if !open {
+                    return Ok(());
+                }
+                let facts = worker_ending_facts(db, &t, &ch, &attempt)?;
+                let class = worker_ending_class(&cause, &facts);
+                let mut ending = facts;
+                ending["cause"] = json!(cause);
+                ending["exit"] = json!(diagnostics.exit);
+                ending["exited_unprompted"] = json!(diagnostics.exited_unprompted);
+                ending["transport_close"] = json!(diagnostics.transport_close);
+                ending["stderr_bytes"] = json!(diagnostics.stderr_bytes);
+                ending["stderr_tail"] = json!(stderr_tail(&diagnostics.stderr_tail));
+                cortex_core::scheduler::retry::record_attempt_ending_tx(
+                    db, &t, &a, &attempt, &cause, class, &ending,
+                )?;
+                Ok(())
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))?
+    }
+    /// Stop a driver that failed. Under the no-stop policy (every task) the stop is a
+    /// continuation on the next rung of the strategy ladder
+    /// (`cortex_core::lifecycle::automatic`), never an owner question or hold: the
+    /// driver's end starts a [`Runtime::follow_continuation`] that relaunches the
+    /// coordinator with a fresh plan once the host has settled the processes. A task
+    /// that already waits on a question keeps it.
     pub(super) async fn stop_after_error(
         self: &Arc<Self>,
         task: &str,
@@ -991,10 +1618,6 @@ a question to the owner (question text and option labels). Write reports, report
                 return;
             }
             let code = error.code().to_owned();
-            // Only a completion gap returns to the coordinator. Other work blockers (a
-            // lost worker whose retries gave up, a failed check) have no coordinator turn
-            // that would ask: the owner gets the runtime's own stop question at once, with
-            // its concrete answers, never a silent RECOVERING hold with nothing to press.
             let gap = code.starts_with("completion_");
             let t = task.to_owned();
             let owner_for_stop = owner.clone();
@@ -1005,9 +1628,8 @@ a question to the owner (question text and option labels). Write reports, report
                     "NATIVE_DRIVER_STOPPED",
                     json!({"reason":code}),
                 )?;
-                // A task already waiting on the runtime's own open stop question keeps
-                // it: that question names the real reason and its answer relaunches the
-                // coordinator. A later driver error never replaces it with another stop.
+                // A task already waiting on an earlier version's open runtime stop
+                // question keeps it: its answer relaunches the coordinator.
                 let (current, _) = cortex_core::lifecycle::domain::task_tx(db, &t)?;
                 let asking: bool = db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM runtime_events e JOIN pending_questions q
@@ -1019,28 +1641,17 @@ a question to the owner (question text and option labels). Write reports, report
                 if current == cortex_core::TaskState::WaitingUser && asking {
                     return Ok(current);
                 }
-                if cortex_core::lifecycle::automatic::enabled(db, &t)? {
-                    cortex_core::ownership::check_tx(db, &t, &owner_for_stop)?;
-                    cortex_core::lifecycle::domain::stop_tx(db, &t, &code)?;
-                    // The host tick owns this relaunch after this driver exits.
-                    return Ok(cortex_core::TaskState::Paused);
-                }
-                let state = cortex_core::lifecycle::domain::stop_tx(db, &t, &code)?;
-                if !gap && state == cortex_core::TaskState::Recovering {
-                    return cortex_core::lifecycle::domain::stop_tx(db, &t, &code);
-                }
-                Ok(state)
+                cortex_core::ownership::check_tx(db, &t, &owner_for_stop)?;
+                cortex_core::lifecycle::domain::stop_tx(db, &t, &code)
             }) {
                 Ok(reply) => reply.await.ok().and_then(|r| r.ok()),
                 Err(_) => None,
             };
-            if round == 2
-                || !gap
-                || !matches!(
-                    state,
-                    Some(cortex_core::TaskState::Recovering | cortex_core::TaskState::Reconciling)
-                )
-            {
+            // A completion gap that needs the owner's decision about the work (a
+            // replaced failed check) stays RECONCILING for its coordinator, which asks:
+            // drive that turn here, or nothing would ask. Every other stop is a
+            // continuation the driver's end follows.
+            if round == 2 || !gap || state != Some(cortex_core::TaskState::Reconciling) {
                 return;
             }
             match self.progress(task, owner, cancelled.clone()).await {
@@ -1048,6 +1659,69 @@ a question to the owner (question text and option labels). Write reports, report
                 Err(next) => error = next,
             }
         }
+    }
+    /// A driver of `task` ended on its own (not cancelled, the service not stopping):
+    /// continue whatever the no-stop policy now owes it.
+    pub(super) async fn driver_ended(
+        self: &Arc<Self>,
+        task: &str,
+        cancelled: &watch::Receiver<bool>,
+    ) {
+        if !*cancelled.borrow() && !*self.stop.borrow() {
+            self.follow_continuation(task.to_owned()).await;
+        }
+    }
+    /// The runtime's own recheck of what a parked task waits for, without any model
+    /// call: each due wait is checked against the built-in endpoint policy before
+    /// any TCP connect or HTTPS HEAD, and the outcome is recorded
+    /// (`EXTERNAL_WAIT_RECHECKED`, `EXTERNAL_WAIT_ENDED`); an open owner action that an
+    /// environment preflight can show fixed (GitHub CLI, Codex or Claude login,
+    /// passwordless sudo) is rechecked with the same backoff and resolved
+    /// (`OWNER_ACTION_RESOLVED`, `by: environment_recheck`) once the fact is present.
+    pub(super) async fn recheck_obstacles(&self, task: &str) -> CoreResult<()> {
+        let now = unix_seconds();
+        let t = task.to_owned();
+        let (due, services) = self
+            .host
+            .executor
+            .read(move |db| {
+                Ok((
+                    cortex_core::lifecycle::obstacles::due_waits(db, &t, now)?,
+                    cortex_core::lifecycle::obstacles::environment_services(db, &t)?,
+                ))
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        for wait in due {
+            let (ok, detail) = probe_external(&wait).await;
+            let (t, id) = (
+                task.to_owned(),
+                wait["id"].as_str().unwrap_or("").to_owned(),
+            );
+            self.host
+                .executor
+                .write(move |db| {
+                    cortex_core::lifecycle::obstacles::record_recheck_tx(
+                        db, &t, &id, ok, now, &detail,
+                    )
+                    .map(|_| ())
+                })?
+                .await
+                .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        }
+        if !services.is_empty() && environment_recheck_due(task) {
+            let facts = crate::native_preflight::facts(&self.host.root).await;
+            let t = task.to_owned();
+            self.host
+                .executor
+                .write(move |db| {
+                    cortex_core::lifecycle::obstacles::resolve_by_environment_tx(db, &t, &facts)
+                        .map(|_| ())
+                })?
+                .await
+                .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        }
+        Ok(())
     }
     async fn drive(
         &self,
@@ -1101,7 +1775,7 @@ a question to the owner (question text and option labels). Write reports, report
     /// message stays editable; a take interrupted by a restart is finished by the next one
     /// (the message id makes it idempotent).
     pub(super) async fn take_queued(&self, task: &str) -> CoreResult<()> {
-        let Some(state) = self.maintenance_state.clone() else {
+        let Some(state) = self.host.workspace_state.clone() else {
             return Ok(());
         };
         let t = task.to_owned();
@@ -1217,19 +1891,6 @@ a question to the owner (question text and option labels). Write reports, report
             .map_err(|_| CoreError::Refused("native_host_closed"))?
     }
     /// Whether an owner message waits for the next coordinator turn.
-    async fn owner_messages_waiting(&self, task: &str) -> CoreResult<bool> {
-        let t = task.to_owned();
-        self.host
-            .executor
-            .read(move |db| {
-                Ok(
-                    !cortex_core::lifecycle::steering::pending(db, &t)?.is_empty()
-                        || !cortex_core::lifecycle::steering::undelivered(db, &t)?.is_empty(),
-                )
-            })?
-            .await
-            .map_err(|_| CoreError::Refused("native_host_closed"))?
-    }
     pub(super) async fn recover_planning(
         &self,
         task: &str,
@@ -1240,18 +1901,7 @@ a question to the owner (question text and option labels). Write reports, report
         // before delivery; never reuse a snapshot captured before replacement.
         let mut goal=String::from("Coordinator recovery on a new engine session. The prior process has a confirmed terminal observation. Do not replay commands, permissions or claimed deliveries. Continue from the fresh retained-state capsule; missing outcomes remain unresolved.");
         goal.push_str(&self.recovery_failure_guidance(task).await?);
-        let task_id = task.to_owned();
-        let automatic = self
-            .host
-            .executor
-            .read(move |db| cortex_core::lifecycle::automatic::enabled(db, &task_id))?
-            .await
-            .map_err(|_| CoreError::Refused("native_host_closed"))??;
-        let route = if automatic {
-            self.coordinator_route(task, None).await?
-        } else {
-            self.routes.route(&self.host.root, "orchestrator")?
-        };
+        let route = self.coordinator_route(task, None).await?;
         self.drive(task, owner, &goal, route, cancelled).await
     }
 
@@ -1419,22 +2069,10 @@ a question to the owner (question text and option labels). Write reports, report
                 step["state"].as_str(),
                 Some("RECOVERING" | "PLANNING" | "RECONCILING")
             ) {
-                // Owner messages waiting for this turn run it on the task's coordinator
-                // route, as a restart for a message did; the route is resolved before
-                // anything is recorded as delivered.
+                // Continue on the task's coordinator regardless of mode or steering.
+                // Resolve it before recording delivery of any owner messages.
                 self.take_queued(task).await?;
-                let t = task.to_owned();
-                let automatic = self
-                    .host
-                    .executor
-                    .read(move |db| cortex_core::lifecycle::automatic::enabled(db, &t))?
-                    .await
-                    .map_err(|_| CoreError::Refused("native_host_closed"))??;
-                let route = if automatic || self.owner_messages_waiting(task).await? {
-                    self.coordinator_route(task, None).await?
-                } else {
-                    self.routes.route(&self.host.root, "orchestrator")?
-                };
+                let route = self.coordinator_route(task, None).await?;
                 let t = task.to_owned();
                 let o = owner.clone();
                 let messages = self.host.executor.write(move|db|{
@@ -1450,7 +2088,7 @@ a question to the owner (question text and option labels). Write reports, report
                     cortex_core::lifecycle::event_tx(db,&t,"NATIVE_COORDINATOR_CONTINUED",json!({"state":cortex_core::lifecycle::domain::task_tx(db,&t)?.0}))?;
                     Ok(messages)
                 })?.await.map_err(|_|CoreError::Refused("native_host_closed"))??;
-                let mut prompt = String::from("Continue from the retained-state capsule. Reconcile verified work with synthesis_submit, ask a structured user question if a decision remains, propose a scoped repair plan for failing project code and keep each unresolved verification command in it. Use verification_submit only to correct the verification procedure or rerun the reviewed work. Never certify missing evidence.");
+                let mut prompt = String::from("Continue from the retained-state capsule. Reconcile verified work with synthesis_submit, ask a structured user question only for a decision about the work itself (never about runtime failures, retries or limits) and keep working on everything it does not block, propose a scoped repair plan for failing project code and keep each unresolved verification command in it. Use verification_submit only to correct the verification procedure or rerun the reviewed work. Never certify missing evidence.");
                 if step["state"] != "RECONCILING" {
                     prompt.push_str(&self.recovery_failure_guidance(task).await?);
                 }
@@ -1689,6 +2327,7 @@ a question to the owner (question text and option labels). Write reports, report
         let t = task.to_owned();
         let a = assignment["assignment_ref"].as_str().unwrap().to_owned();
         let root = self.host.root.clone();
+        let assigned_role = role.to_owned();
         let (node,evidence,escalated,previous,revision)=self.host.executor.read(move |db| {
             let (plan,node_id,stage,revision):(Option<String>,String,String,i64)=db.query_row(
                 "SELECT t.plan_json,n.node_id,n.stage,t.revision FROM runtime_nodes n JOIN runtime_tasks t USING(task_id) WHERE n.task_id=? AND n.assignment_ref=?",
@@ -1699,11 +2338,19 @@ a question to the owner (question text and option labels). Write reports, report
             let mut node=cortex_core::lifecycle::plan::node_routing(&plan,&node_id);
             if !node.is_object(){node=json!({});}
             node["id"]=json!(node_id);
-            // Escalation means a previous dispatch of this node in this plan revision
-            // (review cycles carry the cycle in the node id); a replan reusing the id
-            // starts fresh.
-            let previous=cortex_core::routing::previous_dispatch_engine(db,&t,&node_id,revision)?;
-            let escalated=previous.is_some();
+            // Only work that fell short escalates (`automatic::node_escalated`): this
+            // node's own failure, a repeated review fix, or the one plan revision right
+            // after an escalating ladder rung. A retry after an infrastructure failure
+            // keeps its normal tier. An escalated dispatch moves away from the engine of
+            // the attempt that fell short.
+            let escalated=cortex_core::lifecycle::automatic::node_escalated(db,&t,&node_id,revision)?;
+            let mut previous=None;
+            if escalated {
+                previous=cortex_core::routing::previous_dispatch_engine(db,&t,&node_id,revision)?;
+                if previous.is_none() {
+                    previous=cortex_core::lifecycle::automatic::escalation_engine(db,&t,&node_id,&assigned_role)?;
+                }
+            }
             if stage=="review"{
                 // Independence: the reviewer should run on a model other than the
                 // reviewed execution nodes' models (and preferably another engine).
@@ -1732,6 +2379,24 @@ a question to the owner (question text and option labels). Write reports, report
                     (&t,revision,&node_id),|r|r.get(0))?;
                 node["review_rerun"]=json!(rerun);
             }
+            // A model that lost this node's lineage twice to infrastructure (the session
+            // vanished, the engine failed) is routed away from, without escalating the
+            // tier: another model when one is usable, preferably another engine.
+            let lost=lost_models(db,&t,&node_id)?;
+            if !lost.is_empty(){
+                let field=if stage=="review"{"previous_reviewers"}else{"avoid_routes"};
+                let mut list=node[field].as_array().cloned().unwrap_or_default();
+                list.extend(lost.iter().cloned());
+                node[field]=json!(list);
+                node["lost_routes"]=json!(lost);
+            }
+            // What a restart left with an unknown outcome is re-verified by the fresh attempt.
+            let reverify:Option<String>=db.query_row("SELECT json_extract(payload_json,'$.reverify') FROM runtime_events
+                WHERE task_id=? AND type='ASSIGNMENT_RETRIED' AND json_extract(payload_json,'$.node')=? AND json_extract(payload_json,'$.revision')=?
+                ORDER BY id DESC LIMIT 1",(&t,&node_id,revision),|r|r.get(0)).or_else(|e|match e{rusqlite::Error::QueryReturnedNoRows=>Ok(None),e=>Err(e)})?;
+            if let Some(reverify)=reverify.and_then(|r|serde_json::from_str::<Value>(&r).ok()).filter(|r|r.as_array().is_some_and(|a|!a.is_empty())){
+                node["reverify_effects"]=reverify;
+            }
             Ok((node,cortex_core::routing::evidence(db,&t,&root)?,escalated,previous,revision))
         })?.await.map_err(|_|CoreError::Refused("native_host_closed"))??;
         let (route, mut decision) = match self.routes.worker_selection(
@@ -1751,14 +2416,12 @@ a question to the owner (question text and option labels). Write reports, report
                     self.host
                         .executor
                         .write(move |db| {
-                            if cortex_core::lifecycle::automatic::enabled(db, &t)? {
-                                cortex_core::lifecycle::event_tx(
-                                    db,
-                                    &t,
-                                    "NATIVE_WORKER_ROUTE_BLOCKED",
-                                    probe,
-                                )?;
-                            }
+                            cortex_core::lifecycle::event_tx(
+                                db,
+                                &t,
+                                "NATIVE_WORKER_ROUTE_BLOCKED",
+                                probe,
+                            )?;
                             Ok(())
                         })?
                         .await
@@ -1798,6 +2461,13 @@ a question to the owner (question text and option labels). Write reports, report
             })?
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        // A restart left effects of the previous attempt with an unknown outcome: the
+        // fresh attempt re-verifies them from the files, Git state and receipts first.
+        let mut brief = assignment.clone();
+        if let Some(effects) = node.get("reverify_effects") {
+            brief["reverify_effects"] = effects.clone();
+            brief["reverify_instruction"] = json!("The service restarted while the previous attempt of this assignment ran. These effects of that attempt may or may not have taken place: re-verify each one from the files, Git state and receipts before redoing it; never replay it blindly.");
+        }
         self.turn(
             task,
             owner,
@@ -1805,7 +2475,7 @@ a question to the owner (question text and option labels). Write reports, report
                 assignment: assignment["assignment_ref"].as_str().unwrap().into(),
             },
             route,
-            &assignment.to_string(),
+            &brief.to_string(),
             cancelled,
         )
         .await
@@ -1861,6 +2531,7 @@ a question to the owner (question text and option labels). Write reports, report
                     .stop_after_error(&task, &owner, error, cancelled.clone())
                     .await;
             }
+            runtime.driver_ended(&task, &cancelled).await;
             done.send_replace(true);
         }));
         Ok(())
@@ -1873,8 +2544,8 @@ a question to the owner (question text and option labels). Write reports, report
     ///
     /// With an expected result version, it reopens exactly that completed result.
     /// Without one, it continues a run that ended as failed with every effect known.
-    /// The scheduler spends at most two such repairs per task; each owner consent on
-    /// the queue hold (`owner`) allows exactly one more, under its own fingerprint.
+    /// Every distinct failure fingerprint gets one repair (no repair cap); an owner
+    /// consent on the queue hold (`owner`) is recorded the same way.
     ///
     /// `Busy` (another control, maintenance, or the service stopping) decides nothing:
     /// the caller asks again on its next pass. `Declined` and an error are refusals.
@@ -1894,7 +2565,8 @@ a question to the owner (question text and option labels). Write reports, report
             return Ok(RepairAdmission::Busy);
         }
         let _maintenance = match self
-            .maintenance_state
+            .host
+            .workspace_state
             .as_ref()
             .map(|state| crate::machine::maintenance::admission(state))
             .transpose()
@@ -1951,14 +2623,9 @@ a question to the owner (question text and option labels). Write reports, report
                 if already {
                     return Ok(false);
                 }
-                let repairs: i64 = db.query_row(
-                    "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='AUTOMATIC_REPAIR_REQUESTED'",
-                    [&runtime_task],
-                    |r| r.get(0),
-                )?;
-                if repairs >= 2 && !owner {
-                    return Ok(false);
-                }
+                // No repair cap (no-stop policy): each distinct failure fingerprint gets
+                // its repair; only an identical one is never repeated.
+                let _ = owner;
                 let (state, _) = cortex_core::lifecycle::domain::task_tx(db, &runtime_task)?;
                 let expected_state = if expected_event.is_some() {
                     cortex_core::TaskState::Completed
@@ -2019,8 +2686,16 @@ a question to the owner (question text and option labels). Write reports, report
     pub(crate) async fn shutdown(&self) {
         self.stop.send_replace(true);
         let _serial = self.controls.lock().await;
-        for job in self.jobs.lock().await.drain(..) {
-            let _ = job.await;
+        // Jobs are taken out before they are awaited: a job that ends by starting a
+        // continuation follower (which registers itself) must not wait on this lock.
+        loop {
+            let jobs: Vec<_> = self.jobs.lock().await.drain(..).collect();
+            if jobs.is_empty() {
+                break;
+            }
+            for job in jobs {
+                let _ = job.await;
+            }
         }
     }
 }
@@ -2229,12 +2904,12 @@ mod pump_tests {
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
     }
-    // A second blocking review stops the task with the runtime's own question while the
-    // driver advances. The driver ends there: it never records the step as one that
-    // could not continue (`native_continuation_unavailable`), never replaces the review
-    // question with a second stop, and the one question names the review and its report.
+    // A blocking review while the driver advances is a continuation on the strategy
+    // ladder (no-stop policy): the runtime asks the owner nothing, the driver ends
+    // without recording the step as one that could not continue, and the continuation
+    // cites the review report. A later driver error never records a second stop.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_blocking_review_stop_is_the_only_question_and_the_driver_ends() {
+    async fn a_blocking_review_is_a_continuation_and_the_driver_ends() {
         let root = std::env::temp_dir().join(format!("blocked-{}", crate::identity().unwrap()));
         std::fs::create_dir(&root).unwrap();
         // The review is bound to an observed project revision.
@@ -2262,8 +2937,6 @@ mod pump_tests {
                     "findings":[{"node":"trace","files":["traefik/tls.yml"],"cross_cutting":false,"fix":"Forward the visitor address"}]});
                 db.execute("INSERT INTO runtime_nodes VALUES ('t',4,'_review_1','worker-code-reviewer','Review','[\"trace\"]','[\"**\"]','review','completed','rv',?)",
                     [review.to_string()])?;
-                // The first blocking review already returned to the coordinator.
-                cortex_core::lifecycle::event_tx(db, "t", "ASK_USER_REQUIRED", json!({"blocker":"review_blocked"}))?;
                 Ok(())
             })?;
             Ok(owner)
@@ -2274,36 +2947,52 @@ mod pump_tests {
             runtime.progress("t", &owner, cancelled),
         )
         .await
-        .expect("the driver kept running after the runtime's stop question")
+        .expect("the driver kept running after the continuation")
         .unwrap();
-        let facts = runtime.host.executor.read(|db| {
-            let stopped: i64 = db.query_row("SELECT count(*) FROM runtime_events WHERE type='NATIVE_DRIVER_STOPPED'", [], |r| r.get(0))?;
-            let questions: Vec<(String, String)> = db.prepare("SELECT status,text FROM pending_questions WHERE task_id='t' ORDER BY rowid")?
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
-            let (state, blocker): (String, String) = db.query_row("SELECT state,blocker FROM runtime_tasks WHERE task_id='t'", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            let payload: String = db.query_row("SELECT payload_json FROM runtime_events WHERE type='USER_QUESTION_REQUESTED' ORDER BY id DESC LIMIT 1", [], |r| r.get(0))?;
-            Ok((stopped, questions, state, blocker, payload))
-        }).unwrap().await.unwrap().unwrap();
+        let facts = runtime
+            .host
+            .executor
+            .read(|db| {
+                let stopped: i64 = db.query_row(
+                    "SELECT count(*) FROM runtime_events WHERE type='NATIVE_DRIVER_STOPPED'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let questions: i64 = db.query_row(
+                    "SELECT count(*) FROM pending_questions WHERE task_id='t'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let (state, blocker): (String, String) = db.query_row(
+                    "SELECT state,blocker FROM runtime_tasks WHERE task_id='t'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                let owed = cortex_core::lifecycle::automatic::owed(db, "t")?.map(|o| o.evidence);
+                Ok((stopped, questions, state, blocker, owed))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             facts.0, 0,
-            "the driver recorded a stop after the runtime's question"
+            "the driver recorded a stop after the continuation"
         );
-        assert_eq!(facts.1.len(), 1, "{:?}", facts.1);
-        assert_eq!(facts.1[0].0, "open");
-        assert!(
-            facts.1[0].1.contains("The request chain was not verified.")
-                && facts.1[0].1.contains("r_2413b9f526b9"),
-            "{}",
-            facts.1[0].1
-        );
+        assert_eq!(facts.1, 0, "the owner was asked");
         assert_eq!(
             (facts.2.as_str(), facts.3.as_str()),
-            ("WAITING_USER", "review_blocked")
+            ("RECOVERING", "automatic_continuation_pending")
         );
-        let payload: Value = serde_json::from_str(&facts.4).unwrap();
-        assert_eq!(payload["targets"][0]["reportId"], "r_2413b9f526b9");
-        assert_eq!(payload["recommended"], 0);
-        // A driver error arriving now keeps the review question as the one stop.
+        let evidence = facts.4.expect("a continuation is owed");
+        assert_eq!(evidence["reason"], "review_blocked");
+        assert_eq!(evidence["strategy"], "repair");
+        assert!(evidence["reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["reportId"] == "r_2413b9f526b9"));
+        // A driver error arriving now records no second continuation.
         runtime
             .stop_after_error(
                 "t",
@@ -2312,10 +3001,21 @@ mod pump_tests {
                 watch::channel(false).1,
             )
             .await;
-        let open = runtime.host.executor.read(|db| Ok(db.query_row(
-            "SELECT count(*)||':'||(SELECT blocker FROM runtime_tasks WHERE task_id='t') FROM pending_questions WHERE status='open'", [], |r| r.get::<_, String>(0))?))
-            .unwrap().await.unwrap().unwrap();
-        assert_eq!(open, "1:review_blocked");
+        let count = runtime
+            .host
+            .executor
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT count(*) FROM runtime_events WHERE type='AUTOMATIC_CONTINUATION'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 1);
         runtime.shutdown().await;
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();

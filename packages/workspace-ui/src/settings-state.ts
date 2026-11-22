@@ -32,6 +32,7 @@ export function createSettingsState() {
   const [scope, setScope] = createSignal<string | null>(null);
   const [pending, setPending] = createSignal<Route | string | null>(null);
   let current: Entry | null = null;
+  const saves = new Map<string, Promise<boolean>>();
   const put = <T,>(set: (fn: (r: Record<string, T>) => Record<string, T>) => void, key: string, value: T | undefined) => set(r => {
     const next = { ...r };
     if (value === undefined) delete next[key]; else next[key] = value;
@@ -55,6 +56,13 @@ export function createSettingsState() {
       return !current.stays?.(route);
     },
     saveCurrent: async () => current ? current.save() : true,
+    saveOnce(key: string, start: () => Promise<boolean>) {
+      const inFlight = saves.get(key);
+      if (inFlight) return inFlight;
+      const pending = start().finally(() => saves.delete(key));
+      saves.set(key, pending);
+      return pending;
+    },
     dropCurrent() { if (current) drop(current.key); },
     /** Unsaved drafts of this machine, which a profile switch cannot keep. */
     draftsOn: (machineId: string) => Object.keys(drafts()).filter(k => k.startsWith(`${machineId}:`)).length,
@@ -82,7 +90,7 @@ export function useDraft<T>(props: DraftProps<T>) {
   const dirty = () => count() > 0;
   const state = () => s.state(props.key());
   const problems = () => props.problems?.(value()) ?? [];
-  const clear = () => { const key = props.key(); s.setFailure(key, null); s.setDraft(key, undefined); s.setBase(key, undefined); s.setOrigin(key, undefined); s.setState(key, null); };
+  const clear = (key = props.key()) => { s.setFailure(key, null); s.setDraft(key, undefined); s.setBase(key, undefined); s.setOrigin(key, undefined); s.setState(key, null); };
   const set = (next: T) => {
     const key = props.key();
     s.setNote(key, null);
@@ -90,22 +98,29 @@ export function useDraft<T>(props: DraftProps<T>) {
     if (s.base(key) === undefined && props.revision) { s.setBase(key, props.revision()); s.setOrigin(key, props.saved()); }
     if (same(next, props.saved())) clear(); else s.setDraft(key, next);
   };
-  const save = async (): Promise<boolean> => {
-    if (problems().length) return false;
-    const key = props.key(), fault = ws.demo?.takeSaveFault() ?? null;
-    if (fault === "conflict") props.onConflict?.();
-    const receipt = await props.commit(value(), s.base(key) ?? props.revision?.());
-    // The command may or may not have landed: the screen must not claim either until the machine is read again.
-    if (fault === "timeout") { s.setState(key, "unknown"); return false; }
-    if (!receipt.ok) {
-      s.setFailure(key, receipt.message || "The machine refused this change. Nothing was saved; correct the value and try again.");
-      if (["revision_conflict", "stale_version"].includes(receipt.outcome)) s.setState(key, "conflict");
-      else if (["unknown_outcome", "unknown"].includes(receipt.outcome)) s.setState(key, "unknown");
-      return false;
-    }
-    clear();
-    s.setNote(key, props.saveNote?.() ?? `Saved on ${props.where()}`);
-    return true;
+  const save = () => {
+    const key = props.key();
+    // Save and Save-and-leave share one write and its receipt for this file.
+    return s.saveOnce(key, async () => {
+      if (problems().length) return false;
+      const fault = ws.demo?.takeSaveFault() ?? null;
+      if (fault === "conflict") props.onConflict?.();
+      const submitted = value();
+      const receipt = await props.commit(submitted, s.base(key) ?? props.revision?.());
+      // The command may or may not have landed: the screen must not claim either until the machine is read again.
+      if (fault === "timeout") { s.setState(key, "unknown"); return false; }
+      if (!receipt.ok) {
+        s.setFailure(key, receipt.message || "The machine refused this change. Nothing was saved; correct the value and try again.");
+        if (["revision_conflict", "stale_version"].includes(receipt.outcome)) s.setState(key, "conflict");
+        else if (["unknown_outcome", "unknown"].includes(receipt.outcome)) s.setState(key, "unknown");
+        return false;
+      }
+      // Do not discard a newer edit made while the write was in flight.
+      if (s.draft(key) !== undefined && s.draft(key) !== submitted) return false;
+      clear(key);
+      if (props.key() === key) s.setNote(key, props.saveNote?.() ?? `Saved on ${props.where()}`);
+      return true;
+    });
   };
   /** What moved on the machine and in the draft since it began, by key. A key in both is a collision. */
   const changes = () => {
@@ -124,6 +139,6 @@ export function useDraft<T>(props: DraftProps<T>) {
     s.register({ key, dirty, save, stays: props.stays });
     onCleanup(() => s.unregister(key));
   });
-  return { value, set, count, dirty, state, failure: () => s.failure(props.key()), save, discard: clear, review, reapply, reread, changes, problems, note: () => s.note(props.key()), clearNote: () => s.setNote(props.key(), null), name: props.name, where: props.where };
+  return { value, set, count, dirty, state, failure: () => s.failure(props.key()), save, discard: () => clear(), review, reapply, reread, changes, problems, note: () => s.note(props.key()), clearNote: () => s.setNote(props.key(), null), name: props.name, where: props.where };
 }
 export type Draft<T> = ReturnType<typeof useDraft<T>>;

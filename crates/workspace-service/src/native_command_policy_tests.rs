@@ -30,7 +30,9 @@ fn available(f: &Fixture) -> bool {
         true
     } else {
         assert!(f.prepare(Profile::Development, &[f.root()], &[]).is_err());
-        eprintln!("advanced namespace fixtures unavailable: preparation refused; positive coverage requires container");
+        eprintln!(
+            "advanced namespace fixtures unavailable: preparation refused; positive coverage requires container"
+        );
         false
     }
 }
@@ -197,8 +199,11 @@ fn git_data_guards_linked_worktrees_submodules_and_absent_entries() {
         env,
     )
     .unwrap();
-    run(&s,"echo linked >> source; git add source; ! touch .git; ! touch \"$1/config\"; ! touch \"$2/config\"",
-        &[&root.join(".git"),&sibling]);
+    run(
+        &s,
+        "echo linked >> source; git add source; ! touch .git; ! touch \"$1/config\"; ! touch \"$2/config\"",
+        &[&root.join(".git"), &sibling],
+    );
     s.finish();
     assert_eq!(
         fs::read_to_string(sibling.join("config")).unwrap(),
@@ -250,7 +255,11 @@ fn readonly_overlay_is_discarded_but_ignored_output_persists() {
         );
     }
     if s.overlay {
-        run(&s,"echo discarded > source; echo new > generated; touch cache/persistent; ! touch .cortex-dev/new; test \"$PYTEST_ADDOPTS\" != ''",&[]);
+        run(
+            &s,
+            "echo discarded > source; echo new > generated; touch cache/persistent; ! touch .cortex-dev/new; test \"$PYTEST_ADDOPTS\" != ''",
+            &[],
+        );
     } else {
         run(
             &s,

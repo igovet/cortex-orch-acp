@@ -26,7 +26,14 @@ fn find_role_enum(value: &Value) -> Option<Vec<String>> {
 #[test]
 fn worker_routing_catalogue_equals_the_plannable_role_enum() {
     let schema: Value = serde_json::from_str(include_str!("../schema/tools.json")).unwrap();
-    let plannable: BTreeSet<String> = find_role_enum(&schema["tools"])
+    // The plan's node roles; a review finding's proposed fix role is a subset.
+    let plan = schema["tools"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|t| t["name"] == "plan_submit")
+        .expect("plan_submit");
+    let plannable: BTreeSet<String> = find_role_enum(plan)
         .expect("plan node role enum")
         .into_iter()
         .collect();
@@ -41,6 +48,29 @@ fn worker_routing_catalogue_equals_the_plannable_role_enum() {
         .map(|c| c[1].to_owned())
         .collect();
     assert_eq!(catalogue, plannable);
+    // Every fix role a review finding may propose is a plannable writing role.
+    for tool in schema["tools"].as_object().unwrap().values() {
+        let proposed =
+            &tool["inputSchema"]["properties"]["findings"]["items"]["properties"]["role"]["enum"];
+        for role in proposed.as_array().into_iter().flatten() {
+            let role = role.as_str().unwrap();
+            assert!(plannable.contains(role), "{role}");
+            assert!(
+                ![
+                    "architect",
+                    "explorer",
+                    "planner",
+                    "security-auditor",
+                    "ux-designer",
+                    "accessibility-auditor",
+                    "database-architect",
+                    "performance-engineer"
+                ]
+                .contains(&role),
+                "{role}"
+            );
+        }
+    }
     // The reserved roles (reviewer, build verification, consultant) are never plannable.
     for reserved in ["code-reviewer", "build-verification", "senior-consultant"] {
         assert!(!plannable.contains(reserved), "{reserved}");

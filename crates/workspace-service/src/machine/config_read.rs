@@ -7,23 +7,32 @@ use crate::{
     native_routes::RouteEnvironment,
 };
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(super) fn environment(config: &crate::Config) -> Result<RouteEnvironment> {
-    let mut environment = RouteEnvironment::for_user()
-        .map_err(|e| refuse(e.code(), "Settings roots unavailable."))?;
-    let dev = workspace_protocol::channel::current().is_dev();
+    RouteEnvironment::for_workspace(config)
+        .map_err(|e| refuse(e.code(), "Settings roots unavailable."))
+}
+
+fn engine_data_root(dev: bool, state: &Path, home: &Path, xdg: Option<PathBuf>) -> PathBuf {
     if dev {
-        environment.config = config
-            .launch_config_root()
-            .unwrap_or_else(|| config.state_dir.join("config"));
-        environment.state = config
-            .launch
-            .dev_state
-            .clone()
-            .unwrap_or_else(|| config.state_dir.join("state"));
+        state.join("data")
+    } else {
+        xdg.unwrap_or_else(|| home.join(".local/share"))
     }
-    Ok(environment)
+}
+
+/// The service's adapter store, independent of the sanitized child environment.
+pub(super) fn engine_data(config: &crate::Config, home: &Path) -> Result<PathBuf> {
+    let data = engine_data_root(
+        workspace_protocol::channel::current().is_dev(),
+        &config.state_dir,
+        home,
+        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+    );
+    SetupEnvironment::validate_data(home, &data)
+        .map_err(|e| refuse(e.code(), "Engine data root unavailable."))?;
+    Ok(data)
 }
 
 pub fn read(config: &crate::Config) -> Result<Value> {
@@ -32,15 +41,8 @@ pub fn read(config: &crate::Config) -> Result<Value> {
     let environment = environment(config)?;
     // Never waits: a due Claude `/usage` refresh runs in the background and the next read shows it.
     super::usage_refresh::ensure(config, &environment);
-    let dev = workspace_protocol::channel::current().is_dev();
     let setup = SetupEnvironment {
-        data: if dev {
-            config.state_dir.join("data")
-        } else {
-            std::env::var_os("XDG_DATA_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| environment.home.join(".local/share"))
-        },
+        data: engine_data(config, &environment.home)?,
         path: std::env::var_os("PATH")
             .map(|p| {
                 std::env::split_paths(&p)
@@ -70,4 +72,25 @@ pub fn read(config: &crate::Config) -> Result<Value> {
     view["diagnostics"] = json!(result.settings.diagnostics);
     view["catalogueRefresh"] = refresh;
     Ok(view)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_data_root_is_channel_local_or_xdg_with_home_fallback() {
+        let home = Path::new("/native-home");
+        let state = Path::new("/workspace-state");
+        let xdg = PathBuf::from("/isolated-data");
+        assert_eq!(engine_data_root(false, state, home, Some(xdg.clone())), xdg);
+        assert_eq!(
+            engine_data_root(false, state, home, None),
+            home.join(".local/share")
+        );
+        assert_eq!(
+            engine_data_root(true, state, home, Some(xdg)),
+            state.join("data")
+        );
+    }
 }

@@ -534,3 +534,41 @@ fn invalid_utf8_report_and_modified_replayed_draft_fail_closed() {
         "file_conflict"
     );
 }
+
+#[test]
+fn sprint_reads_only_committed_immutable_reports_without_recovering_the_writer() {
+    let (_project, store) = setup();
+    let first = publish(&store, "First decision", false);
+    let pipeline = publish(&store, "Runtime pipeline", true);
+    let second = publish(&store, "Later decision", false);
+    let publisher = Publisher::new(&store);
+    // A committed report remains readable alongside an unrelated pending
+    // intent. Recovery belongs to the author/runtime publication path.
+    let intent = store
+        .key()
+        .directory()
+        .join("t/.publication_interrupted.json");
+    std::fs::write(&intent, b"incomplete").unwrap();
+    let first_page = publisher.immutable_reports("t", None, 1).unwrap();
+    assert_eq!(first_page.reports[0].report_id, second);
+    let last = publisher
+        .immutable_reports("t", first_page.next_cursor.as_deref(), 1)
+        .unwrap();
+    assert_eq!(last.reports[0].report_id, first);
+    assert!(last.next_cursor.is_none());
+    assert!(publisher
+        .immutable_report_page("t", &first, None, 4000)
+        .unwrap()
+        .markdown
+        .contains("First decision"));
+    for (task, id) in [("t", &pipeline), ("other", &first)] {
+        assert_eq!(
+            publisher
+                .immutable_report_page(task, id, None, 1)
+                .unwrap_err()
+                .code(),
+            "not_found"
+        );
+    }
+    assert_eq!(std::fs::read(intent).unwrap(), b"incomplete");
+}

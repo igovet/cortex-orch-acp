@@ -56,6 +56,18 @@ impl Run {
             && (self.operation != other.operation
                 || self.receipt["profile"] == other.receipt["profile"])
     }
+    /// The same intent as `other`: the same argv in the same working directory, on
+    /// any profile or operation. Only used to let a later verified pass of a later
+    /// revision supersede an earlier revision's failed check
+    /// (`repair_checks::require_prior_worker_repairs`), never inside one attempt.
+    pub(super) fn same_intent(&self, other: &Self) -> bool {
+        !self.never_launched()
+            && !other.never_launched()
+            && self.identity()
+            && other.identity()
+            && self.receipt["argv"] == other.receipt["argv"]
+            && self.receipt["cwd"] == other.receipt["cwd"]
+    }
     pub fn verified_failure(&self) -> bool {
         self.complete() && self.receipt["exit_code"].as_i64().is_some_and(|c| c != 0)
     }

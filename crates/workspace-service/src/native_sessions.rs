@@ -274,6 +274,7 @@ pub trait ClientPermissions: Send + Sync {
     ) -> FutureResult<'a, PermissionDecision>;
 }
 pub struct NativeHost {
+    pub(super) workspace_state: Option<PathBuf>,
     pub(super) mcp: crate::native_mcp::Registry,
     pub(super) routes: std::sync::RwLock<Option<Arc<dyn crate::native_runtime::NativeRoutes>>>,
     pub(super) permissions: std::sync::RwLock<Option<Arc<dyn ClientPermissions>>>,
@@ -348,6 +349,7 @@ impl NativeHost {
                 .map_err(|_| CoreError::Refused("session_host_closed"))??;
         }
         Ok(Self {
+            workspace_state: None,
             mcp,
             routes: std::sync::RwLock::new(None),
             permissions: std::sync::RwLock::new(None),
@@ -520,10 +522,13 @@ impl NativeHost {
                 engine_kind,
             )?;
             let automatic = lifecycle::automatic::enabled(db, &task)?;
-            if identity.role == "coordinator" && automatic {
+            if identity.role == "coordinator" {
+                // The no-stop policy holds for every task, not only Automatic ones.
                 instructions.push_str("\n\n");
                 instructions.push_str(lifecycle::automatic::COORDINATOR_NOTE);
-                instructions.push_str(" Have execution workers use Cortex project file tools for changes that must be included in the task's local finish.");
+                if automatic {
+                    instructions.push_str(" Have execution workers use Cortex project file tools for changes that must be included in the task's local finish.");
+                }
             } else if automatic && identity.stage.as_deref() == Some("execution") {
                 instructions.push_str("\n\nAutomatic sprint: make the task's final file changes through Cortex project file tools so the runtime retains attributable write receipts. Do not stage or commit changes yourself; automatic finish only commits changes it can attribute to this task.");
             }
@@ -547,6 +552,7 @@ impl NativeHost {
         })?)
         .await?;
         let policy = Arc::new(CorePolicy {
+            workspace_state: self.workspace_state.clone(),
             commands: self.commands.clone(),
             routes: self.routes.read().unwrap().clone(),
             permissions: self.permissions.read().unwrap().clone(),
@@ -1347,6 +1353,16 @@ impl SessionDriver {
     pub(crate) async fn process_exited(&self) {
         self.engine.exited().await
     }
+    /// The engine process's retained, secret-free diagnostics (exit status or signal,
+    /// transport close, bounded redacted stderr tail). The handle stays readable after
+    /// [`Self::shutdown`], which completes them.
+    pub(crate) fn diagnostics(&self) -> cortex_engine::engine::Diagnostics {
+        self.engine.diagnostics()
+    }
+    /// This session's channel id.
+    pub(crate) fn channel_id(&self) -> &str {
+        &self.credential.channel_id
+    }
     /// `delivered`: the guidance prompt reached the engine (it was active, even if a
     /// later guidance message cancelled it); `preempted`: a newer guidance replaced it.
     pub(crate) async fn guidance_delivery(
@@ -1788,6 +1804,7 @@ async fn settle(
 }
 /// Concrete default-deny composition. Unsupported tools are not advertised.
 struct CorePolicy {
+    workspace_state: Option<PathBuf>,
     commands: crate::native_commands::Running,
     routes: Option<Arc<dyn crate::native_runtime::NativeRoutes>>,
     permissions: Option<Arc<dyn ClientPermissions>>,
@@ -2309,6 +2326,8 @@ impl CorePolicy {
                 );
             }
             if crate::native_context_tools::supports(&name) {
+                let state = self.workspace_state.clone();
+                let recipient = self.root.clone();
                 let result = receive(
                     self.executor
                         .publication(move |store| {
@@ -2317,6 +2336,17 @@ impl CorePolicy {
                             })?;
                             if !same(&i, &expected) {
                                 return Err(CoreError::Refused("channel_identity_changed"));
+                            }
+                            if matches!(name.as_str(), "sprint_graph" | "sprint_task_result") {
+                                return crate::native_context_tools::sprint_read(
+                                    store,
+                                    &c,
+                                    &i,
+                                    state.as_deref(),
+                                    &recipient,
+                                    &name,
+                                    &arguments,
+                                );
                             }
                             if name == "task_get_context" {
                                 crate::native_context_tools::task_context(store, &i, &c.channel_id)

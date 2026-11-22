@@ -40,6 +40,8 @@ pub struct Options {
     pub check_installed: bool,
     pub prior_archive: Option<PathBuf>,
     pub resume: Option<String>,
+    /// Builds and caches kept per channel after success (`--keep-builds`, 0 disables).
+    pub keep_builds: usize,
 }
 
 impl Options {
@@ -56,6 +58,7 @@ impl Options {
             check_installed: false,
             prior_archive: None,
             resume: None,
+            keep_builds: crate::builds::KEEP,
         };
         let mut iter = args.iter();
         while let Some(arg) = iter.next() {
@@ -87,6 +90,13 @@ impl Options {
                     if !(1..=16).contains(&o.jobs) {
                         return Err("jobs must be between 1 and 16".into());
                     }
+                }
+                "--keep-builds" => {
+                    o.keep_builds = value(name)?
+                        .parse()
+                        .ok()
+                        .filter(|n| *n <= 50)
+                        .ok_or("keep-builds must be between 0 and 50")?;
                 }
                 "--test-workspace" => o.test_workspace = true,
                 "--check-install" => o.check_install = true,
@@ -587,6 +597,8 @@ pub fn build_deb(root: &Path, o: &Options) -> Res<()> {
     {
         return Err("build directory must be a local non-symlink directory".into());
     }
+    // Held for the whole build: build hygiene never removes a locked build.
+    let _in_progress = crate::builds::lock_build(&out)?;
     let stamp = select_stamp(&output_root, &out, o.build_stamp.as_deref())?;
     for name in ["manifest.json", "container.cid"] {
         let _ = fs::remove_file(out.join(name));
@@ -797,6 +809,13 @@ pub fn build_deb(root: &Path, o: &Options) -> Res<()> {
         printed.set(k, v.clone());
     }
     println!("{}", dumps(&printed, &pretty)?);
+    // Disk hygiene after success: never fails the finished build. Status goes to
+    // stderr so stdout stays the build JSON.
+    if o.keep_builds > 0 {
+        if let Err(e) = crate::builds::clean_quiet(&output_root, o.keep_builds, &out) {
+            eprintln!("build hygiene skipped: {e}");
+        }
+    }
     Ok(())
 }
 

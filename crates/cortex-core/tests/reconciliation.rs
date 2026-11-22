@@ -686,6 +686,7 @@ fn replanning_budget_scope_policy_and_escalation_injection() {
         })
         .unwrap();
     }
+    // No replan limit: the fourth request changes approach to a senior consultation.
     assert_eq!(
         s.write(|db| propose_replan_tx(
             db,
@@ -695,9 +696,8 @@ fn replanning_budget_scope_policy_and_escalation_injection() {
             "scope_request",
             &json!({"scope":["src"]})
         ))
-        .unwrap_err()
-        .code(),
-        "replan_limit_requires_user_input"
+        .unwrap()["decision"],
+        "senior_consultation"
     );
     s.write(|db| {
         lifecycle::event_tx(

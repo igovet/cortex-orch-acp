@@ -315,6 +315,8 @@ pub fn accept_routed_tx(
                 return refuse("write_denied");
             }
         }
+        // An open owner decision is asked before the blocked work is planned again.
+        super::obstacles::require_owner_question_tx(db, task)?;
         super::automatic::require_failed_checks(db, task, &canonical["verification"])?;
         super::completion::require_repair_commands(db, task, &canonical["verification"])?;
         let revision = revision + 1;
@@ -375,6 +377,12 @@ pub fn accept_routed_tx(
         // were inserted, including a runtime-added `_consultation` node.
         let mut stored = canonical.clone();
         stored["tasks"] = json!(proposed);
+        // `review_cycle` restarts with the revision: it numbers this revision's review
+        // and fix nodes and bounds its reviews, and every new revision needs its own
+        // mandatory review. It is not the review budget: that belongs to the task
+        // lineage across revisions and grants further fix rounds only while the
+        // findings strictly shrink (`review::advance_tx`), so a continuation's new
+        // plan never starts a fresh budget.
         db.execute("UPDATE runtime_tasks SET revision=?,plan_json=?,synthesis=NULL,review_cycle=0 WHERE task_id=?",
             (revision,stored.to_string(),task))?;
         for n in &proposed {

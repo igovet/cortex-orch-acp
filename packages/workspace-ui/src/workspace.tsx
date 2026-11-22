@@ -22,6 +22,8 @@ const sprintPlanningTask = (state: WorkspaceState, sprintId: string) => { const 
 const planningTaskSprint = (state: WorkspaceState, taskId: string) => { const s = planningSprintOf(state, taskId); return s && planningTaskOf(state, s) ? s : null; };
 import { Archive } from "./archive";
 import { MachineDialogs } from "./machine-dialogs";
+import { SudoPrompts } from "./sudo-prompt";
+import { OwnerActions } from "./owner-actions";
 import { Inbox, NotFound } from "./pages";
 import { Help, Palette } from "./palette";
 import { createPanels } from "./prefs";
@@ -545,6 +547,8 @@ export function Workspace(props: WorkspaceProps) {
       <UnsavedOnClose open={closingWindow()} onClose={() => setClosingWindow(false)} />
       <ReviewDialogs />
       <MachineDialogs />
+      <Show when={store.ready()}><SudoPrompts /></Show>
+      <Show when={store.ready()}><OwnerActions /></Show>
       <Receipt />
     </div>
   </Show></WsContext.Provider>;

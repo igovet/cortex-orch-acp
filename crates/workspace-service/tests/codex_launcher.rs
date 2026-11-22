@@ -318,6 +318,20 @@ fn golden_comparisons(root: &Path, binary: &Path, native: &Path) -> usize {
         let argv = entry["argv"].as_array().unwrap();
         let (status, out, err, mut rows) = run(root, native, case, argv, &entry["locale"]);
         for row in &mut rows {
+            // The service bounds every child's build parallelism to half the CPUs
+            // (`launch::default_build_parallelism`); the value depends on the host.
+            if let Some(env) = row["env"].as_object_mut() {
+                for key in ["CARGO_BUILD_JOBS", "CMAKE_BUILD_PARALLEL_LEVEL"] {
+                    if let Some(jobs) = env.remove(key) {
+                        assert!(
+                            jobs.as_str()
+                                .and_then(|j| j.parse::<u32>().ok())
+                                .is_some_and(|j| j >= 2),
+                            "{key}={jobs}"
+                        );
+                    }
+                }
+            }
             let args = row["argv"].as_array_mut().unwrap();
             if args.last().unwrap() == "app-server" {
                 let n = args.len();

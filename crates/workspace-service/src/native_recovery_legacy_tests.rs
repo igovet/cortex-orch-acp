@@ -365,26 +365,16 @@ async fn never_started_legacy_rows_settle_and_restarts_record_nothing_new() {
         "released:no_engine_process");
     assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.evidence')||':'||json_extract(payload_json,'$.count') FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'").await,
         "no_engine_session_or_process_and_capacity_released:2");
+    // A restart is infrastructure: the interrupted turn resumes in its state on the
+    // same rung (no continuation, no owner hold, no new plan revision). What the
+    // resumed driver does next (this fixture has no engine) is not recovery's.
     assert_eq!(
-        sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await,
-        "RECOVERING:native_session_outcome_unknown"
-    );
-    let counted = "SELECT count(*) FROM runtime_events";
-    let before = sql(&runtime, counted).await;
-    runtime.recover_fixture().await.unwrap();
-    runtime.recover_fixture().await.unwrap();
-    assert_eq!(
-        sql(&runtime, counted).await,
-        before,
-        "a restart re-recorded an unchanged recovery"
-    );
-    assert_eq!(
-        sql(
-            &runtime,
-            "SELECT count(*) FROM runtime_events WHERE type='NATIVE_RECOVERY_REQUIRED'"
-        )
-        .await,
+        sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_RECOVERY_RESUMED' AND json_extract(payload_json,'$.restart_resume')=1 AND json_extract(payload_json,'$.revision')=0").await,
         "1"
+    );
+    assert_eq!(
+        sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type IN ('NATIVE_RECOVERY_REQUIRED','AUTOMATIC_CONTINUATION') AND json_extract(payload_json,'$.reason')='native_service_interrupted'").await,
+        "0"
     );
     close(root, runtime).await;
 }
@@ -467,10 +457,10 @@ async fn a_dead_services_broker_directory_is_removed_on_recovery() {
 
 /// Owner store 2026-11-17: a worker's turn ended without an accepted result, the retry
 /// gave up (`lost_worker_action_outcome_unknown`) and the stop left the task in
-/// RECOVERING for a Retry no screen offers, with no question. A stop for such a work
-/// blocker now asks the owner at once with the runtime's stop question.
+/// RECOVERING for a Retry no screen offers. Under the no-stop policy such a stop is a
+/// continuation that records the uncertainty; the owner is asked nothing.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_work_stop_asks_the_owner_with_concrete_answers() {
+async fn a_work_stop_continues_with_its_uncertainty_instead_of_asking() {
     let (root, runtime, _, task) = seeded().await;
     exec(
         &runtime,
@@ -496,19 +486,20 @@ async fn a_work_stop_asks_the_owner_with_concrete_answers() {
         .await;
     assert_eq!(
         sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await,
-        "WAITING_USER:lost_worker_action_outcome_unknown"
+        "RECOVERING:automatic_continuation_pending"
     );
-    assert_eq!(sql(&runtime, "SELECT count(*) FROM pending_questions WHERE status='open' AND dedup_key LIKE 'runtime:stop:%'").await, "1");
-    let question = sql(
-        &runtime,
-        "SELECT text FROM pending_questions WHERE status='open'",
-    )
-    .await;
-    assert!(
-        question.contains("without an accepted result"),
-        "{question}"
+    assert_eq!(
+        sql(
+            &runtime,
+            "SELECT count(*) FROM pending_questions WHERE status='open'"
+        )
+        .await,
+        "0"
     );
-    assert!(!question.contains("lost_worker"), "{question}");
+    assert_eq!(
+        sql(&runtime, "SELECT json_extract(payload_json,'$.reason')||':'||json_extract(payload_json,'$.uncertain') FROM runtime_events WHERE type='AUTOMATIC_CONTINUATION'").await,
+        "lost_worker_action_outcome_unknown:1"
+    );
     close(root, runtime).await;
 }
 
@@ -516,7 +507,7 @@ async fn a_work_stop_asks_the_owner_with_concrete_answers() {
 /// last ASK_USER_REQUIRED unanswered and nothing after it) gets the question on the
 /// next start; a task where anything followed the stop is left alone.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unasked_legacy_work_stop_gets_its_question_on_start() {
+async fn an_unasked_legacy_work_stop_continues_on_start() {
     for followed in [false, true] {
         let (root, runtime, _, task) = seeded().await;
         exec(&runtime, format!("
@@ -538,16 +529,17 @@ async fn an_unasked_legacy_work_stop_gets_its_question_on_start() {
         if followed {
             assert_eq!((state.as_str(), open.as_str()), ("RECOVERING:", "0"));
         } else {
+            // No-stop policy: the stuck stop continues instead of asking.
             assert_eq!(
                 (state.as_str(), open.as_str()),
-                ("WAITING_USER:lost_worker_action_outcome_unknown", "1")
+                ("RECOVERING:automatic_continuation_pending", "0")
             );
-            // A later start does not ask twice.
+            // A later start does not continue twice.
             runtime.recover_fixture().await.unwrap();
             assert_eq!(
                 sql(
                     &runtime,
-                    "SELECT count(*) FROM pending_questions WHERE dedup_key LIKE 'runtime:stop:%'"
+                    "SELECT count(*) FROM runtime_events WHERE type='AUTOMATIC_CONTINUATION'"
                 )
                 .await,
                 "1"
@@ -603,9 +595,16 @@ async fn a_legacy_command_start_settles_from_its_receipt_or_an_earlier_boot_once
         }
         exec(&runtime, rows).await;
         runtime.recover_fixture().await.unwrap();
+        // No-stop policy: whatever the facts still show becomes a continuation that
+        // carries it; the task is never held for the owner.
         assert_eq!(
             sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await,
-            format!("RECOVERING:{hold}"),
+            "RECOVERING:automatic_continuation_pending",
+            "{case}"
+        );
+        assert_eq!(
+            sql(&runtime, "SELECT json_extract(payload_json,'$.reason') FROM runtime_events WHERE type='AUTOMATIC_CONTINUATION'").await,
+            hold,
             "{case}"
         );
         let exits = "SELECT coalesce(group_concat(json_extract(payload_json,'$.evidence')||':'||coalesce(json_extract(payload_json,'$.exit_code'),'null')||':'||coalesce(json_extract(payload_json,'$.failure'),'none')||':'||json_extract(payload_json,'$.recovered'),','),'') FROM runtime_events WHERE type='COMMAND_PROCESS_EXITED'";
@@ -624,7 +623,7 @@ async fn a_legacy_command_start_settles_from_its_receipt_or_an_earlier_boot_once
             if evidence.is_some() {
                 format!("{hold}:legacy_effect_outcome_unknown")
             } else {
-                String::new()
+                format!("{hold}:-")
             },
             "{case}"
         );

@@ -340,6 +340,11 @@ impl Bridge {
             | "remote.pairing.decide"
             | "remote.devices.revoke"
             | "remote.relay.set"
+            | "remote.sudo.set"
+            | "askpass.list"
+            | "askpass.answer"
+            | "owner_actions.list"
+            | "owner_actions.act"
             | "notifications.report"
             | "notifications.take" => self.rpc(&call.operation, call.message).await,
             "service.capabilities" => {
@@ -686,12 +691,31 @@ mod tests {
     use super::Bridge;
     use std::os::unix::fs::PermissionsExt;
 
+    // Keep each socket in its private fixture directory even if the caller's
+    // TMPDIR makes the real pathname too long for sockaddr_un.
+    fn socket_address(
+        path: &std::path::Path,
+    ) -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
+        use std::os::fd::AsRawFd;
+        let dir = std::fs::File::open(path.parent().unwrap())?;
+        let address = std::path::PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()))
+            .join(path.file_name().unwrap());
+        Ok((dir, address))
+    }
+
+    fn bind_socket(path: &std::path::Path) -> tokio::net::UnixListener {
+        let (_dir, address) = socket_address(path).unwrap();
+        tokio::net::UnixListener::bind(address).unwrap()
+    }
+
     /// A plain Unix-socket connector for the fake services below.
     struct Unix(std::path::PathBuf);
     impl super::Connector for Unix {
         fn connect(&self) -> super::BoxFuture<'_, Result<super::Stream, String>> {
             Box::pin(async move {
-                tokio::net::UnixStream::connect(&self.0)
+                let (_dir, address) =
+                    socket_address(&self.0).map_err(|_| "service_unavailable".to_string())?;
+                tokio::net::UnixStream::connect(address)
                     .await
                     .map(|s| Box::new(s) as super::Stream)
                     .map_err(|_| "service_unavailable".to_string())
@@ -714,7 +738,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = root.join("service.sock");
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let listener = bind_socket(&path);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let frames = std::sync::Arc::new(frames);
         let subscriptions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -943,7 +967,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = root.join("service.sock");
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let listener = bind_socket(&path);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let slow = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = slow.clone();
@@ -1004,7 +1028,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = root.join("service.sock");
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let listener = bind_socket(&path);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let server = tokio::spawn(async move {
             loop {
@@ -1057,7 +1081,7 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = root.join("service.sock");
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let listener = bind_socket(&path);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let codes = [
             "native_route_authorization_unavailable",
@@ -1110,11 +1134,15 @@ mod tests {
     #[tokio::test]
     async fn native_query_routes_directly_and_validates_its_reply() {
         use serde_json::json;
-        let root = std::env::temp_dir().join(format!("cw-native-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "cw-native-{}-{}",
+            std::process::id(),
+            "x".repeat(110)
+        ));
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = root.join("service.sock");
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let listener = bind_socket(&path);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let serving = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();

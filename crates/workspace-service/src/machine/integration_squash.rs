@@ -26,6 +26,7 @@ pub(super) fn replay(reply: Value) -> Result<Value> {
         Some("review_required") => "review_required",
         Some("private_index") => "private_index",
         Some("push_required") => "push_required",
+        Some("pull_request_unsafe") => "pull_request_unsafe",
         Some("unknown_outcome") => "unknown_outcome",
         Some("gh_failed") => "gh_failed",
         Some("invalid_request") => "invalid_request",

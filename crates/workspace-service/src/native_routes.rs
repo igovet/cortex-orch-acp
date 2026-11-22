@@ -119,8 +119,27 @@ impl RouteEnvironment {
             home,
             config,
             state,
-            routing_override: std::env::var_os("CORTEX_ROUTING").map(PathBuf::from),
+            routing_override: std::env::var_os("CORTEX_ROUTING")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
         })
+    }
+    pub fn for_workspace(config: &crate::Config) -> CoreResult<Self> {
+        let mut environment = Self::for_user()?;
+        if workspace_protocol::channel::current().is_dev() {
+            environment.config = config
+                .launch_config_root()
+                .unwrap_or_else(|| config.state_dir.join("config"));
+            environment.state = config
+                .launch
+                .dev_state
+                .clone()
+                .unwrap_or_else(|| config.state_dir.join("state"));
+            if config.launch.extracted_dev {
+                environment.routing_override = None;
+            }
+        }
+        Ok(environment)
     }
     pub(crate) fn validate(&self) -> CoreResult<()> {
         for path in [&self.home, &self.config, &self.state] {
@@ -641,6 +660,26 @@ impl RouteResolver {
         }
         self.selected(matches[0], serde_json::to_value(parameters)?, "owner_task")
     }
+    /// Another qualified coordinator route than `connection`/`model`, as a pin: an
+    /// eligible owner route with quota left, on another connection (engine or account)
+    /// first, then the least used. Used by the no-stop policy to change approach.
+    fn alternate_pin(&self, connection: &str, model: &str) -> CoreResult<Option<Value>> {
+        let mut options = Vec::new();
+        for c in self.candidates.iter().filter(|c| {
+            self.allowed(c, false)
+                && !c.route_id().is_empty()
+                && !(c.connection_id() == connection && c.model() == model)
+        }) {
+            let usage = self.usage(c)?;
+            if usage.is_none_or(|v| v < 100.0) {
+                options.push((c.connection_id() == connection, usage.unwrap_or(0.0), c));
+            }
+        }
+        options.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+        Ok(options
+            .first()
+            .map(|(_, _, c)| json!({"route_id":c.route_id(),"parameters":{}})))
+    }
     /// Context-free worker selection is used only for preflight. Dispatch supplies retained evidence.
     pub fn worker(&self, role: &str) -> CoreResult<SelectedRoute> {
         self.choose(
@@ -1070,6 +1109,15 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
         let key = super::native_runtime::key(root)?;
         let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
         self.session(root, resolver.task_coordinator(settings)?)
+    }
+    fn alternate_coordinator_pin(
+        &self,
+        root: &Path,
+        current: &crate::native_sessions::SessionRoute,
+    ) -> CoreResult<Option<Value>> {
+        let key = super::native_runtime::key(root)?;
+        let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+        resolver.alternate_pin(&current.connection, &current.model)
     }
     fn coordinator_pin(&self, root: &Path, settings: &Value) -> CoreResult<Option<Value>> {
         let key = super::native_runtime::key(root)?;

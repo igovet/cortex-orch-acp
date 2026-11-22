@@ -155,6 +155,22 @@ export type Task = {
   coordinatorRoute?: { model: string; effort: string } | null;
   /** The owner's `deny-write` paths in force for this task (runtime facts), with when each was set; Remove lifts one. */
   writeDenials?: { path: string; setAt: number | null }[];
+  /** What the task spent and since when it has made no progress, as the machine read them from its runtime records. */
+  spend?: TaskSpend;
+};
+/**
+ * A task's spend, only from what was recorded: `workingMs` is the time it spent in a working state (planning, executing,
+ * reviewing, verifying), `workingSince` when the current working stretch began (null while it does not work). Sessions and
+ * turns are counted by the engine and model each session was configured with. `tokens` sums the turns whose engine reported
+ * a token count (`reportedTurns` of `turns`); null means no turn reported any, never zero. `stalledSince` is when the working
+ * task last made progress or resumed work (null while it does not work); `lastFailures` are short plain reasons the newest
+ * failed attempts since then hit, newest first.
+ */
+export type TaskSpend = {
+  workingMs: number; workingSince: number | null; lastProgressAt: number | null; stalledSince: number | null;
+  sessions: number; turns: number; reportedTurns: number; tokens: number | null;
+  engines: { engine: string; model: string; modelLabel?: string; sessions: number; turns: number; reportedTurns: number; tokens: number | null }[];
+  lastFailures: string[];
 };
 /** The route and access of one task. Machine defaults fill a new task; changing them here never touches other tasks. */
 export type TaskSettings = { model: string; effort: string; mode: "development" | "guarded" | "auto"; language: "auto" | "en" | "ru" };

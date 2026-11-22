@@ -21,7 +21,15 @@ if [ -L .workspace-build ] || [ -L .workspace-build/local-dev ]; then
     exit 1
 fi
 mkdir -p .workspace-build/local-dev
+# Share the directory lock with Dev qualification cleanup. A directory FD does
+# not create or follow a separately replaceable lock-file path.
+exec 9< .workspace-build/local-dev
+flock -x 9
+# build-deb keeps the newest Dev builds after success; this wrapper already holds
+# the local-dev lock, so their local-dev copies are not in use by a qualification.
+export CORTEX_BUILD_LOCAL_DEV_LOCK_HELD=1
 build=$(xtask new-build-dir .workspace-build)
+printf 'Dev build directory: %s\n' "$build" >&2
 xtask build-deb --resume "$build" "$@"
 set -- ".workspace-build/$build/artifacts/"*.deb
 if [ ! -f "$1" ]; then

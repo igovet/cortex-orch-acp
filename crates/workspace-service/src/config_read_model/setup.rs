@@ -44,6 +44,19 @@ fn parents(p: &Path) -> CoreResult<()> {
     }
     Ok(())
 }
+impl SetupEnvironment {
+    pub(crate) fn validate_data(home: &Path, data: &Path) -> CoreResult<()> {
+        parents(data)?;
+        // Apply the existing project-storage fence to the additional XDG data root.
+        RouteEnvironment {
+            home: home.to_owned(),
+            config: data.to_owned(),
+            state: data.to_owned(),
+            routing_override: None,
+        }
+        .validate()
+    }
+}
 fn regular(p: &Path, executable: bool) -> bool {
     fs::metadata(p).is_ok_and(|m| m.is_file() && (!executable || m.mode() & 0o111 != 0))
 }
@@ -349,14 +362,7 @@ impl ConfigurationReader {
         .map(|a| (a, node.clone())))
     }
     fn setup_node(&self, env: &SetupEnvironment) -> CoreResult<Option<PathBuf>> {
-        parents(&env.data)?;
-        RouteEnvironment {
-            home: self.environment.home.clone(),
-            config: env.data.clone(),
-            state: env.data.clone(),
-            routing_override: None,
-        }
-        .validate()?;
+        SetupEnvironment::validate_data(&self.environment.home, &env.data)?;
         for p in &env.path {
             absolute(p)?;
         }
@@ -398,15 +404,7 @@ impl ConfigurationReader {
     }
     /// Complete prompt-free display discovery. No command/credential bytes returned.
     pub fn setup_discovery(&self, env: &SetupEnvironment) -> CoreResult<SettingsRead> {
-        parents(&env.data)?;
-        // Apply the existing project-storage fence to the additional XDG data root.
-        RouteEnvironment {
-            home: self.environment.home.clone(),
-            config: env.data.clone(),
-            state: env.data.clone(),
-            routing_override: None,
-        }
-        .validate()?;
+        SetupEnvironment::validate_data(&self.environment.home, &env.data)?;
         for p in &env.path {
             absolute(p)?;
         }

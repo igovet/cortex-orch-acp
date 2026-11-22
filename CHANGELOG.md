@@ -4,6 +4,38 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Fixed: an ordinary **Git → Commit…** that lands exactly the accepted files and bytes of an accepted project-folder result no longer marks that result stale. The same accepted version stays current and Finish (Merge…/Create PR…) stays available. Extra or changed files, a partial commit or an amend still make the result stale.
+
+- Create PR now needs a push witness. The owner-confirmed Push records the canonical host/owner/repository, full commit SHA and remote ref it reached; Finish refuses before any `gh` dispatch when the witness is missing, `origin` was retargeted, or a read-only repository-scoped lookup does not return exactly the witnessed commit. After creation, repository, source ref, head SHA, base, open state and address are read back independently before the address is saved, and an ambiguous outcome is never replayed.
+
+- Standalone qualification refuses an archive whose build manifest is absent, symlinked, unreadable, unsafe or mismatching before extracting or running anything from it. `drive` must use the archive digest recorded by a successful smoke. A screenshot is accepted only when capture exits 0 and the image is a complete, decodable PNG. `scripts/test-qualify-dev-archive.sh` covers these refusals offline.
+
+- Create PR is bound to the repository Git checked: `gh pr create --repo HOST/OWNER/REPO` is derived from the single effective `origin` URL, `GH_REPO` and a conflicting `GH_HOST` are dropped from the child, and an address for another host, owner or repository is refused without being saved. View PR revalidates the saved address against the current `origin` repository.
+
+- A sandboxed command that has started is no longer rerun on the host because its output looks like a refused nested sandbox or refused root; the original receipt is kept and the text is an advisory hint. The host rerun now happens once, only when the supervisor proves the sandbox launcher failed before the command started.
+
+- Background outage rechecks probe only the built-in endpoints (`api.github.com`, `github.com`, `api.openai.com`, `chatgpt.com`, `api.anthropic.com`, HTTPS 443); destinations inferred from failure text stay technical. Resolved addresses must all be public, the probe connects to the checked address, and the HEAD check runs a config-free curl with an empty environment and no redirects.
+
+- Standalone `drive` requires a private authenticated Xvfb (per-run X authority cookie, own Xvfb process, window owned by the extracted desktop) and refuses the owner's display or a missing `xauth` before any driver dispatch. `scripts/test-qualify-dev-display.sh` covers the refusals.
+
+- Tasks start with an environment preflight (no model call, at most 3 seconds, probes in parallel): GitHub CLI, native Codex and Claude logins by exit code, passwordless or password-needed `sudo`, free space of the project volume and `/tmp`, display/session, Docker and the project's Git state. The facts are recorded as `ENVIRONMENT_PREFLIGHT` and carried in the coordinator's capsule (`environment`) so plans start from them; a gap is a fact, never a stop. The Codex and Claude CLIs are asked only where their native login files already exist, so a probe never creates an engine home (a fresh `~/.claude` would otherwise make the settings read refuse).
+
+- The project's own agent and process-rule files (`AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`, `.agents/`, `.claude/`, `docs/project/verification.md`) are write-protected for every task by default (`rule_file_protected`), unless the owner's task or message names the file, `/skill-management` is used, or the owner sends `allow-write: <path>` or removes the protection. Plan scopes are not refused for them; the capsule lists them (`rule_file_protection`).
+
+- Every successful `build-deb` keeps only the newest two `build-*` directories and `.cache/<channel>-<image>` caches per channel, never the build in progress, anything a running container references or the installed package's build, and prints what it freed. `cortex-xtask clean-builds [--keep N] [--dry-run]` does the same on demand; `target/` is never cleaned automatically.
+
+- Standalone desktop qualification now runs the extracted Dev package in the owner's real environment (real HOME, keyring, native and gh logins, private Dev XDG roots, private Xvfb or the owner's display) without the RootlessKit lab or the nested verifier build. Missing displays, tools or logins are recorded as unobserved steps (exit 3) instead of stopping the run; `--archive newest` reuses a built archive and `install` installs the exact Dev archive through `sudo`. The GitHub CLI login is a recorded fact, not a smoke requirement.
+
+- Extracted Dev smoke and drive now require a complete Bubblewrap verifier receipt from the running service and an exact native View PR address capture before desktop input. Extracted View PR records a digest instead of opening the owner's browser; recorder failure never falls back to a system opener.
+
+- Workspace keeps an accepted native result current when ordinary Git Commit records the exact accepted files on the same branch. The owner can push and open a pull request from Finish without repeating review. The merge card and Finish dialog block actions for a stale result, just as the Git menu does.
+
+- New task shows coordinator models from the selected project's routing and allowed-route ceiling. Manual planning continues on the task's own coordinator even when the machine default is no longer available. Overlapping Settings saves for the same draft now share one reply instead of issuing a second, stale write.
+
+- Workspace Dev can run from a privately extracted Debian archive for testing without sudo. The launcher verifies read-only mounts for persistent Workspace and production Paseo paths before each candidate process starts, checks the private socket peers and reaps its transient cgroups. Concurrent changes to persistent host metadata are diagnostic only. Extracted Settings and dispatch both ignore inherited routing overrides, and an empty `CORTEX_ROUTING` no longer makes ordinary Workspace Settings retry indefinitely. No-paid Dev smoke reads back Settings, the observed light route and its matching coordinator default over the private socket. It sends no task. Native logins and the GitHub CLI login are recorded as host facts rather than smoke requirements, and there is no RootlessKit lab or separately built verifier.
+
+- 2026-11-20: Workspace now uses the same XDG data root to discover, download and recheck Codex and Claude adapters in the release channel. Native accounts stay in HOME; Workspace Dev keeps its separate adapter store.
+
 Workspace keeps the pinned decision and composer together at the bottom of a conversation. Scrolling back puts **Latest** over the conversation instead of the decision. When a draft becomes read-only, its text stays visible and the reason is shown separately. The running-task label keeps room in the narrow sprint toolbar, routing selectors fit their columns, and New sprint no longer repeats its planning hint in a sticky footer.
 
 A task no longer hangs on a worker question whose engine session was lost. Such a question could not be answered and Resume could not revive it, yet the task kept waiting on it: the lost worker was not retried and the owner's queued messages were never delivered. The runtime now cancels that question, retries the worker and delivers queued messages at the next boundary. A question kept by Pause is unaffected.

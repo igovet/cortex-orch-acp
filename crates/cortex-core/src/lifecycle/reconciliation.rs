@@ -61,6 +61,28 @@ pub fn gaps(db: &Connection, task: &str) -> CoreResult<BTreeMap<String, String>>
             }
         }
     }
+    // A limit the runtime disclosed when it broke a loop (`LOOP_BROKEN.limits`, for
+    // example on a node of an earlier plan revision) stays a gap of the final result
+    // until the task is reopened, so it reaches Not verified after a replan too.
+    let broken = db
+        .prepare(
+            "SELECT payload_json FROM runtime_events WHERE task_id=?1 AND type='LOOP_BROKEN'
+             AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='TASK_REOPENED'),0)
+             ORDER BY id",
+        )?
+        .query_map([task], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for raw in broken {
+        let v: Value = serde_json::from_str(&raw)?;
+        for limit in v["limits"].as_array().into_iter().flatten() {
+            if !matches!(limit["outcome"].as_str(), Some("not_run" | "unverified")) {
+                continue;
+            }
+            if let Some(name) = limit["name"].as_str().filter(|n| !n.trim().is_empty()) {
+                gaps.insert(normalized(name), name.into());
+            }
+        }
+    }
     Ok(gaps)
 }
 fn authored_disclosure(text: &str) -> bool {
@@ -512,10 +534,10 @@ const REPORT_PAGE_CHARS: i64 = 4000;
 /// (`changed_paths` of `NATIVE_COMMAND_FINISHED`). Other changed files are listed
 /// as context only: a shared checkout holds other actors' uncommitted work. When a
 /// command since the baseline has no complete change record, attribution is
-/// incomplete and every listed file is required, as before. The packet's
+/// incomplete: the required set stays the task's recorded changes, other files stay
+/// context, and the approval discloses the gap as an unverified limit. The packet's
 /// `review_binding` names what the review binds: the task's own files
-/// (`task_files`, their paths) or, when attribution is incomplete or too large,
-/// the whole checkout. The host keeps it with the recorded packet, not in the
+/// (`task_files`, their paths) or, when there are too many, the whole checkout. The host keeps it with the recorded packet, not in the
 /// reviewer's brief.
 pub fn review_packet_tx(
     db: &Connection,
@@ -603,7 +625,11 @@ pub fn review_packet_tx(
     }
     let attributed = |path: &str| last_writes.contains_key(path) || commanded.contains_key(path);
     let attribution_complete = attribution.is_ok();
-    let required = |path: &str| !attribution_complete || attributed(path);
+    // Only the task's own changes are required, whatever else is uncommitted in the
+    // checkout. An incomplete record (a command or turn whose changes could not be
+    // listed) never turns other actors' files into this task's review obligation:
+    // they stay context, and the gap is disclosed as an unverified limit.
+    let required = |path: &str| attributed(path);
     let total = files.len();
     let mut ordered: Vec<_> = files.iter().collect();
     if total > REVIEW_PACKET_FILES {
@@ -647,7 +673,7 @@ pub fn review_packet_tx(
     }
     if let Err(reason) = &attribution {
         changed["attribution"] = json!({"reason":reason,
-            "note":"Some of this task's commands have no complete record of the files they changed, so every listed file is required and the review binds the whole checkout."});
+            "note":"Some of this task's commands or turns have no complete record of the files they changed. Files with a write receipt or a recorded command change are required; other changed files are context only. Inspect them if the objective or predecessor reports point there."});
     }
     match manifest.as_ref().map(|m| m.ignored) {
         Some(IgnoredChange::Changed) => {
@@ -672,15 +698,14 @@ pub fn review_packet_tx(
         "recorded_task_paths":last_writes.len(),
         "command_changed_paths":commanded.len(),
         "guidance":"Use the objective and task write receipts across plans to focus your review. Files with required true are this task's own changes (a write receipt, or a path changed while one of its commands ran): read each of them. Files with required false changed in the checkout without a writer from this task; they are context only and never required. A matching hash binds the observed file bytes to the latest recorded write. For changed or unobserved bytes, inspect the relevant file and predecessor reports. Manifest-only paths have no confirmed writer. A whole-checkout diff may include unrelated work."});
-    // What the review binds: the bytes of the task's own files, unless attribution
-    // is incomplete or the set is too large to hash, when it is the whole checkout.
+    // What the review binds: the bytes of the task's own files, unless the set is
+    // too large to hash, when it is the whole checkout. Other actors' edits never
+    // make the review stale.
     let bound: Vec<&String> = files.keys().filter(|p| required(p)).collect();
-    let binding = match &attribution {
-        Err(reason) => json!({"kind":"checkout","reason":reason}),
-        Ok(()) if bound.len() > REVIEW_BINDING_FILES => {
-            json!({"kind":"checkout","reason":"too_many_task_files"})
-        }
-        Ok(()) => json!({"kind":"task_files","paths":bound}),
+    let binding = if bound.len() > REVIEW_BINDING_FILES {
+        json!({"kind":"checkout","reason":"too_many_task_files"})
+    } else {
+        json!({"kind":"task_files","paths":bound})
     };
     let reports = db
         .prepare(
@@ -947,11 +972,37 @@ pub fn submit_verification_tx(
     args: &Value,
 ) -> CoreResult<Value> {
     request_tx(db, task, actor, key, "verification_submit", args, || {
-        let commands = plan::verification(&args["verification"])?;
+        // An empty procedure only when the owner accepted every command of the plan as
+        // not verified (checked below).
+        let empty = args["verification"]
+            .as_array()
+            .is_some_and(|a| a.is_empty());
+        let commands = if empty {
+            Vec::new()
+        } else {
+            plan::verification(&args["verification"])?
+        };
         let (state, revision) = domain::task_tx(db, task)?;
         let last:Option<(String,String)>=db.query_row("SELECT type,payload_json FROM runtime_events WHERE task_id=?
-            AND type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED','PLAN_ACCEPTED') ORDER BY id DESC LIMIT 1",
+            AND type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED','PLAN_ACCEPTED','VERIFICATION_ENVIRONMENT_WAIT') ORDER BY id DESC LIMIT 1",
             [task],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        // A verification its environment kept failing, after the owner answered the
+        // runtime's question about it, is repaired the same way: the coordinator may
+        // change the procedure. That command never failed on the work, so leaving it out
+        // is not a dropped failed check (an accepted one stays a disclosed limit).
+        let last = last.map(|(kind, raw)| {
+            let asked = kind == "VERIFICATION_ENVIRONMENT_WAIT"
+                && serde_json::from_str::<Value>(&raw)
+                    .is_ok_and(|w| w["owner_question"].is_string());
+            if asked {
+                (
+                    "VERIFICATION_FAILED".to_owned(),
+                    json!({"unresolved_commands":[]}).to_string(),
+                )
+            } else {
+                (kind, raw)
+            }
+        });
         let Some((kind, raw)) = last else {
             return refuse("verification_repair_not_expected");
         };
@@ -965,7 +1016,41 @@ pub fn submit_verification_tx(
             return refuse("automatic_consultation_plan_required");
         }
         super::automatic::require_failed_checks(db, task, &args["verification"])?;
+        if empty {
+            return accept_all_unverified_tx(db, task, revision);
+        }
         let failed: Value = serde_json::from_str(&raw)?;
+        // The identical procedure may be resubmitted once with nothing changed (one
+        // rerun of a possibly flaky check). Again, with still nothing changed since (no
+        // project write, no worker or outside command that could have changed the
+        // environment, no owner input, no new plan), it would only repeat the same
+        // failure: refused. The runtime's own rerun of an environmental outcome never
+        // comes through here.
+        let current: Value = db
+            .query_row(
+                "SELECT plan_json FROM runtime_tasks WHERE task_id=?",
+                [task],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|p| serde_json::from_str::<Value>(&p).ok())
+            .map(|p| p["verification"].clone())
+            .unwrap_or(Value::Null);
+        if args["verification"] == current {
+            let repeated: i64 = db.query_row(
+                "SELECT count(*) FROM runtime_events WHERE task_id=?1 AND type='VERIFICATION_REVISED'
+                 AND json_extract(payload_json,'$.verification')=json(?2)
+                 AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND (type IN
+                   ('NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED','NATIVE_OUTSIDE_SETTLED','NATIVE_WRITER_TURN_CHANGES',
+                    'USER_STEERING','USER_ANSWER_RECEIVED','OWNER_ACTION_RESOLVED','TASK_REOPENED','PLAN_ACCEPTED')
+                   OR type='NATIVE_COMMAND_STARTED' AND json_extract(payload_json,'$.channel_id') IS NOT NULL)),0)",
+                (task, current.to_string()),
+                |r| r.get(0),
+            )?;
+            if repeated >= 1 {
+                return refuse("verification_unchanged");
+            }
+        }
         let raw: String = db.query_row(
             "SELECT plan_json FROM runtime_tasks WHERE task_id=?",
             [task],
@@ -1006,6 +1091,40 @@ pub fn submit_verification_tx(
         domain::state_tx(db, task, TaskState::Verifying, None)?;
         Ok(json!({"recorded":true,"state":"VERIFYING"}))
     })
+}
+/// Every verification command of the plan was accepted by the owner as not verified
+/// (`automatic::owner_accepted_commands`, an explicit owner decision after the
+/// runtime's loop question): the plan keeps no command, nothing is run and nothing
+/// is recorded as passed (no `VERIFICATION_PASSED`). `VERIFICATION_REVISED` names the
+/// accepted commands (`accepted_unverified`) and the task reconciles; completion
+/// still requires the approving review's unchanged binding, and the accepted limits
+/// are gaps the final result must list under Not verified.
+fn accept_all_unverified_tx(db: &Transaction<'_>, task: &str, revision: i64) -> CoreResult<Value> {
+    let raw: String = db.query_row(
+        "SELECT plan_json FROM runtime_tasks WHERE task_id=?",
+        [task],
+        |r| r.get(0),
+    )?;
+    let mut plan: Value = serde_json::from_str(&raw)?;
+    let current = plan["verification"].as_array().cloned().unwrap_or_default();
+    let accepted = super::automatic::owner_accepted_commands(db, task)?;
+    if current.is_empty() || current.iter().any(|argv| !accepted.contains(argv)) {
+        return refuse("verification_required");
+    }
+    plan["verification"] = json!([]);
+    db.execute(
+        "UPDATE runtime_tasks SET plan_json=? WHERE task_id=?",
+        (plan.to_string(), task),
+    )?;
+    event_tx(
+        db,
+        task,
+        "VERIFICATION_REVISED",
+        json!({"verification":[],"dropped_failed":[],"accepted_unverified":current,"revision":revision}),
+    )?;
+    domain::state_tx(db, task, TaskState::Verifying, None)?;
+    domain::state_tx(db, task, TaskState::Reconciling, None)?;
+    Ok(json!({"recorded":true,"state":"RECONCILING","accepted_unverified":current}))
 }
 /// An owner-released answer cannot certify unfinished work. Keep the answer,
 /// but fail explicitly on the same work-certification gaps as the retained runtime.

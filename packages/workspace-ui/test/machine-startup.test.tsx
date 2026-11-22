@@ -346,11 +346,18 @@ describe("model lists that arrive after the first screen", () => {
 it("moves a new task's coordinator to the owner's default once that model is offered, and keeps a choice made by hand", async () => {
   const world = withTask(emptyWorkspace(), "Work");
   world.machines[0].connection = "connected";
-  world.machines[0].config.surfaces.user_defaults.coordinator = { engine: "claude-agent-acp", model: "fable", effort: "high", parameters: {} };
-  const luna = { id: "codex-acp/gpt-6-luna", label: "6 Luna", engine: "Codex", efforts: ["high"] };
-  const fable = { id: "fable", label: "Fable", engine: "Claude", efforts: ["high"] };
-  world.options = { ...facts.options!, models: [luna] };
+  const config = world.machines[0].config;
+  config.surfaces.user_defaults.coordinator = { engine: "claude-agent-acp", model: "fable", effort: "high", parameters: {} };
+  config.setup["codex-acp"].status = "connected";
+  config.setup["claude-agent-acp"].status = "connected";
+  config.surfaces.routing.engines["codex-acp"].enabled = ["gpt-6-luna"];
+  config.surfaces.routing.engines["claude-agent-acp"].enabled = ["fable"];
+  config.catalogue["codex-acp"].models = [{ id: "gpt-6-luna", routeId: "codex-acp/gpt-6-luna", label: "6 Luna", efforts: ["high"], observed: true }];
+  const refreshed = { ...config, catalogue: { ...config.catalogue,
+    "claude-agent-acp": { ...config.catalogue["claude-agent-acp"], models: [{ id: "fable", label: "Fable", efforts: ["high"], observed: true }] },
+  } };
   const s = scriptedPort({ capabilities: { everything: true, operations: [] } });
+  const refresh = () => s.emit({ kind: "machine", facts: { ...facts, patch: { config: refreshed } } });
   history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}/new?project=p`);
   const root = document.createElement("div"); document.body.append(root);
   dispose = render(() => <Workspace port={s.port} />, root);
@@ -360,7 +367,7 @@ it("moves a new task's coordinator to the owner's default once that model is off
   const shown = () => root.querySelector('[aria-label^="Coordinator model:"]')?.getAttribute("aria-label");
   // The default's engine has no list yet: an offered model stands in, but is not taken as a choice.
   expect(shown()).toBe("Coordinator model: 6 Luna");
-  s.emit({ kind: "machine", facts: { ...facts, options: { ...facts.options!, models: [luna, fable] } } });
+  refresh();
   for (let i = 0; i < 4; i++) await flush();
   expect(shown()).toBe("Coordinator model: Fable");
   // A model the owner picks by hand stays picked when the lists are read again.
@@ -369,7 +376,7 @@ it("moves a new task's coordinator to the owner's default once that model is off
   [...document.querySelectorAll<HTMLElement>('[role="menuitem"], .mi, button')].find(b => b.textContent?.includes("6 Luna") && b.closest("[popover]"))!.click();
   for (let i = 0; i < 2; i++) await flush();
   expect(shown()).toBe("Coordinator model: 6 Luna");
-  s.emit({ kind: "machine", facts: { ...facts, options: { ...facts.options!, models: [luna, fable] } } });
+  refresh();
   for (let i = 0; i < 4; i++) await flush();
   expect(shown()).toBe("Coordinator model: 6 Luna");
 });

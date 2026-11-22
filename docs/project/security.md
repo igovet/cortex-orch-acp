@@ -73,6 +73,7 @@ instruction and is matched after path normalization, so a `./` spelling does not
 | One mutating owner per task | `ownership.acquire_task_owner_tx` (atomic CAS under `BEGIN IMMEDIATE`) |
 | Stale channel cannot mutate | `server.Server._dispatch_channeled` (built-in tools) **and**, since its introduction, `server.Server.dispatch`'s delegation-operation branch (see Finding 1 below) -- both compare `channel.owner_epoch` against `ownership.current_owner_epoch` before any mutating call |
 | Cross-task/cross-role data scoping | every delegation handler in `delegation.mcp_tools` derives task/recipient/owner scope only from the already-resolved `ChannelContext`; no operation accepts a task id, recipient selector, or owner scope as an argument |
+| Workspace sprint reads | The coordinator may select a member of its own sprint. The native host derives the sprint from the authenticated execution, checks the saved roster and project membership, and restricts report reads to that member’s published immutable reports. |
 | Least-privilege process environments | `connections.environment.build_process_env` -- fixed base-env allowlist, per-connection isolation dir, single fresh-read secret variable, denylist defense-in-depth, no `extra_env` |
 | Filesystem containment | `engine.fs_bridge` -- fd-based, TOCTOU-safe (`O_NOFOLLOW` + `/proc/self/fd` real-path check), `.git`/`.cortex` refused, non-regular files refused |
 | Workspace isolation between workers | `delegation.workspace_isolation` -- disjoint `workspace_root`s per binding |

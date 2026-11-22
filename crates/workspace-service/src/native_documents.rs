@@ -30,7 +30,7 @@ fn text<'a>(args: &'a Value, key: &str) -> CoreResult<&'a str> {
         .as_str()
         .ok_or(CoreError::Refused("invalid_arguments"))
 }
-fn authenticate(store: &Store, c: &Credential, expected: &Identity) -> CoreResult<()> {
+pub(super) fn authenticate(store: &Store, c: &Credential, expected: &Identity) -> CoreResult<()> {
     store.read(|db| {
         let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
         if &i != expected {
@@ -53,7 +53,7 @@ fn catalogue(i: &Identity) -> CoreResult<Vec<Value>> {
             .collect(),
     )
 }
-fn validate(i: &Identity, name: &str, args: &Value) -> CoreResult<()> {
+pub(super) fn validate(i: &Identity, name: &str, args: &Value) -> CoreResult<()> {
     let tools = catalogue(i)?;
     let tool = tools
         .iter()

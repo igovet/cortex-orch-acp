@@ -18,6 +18,13 @@
 //! manager with the token as `DESKTOP_STARTUP_ID`/`XDG_ACTIVATION_TOKEN`, keeping the target
 //! for the new window's `notifications.take` (single use, one minute). Without a session bus
 //! (a headless machine) nothing is raised and `service.status` says so.
+//!
+//! One kind is also looked at on a timer: a working task that has made no progress for the
+//! owner's threshold (3 hours unless the window reports another, `stallHours`) is announced
+//! once, and again every 3 hours while it stays stuck (see `progress`). A light read of each
+//! active project's working tasks every five minutes rereads a project only when such a moment
+//! is due. The notification never pauses or changes the task; the runtime records
+//! `NO_PROGRESS_NOTIFIED` with its numbers.
 use crate::session_bus::{self, Arg, Bus, Message};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -26,6 +33,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+#[path = "native_progress.rs"]
+pub(crate) mod progress;
 
 const NAME: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
@@ -42,6 +52,13 @@ const SEEN_LIMIT: usize = 1000;
 /// Bound on ids and tokens taken from the window or the bus.
 const MAX_ID: usize = 256;
 const MAX_TOKEN: usize = 512;
+/// The no-progress thresholds the owner can choose, in hours, and the default.
+const STALL_HOURS: [u32; 4] = [1, 2, 3, 6];
+const STALL_DEFAULT: u32 = 3;
+/// A task still stuck is announced again after this long.
+const STALL_REPEAT_MS: i64 = 3 * 3_600_000;
+/// How often the working tasks are looked at for a no-progress moment.
+const STALL_TICK: Duration = Duration::from_secs(300);
 
 /// The moments that need the owner, one setting each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -53,15 +70,18 @@ pub(crate) enum Kind {
     Failed,
     Planning,
     Paused,
+    /// A working task that has made no progress for the owner's threshold.
+    Stalled,
 }
 impl Kind {
-    pub(crate) const ALL: [Kind; 6] = [
+    pub(crate) const ALL: [Kind; 7] = [
         Kind::Question,
         Kind::Stop,
         Kind::Result,
         Kind::Failed,
         Kind::Planning,
         Kind::Paused,
+        Kind::Stalled,
     ];
     fn summary(self) -> &'static str {
         match self {
@@ -71,6 +91,7 @@ impl Kind {
             Kind::Failed => "Task failed",
             Kind::Planning => "Planning question waiting",
             Kind::Paused => "Sprint paused",
+            Kind::Stalled => "No progress",
         }
     }
 }
@@ -420,6 +441,105 @@ pub(crate) fn items(
     out
 }
 
+/// A working task's no-progress moment: its item, its runtime task and the numbers the
+/// runtime records when it is announced (`NO_PROGRESS_NOTIFIED`).
+#[derive(Debug)]
+pub(crate) struct Stall {
+    pub item: Item,
+    pub runtime: String,
+    pub numbers: Value,
+}
+/// How long a working task has been without progress, and which announcement that is
+/// (0 at the threshold, one more every 3 hours after it), once it reached the threshold.
+pub(crate) fn stall_round(since: i64, now: i64, hours: u32) -> Option<(i64, i64)> {
+    let threshold = i64::from(hours) * 3_600_000;
+    let elapsed = now - since;
+    (hours > 0 && elapsed >= threshold).then(|| (elapsed, (elapsed - threshold) / STALL_REPEAT_MS))
+}
+/// Every working task's due announcement, as `task|round`: what the timer compares.
+pub(crate) fn stall_keys(working: &[progress::Working], now: i64, hours: u32) -> BTreeSet<String> {
+    working
+        .iter()
+        .filter_map(|w| {
+            let since = w.spend.stalled_since?;
+            let (_, round) = stall_round(since, now, hours)?;
+            Some(format!("{}|{since}:{round}", w.task))
+        })
+        .collect()
+}
+/// The no-progress moments of one project's working tasks: never a sprint's planning task, an
+/// archived or settled task, or one that has another owner moment (`taken`).
+pub(crate) fn stalls(
+    project: &str,
+    tasks: &[Value],
+    product: &Value,
+    working: &[progress::Working],
+    taken: &BTreeSet<Place>,
+    now: i64,
+    hours: u32,
+) -> Vec<Stall> {
+    let records = &product["tasks"];
+    let planning: HashSet<&str> = product["sprints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s["planningTaskId"].as_str())
+        .collect();
+    let mut out = Vec::new();
+    for w in working {
+        let Some(t) = tasks.iter().find(|t| t["taskId"] == w.task.as_str()) else {
+            continue;
+        };
+        let record = &records[&w.task];
+        let settled = matches!(record["status"].as_str(), Some("ready_to_merge" | "done"))
+            || !record["closedAs"].is_null();
+        if !id_ok(&w.task)
+            || !record["archive"].is_null()
+            || record["purged"] == true
+            || settled
+            || planning.contains(w.task.as_str())
+        {
+            continue;
+        }
+        let place = Place {
+            project: project.into(),
+            sprint: false,
+            id: w.task.clone(),
+        };
+        let (Some(since), false) = (w.spend.stalled_since, taken.contains(&place)) else {
+            continue;
+        };
+        let Some((elapsed, round)) = stall_round(since, now, hours) else {
+            continue;
+        };
+        let title = record["title"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned)
+            .or_else(|| first_line(t["description"].as_str().unwrap_or(""), 80))
+            .unwrap_or_else(|| "A task".into());
+        let spend = &w.spend;
+        out.push(Stall {
+            item: Item {
+                kind: Kind::Stalled,
+                place,
+                decision: None,
+                label: format!(
+                    "{title} has made no progress for {} h.",
+                    elapsed / 3_600_000
+                ),
+                detail: Some(progress::summary(spend)),
+                state: format!("np:{since}:{round}"),
+            },
+            runtime: w.runtime.clone(),
+            numbers: json!({"threshold_hours":hours,"stalled_ms":elapsed,"round":round,
+                "working_ms":spend.working_ms,"sessions":spend.sessions(),"turns":spend.turns(),
+                "reported_turns":spend.reported_turns(),"tokens":spend.tokens(),"failures":spend.reasons.len()}),
+        });
+    }
+    out
+}
+
 #[derive(Debug)]
 struct Shown {
     id: u32,
@@ -614,6 +734,9 @@ fn random() -> u64 {
 pub(crate) struct Report {
     pub focused: Option<ReportPlace>,
     pub kinds: Vec<Kind>,
+    /// The no-progress threshold in hours (one of `STALL_HOURS`), when the window names one.
+    #[serde(default, rename = "stallHours")]
+    pub stall_hours: Option<u32>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -624,13 +747,24 @@ pub(crate) struct ReportPlace {
     #[serde(default)]
     pub sprint: Option<String>,
 }
+#[cfg(test)]
 pub(crate) fn report(params: Value) -> io::Result<(Option<Place>, BTreeSet<Kind>)> {
+    report_with_threshold(params).map(|(place, kinds, _)| (place, kinds))
+}
+/// `report` with the no-progress threshold the window named, if any.
+pub(crate) fn report_with_threshold(
+    params: Value,
+) -> io::Result<(Option<Place>, BTreeSet<Kind>, Option<u32>)> {
     let bad = || crate::failure("invalid_params");
     // `focused` is always named, null when no task or sprint is on view.
     if params.get("focused").is_none() {
         return Err(bad());
     }
     let r: Report = serde_json::from_value(params).map_err(|_| bad())?;
+    if r.stall_hours.is_some_and(|h| !STALL_HOURS.contains(&h)) {
+        return Err(bad());
+    }
+    let stall = r.stall_hours;
     let place = match r.focused {
         None => None,
         Some(p) => {
@@ -649,7 +783,7 @@ pub(crate) fn report(params: Value) -> io::Result<(Option<Place>, BTreeSet<Kind>
             })
         }
     };
-    Ok((place, r.kinds.into_iter().collect()))
+    Ok((place, r.kinds.into_iter().collect(), stall))
 }
 
 /// The command that starts the desktop app through the user manager, so it runs in the
@@ -687,6 +821,12 @@ struct Inner {
     handoff: Handoff,
     focus: Option<(Place, Instant)>,
     enabled: Option<BTreeSet<Kind>>,
+    /// The owner's no-progress threshold in hours; `STALL_DEFAULT` until a window names one.
+    stall_hours: Option<u32>,
+    /// Per project, the due no-progress announcements its last read found (`stall_keys`).
+    stall_seen: HashMap<String, BTreeSet<String>>,
+    /// The runtime task and numbers of each no-progress item, for its runtime record.
+    stall_numbers: HashMap<Place, (String, Value)>,
     /// No saved state yet: the first read of each project only records what is open.
     first: bool,
     primed: BTreeSet<String>,
@@ -727,11 +867,15 @@ impl Notifier {
             .clone()
             .unwrap_or_else(|| Kind::ALL.into_iter().collect())
     }
+    fn stall_hours(inner: &Inner) -> u32 {
+        inner.stall_hours.unwrap_or(STALL_DEFAULT)
+    }
     fn save(inner: &Inner) {
         let Some(path) = &inner.state_file else {
             return;
         };
-        let value = json!({"kinds": Self::enabled(inner), "seen": inner.book.seen_list()});
+        let value = json!({"kinds": Self::enabled(inner), "seen": inner.book.seen_list(),
+            "stallHours": Self::stall_hours(inner)});
         let _ = write_private(path, &serde_json::to_vec(&value).unwrap_or_default());
     }
 }
@@ -814,6 +958,10 @@ impl crate::Service {
             inner.first = saved.is_none();
             if let Some(saved) = &saved {
                 inner.enabled = serde_json::from_value(saved["kinds"].clone()).ok();
+                inner.stall_hours = saved["stallHours"]
+                    .as_u64()
+                    .and_then(|h| u32::try_from(h).ok())
+                    .filter(|h| STALL_HOURS.contains(h));
                 for seen in saved["seen"]
                     .as_array()
                     .into_iter()
@@ -842,6 +990,8 @@ impl crate::Service {
         tokio::spawn(async move {
             let mut shutdown = service.shutdown.subscribe();
             let mut events = service.events.subscribe();
+            let mut stall_tick = tokio::time::interval(STALL_TICK);
+            stall_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             for p in service
                 .state
                 .lock()
@@ -868,6 +1018,7 @@ impl crate::Service {
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
                     Some(message) = incoming.recv() => service.bus_message(message).await,
+                    _ = stall_tick.tick() => service.stall_check().await,
                     _ = service.notifier.wake.notified() => {
                         tokio::time::sleep(SETTLE).await;
                         let due = std::mem::take(&mut *service.notifier.dirty.lock().unwrap_or_else(|e| e.into_inner()));
@@ -906,7 +1057,32 @@ impl crate::Service {
         let runtime = self.state.lock().await.native.get(project).cloned();
         let mut tasks = Vec::new();
         let mut decisions = HashMap::new();
-        let product = if let Some(runtime) = runtime {
+        let (stalled_on, hours) = {
+            let inner = self
+                .notifier
+                .inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            (
+                Notifier::enabled(&inner).contains(&Kind::Stalled),
+                Notifier::stall_hours(&inner),
+            )
+        };
+        let now = progress::now_ms();
+        let mut working = Vec::new();
+        let product = if let Some(runtime) = &runtime {
+            if stalled_on {
+                // A store that cannot be read for this skips only the no-progress moments.
+                if let Ok(read) = runtime
+                    .host
+                    .executor
+                    .read(move |db| progress::working_tasks(db, now))
+                {
+                    if let Ok(Ok(found)) = read.await {
+                        working = found;
+                    }
+                }
+            }
             let mut cursor = Value::Null;
             for _ in 0..200 {
                 let page = self.native_query(json!({"protocol":{"major":2,"mapping":2},"requestId":"notifications",
@@ -958,13 +1134,25 @@ impl crate::Service {
             // An inactive or removed project has nothing to announce.
             json!({})
         };
-        let found = items(project, &tasks, &product, &decisions);
+        let mut found = items(project, &tasks, &product, &decisions);
+        let taken: BTreeSet<Place> = found.iter().map(|i| i.place.clone()).collect();
+        let stalled = stalls(project, &tasks, &product, &working, &taken, now, hours);
         let (actions, bus) = {
             let mut inner = self
                 .notifier
                 .inner
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+            inner
+                .stall_seen
+                .insert(project.to_owned(), stall_keys(&working, now, hours));
+            inner.stall_numbers.retain(|p, _| p.project != project);
+            for s in stalled {
+                inner
+                    .stall_numbers
+                    .insert(s.item.place.clone(), (s.runtime, s.numbers));
+                found.push(s.item);
+            }
             let now = Instant::now();
             let focus = inner
                 .focus
@@ -997,19 +1185,93 @@ impl crate::Service {
                     .await;
                     if let Ok(Ok(reply)) = reply {
                         if let Some(id) = reply.body.first().and_then(Arg::u32) {
-                            let mut inner = self
-                                .notifier
-                                .inner
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
-                            inner.server = Some(reply.sender);
-                            inner.book.raised(&item, id);
+                            let record = {
+                                let mut inner = self
+                                    .notifier
+                                    .inner
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                inner.server = Some(reply.sender);
+                                inner.book.raised(&item, id);
+                                (item.kind == Kind::Stalled)
+                                    .then(|| inner.stall_numbers.get(&item.place).cloned())
+                                    .flatten()
+                            };
+                            if let (Some((task, numbers)), Some(runtime)) = (record, &runtime) {
+                                // The owner was told; the task itself is left exactly as it is.
+                                if let Ok(write) = runtime.host.executor.write(move |db| {
+                                    cortex_core::lifecycle::event_tx(
+                                        db,
+                                        &task,
+                                        "NO_PROGRESS_NOTIFIED",
+                                        numbers,
+                                    )?;
+                                    Ok(())
+                                }) {
+                                    let _ = write.await;
+                                }
+                            }
                         }
                     }
                 }
             }
         }
         Ok(())
+    }
+
+    /// The timer's light look at every active project's working tasks: a project is read
+    /// again only when a no-progress announcement fell due or went away since its last read.
+    async fn stall_check(&self) {
+        let (on, hours) = {
+            let inner = self
+                .notifier
+                .inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            (
+                inner.bus.is_some() && Notifier::enabled(&inner).contains(&Kind::Stalled),
+                Notifier::stall_hours(&inner),
+            )
+        };
+        if !on {
+            return;
+        }
+        let runtimes: Vec<_> = self
+            .state
+            .lock()
+            .await
+            .native
+            .iter()
+            .map(|(p, r)| (p.clone(), r.clone()))
+            .collect();
+        for (project, runtime) in runtimes {
+            let now = progress::now_ms();
+            let Ok(read) = runtime
+                .host
+                .executor
+                .read(move |db| progress::working_tasks(db, now))
+            else {
+                continue;
+            };
+            let Ok(Ok(working)) = read.await else {
+                continue;
+            };
+            let keys = stall_keys(&working, now, hours);
+            let changed = {
+                let inner = self
+                    .notifier
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                inner
+                    .stall_seen
+                    .get(&project)
+                    .map_or(!keys.is_empty(), |k| *k != keys)
+            };
+            if changed {
+                self.notifier.touch(&project);
+            }
+        }
     }
 
     async fn bus_message(self: &Arc<Self>, m: Message) {
@@ -1083,7 +1345,7 @@ impl crate::Service {
     ) -> io::Result<Value> {
         let raising = self.notifier.raising();
         if method == "notifications.report" {
-            let (place, kinds) = report(params)?;
+            let (place, kinds, stall) = report_with_threshold(params)?;
             let (mut projects, changed) = {
                 let mut inner = self
                     .notifier
@@ -1093,9 +1355,13 @@ impl crate::Service {
                 let before = inner.focus.as_ref().map(|(p, _)| p.project.clone());
                 let after = place.as_ref().map(|p| p.project.clone());
                 inner.focus = place.map(|p| (p, Instant::now() + FOCUS_TTL));
-                let changed = inner.enabled.as_ref() != Some(&kinds);
+                let changed = inner.enabled.as_ref() != Some(&kinds)
+                    || stall.is_some_and(|h| inner.stall_hours != Some(h));
                 if changed {
                     inner.enabled = Some(kinds);
+                    if stall.is_some() {
+                        inner.stall_hours = stall;
+                    }
                     Notifier::save(&inner);
                 }
                 (

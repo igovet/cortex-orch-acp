@@ -612,3 +612,159 @@ fn hybrid_sprint_notifies_only_owner_holds_and_never_the_owners_own_pause() {
         .collect();
     assert_eq!(paused, ["owner"], "{found:?}");
 }
+
+fn stuck(task: &str, state: &str, since: i64) -> progress::Working {
+    progress::Working {
+        task: task.into(),
+        runtime: format!("rt-{task}"),
+        spend: progress::compute(
+            state,
+            &[progress::Event {
+                kind: "TASK_STATE_CHANGED".into(),
+                payload: json!({"previous":"CREATED","state":"EXECUTING"}),
+                at: since,
+            }],
+            &[],
+            since,
+        ),
+    }
+}
+const HOUR: i64 = 3_600_000;
+
+#[test]
+fn a_task_without_progress_is_announced_once_past_the_threshold_and_again_every_three_hours() {
+    let tasks = [task("a", "working")];
+    let product = json!({"tasks":{"a":{"title":"Port the parser"}},"sprints":[]});
+    let working = [stuck("a", "EXECUTING", 0)];
+    let none = BTreeSet::new();
+    let mut book = Book::default();
+    let raised = |now: i64, enabled: &BTreeSet<Kind>, book: &mut Book| {
+        let found: Vec<Item> = stalls("p", &tasks, &product, &working, &none, now, 3)
+            .into_iter()
+            .map(|s| s.item)
+            .collect();
+        book.plan("p", found, None, enabled, false)
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::Raise { item, .. } => Some(item),
+                Action::Withdraw { .. } => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    // Below the threshold nothing is due.
+    assert!(raised(3 * HOUR - 1, &all(), &mut book).is_empty());
+    let first = raised(3 * HOUR, &all(), &mut book);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].kind, Kind::Stalled);
+    assert_eq!(
+        first[0].label,
+        "Port the parser has made no progress for 3 h."
+    );
+    let detail = first[0].detail.as_deref().unwrap();
+    assert!(
+        detail.starts_with("Spent: ") && detail.contains("0 turns, tokens not reported."),
+        "{detail}"
+    );
+    assert_eq!(
+        first[0].target(),
+        json!({"kind":"task","project":"p","task":"a"})
+    );
+    book.raised(&first[0], 7);
+    // Still stuck: no second notification until three more hours have passed.
+    assert!(raised(5 * HOUR, &all(), &mut book).is_empty());
+    let again = raised(6 * HOUR, &all(), &mut book);
+    assert_eq!(again.len(), 1);
+    assert_eq!(
+        again[0].label,
+        "Port the parser has made no progress for 6 h."
+    );
+    // The owner turned the kind off: nothing more.
+    let off: BTreeSet<Kind> = Kind::ALL
+        .into_iter()
+        .filter(|k| *k != Kind::Stalled)
+        .collect();
+    assert!(raised(9 * HOUR, &off, &mut book).is_empty());
+}
+
+#[test]
+fn paused_finished_and_otherwise_announced_tasks_are_never_announced_as_stuck() {
+    let tasks = [
+        task("a", "working"),
+        task("b", "working"),
+        task("c", "working"),
+        task("d", "working"),
+    ];
+    let product = json!({"tasks":{"a":{"title":"A"},"b":{"title":"B","status":"done"},"c":{"title":"C"},"d":{"title":"D","archive":{"at":"x"}}},
+        "sprints":[{"id":"s","planningTaskId":"c"}]});
+    // `a` is paused, `b` done, `c` a sprint's planning task, `d` archived.
+    let working = [
+        stuck("a", "PAUSED", 0),
+        stuck("b", "EXECUTING", 0),
+        stuck("c", "EXECUTING", 0),
+        stuck("d", "EXECUTING", 0),
+    ];
+    assert!(stalls(
+        "p",
+        &tasks,
+        &product,
+        &working,
+        &BTreeSet::new(),
+        10 * HOUR,
+        3
+    )
+    .is_empty());
+    // A task that already has another owner moment keeps that one.
+    let working = [stuck("a", "EXECUTING", 0)];
+    let taken = BTreeSet::from([place("a")]);
+    assert!(stalls("p", &tasks, &product, &working, &taken, 10 * HOUR, 3).is_empty());
+    assert_eq!(
+        stalls(
+            "p",
+            &tasks,
+            &product,
+            &working,
+            &BTreeSet::new(),
+            10 * HOUR,
+            3
+        )
+        .len(),
+        1
+    );
+    // The threshold the owner chose applies; the timer's keys follow it.
+    assert!(stalls(
+        "p",
+        &tasks,
+        &product,
+        &working,
+        &BTreeSet::new(),
+        5 * HOUR,
+        6
+    )
+    .is_empty());
+    assert!(stall_keys(&working, 5 * HOUR, 6).is_empty());
+    assert_eq!(
+        stall_keys(&working, 5 * HOUR, 1),
+        BTreeSet::from(["a|0:1".to_owned()])
+    );
+}
+
+#[test]
+fn a_window_report_names_the_no_progress_threshold_only_from_the_offered_hours() {
+    let (_, kinds, hours) = report_with_threshold(
+        json!({"focused":null,"kinds":["question","stalled"],"stallHours":6}),
+    )
+    .unwrap();
+    assert_eq!(kinds, BTreeSet::from([Kind::Question, Kind::Stalled]));
+    assert_eq!(hours, Some(6));
+    assert_eq!(
+        report_with_threshold(json!({"focused":null,"kinds":[]}))
+            .unwrap()
+            .2,
+        None
+    );
+    for bad in [json!(0), json!(5), json!("3"), json!(-1)] {
+        assert!(
+            report_with_threshold(json!({"focused":null,"kinds":[],"stallHours":bad})).is_err()
+        );
+    }
+}

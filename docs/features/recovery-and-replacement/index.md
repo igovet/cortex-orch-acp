@@ -184,10 +184,11 @@ included, so a closed task can be deleted):
   runtime record is settled: the delegation becomes `terminated`, the
   reservation `released` with observation `no_engine_process`, and one
   `NATIVE_PROCESS_SETTLED` event records evidence
-  `service_gone_and_no_engine_process_in_project`. An unfinished task is then
-  held as interrupted (blocker `native_session_outcome_unknown`, never driven
-  on by itself), so the owner's message, Stop, Resume, Close and Delete all
-  work. A process whose command line or working directory cannot be read
+  `service_gone_and_no_engine_process_in_project`. An unfinished task then
+  continues as an interrupted turn under the [no-stop policy](../task-lifecycle/index.md#no-stop-policy-and-the-strategy-ladder)
+  (`AUTOMATIC_CONTINUATION`, reason `native_service_interrupted` or
+  `native_session_outcome_unknown`), relaunched by the runtime itself; the owner's
+  message, Stop, Resume, Close and Delete all work. A process whose command line or working directory cannot be read
   counts as such an engine, and so does an unreadable process table; while one
   exists the attempts stay fail-closed. Attempts with a process record are
   decided by the registry rules below.
@@ -205,12 +206,11 @@ included, so a closed task can be deleted):
   `unconfirmed_exit_and_no_engine_process_in_project`. Nothing is signalled,
   killed or relaunched. While a candidate process exists nothing changes and
   the re-check backs off (15 seconds, doubling to 10 minutes; a changed set of
-  such attempts is checked at once). A settled task no driver runs is an
-  ordinary interrupted turn; in Automatic, one held only by that exit (stopped
-  with no recorded reason, or paused `outcome_unknown` only for an unconfirmed
-  process exit) records an `AUTOMATIC_CONTINUATION` with reason
-  `native_process_exit_settled` and continues through the host's usual checks,
-  which still refuse while any dispatched effect is unknown.
+  such attempts is checked at once). A settled task no driver runs continues, in every run mode: a
+  continuation that waited for that exit resumes, and one held only by that exit
+  (stopped with no recorded reason, or held for an unconfirmed process exit)
+  records an `AUTOMATIC_CONTINUATION` with reason `native_process_exit_settled`.
+  Effects with an unknown outcome are then re-verified, never replayed.
 - **Never started by the retired Python host.** A `failed` or `in_progress`
   worker row with no engine session and no process record, whose capacity that
   host had already released (or, for `failed`, never reserved), is settled
@@ -261,12 +261,12 @@ included, so a closed task can be deleted):
   (`receipt_settled`), or when the runtime recorded an event in another boot
   after the start (`previous_boot`: outcome `outcome_not_recorded`, no exit
   code). A start without a call reference or such evidence stays unknown. A
-  task held only for such starts is then held for what its facts still show
-  (for example an outside write with an unknown outcome,
-  `native_outside_outcome_unknown`), or otherwise as an interrupted turn
-  (`native_session_outcome_unknown`), with one `NATIVE_RECOVERY_REQUIRED`
-  event naming `settled_barrier`. It is never driven on by itself, and later
-  restarts record nothing new.
+  task held for such starts then continues with what its facts still show as
+  the continuation's reason (for example an outside write with an unknown
+  outcome, `native_outside_outcome_unknown`, or otherwise
+  `native_session_outcome_unknown`), with one `NATIVE_RECOVERY_REQUIRED` event
+  (`continued: true`, naming `settled_barrier` when the start was settled), and
+  later restarts record nothing new.
 
 A dead service never removes its sessions' broker directories
 (`cortex-mcp-` and 24 hex digits, in the project's store directory). Recovery
@@ -281,8 +281,9 @@ event, since runtime events reference the runtime record; the settled rows
 keep the evidence. Such a task is never stamped, so an attempt of it that no
 rule settles stays unsettled. Each task's recovery runs in its own savepoint:
 a task whose recovery fails (for example a damaged state) is rolled back
-alone, held with blocker `native_recovery_failed` when it has a runtime
-record, and the project still opens. Recovery is idempotent: a task already
+alone and continues as a `native_recovery_failed` continuation when its store
+still accepts one (otherwise it is held with that blocker), and the project
+still opens. Recovery is idempotent: a task already
 held for the same reason, or a worker wait already marked lost, records
 nothing again on the next restart.
 
@@ -299,9 +300,9 @@ the owner's cancellation and is reported done (receipt `processesUnconfirmed`,
 `OWNER_TASK_RESOLVED` with `processes_unconfirmed`), so the window closes the
 card; deletion stays refused until the attempt is settled, and restarting the
 computer lets the next recovery settle it.
-Once settled, the task's next owner message or Retry is admitted and relaunches
-the coordinator, an answered runtime stop question relaunches it, and a closed
-task can be deleted.
+Once settled, the runtime continues the task by itself (an owner message waits
+for that boundary), an answered stop question an earlier version stored
+relaunches it, and a closed task can be deleted.
 
 ## Crash boundaries
 

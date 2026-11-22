@@ -12,6 +12,7 @@ use super::{
     task_facts_git,
     workers::truthy as truth,
 };
+pub(super) use effects::GitHubRepository;
 /// Another owner action on a task whose integration is running.
 pub(super) const IN_PROGRESS: &str =
     "This task is being merged or its pull request is being created. Wait for it to finish.";
@@ -114,8 +115,7 @@ async fn verified_result(
     )
 }
 /// The recorded address of the pull request created for a task, for the desktop's own
-/// opener: only an `https` address on the host of this repository's `origin` remote,
-/// checked again now against the remote as it is configured today.
+/// opener: only an `https` PR address on the repository currently configured as `origin`.
 pub async fn pull_request_address(
     root: &Path,
     project: &str,
@@ -138,14 +138,13 @@ pub async fn pull_request_address(
             "GitHub CLI did not report this pull request's address, so it was not recorded. Find it on GitHub.",
         ));
     };
-    let remote = git
-        .out(root, &["remote", "get-url", "origin"])
+    if !effects::origin_repository(root, git)
         .await
-        .unwrap_or_default();
-    if effects::pull_request_url(url, &remote).as_deref() != Some(url) {
+        .is_ok_and(|repository| repository.pull_request_url(url).is_some())
+    {
         return Err(refuse(
             "pull_request_unsafe",
-            "The recorded pull request address is not on this repository's remote host, so it was not opened.",
+            "The recorded pull request address is not for this repository's current origin, so it was not opened.",
         ));
     }
     Ok(serde_json::json!({ "url": url }))
@@ -372,14 +371,20 @@ async fn integrate(
     if automatic && facts["inspectionIncomplete"] == true {
         return Ok(json!({"deferred":true}));
     }
-    if !automatic && facts["alreadyInTarget"] == true {
-        return Err(refuse(
+    let contained = !automatic && facts["alreadyInTarget"] == true;
+    let already_in_target = || -> Result<Value> {
+        Err(refuse(
             "already_in_target",
             format!(
                 "Already in {}. Confirm Close task instead; no Git operation is needed.",
                 facts["targetBranch"].as_str().ok_or_else(malformed)?
             ),
-        ));
+        ))
+    };
+    // Preserve existing containment admission for unwitnessed actions. For an
+    // accepted ordinary commit, drift must win even if it made the task diff empty.
+    if contained && !record["acceptance"]["committedDigest"].is_string() {
+        return already_in_target();
     }
     let verified = verified_result(
         root,
@@ -405,6 +410,9 @@ async fn integrate(
                 "Files changed after acceptance. Rerun checks and accept the new result.",
             ));
         }
+    }
+    if contained {
+        return already_in_target();
     }
     if !git.is_repo(&path).await? {
         if automatic {

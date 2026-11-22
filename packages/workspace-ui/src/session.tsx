@@ -17,6 +17,7 @@ import { age, attemptsSpentOn, clock, humanStatus, ownerHold, replanStopping, re
 import { inTask } from "./status-text";
 import { attemptsByNode, closeBlocked, contextOf, coordinatorLine, duration, elapsedOf, isFinished, messageDelivery, reviewLine, workersOutcome, phases, recordedCoordinatorRoute, sessionModel, tokens, unconfirmedState, verificationFace, workerFace, workerState, workingNow, type SessionModel } from "./session-model";
 import { CORTEX, Pill, StopCommand, VERIFICATION, WorkerPane, WaitingIndicator, WorkingIndicator } from "./worker";
+import { SpendLine } from "./task-spend";
 import { createOpenState, Fold, TextSteps } from "./feed";
 
 import { ResultText, resultPreview } from "./result-text";
@@ -717,6 +718,8 @@ export function WorkersList(props: { m: SessionModel; now: number; pick: string 
   // One card by id: it keeps its element while the machine refreshes the worker it shows.
   const Card = (c: { id: string }) => <Show when={props.m.workers.find(w => w.id === c.id)}>{w => <WorkerCard w={w()} now={props.now} to={at(c.id)} selected={props.pick === c.id} />}</Show>;
   return <div class="wlist" role="tablist" aria-orientation="vertical" aria-label="Workers">
+    {/* What the task spent so far, as its engines reported it. */}
+    <SpendLine task={props.m.view.task} />
     <div class="wg">Coordinator</div>
     <A class="wcard" role="tab" to={at(CORTEX)} aria-selected={props.pick === CORTEX ? "true" : "false"}>
       <span class="l1"><span class="ic"><I n="bot" s={14} /></span>Coordinator<span class={`st ${props.m.view.fact.tone}`}>{props.m.mode === "live" ? "Coordinating" : props.m.view.fact.text}</span></span>

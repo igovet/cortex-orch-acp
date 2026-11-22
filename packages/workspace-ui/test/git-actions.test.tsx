@@ -166,6 +166,38 @@ const band = (root: HTMLElement) => root.querySelector<HTMLElement>(".titlebar .
 const gitPrimaryButton = (root: HTMLElement) => band(root).querySelector<HTMLButtonElement>('[aria-label="Git"] .hg-a')!;
 const menuLabels = (root: HTMLElement) => [...root.querySelectorAll<HTMLElement>("#m-git .mi")].map(b => b.querySelector(".grow")!.firstChild!.textContent);
 
+describe("accepted result freshness at Finish", () => {
+  it("allows an unchanged committed result from both surfaces, and blocks drift even in an open PR dialog", async () => {
+    const c = checkout({ id: "p:wt", kind: "worktree", branch: "task/fix", taskId: "t", path: "/w", upstream: "origin/task/fix" });
+    const fresh = world(c, ready);
+    const { root, p } = await open(fresh, "/m/local/t/t/changes");
+    const cardPr = () => [...root.querySelectorAll<HTMLButtonElement>(".ready button")].find(b => b.textContent === "Create PR…")!;
+    const cardMerge = () => [...root.querySelectorAll<HTMLButtonElement>(".ready button")].find(b => b.textContent === "Merge…")!;
+    const menu = (label: string) => [...root.querySelectorAll<HTMLButtonElement>("#m-git .mi")].find(b => b.querySelector(".grow")?.firstChild?.textContent === label)!;
+    const confirmPr = () => root.querySelector<HTMLButtonElement>('dialog[open] [aria-label="Create PR (no push)"]')!;
+    expect(cardPr().getAttribute("aria-disabled")).toBeNull();
+    expect(cardMerge().getAttribute("aria-disabled")).toBeNull();
+    expect(menu("Create PR…").getAttribute("aria-disabled")).toBeNull();
+    cardPr().click(); await settle();
+    expect(confirmPr().getAttribute("aria-disabled")).toBeNull();
+
+    p.emit(projection("2", world(c, { ...ready, workspaceDigest: "different" }))); await settle();
+    for (const button of [cardPr(), cardMerge(), menu("Create PR…"), confirmPr()]) {
+      expect(button.getAttribute("aria-disabled")).toBe("true");
+      expect(button.textContent ?? "").not.toContain("View PR");
+    }
+    expect(confirmPr().getAttribute("data-why")).toContain("stale");
+    confirmPr().click(); await settle();
+    expect(p.commands).toEqual([]);
+    expect(menuLabels(root)).not.toContain("View PR");
+
+    p.emit(projection("3", fresh)); await settle();
+    expect(confirmPr().getAttribute("aria-disabled")).toBeNull();
+    confirmPr().click(); await settle();
+    expect(p.commands.map(c => c.payload)).toEqual([expect.objectContaining({ type: "integrate", method: "pr", digest: "d" })]);
+  });
+});
+
 describe("View PR in the merge card", () => {
   const url = "https://github.com/example/a-very-long-repository-name-for-a-recorded-pull-request/pull/123";
   const state = (address?: string) => world(
@@ -175,15 +207,18 @@ describe("View PR in the merge card", () => {
   const row = (root: HTMLElement) => root.querySelector<HTMLElement>(".ready .rv-pr")!;
   const viewPr = (el: HTMLElement) => [...el.querySelectorAll("button")].find(b => b.textContent === "View PR");
 
-  it("shows the recorded address and opens it through the workspace command", async () => {
+  it.each(["merge card", "Git menu"] as const)("shows the recorded address and requests opening it from the %s", async (entry) => {
     const { root, p } = await open(state(url), "/m/local/t/t/changes");
     const pr = row(root);
     expect(pr.querySelector(".l-row-d .mono")?.textContent).toBe(url);
     expect(pr.textContent).toContain("Pull request created into main");
     expect(pr.textContent).toContain("Draft. It is not merged, so this task stays here.");
     expect(pr.textContent).toContain("GitHub CLI");
-    expect(menuLabels(root)).toContain("View PR");
-    const button = viewPr(pr)!;
+    // The port fixture receives the persisted URL, not the subprocess stdout line.
+    const menuButton = [...root.querySelectorAll<HTMLButtonElement>("#m-git .mi")]
+      .find(b => b.querySelector(".grow")?.firstChild?.textContent === "View PR");
+    expect(menuButton).toBeDefined();
+    const button = entry === "merge card" ? viewPr(pr)! : menuButton!;
     expect(button.getAttribute("aria-disabled")).toBeNull();
     expect(p.commands).toEqual([]);
     button.click(); await settle();

@@ -1680,16 +1680,27 @@ async fn skill_proposals() {
         .await;
         if decision == "invalid" {
             // The fake peer reports refusal; the invalid proposal must never persist.
+            // No-stop policy: the runtime asks no stop question; it continues the task
+            // with a changed approach, and the owner's cancel ends the prompt.
+            tokio::time::timeout(Duration::from_secs(20), async {
+                while f.query(
+                    "SELECT count(*) FROM runtime_events WHERE type='AUTOMATIC_CONTINUATION'",
+                ) == 0
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("the refused proposal did not continue the task");
+            c.notification("session/cancel", json!({"sessionId":sid}))
+                .await;
             loop {
                 let frame = c.recv().await;
-                if frame["method"] == "session/request_permission" {
-                    assert!(frame["params"]["toolCall"]["title"]
-                        .as_str()
-                        .unwrap()
-                        .starts_with("The task stopped:"));
-                    c.notification("session/cancel", json!({"sessionId":sid}))
-                        .await;
-                } else if frame["id"] == 3 {
+                assert_ne!(
+                    frame["method"], "session/request_permission",
+                    "the runtime asked a stop question: {frame}"
+                );
+                if frame["id"] == 3 {
                     break;
                 }
             }

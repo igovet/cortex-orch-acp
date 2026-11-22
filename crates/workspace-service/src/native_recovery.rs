@@ -961,6 +961,151 @@ fn settle_legacy_starts_tx(
     Ok(settled)
 }
 
+/// A restart that finds a task at the same point this many times without progress
+/// (`boot_recovery` loop key: reason and plan revision) pauses it for the runtime's
+/// own recheck instead of resuming it again.
+const BOOT_RECOVERY_LIMIT: i64 = 3;
+/// Records `NATIVE_RECOVERY_REQUIRED` once per restart burst: a later restart that
+/// finds the task held for the same reason in the same state, with nothing recorded
+/// for it since but recovery bookkeeping, records nothing again.
+fn recovery_required_once_tx(
+    db: &rusqlite::Transaction<'_>,
+    task: &str,
+    required: Value,
+) -> CoreResult<()> {
+    use rusqlite::OptionalExtension;
+    let latest: Option<(i64, String)> = db
+        .query_row(
+            "SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type='NATIVE_RECOVERY_REQUIRED'
+             ORDER BY id DESC LIMIT 1",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((id, raw)) = latest {
+        let previous: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        let quiet: bool = db.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND id>? AND type NOT IN
+                ('NATIVE_PROCESS_SETTLED','NATIVE_PROCESS_UNCONFIRMED','NATIVE_GUIDANCE_SETTLED',
+                 'NATIVE_CONTROL_OUTCOME_UNKNOWN','NATIVE_START_RECONCILED','TASK_STATE_CHANGED'))",
+            (task, id),
+            |r| r.get(0),
+        )?;
+        if quiet
+            && previous["reason"] == required["reason"]
+            && previous["previous"] == required["previous"]
+            && previous["continued"] == required["continued"]
+        {
+            return Ok(());
+        }
+    }
+    lifecycle::event_tx(db, task, "NATIVE_RECOVERY_REQUIRED", required)?;
+    Ok(())
+}
+/// How a restart found a task: resumed on its rung, paused for a recheck, or left to
+/// the ordinary recovery rules.
+enum RestartResume {
+    Resumed,
+    Paused,
+    NotApplicable,
+}
+/// A service restart is infrastructure, never the model's failure. A task whose plan
+/// was being planned, executed or reviewed, whose every owned process is confirmed
+/// gone, resumes in the same state on the same ladder rung without a new plan
+/// revision: what the gone sessions left with an unknown outcome is settled once for
+/// re-verification (`settled_by: runtime_reverify`), each lost attempt is recorded as
+/// ended by the restart (`runtime_restart`, so its node is retried at once without
+/// escalation), and the fresh attempt re-verifies those effects. A restart that finds
+/// the task at the same point [`BOOT_RECOVERY_LIMIT`] times without progress pauses
+/// it (`pause_kind: infrastructure`) instead. A command still unsettled, unconfirmed
+/// processes or any other unknown keep the ordinary recovery rules.
+fn restart_resume_tx(
+    db: &rusqlite::Transaction<'_>,
+    task: &str,
+    state: TaskState,
+    reason: &str,
+    boot: Option<&str>,
+) -> CoreResult<RestartResume> {
+    if lifecycle::automatic::require_processes_gone(db, task).is_err() {
+        return Ok(RestartResume::NotApplicable);
+    }
+    let (_, revision) = domain::task_tx(db, task)?;
+    // Resumes at this same point (the plan revision; the reason label differs between
+    // restarts of one crash loop) since the task last progressed or the owner spoke.
+    let resumed: i64 = db.query_row(
+        "SELECT count(*) FROM runtime_events WHERE task_id=?1 AND type='NATIVE_RECOVERY_RESUMED'
+           AND json_extract(payload_json,'$.restart_resume')=1 AND json_extract(payload_json,'$.revision')=?2
+           AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type IN
+             ('TASK_PROGRESS','TASK_REOPENED','USER_STEERING','USER_ANSWER_RECEIVED','OWNER_TASK_RESUMED')),0)",
+        (task, revision),
+        |r| r.get(0),
+    )?;
+    let key = cortex_core::scheduler::retry::loop_key(
+        "boot_recovery",
+        "",
+        &format!("{}|{revision}", state.as_str()),
+    );
+    if resumed >= BOOT_RECOVERY_LIMIT {
+        lifecycle::event_tx(
+            db,
+            task,
+            "LOOP_BROKEN",
+            json!({"key":key,"kind":"boot_recovery","node":null,"count":resumed + 1,
+                "action":"infrastructure_pause","limits":[],"reason":reason,"revision":revision}),
+        )?;
+        cortex_core::scheduler::retry::infrastructure_pause_tx(
+            db,
+            task,
+            json!({"reason":"boot_recovery_loop","restart_reason":reason,"key":key,"count":resumed + 1}),
+        )?;
+        return Ok(RestartResume::Paused);
+    }
+    let uncertainty = match lifecycle::automatic::settle_unknown_effects_tx(db, task) {
+        Ok(uncertainty) => uncertainty,
+        Err(CoreError::Refused("native_command_outcome_pending")) => {
+            return Ok(RestartResume::NotApplicable)
+        }
+        Err(error) => return Err(error),
+    };
+    // Each attempt the restart ended without a result: retried as `runtime_restart`.
+    let lost = db
+        .prepare(
+            "SELECT n.assignment_ref,p.attempt_id FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+             JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
+             WHERE n.task_id=? AND n.revision=t.revision AND n.status='running' AND n.result_json IS NULL
+             AND p.status='terminated' AND p.attempt_id IS NOT NULL",
+        )?
+        .query_map([task], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (assignment, attempt) in &lost {
+        cortex_core::scheduler::retry::record_attempt_ending_tx(
+            db,
+            task,
+            assignment,
+            attempt,
+            "service_restarted",
+            "runtime_restart",
+            &json!({"cause":"service_restarted","restart_reason":reason,"boot_id":boot}),
+        )?;
+    }
+    if resumed > 0 {
+        lifecycle::event_tx(
+            db,
+            task,
+            "LOOP_OBSERVED",
+            json!({"key":key,"kind":"boot_recovery","node":null,"count":resumed + 1}),
+        )?;
+    }
+    lifecycle::event_tx(
+        db,
+        task,
+        "NATIVE_RECOVERY_RESUMED",
+        json!({"state":state,"restart_resume":true,"restart_reason":reason,"revision":revision,
+            "uncertainty":uncertainty,"lost_attempts":lost.len(),"replayed":false}),
+    )?;
+    Ok(RestartResume::Resumed)
+}
+
 /// Recovers one unfinished task from its durable checkpoints. Returns the task to
 /// drive when nothing about it is unknown. A held task is recorded once: a restart
 /// that finds it already held for the same reason adds no new event. `interrupted`:
@@ -1138,14 +1283,70 @@ fn recover_task_tx(
         Some("native_control_outcome_unknown")
     } else if unknown
         || legacy_settled
-        || (interrupted && !lifecycle::automatic::enabled(db, task)?)
+        || (interrupted
+            && (state == TaskState::WaitingUser
+                || waits::projection_tx(db, &task)?
+                    .iter()
+                    .any(|w| matches!(w["status"].as_str(), Some("open" | "ready")))))
     {
+        // An interrupted turn with a question or wait keeps that wait's authority (a
+        // barrier); any other interrupted turn continues below.
         Some("native_session_outcome_unknown")
     } else {
         None
     };
+    // A restart is infrastructure: a plan being planned, executed, reviewed or
+    // verified resumes in its state on the same rung without a new revision once its
+    // processes are confirmed gone ([`restart_resume_tx`]). A verification run the
+    // restart interrupted is settled as unknown and rerun by the runtime when the
+    // driver verifies again (`completion::settle_interrupted_verification_tx`), never
+    // a continuation. Answers, legacy starts, desktop controls, questions and waits
+    // keep their own rules.
+    let restart_reason = match reason {
+        Some(
+            r @ ("native_session_outcome_unknown"
+            | "native_outside_outcome_unknown"
+            | "native_verification_outcome_unknown"),
+        ) => Some(r),
+        None if interrupted => Some("native_service_interrupted"),
+        _ => None,
+    };
+    if let Some(restart_reason) = restart_reason.filter(|r| {
+        !legacy
+            && match state {
+                TaskState::Planning | TaskState::Executing | TaskState::Reviewing => {
+                    *r != "native_verification_outcome_unknown"
+                }
+                TaskState::Verifying => true,
+                _ => false,
+            }
+    }) {
+        let waiting = waits::projection_tx(db, &task)?
+            .iter()
+            .any(|w| matches!(w["status"].as_str(), Some("open" | "ready" | "resuming")));
+        if !waiting {
+            match restart_resume_tx(db, task, state, restart_reason, boot)? {
+                RestartResume::Resumed => return Ok(Some((task.to_owned(), owner, state))),
+                RestartResume::Paused => return Ok(None),
+                RestartResume::NotApplicable => {}
+            }
+        }
+    }
     if let Some(reason) = reason {
-        if lifecycle::automatic::pause_unsettled_tx(db, task, reason)? {
+        // No-stop policy (every task): the unknown outcome becomes a continuation that
+        // records the uncertainty for the next coordinator, which re-verifies it once
+        // the host has settled the processes. Only a paused or waiting task, or one
+        // with an open wait, keeps the barrier for its own authority.
+        let was_held = lifecycle::automatic::held(db, task)?;
+        if lifecycle::automatic::continue_unsettled_tx(db, task, reason)? {
+            if !was_held {
+                let mut required =
+                    json!({"reason":reason,"previous":state,"replayed":false,"continued":true});
+                if legacy_settled {
+                    required["settled_barrier"] = json!(LEGACY_EFFECT);
+                }
+                recovery_required_once_tx(db, task, required)?;
+            }
             return Ok(None);
         }
         // Already held for exactly this (the effective) reason in the state it
@@ -1163,17 +1364,14 @@ fn recover_task_tx(
             let mut required = json!({"reason":reason,"previous":state,"replayed":false});
             if legacy_settled {
                 required["settled_barrier"] = json!(LEGACY_EFFECT);
-                lifecycle::event_tx(db, &task, "NATIVE_RECOVERY_REQUIRED", required)?;
+                recovery_required_once_tx(db, task, required)?;
                 domain::native_barrier_settled_tx(db, &task, LEGACY_EFFECT, reason)?;
             } else {
-                lifecycle::event_tx(db, &task, "NATIVE_RECOVERY_REQUIRED", required)?;
+                recovery_required_once_tx(db, task, required)?;
                 domain::native_recovery_required_tx(db, &task, reason)?;
             }
         }
-    } else if interrupted
-        && !matches!(state, TaskState::Paused | TaskState::WaitingUser)
-        && lifecycle::automatic::enabled(db, task)?
-    {
+    } else if interrupted && !matches!(state, TaskState::Paused | TaskState::WaitingUser) {
         domain::stop_tx(db, task, "native_service_interrupted")?;
     } else if matches!(
         state,
@@ -1256,7 +1454,9 @@ pub(super) const SYSTEM_PROC: &str = "/proc";
 
 impl Runtime {
     pub(crate) async fn recover(self: &Arc<Self>) -> CoreResult<()> {
-        self.recover_from(std::path::Path::new(SYSTEM_PROC)).await
+        self.recover_from(std::path::Path::new(SYSTEM_PROC)).await?;
+        // Continuations this recovery recorded (or found) run without a scheduler tick.
+        self.follow_owed_continuations().await
     }
 
     /// Called once after acquiring the project scheduler lease, before publication.
@@ -1416,6 +1616,18 @@ impl Runtime {
                         if held.as_deref() == Some("native_recovery_failed") {
                             return Ok(());
                         }
+                        // No-stop policy: continue it with a fresh plan when the store
+                        // still accepts a continuation; otherwise hold it with the reason.
+                        let continued = isolated(db, || {
+                            if lifecycle::automatic::held(db, task)? {
+                                return Ok(true);
+                            }
+                            domain::stop_tx(db, task, "native_recovery_failed")?;
+                            lifecycle::automatic::held(db, task)
+                        });
+                        if continued.unwrap_or(false) {
+                            return Ok(());
+                        }
                         lifecycle::event_tx(
                             db,
                             task,
@@ -1447,40 +1659,16 @@ impl Runtime {
                     runtime.progress(&task, &owner, cancelled.clone()).await
                 };
                 if let Err(error) = result {
-                    // A completion gap is not an unknown outcome: nothing was lost and
-                    // nothing is running. It takes the same path as on a live driver, so
-                    // the coordinator (then the owner) decides, never an "interrupted" hold.
-                    let t = task.clone();
-                    let automatic = match runtime
-                        .host
-                        .executor
-                        .read(move |db| lifecycle::automatic::enabled(db, &t))
-                    {
-                        Ok(reply) => matches!(reply.await, Ok(Ok(true))),
-                        Err(_) => false,
-                    };
-                    if !*cancelled.borrow()
-                        && !*runtime.stop.borrow()
-                        && (automatic || error.code().starts_with("completion_"))
-                    {
+                    // The same path as on a live driver, for every task: the stop is a
+                    // continuation on the next rung of the strategy ladder (no-stop
+                    // policy), never an "interrupted" hold for the owner.
+                    if !*cancelled.borrow() && !*runtime.stop.borrow() {
                         runtime
                             .stop_after_error(&task, &owner, error, cancelled.clone())
                             .await;
-                    } else if !*cancelled.borrow() && !*runtime.stop.borrow() {
-                        let reason = error.code().to_owned();
-                        if let Ok(reply) = runtime.host.executor.write(move |db| {
-                            lifecycle::event_tx(
-                                db,
-                                &task,
-                                "NATIVE_RECOVERY_REQUIRED",
-                                json!({"reason":reason,"replayed":false}),
-                            )?;
-                            domain::native_recovery_required_tx(db, &task, &reason)
-                        }) {
-                            let _ = reply.await;
-                        }
                     }
                 }
+                runtime.driver_ended(&task, &cancelled).await;
                 done.send_replace(true);
             })
             .await;
@@ -1787,9 +1975,15 @@ mod tests {
                 let (state,blocker,epoch):(String,String,i64)=db.query_row(
                     "SELECT t.state,t.blocker,o.epoch FROM runtime_tasks t JOIN task_owners o USING(task_id) WHERE t.task_id=?",
                     [task],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+                // No-stop policy: the unknown outcome is a continuation that carries it
+                // for the coordinator, never a hold for the owner.
                 assert_eq!(state,"RECOVERING");
-                assert_eq!(blocker,reason);
+                assert_eq!(blocker,"automatic_continuation_pending","{task}");
                 assert_eq!(epoch,2);
+                let continued:String=db.query_row(
+                    "SELECT json_extract(payload_json,'$.reason') FROM runtime_events WHERE task_id=? AND type='AUTOMATIC_CONTINUATION' ORDER BY id DESC LIMIT 1",
+                    [task],|r|r.get(0))?;
+                assert!(continued==reason || reason=="native_session_outcome_unknown" && continued=="native_service_interrupted","{task}: {continued}");
             }
             assert_eq!(db.query_row("SELECT count(*) FROM delegation_provisioning",[],|r|r.get::<_,i64>(0))?,3);
             // The host that ran them is gone and no engine works in the project: the
@@ -1988,6 +2182,188 @@ mod tests {
         drop(runtime);
         service.stop().await.unwrap();
         drop(service);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+    use cortex_core::{lifecycle::TaskMachine, OpenMode, ProjectKey, Store, StoreChannel};
+    use std::os::unix::fs::PermissionsExt;
+    fn store() -> (std::path::PathBuf, Store) {
+        let root = std::env::temp_dir().join(format!(
+            "native-restart-resume-{}",
+            crate::native_effects::identity().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = Store::open(
+            ProjectKey::new(&root, StoreChannel::Dev).unwrap(),
+            OpenMode::Initialize,
+        )
+        .unwrap();
+        TaskMachine::new(&store)
+            .create("t", "goal", "owner")
+            .unwrap();
+        store
+            .write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=4", [])?;
+                // A worker the dead service ran, settled by this recovery: no result.
+                db.execute("INSERT INTO runtime_nodes(task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status,assignment_ref)
+                    VALUES ('t',4,'impl','worker-backend-dev','work','[]','[\"src\"]','execution','running','a1')",[])?;
+                db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,channel_id,engine_session_ref,owner_epoch,created_at,updated_at)
+                    VALUES ('a1','t','x1','worker-backend-dev','ready','terminated','c1','es','1','now','now')",[])?;
+                db.execute("INSERT INTO trusted_channels(channel_id,secret_hash,task_id,principal_thread_id,role,assignment_id,attempt_id,owner_epoch,issued_at)
+                    VALUES ('c1','fixture','t','thread','worker','a1','x1',1,'now')",[])?;
+                // A write the gone session left without a final receipt.
+                db.execute("INSERT INTO runtime_requests VALUES ('t','w1','c1','project_write','digest','{\"path\":\"src/lib.rs\"}')",[])?;
+                Ok(())
+            })
+            .unwrap();
+        (root, store)
+    }
+    fn count(store: &Store, kind: &str) -> i64 {
+        store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT count(*) FROM runtime_events WHERE task_id='t' AND type=?",
+                    [kind],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    }
+    /// Owner stores 2026-11-21 13:54 (cortex 323970-323984, Youtube 49909): a restart
+    /// turned every interrupted task into a ladder rung (`repair`) and a new plan. It
+    /// resumes on the same rung now, in the same revision, with the gone session's
+    /// open effects settled once for re-verification and its attempt ended as
+    /// `runtime_restart`; a restart that finds the same point three times pauses the
+    /// task for the runtime's own recheck instead (`boot_recovery`).
+    #[test]
+    fn a_restart_resumes_on_the_same_rung_and_a_crash_loop_pauses() {
+        let (root, store) = store();
+        let recover = |store: &Store| {
+            store.write(|db| {
+                recover_task_tx(
+                    db,
+                    "t",
+                    "EXECUTING",
+                    "owner".into(),
+                    1,
+                    false,
+                    true,
+                    Some("boot"),
+                )
+            })
+        };
+        let resumed = recover(&store).unwrap();
+        assert!(matches!(resumed, Some((_, _, TaskState::Executing))));
+        let (state, revision, settled, class): (String, i64, String, String) = store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT t.state,t.revision,(SELECT json_extract(result_json,'$.settled_by') FROM runtime_requests WHERE request_key='w1'),
+                        (SELECT json_extract(payload_json,'$.failure_class') FROM task_events WHERE event_type='assignment_failed')
+                     FROM runtime_tasks t WHERE task_id='t'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            (state.as_str(), revision, settled.as_str(), class.as_str()),
+            ("EXECUTING", 4, "runtime_reverify", "runtime_restart")
+        );
+        assert_eq!(count(&store, "AUTOMATIC_CONTINUATION"), 0);
+        assert_eq!(count(&store, "NATIVE_RECOVERY_RESUMED"), 1);
+        // Two more restarts at the same point resume again; the fourth pauses.
+        for _ in 0..2 {
+            assert!(recover(&store).unwrap().is_some());
+        }
+        assert_eq!(count(&store, "LOOP_OBSERVED"), 2);
+        assert!(recover(&store).unwrap().is_none());
+        let (state, pause): (String, String) = store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT (SELECT state FROM runtime_tasks WHERE task_id='t'),
+                        json_extract(payload_json,'$.pause_kind') FROM runtime_events WHERE type='AUTOMATIC_PAUSED'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            (state.as_str(), pause.as_str()),
+            ("RECOVERING", "infrastructure")
+        );
+        assert_eq!(count(&store, "LOOP_BROKEN"), 1);
+        assert_eq!(count(&store, "AUTOMATIC_CONTINUATION"), 0);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// A restart in the middle of the final verification left its run without a
+    /// finish record; it used to become a ladder continuation (a replan). The task
+    /// stays VERIFYING on the same rung, and the driver settles that run as unknown
+    /// and reruns verification itself.
+    #[test]
+    fn an_interrupted_verification_stays_verifying_without_a_continuation() {
+        let (root, store) = store();
+        store
+            .write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='VERIFYING'", [])?;
+                db.execute("UPDATE runtime_nodes SET status='completed',result_json='{}'", [])?;
+                db.execute("DELETE FROM runtime_requests", [])?;
+                db.execute(
+                    "INSERT INTO runtime_requests VALUES ('t','verify-1','native-verifier','native_verification_intent','digest','{\"revision\":4}')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let resumed = store
+            .write(|db| {
+                recover_task_tx(
+                    db,
+                    "t",
+                    "VERIFYING",
+                    "owner".into(),
+                    1,
+                    false,
+                    false,
+                    Some("boot"),
+                )
+            })
+            .unwrap();
+        assert!(matches!(resumed, Some((_, _, TaskState::Verifying))));
+        let state: String = store
+            .read(|db| Ok(db.query_row("SELECT state FROM runtime_tasks", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(state, "VERIFYING");
+        assert_eq!(count(&store, "AUTOMATIC_CONTINUATION"), 0);
+        assert_eq!(count(&store, "NATIVE_RECOVERY_REQUIRED"), 0);
+        assert_eq!(count(&store, "NATIVE_RECOVERY_RESUMED"), 1);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// Owner stores: ~20 restarts re-flagged the same parked tasks (236
+    /// `NATIVE_RECOVERY_REQUIRED`, up to 16 per task). One per restart burst now.
+    #[test]
+    fn recovery_required_is_recorded_once_per_burst() {
+        let (root, store) = store();
+        store
+            .write(|db| {
+                for _ in 0..3 {
+                    recovery_required_once_tx(
+                        db,
+                        "t",
+                        json!({"reason":"native_session_outcome_unknown","previous":"WAITING_USER","replayed":false}),
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(count(&store, "NATIVE_RECOVERY_REQUIRED"), 1);
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

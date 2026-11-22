@@ -7,7 +7,10 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{net::UnixStream, process::Command, time::timeout};
 pub use workspace_client::bridge::{frame_failure, incoming, Incoming, Refused, ORDINARY_REQUESTS};
 use workspace_client::{BoxFuture, Connector, Stream};
-use workspace_service::connect;
+use workspace_service::{
+    connect,
+    dev_extraction::{DevExtraction, OpenerCapture},
+};
 
 /// Marks an error as the machine's own answer, so a caller can tell it from a reply that never came.
 const REFUSED: &str = "refused:";
@@ -16,27 +19,35 @@ const STARTUP_DEADLINE: Duration = workspace_client::bridge::STARTUP_DEADLINE;
 /// This account's service socket, started through the user service manager when absent.
 struct Unix {
     socket: PathBuf,
-    start_unit: bool,
+    startup: Startup,
     starting: tokio::sync::Mutex<()>,
+}
+#[derive(Clone, Copy)]
+enum Startup {
+    Installed,
+    SocketOnly,
+    Extracted,
 }
 impl Unix {
     async fn connection(&self) -> Result<UnixStream, String> {
+        self.connection_with(|| Command::new("/usr/bin/systemctl"))
+            .await
+    }
+    async fn connection_with(&self, systemctl: impl Fn() -> Command) -> Result<UnixStream, String> {
         if let Ok(stream) = connect(&self.socket).await {
             return Ok(stream);
         }
-        if !self.start_unit {
-            return Err("service_unavailable".into());
+        match self.startup {
+            Startup::Installed => (),
+            Startup::SocketOnly => return Err("service_unavailable".into()),
+            Startup::Extracted => return Err("extracted_dev_service_unavailable".into()),
         }
         // Serialize startup, never replay the caller's RPC or expose a shell to JS.
         let _guard = self.starting.lock().await;
         if let Ok(stream) = connect(&self.socket).await {
             return Ok(stream);
         }
-        Bridge::start_service(
-            || Command::new("/usr/bin/systemctl"),
-            &workspace_protocol::channel::current().unit,
-        )
-        .await?;
+        Bridge::start_service(systemctl, &workspace_protocol::channel::current().unit).await?;
         self.wait_for_socket(STARTUP_DEADLINE).await
     }
     async fn wait_for_socket(&self, grace: Duration) -> Result<UnixStream, String> {
@@ -58,6 +69,7 @@ impl Connector for Unix {
 
 pub struct Bridge {
     shared: workspace_client::Bridge,
+    opener_capture: Option<OpenerCapture>,
     /// The socket connector itself, for the late-socket wait the tests drive directly.
     #[cfg_attr(not(test), allow(dead_code))]
     unix: Arc<Unix>,
@@ -65,6 +77,16 @@ pub struct Bridge {
 impl Bridge {
     /// The socket is resolved by trusted native startup, never a JavaScript argument.
     pub fn for_user() -> Result<Self, String> {
+        if let Some(extraction) = DevExtraction::from_env().map_err(|error| error.to_string())? {
+            let mut bridge = Self::with(
+                extraction.runtime_dir().join("service.sock"),
+                Startup::Extracted,
+            );
+            bridge.opener_capture = extraction
+                .qualification_opener()
+                .map_err(|_| "qualification_opener_invalid")?;
+            return Ok(bridge);
+        }
         let runtime = std::env::var_os("XDG_RUNTIME_DIR").ok_or("service_unavailable")?;
         if !PathBuf::from(&runtime).is_absolute() {
             return Err("service_unavailable".into());
@@ -73,20 +95,21 @@ impl Bridge {
             workspace_protocol::channel::current()
                 .runtime_dir(&PathBuf::from(runtime))
                 .join("service.sock"),
-            true,
+            Startup::Installed,
         ))
     }
     pub fn new(socket: PathBuf) -> Self {
-        Self::with(socket, false)
+        Self::with(socket, Startup::SocketOnly)
     }
-    fn with(socket: PathBuf, start_unit: bool) -> Self {
+    fn with(socket: PathBuf, startup: Startup) -> Self {
         let unix = Arc::new(Unix {
             socket,
-            start_unit,
+            startup,
             starting: tokio::sync::Mutex::new(()),
         });
         Self {
             shared: workspace_client::Bridge::new(unix.clone()),
+            opener_capture: None,
             unix,
         }
     }
@@ -149,6 +172,12 @@ impl Bridge {
                     }
                     if system {
                         methods.push(json!("native.open_logs"));
+                    }
+                    let pr_opener = match self.unix.startup {
+                        Startup::Extracted => self.opener_capture.is_some(),
+                        _ => system,
+                    };
+                    if pr_opener {
                         methods.push(json!("native.open_pull_request"));
                     }
                 }
@@ -258,6 +287,32 @@ impl Bridge {
         }
         Ok(json!({"outcome":"opened"}))
     }
+    /// Same handoff used by the real View PR call. An extracted app must never fall
+    /// through to an installed opener, including when no recorder was configured.
+    fn capture_pull_request(&self, url: &str) -> Result<bool, String> {
+        if !matches!(self.unix.startup, Startup::Extracted) {
+            return Ok(false);
+        }
+        let capture = self
+            .opener_capture
+            .as_ref()
+            .ok_or("qualification_opener_missing")?;
+        capture
+            .record(url)
+            .map_err(|_| "qualification_opener_write_failed")?;
+        Ok(true)
+    }
+
+    #[cfg(any(feature = "desktop", test))]
+    pub(crate) fn probe_qualification_opener(&self) -> Result<(), String> {
+        match self
+            .capture_pull_request("https://qualification.invalid/cortex/view-pr?exact=1&arg=2")?
+        {
+            true => Ok(()),
+            false => Err("qualification_opener_inactive".into()),
+        }
+    }
+
     /// A task's pull request in the system browser. The address comes from the service, which
     /// recorded it from GitHub CLI and checks it against the repository's remote host; it is
     /// checked here again to be one plain https address before any program sees it.
@@ -280,6 +335,9 @@ impl Bridge {
             .ok_or(
                 "This pull request's address is not a plain https address, so it was not opened.",
             )?;
+        if self.capture_pull_request(url)? {
+            return Ok(json!({"outcome":"opened"}));
+        }
         let (program, args) =
             opener::system_opener().ok_or("No browser opener is installed on this machine.")?;
         let mut args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
@@ -316,7 +374,7 @@ impl Bridge {
 
 #[cfg(test)]
 mod tests {
-    use super::Bridge;
+    use super::{Bridge, Startup};
     use std::{
         io::Write,
         os::unix::fs::{DirBuilderExt, PermissionsExt},
@@ -377,6 +435,43 @@ mod tests {
         assert!(seen.iter().any(|e| e["state"] == "connected"));
         assert!(!seen.iter().any(|e| e["state"] == "disconnected"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn qualification_opener_is_mandatory_for_extracted_pr_handoffs() {
+        let socket = Path::new("/nonexistent/service.sock").to_owned();
+        let extracted = Bridge::with(socket.clone(), Startup::Extracted);
+        assert_eq!(
+            extracted.probe_qualification_opener(),
+            Err("qualification_opener_missing".into())
+        );
+        let ordinary = Bridge::with(socket, Startup::Installed);
+        assert_eq!(
+            ordinary.probe_qualification_opener(),
+            Err("qualification_opener_inactive".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn extracted_dev_connects_only_to_its_socket_and_never_starts_the_installed_unit() {
+        let root = Path::new("/tmp").join(format!("cw-isolated-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let path = root.join("service.sock");
+        let bridge = Bridge::with(path.clone(), Startup::Extracted);
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let no_systemctl = || panic!("an extracted desktop must not invoke systemctl");
+        bridge.unix.connection_with(no_systemctl).await.unwrap();
+        drop(listener);
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            bridge.unix.connection_with(no_systemctl).await.unwrap_err(),
+            "extracted_dev_service_unavailable"
+        );
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[tokio::test]

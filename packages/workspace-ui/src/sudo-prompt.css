@@ -1,0 +1,8 @@
+/* A sudo password prompt: a card over the corner of the window, never a modal, so the rest of the work stays usable. */
+.sudo-stack { position: fixed; right: 16px; bottom: 16px; z-index: 45; display: flex; flex-direction: column; gap: 10px; width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; }
+.sudo-stack[data-shell="phone"] { left: 8px; right: 8px; bottom: max(8px, env(safe-area-inset-bottom)); width: auto; }
+.sudo-card { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--warn-line, var(--line)); border-radius: 10px; background: var(--bg-raised); box-shadow: var(--shadow-menu); min-width: 0; margin: 0; }
+.sudo-card > .row { gap: 8px; min-width: 0; }
+.sudo-left { margin-left: auto; flex: none; }
+.sudo-command { display: block; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--bg-canvas); font-size: var(--t-sec); overflow-wrap: anywhere; max-height: 96px; overflow-y: auto; }
+.sudo-card .inp { width: 100%; min-width: 0; }

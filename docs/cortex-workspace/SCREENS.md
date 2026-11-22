@@ -165,7 +165,7 @@ The Android app mounts the same Workspace interface with a phone shell. It diffe
 - Code is read-only, there is no terminal, no file editing or system folder chooser, and no keyboard shortcut hints.
 - Phone-only screens: connect (start), scan the QR code with the camera, paste a pairing link, a check-and-wait step that shows the fingerprint until the computer allows or denies, the machine sheet (rename, forget), and phone settings (appearance and About). The interface has App lock and relay pages that appear only when the native shell offers them; the Android app offers neither, because app lock (to be optional and off by default) and a phone-side relay override are not built.
 
-The desktop's Settings, Remote access page holds the switch, the pairing QR code with a copy-link control and its time left, the pending request with Allow and Deny, the paired devices with Revoke, and the relay setting. There is no short pairing code.
+The desktop's Settings, Remote access page holds the switch, the pairing QR code with a copy-link control and its time left, the pending request with Allow and Deny, the paired devices with Revoke, and the relay setting. It also holds the "Passwords and tokens from phones" switch ([sudo password prompt](#sudo-password-prompt), [owner action card](#owner-action-card)). There is no short pairing code.
 
 ### Accessibility
 
@@ -548,10 +548,40 @@ The machine service raises the desktop notifications, so they also arrive while 
 | Task failed | a task failed or could not start, with no question | the task |
 | Planning question waiting | a sprint's planning asks the owner (its planning task's question included, never raised as a task's) | the sprint's planning chat, or its Conversation for a sprint planned by a planning task |
 | Sprint paused | a sprint paused itself; the second line is its reason (not Manual mode's stop after a result, nor the owner's own pause, close or delete). In an Automatic sprint a saved hold that requires the owner raises it, including a blocked acceptance or integration | the sprint |
+| No progress | a working task (not paused, waiting for you or finished) has made no progress for the chosen time, 3 hours unless changed: "<title> has made no progress for 3 h." and a second line with what it spent (time working, turns, tokens or "tokens not reported") and the short reasons its last attempts hit. Again every 3 hours while it stays stuck; the task keeps working and is never paused or changed. Progress is an accepted plan, a worker result, an approving review, passed verification or a passed check (or the runtime's `TASK_PROGRESS` records once it writes them); the clock restarts when the task resumes or you answer, steer or continue it. The runtime records `NO_PROGRESS_NOTIFIED` with the numbers only | the task |
 
-Routine progress, an automatic acceptance that went through and anything on view in the focused window raise nothing. One notification stands for each task or sprint: a newer state replaces it (an answered question followed by a result, for example), and resolving it any way (answering, accepting, closing, archiving) withdraws it. Settings, Appearance turns notifications off and on, and below that switch each kind on its own; all are on at first. It also holds the "Show every tool call" switch described under Task workers.
+Routine progress, an automatic acceptance that went through and anything on view in the focused window raise nothing. One notification stands for each task or sprint: a newer state replaces it (an answered question followed by a result, for example), and resolving it any way (answering, accepting, closing, archiving) withdraws it. Settings, Appearance turns notifications off and on, and below that switch each kind on its own; all are on at first. Below the kinds, "Tasks with no progress" picks Off, 1 h, 2 h, 3 h (the default) or 6 h. While a working task is past that time its title band shows a quiet "No progress for N h" badge. The task inspector's Spend section and the top of Work details show what the task spent, from the runtime's records only: time in a working state, engine sessions and turns by engine and model, and tokens where an engine report is stored, otherwise "Not reported" (the runtime does not record per-turn token reports yet). It also holds the "Show every tool call" switch described under Task workers.
 
 A tab that already shows the task or sprint (any of its tabs) comes forward instead of a second one, the active tab first, and moves to the place; otherwise the active tab goes there, and Settings with unsaved changes asks first. A question already answered or withdrawn opens the task or sprint without scrolling; a task or sprint that no longer exists opens its project's board, and an unknown project Home. No dialog is shown. Opening a notification marks nothing that opening the place by hand would not. A click while no window is open starts the app on that place. Platform behavior and limits are in [platforms](platforms.md#desktop-notifications-on-gnome-and-wayland).
+
+## Sudo password prompt
+
+**Status: built in the shared interface (`packages/workspace-ui/src/sudo-prompt.tsx`, `sudo-prompt.css`) and shown by the desktop and the phone shell alike; covered by Vitest and no-paid service tests with a fake `sudo` only. Not seen in the native window or on a device, and no real sudo password has been typed through it.**
+
+When a command a task runs on the machine asks for root with `sudo`, a card titled **Password for sudo** appears over the bottom right corner of the window (on a phone, across the bottom of the screen). It is not modal: the rest of the interface, and the task's other work, carry on; only the asking command waits. The card names the project, task and worker, shows sudo's command line in a code block and the folder it runs in, says that the password goes to sudo on the machine and is neither saved nor shown to the model, and counts down to its close (10 minutes). Below that is a masked password field (no autofill, spell check or capitalization) with **Cancel** and **Submit**. Submit sends the password once and clears the field; the card closes when the machine confirms. Cancel sends a cancel and sudo fails as it would without a password. A refusal (the prompt already closed, or a password that spans lines) shows under the field in words. Several open prompts stack, oldest first. The prompts are read every 2 seconds while the machine is connected; an older service without them shows nothing.
+
+On a phone the same card answers over the paired connection. While the computer's Settings, Remote access, **Passwords and tokens from phones** is off, the phone's card has no field and no Submit: it says passwords and tokens from phones are turned off on the computer and offers Cancel only. That switch is on by default and appears only when the machine reports it.
+
+## Owner action card
+
+**Status: built in the shared interface (`packages/workspace-ui/src/owner-actions.tsx`, `owner-actions.css`, `terminal-command.ts`) on the service's `owner_actions.list`/`owner_actions.act`, and shown by the desktop and the phone shell alike; covered by Vitest and no-paid service tests with a fake `gh` and fake tokens only. Not seen in the native window or on a device; no real sign-in or token has gone through it.**
+
+When a task's work needs access the machine lacks (it is not signed in to GitHub, Codex or Claude, or `sudo` needs the owner), the task does not stop and the blocked work waits. A card appears over the top right corner of the window (on a phone, across the top of the screen), titled by what is missing: **Sign in to GitHub**, **Sign in to Codex**, **Sign in to Claude**, **sudo needs your password**, or **Access needed:** and the service's name. It is not modal. It names the project and task, says in plain words what the task could not do, and offers what the machine supports for that service:
+
+| Service | Open sign-in in terminal | Paste a token | Check again |
+| --- | --- | --- | --- |
+| GitHub | `gh auth login` | yes (`gh auth login --with-token`) | yes |
+| Codex | `codex login` | no | yes |
+| Claude | `claude auth login` | no | yes |
+| sudo | no (the card says a Password for sudo prompt opens when the command asks) | no | yes |
+| other | no | no | no |
+
+- **Open sign-in in terminal** (desktop with a terminal) opens the task, opens the bottom terminal on its project shell (the project folder) and types the login command there once. Without a terminal, and always on a phone, the card shows the command in a code block and says to run it in a terminal on the computer, then check again. The phone has no terminal.
+- **Paste a token** is a masked field (no autofill or spell check) with **Sign in with token**. Submitting clears the field at once; the token goes to the CLI on the machine once and is not saved or shown to the model ([security](../../SECURITY.md#owner-actions-sign-ins-and-pasted-tokens)). On a phone with Settings, Remote access, **Passwords and tokens from phones** off, the card has no field and says to paste the token on the computer.
+- **I've signed in, check again** (for sudo, **Check again**) asks the machine to check now; when the access is there the card closes, otherwise it says the sign-in is still missing. The machine also checks every 60 seconds while the card is open, and a sudo card closes when a Password for sudo prompt of the same task is answered.
+- **Dismiss** closes the card; the task retries the blocked work anyway. **Open task** goes to the task.
+
+Several cards stack, oldest first. They are read every 5 seconds while the machine is connected; an older service without them shows nothing. A new card raises one window notification on the desktop (through the window's own notifications, while notifications and "Questions and permissions" are on and the task is not on view), opening the task; it is announced once. The phone has no notifications.
 
 ## Keyboard and visual rules
 

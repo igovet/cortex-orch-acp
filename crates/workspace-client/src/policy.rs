@@ -179,6 +179,7 @@ fn remote(call: &Call) -> Result<(), String> {
     let ok = match call.operation.as_str() {
         "remote.status" | "remote.pairing.start" | "remote.pairing.cancel" => map.is_empty(),
         "remote.enable" => map.len() == 1 && map.get("enabled").is_some_and(Value::is_boolean),
+        "remote.sudo.set" => map.len() == 1 && map.get("allowed").is_some_and(Value::is_boolean),
         "remote.pairing.decide" => {
             map.len() == 2 && id("requestId") && map.get("allow").is_some_and(Value::is_boolean)
         }
@@ -193,6 +194,80 @@ fn remote(call: &Call) -> Result<(), String> {
                                 && !text.chars().any(char::is_control)
                         })
                 })
+        }
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(refused())
+    }
+}
+
+/// Longest sudo password a window sends (the service applies the same bound).
+const SUDO_PASSWORD_BYTES: usize = 1024;
+
+/// `askpass.list` with no parameters, or `askpass.answer` naming one prompt with either a
+/// password or `cancel: true`.
+fn sudo_prompt(call: &Call) -> Result<(), String> {
+    let map = call.message.as_object().ok_or_else(refused)?;
+    let id = map
+        .get("promptId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| {
+            !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
+        });
+    let ok = match call.operation.as_str() {
+        "askpass.list" => map.is_empty(),
+        "askpass.answer" => {
+            id && map.len() == 2
+                && (map.get("cancel") == Some(&Value::Bool(true))
+                    || map
+                        .get("password")
+                        .and_then(Value::as_str)
+                        .is_some_and(|p| {
+                            !p.is_empty()
+                                && p.len() <= SUDO_PASSWORD_BYTES
+                                && !p.contains(['\n', '\r', '\0'])
+                        }))
+        }
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(refused())
+    }
+}
+
+/// Longest sign-in token a window sends (the service applies the same bound).
+const OWNER_TOKEN_BYTES: usize = 4096;
+
+/// `owner_actions.list` with no parameters, or `owner_actions.act` naming one project and
+/// action with `recheck`, `terminal` or `dismiss`, or `token` with the pasted token.
+fn owner_action(call: &Call) -> Result<(), String> {
+    let map = call.message.as_object().ok_or_else(refused)?;
+    let id = |key: &str| {
+        map.get(key).and_then(Value::as_str).is_some_and(|t| {
+            !t.is_empty() && t.len() <= 96 && t.bytes().all(|b| b.is_ascii_graphic())
+        })
+    };
+    let ok = match call.operation.as_str() {
+        "owner_actions.list" => map.is_empty(),
+        "owner_actions.act" => {
+            id("projectId")
+                && id("actionId")
+                && match (map.len(), map.get("action").and_then(Value::as_str)) {
+                    (3, Some("recheck" | "terminal" | "dismiss")) => true,
+                    (4, Some("token")) => {
+                        map.get("token").and_then(Value::as_str).is_some_and(|t| {
+                            !t.is_empty()
+                                && t.len() <= OWNER_TOKEN_BYTES
+                                && !t.contains(['\n', '\r', '\0'])
+                        })
+                    }
+                    _ => false,
+                }
         }
         _ => false,
     };
@@ -256,6 +331,12 @@ pub fn phone_allows(call: &Call) -> bool {
         };
         return phone_machine_operation(op, call.message.get("params").unwrap_or(&Value::Null));
     }
+    // An owner action's terminal login opens in the desktop's own terminal.
+    if call.operation == "owner_actions.act"
+        && call.message.get("action") == Some(&Value::from("terminal"))
+    {
+        return false;
+    }
     true
 }
 
@@ -283,6 +364,16 @@ fn authorize_body(body: Value, phone: bool) -> Result<Call, String> {
         remote(&call)?;
         return Ok(call);
     }
+    // The owner's sudo password prompts: list them, or answer one with a password or a
+    // cancel. Exact shapes; the password is passed through, never kept or logged here.
+    if call.operation.starts_with("askpass.") {
+        return sudo_prompt(&call).map(|()| call);
+    }
+    // Owner actions: list them, or act on one. Exact shapes; a pasted token is passed
+    // through once, never kept or logged here.
+    if call.operation.starts_with("owner_actions.") {
+        return owner_action(&call).map(|()| call);
+    }
     // Desktop notifications: what the focused window shows and the kinds the owner wants, and
     // the target kept for a window the service started from a click. Exact shapes; the
     // service checks every id again.
@@ -306,15 +397,28 @@ fn authorize_body(body: Value, phone: bool) -> Result<Call, String> {
             _ => false,
         };
         let kinds = map.get("kinds").and_then(Value::as_array).is_some_and(|k| {
-            k.len() <= 6
+            k.len() <= 7
                 && k.iter().all(|k| {
                     matches!(
                         k.as_str(),
-                        Some("question" | "stop" | "result" | "failed" | "planning" | "paused")
+                        Some(
+                            "question"
+                                | "stop"
+                                | "result"
+                                | "failed"
+                                | "planning"
+                                | "paused"
+                                | "stalled"
+                        )
                     )
                 })
         });
-        if map.len() != 2 || !focused || !kinds {
+        // The no-progress threshold in hours, when the window names one.
+        let stall = match map.get("stallHours") {
+            None => Some(2),
+            Some(h) => matches!(h.as_u64(), Some(1 | 2 | 3 | 6)).then_some(3),
+        };
+        if stall != Some(map.len()) || !focused || !kinds {
             return Err(refused());
         }
         return Ok(call);
@@ -761,6 +865,9 @@ mod tests {
         assert!(!desktop("remote.relay.set", json!({"url":""})));
         assert!(!desktop("remote.relay.set", json!({"url":7})));
         assert!(!desktop("remote.unknown", json!({})));
+        assert!(desktop("remote.sudo.set", json!({"allowed":false})));
+        assert!(!desktop("remote.sudo.set", json!({"allowed":"no"})));
+        assert!(!phone("remote.sudo.set", json!({"allowed":true})));
         // The origin rule applies to remote settings too.
         assert!(authorize(
             "other",
@@ -950,5 +1057,66 @@ mod tests {
         assert!(phone_method("machine.call"));
         assert!(!phone_method("terminal.open"));
         assert!(!phone_method("remote.status"));
+    }
+
+    /// A sudo password prompt is listed and answered from the desktop and the phone in
+    /// exact shapes only.
+    #[test]
+    fn sudo_prompts_are_listed_and_answered_in_exact_shapes() {
+        for allowed in [desktop, phone] {
+            assert!(allowed("askpass.list", json!({})));
+            assert!(!allowed("askpass.list", json!({"x":1})));
+            assert!(allowed(
+                "askpass.answer",
+                json!({"promptId":"ab12","password":"pw with spaces"})
+            ));
+            assert!(allowed(
+                "askpass.answer",
+                json!({"promptId":"ab12","cancel":true})
+            ));
+            for bad in [
+                json!({"promptId":"ab12"}),
+                json!({"promptId":"ab12","cancel":false}),
+                json!({"promptId":"ab12","password":""}),
+                json!({"promptId":"ab12","password":"a\nb"}),
+                json!({"promptId":"ab12","password":"x".repeat(1025)}),
+                json!({"promptId":"zz","password":"x"}),
+                json!({"promptId":"ab12","password":"x","cancel":true}),
+            ] {
+                assert!(!allowed("askpass.answer", bad.clone()), "{bad}");
+            }
+            assert!(!allowed("askpass.other", json!({})));
+        }
+    }
+
+    /// Owner actions are listed and acted on in exact shapes; a phone never asks for the
+    /// desktop terminal login.
+    #[test]
+    fn owner_actions_are_listed_and_acted_on_in_exact_shapes() {
+        let act = |action: &str| json!({"projectId":"wp_1","actionId":"oa_1","action":action});
+        let token =
+            |t: &str| json!({"projectId":"wp_1","actionId":"oa_1","action":"token","token":t});
+        for allowed in [desktop, phone] {
+            assert!(allowed("owner_actions.list", json!({})));
+            assert!(!allowed("owner_actions.list", json!({"x":1})));
+            for action in ["recheck", "dismiss"] {
+                assert!(allowed("owner_actions.act", act(action)), "{action}");
+            }
+            assert!(allowed("owner_actions.act", token("ghp_x")));
+            for bad in [
+                act("other"),
+                token(""),
+                token("a\nb"),
+                token(&"x".repeat(4097)),
+                json!({"projectId":"wp_1","actionId":"oa_1","action":"recheck","token":"t"}),
+                json!({"projectId":"wp_1","action":"recheck"}),
+                json!({"projectId":"wp 1","actionId":"oa_1","action":"recheck"}),
+            ] {
+                assert!(!allowed("owner_actions.act", bad.clone()), "{bad}");
+            }
+            assert!(!allowed("owner_actions.other", json!({})));
+        }
+        assert!(desktop("owner_actions.act", act("terminal")));
+        assert!(!phone("owner_actions.act", act("terminal")));
     }
 }

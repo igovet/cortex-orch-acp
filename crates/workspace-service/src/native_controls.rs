@@ -232,7 +232,7 @@ mod stop_continuation_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn continue_after_a_start_failure_relaunches_instead_of_stranding_recovery() {
+    async fn a_start_failure_continues_by_itself_instead_of_asking_the_owner() {
         let root =
             std::env::temp_dir().join(format!("stop-continue-{}", crate::identity().unwrap()));
         std::fs::create_dir(&root).unwrap();
@@ -263,17 +263,36 @@ mod stop_continuation_tests {
             )
             .await
             .unwrap();
-        until(&runtime, |(state, failures, open, _)| {
-            state == "WAITING_USER" && *failures == 1 && *open == 1
+        // No-stop policy: the failed start is a continuation the runtime relaunches by
+        // itself (a second launch attempt), spaced out while it keeps failing, and the
+        // owner is never asked.
+        until(&runtime, |(_, failures, open, owed)| {
+            *failures >= 2 && *open == 0 && !owed
         })
         .await;
-        let execution = runtime
+        let continued = runtime
+            .host
+            .executor
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT count(*) FROM runtime_events WHERE type='AUTOMATIC_CONTINUATION'
+                     AND json_extract(payload_json,'$.reason')='coordinator_session_start_failed'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(continued >= 1, "{continued}");
+        let questions = runtime
             .host
             .executor
             .read(|db| {
                 Ok(
-                    db.query_row("SELECT execution_id FROM workspace_tasks", [], |r| {
-                        r.get::<_, String>(0)
+                    db.query_row("SELECT count(*) FROM pending_questions", [], |r| {
+                        r.get::<_, i64>(0)
                     })?,
                 )
             })
@@ -281,47 +300,7 @@ mod stop_continuation_tests {
             .await
             .unwrap()
             .unwrap();
-        let page = runtime
-            .decisions(
-                "project".into(),
-                json!({"operation":"decisions.list","target":execution,"limit":100}),
-            )
-            .await
-            .unwrap();
-        let d = page["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|d| d["status"] == "pending")
-            .unwrap()
-            .clone();
-        // The owner reads the reason in plain words, never the raw blocker code.
-        let prompt = d["prompt"].as_str().unwrap();
-        assert!(
-            prompt.contains("the coordinator session could not start"),
-            "{prompt}"
-        );
-        assert!(!prompt.contains("_session_start_failed"), "{prompt}");
-        let option = d["options"][0].clone();
-        assert!(option["label"].as_str().unwrap().starts_with("Continue"));
-        runtime
-            .answer_command(
-                "project".into(),
-                json!({"protocol":{"major":1,"minor":8},"requestId":"answer","projectId":"project",
-                    "actorId":actor(),"operation":"decisions.answer","target":d["decisionId"],
-                    "expectedVersion":d["version"],"ownerEpoch":d["ownerEpoch"],
-                    "payload":{"executionId":execution,"acpSessionId":d["acpSessionId"],"batchId":null,
-                        "answers":[{"decisionId":d["decisionId"],"questionId":d["questionId"],
-                            "optionId":option["optionId"],"expectedVersion":d["version"]}]}}),
-            )
-            .await
-            .unwrap();
-        // The coordinator really relaunched (a second launch attempt), and its
-        // repeated failure is a new explicit owner question, not RECOVERING.
-        until(&runtime, |(state, failures, open, owed)| {
-            state == "WAITING_USER" && *failures == 2 && *open == 1 && !owed
-        })
-        .await;
+        assert_eq!(questions, 0);
         runtime.shutdown().await;
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
@@ -377,12 +356,14 @@ mod stop_continuation_tests {
         }
         routes.0.store(true, Ordering::SeqCst);
         runtime.continue_automatic_tasks().await.unwrap();
-        until(&runtime, |(_, failures, _, _)| *failures == 1).await;
+        // Relaunched once the route qualifies; the failing fixture start then keeps
+        // continuing (no-stop policy), so later relaunches may follow.
+        until(&runtime, |(_, failures, _, _)| *failures >= 1).await;
         runtime.settle_task(&task).await.unwrap();
         runtime.host.executor.read(move |db| {
             let resumed: i64 = db.query_row("SELECT count(*) FROM runtime_events WHERE task_id=? AND type='AUTOMATIC_RESUMED'",
                 [&task], |r| r.get(0))?;
-            assert_eq!(resumed, 1);
+            assert!(resumed >= 1, "{resumed}");
             let pause = automatic::projection(db, &task)?.unwrap()["pause"].clone();
             assert_ne!(pause["reason"], "native_task_route_unavailable");
             Ok(())
@@ -736,9 +717,15 @@ mod resume_tests {
             Ok(())
         }).unwrap().await.unwrap().unwrap();
         runtime.recover_fixture().await.unwrap();
+        // No-stop policy: the interrupted turn records no owner barrier; the paused task
+        // keeps the owner's own Pause and continues on Resume.
         assert_eq!(
-            sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await,
-            "PAUSED:native_session_outcome_unknown"
+            sql(
+                &runtime,
+                "SELECT state||':'||coalesce(blocker,'') FROM runtime_tasks"
+            )
+            .await,
+            "PAUSED:"
         );
         let error = runtime
             .control("project".into(), message(&execution, "paused-msg"))
@@ -835,8 +822,13 @@ mod resume_tests {
             sql(&runtime, "SELECT state FROM runtime_tasks").await,
             "RECOVERING"
         );
+        // No-stop policy: the unknown outcome is a continuation that records it.
         assert_eq!(
             sql(&runtime, "SELECT blocker FROM runtime_tasks").await,
+            "automatic_continuation_pending"
+        );
+        assert_eq!(
+            sql(&runtime, "SELECT json_extract(payload_json,'$.reason') FROM runtime_events WHERE type='AUTOMATIC_CONTINUATION'").await,
             "native_control_outcome_unknown"
         );
         let _ = task;
@@ -1004,6 +996,46 @@ mod resume_tests {
         close(root, runtime).await;
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn manual_planning_recovery_uses_the_task_choice_when_default_is_unavailable() {
+        let (root, runtime, _, task) = seeded(Routes {
+            generation: AtomicUsize::new(0),
+            default_available: false,
+        })
+        .await;
+        let owner = OwnerEpoch {
+            owner: "fixture".into(),
+            epoch: 1,
+        };
+        // Stop at the drive boundary, after route resolution and before any engine launch.
+        runtime.stop.send_replace(true);
+        let (_cancel, cancelled) = tokio::sync::watch::channel(false);
+        assert_eq!(
+            runtime
+                .recover_planning(&task, &owner, cancelled.clone())
+                .await
+                .unwrap_err()
+                .code(),
+            "native_route_authorization_unavailable"
+        );
+        exec(&runtime, "INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at)
+            SELECT task_id,'NATIVE_TASK_SETTINGS','runtime','{\"settings\":{\"model\":\"task-model\",\"effort\":\"\",\"mode\":\"read_only\",\"language\":\"auto\"},\"activation\":\"next_use\"}',created_at
+            FROM runtime_events LIMIT 1").await;
+        assert_eq!(
+            runtime.coordinator_route(&task, None).await.unwrap().model,
+            "task-model"
+        );
+        assert_eq!(
+            runtime
+                .recover_planning(&task, &owner, cancelled)
+                .await
+                .unwrap_err()
+                .code(),
+            "native_service_stopped"
+        );
+        close(root, runtime).await;
+    }
+
     /// The rows an earlier host left after a worker session start that it refused
     /// before launching the engine (`phase`/`error` as given), followed by the owner's
     /// free-text answer to the runtime stop question and an unconfirmed follow-up:
@@ -1036,6 +1068,30 @@ mod resume_tests {
     }
     fn message(execution: &str, key: &str) -> Value {
         json!({"projectId":"project","executionId":execution,"requestId":key,"action":"prompt","text":"Try again."})
+    }
+    /// The no-stop policy's continuation resumed (by a follower or the host tick).
+    async fn continued(runtime: &Arc<Runtime>) {
+        for _ in 0..200 {
+            runtime.continue_automatic_tasks().await.unwrap();
+            if sql(
+                runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='AUTOMATIC_RESUMED'",
+            )
+            .await
+                != "0"
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!(
+            "the continuation did not resume: {}",
+            sql(
+                runtime,
+                "SELECT state||':'||coalesce(blocker,'') FROM runtime_tasks"
+            )
+            .await
+        );
     }
     async fn coordinator_relaunched(runtime: &Runtime) {
         for _ in 0..200 {
@@ -1137,11 +1193,25 @@ mod resume_tests {
             .await,
             "1"
         );
+        // No-stop policy: the task is a continuation waiting for the host's process
+        // evidence; nothing restarts while the engine may still run.
+        assert_eq!(
+            sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await,
+            "RECOVERING:automatic_continuation_pending"
+        );
         let error = runtime
             .control("project".into(), message(&execution, "same-boot"))
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "native_shutdown_unconfirmed");
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='AUTOMATIC_RESUMED'"
+            )
+            .await,
+            "0"
+        );
         assert_eq!(sql(&runtime, "SELECT status FROM delegation_provisioning WHERE idempotency_key='legacy-assignment'").await, "ambiguous");
         // A recovery in a later boot: no process of that boot can still run.
         exec(&runtime, "UPDATE runtime_events SET payload_json=json_set(payload_json,'$.boot_id','an-earlier-boot') WHERE type='NATIVE_PROCESS_UNCONFIRMED'").await;
@@ -1151,10 +1221,8 @@ mod resume_tests {
         assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.evidence') FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'").await,
             "unconfirmed_attempt_from_previous_boot");
         std::fs::remove_dir_all(engine).unwrap();
-        runtime
-            .control("project".into(), message(&execution, "next-boot"))
-            .await
-            .unwrap();
+        // Settled: the runtime continues the task by itself.
+        continued(&runtime).await;
         coordinator_relaunched(&runtime).await;
         close(root, runtime).await;
     }
@@ -1166,7 +1234,7 @@ mod resume_tests {
     /// Delete all work. Earlier builds refused all of them as
     /// `native_shutdown_unconfirmed`, on every restart, until a reboot.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_worker_of_a_killed_service_is_settled_on_restart_and_the_task_continues() {
+    async fn a_worker_of_a_killed_service_is_settled_on_restart_and_the_task_continues_by_itself() {
         let (root, runtime, execution, task) = seeded(Routes {
             generation: AtomicUsize::new(0),
             default_available: true,
@@ -1200,31 +1268,29 @@ mod resume_tests {
             "released:no_engine_process");
         assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.evidence') FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'").await,
             "service_gone_and_no_engine_process_in_project");
-        // Held for the owner, not driven on by itself.
+        // No-stop policy: not held for the owner. A restart is infrastructure: the task
+        // resumes in its state on the same rung (no continuation, no new revision), and
+        // the runtime relaunches the interrupted work itself.
         assert_eq!(
             sql(
                 &runtime,
-                "SELECT state||':'||blocker FROM runtime_tasks WHERE task_id!='other-task'"
+                "SELECT count(*) FROM runtime_events WHERE type='AUTOMATIC_CONTINUATION'"
             )
             .await,
-            "RECOVERING:native_session_outcome_unknown"
+            "0"
         );
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type IN ('NATIVE_RECOVERY_RESUMED','NATIVE_PROCESS_UNCONFIRMED')").await, "0");
+        assert_eq!(
+            sql(&runtime, "SELECT json_extract(payload_json,'$.restart_resume') FROM runtime_events WHERE type='NATIVE_RECOVERY_RESUMED'").await,
+            "1"
+        );
+        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type IN ('NATIVE_PROCESS_UNCONFIRMED','AUTOMATIC_PAUSED')").await, "0");
+        assert_eq!(
+            sql(&runtime, "SELECT count(*) FROM pending_questions").await,
+            "0"
+        );
         // The settled worker no longer holds its files for the other task.
         assert!(conflict().await.unwrap().unwrap().is_none());
-        // A later restart records nothing new for it.
-        let counted = sql(&runtime, "SELECT count(*) FROM runtime_events").await;
-        runtime.recover_fixture().await.unwrap();
-        assert_eq!(
-            sql(&runtime, "SELECT count(*) FROM runtime_events").await,
-            counted
-        );
-        // The owner's message is admitted and relaunches the coordinator.
-        let receipt = runtime
-            .control("project".into(), message(&execution, "continue-after-kill"))
-            .await
-            .unwrap();
-        assert_eq!(receipt["outcome"], "recorded");
+        runtime.continue_automatic_tasks().await.unwrap();
         coordinator_relaunched(&runtime).await;
         assert_eq!(
             sql(
@@ -1234,6 +1300,7 @@ mod resume_tests {
             .await,
             "0"
         );
+        let _ = execution;
         close(root, runtime).await;
     }
 
@@ -1448,26 +1515,25 @@ mod resume_tests {
             .await
             .unwrap()
             .unwrap();
+        // No-stop policy: the stop is a continuation that waits for the host's process
+        // evidence (never an owner pause) and carries the uncertainty.
         assert_eq!(
             sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await,
-            "RECOVERING:automatic_continuation_paused"
+            "RECOVERING:automatic_continuation_pending"
         );
-        // The host tick alone never resumes an unknown outcome.
-        runtime.continue_automatic_tasks().await.unwrap();
+        assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.uncertain') FROM runtime_events WHERE type='AUTOMATIC_CONTINUATION'").await,
+            "1");
+        // The exit settles and the continuation relaunches its coordinator.
+        assert!(!runtime.resettle_fixture().await.unwrap());
+        continued(&runtime).await;
         assert_eq!(
             sql(
                 &runtime,
-                "SELECT count(*) FROM runtime_events WHERE type='AUTOMATIC_RESUMED'"
+                "SELECT count(*) FROM runtime_events WHERE type='AUTOMATIC_PAUSED'"
             )
             .await,
             "0"
         );
-        // One pass: the exit settles, the task is an interrupted automatic turn, and
-        // the same pass's continuation relaunches its coordinator.
-        assert!(!runtime.resettle_fixture().await.unwrap());
-        assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.reason') FROM runtime_events WHERE type='AUTOMATIC_CONTINUATION'").await,
-            "native_process_exit_settled");
-        runtime.continue_automatic_tasks().await.unwrap();
         assert_eq!(
             sql(
                 &runtime,
@@ -1671,7 +1737,7 @@ impl Runtime {
             request["action"].as_str(),
             Some("resume" | "retry" | "prompt" | "incoming_prompt" | "rerun_check")
         ) {
-            if let Some(state) = self.maintenance_state.clone() {
+            if let Some(state) = self.host.workspace_state.clone() {
                 Some(
                     tokio::task::spawn_blocking(move || {
                         crate::machine::maintenance::admission(&state)
@@ -1897,6 +1963,13 @@ impl Runtime {
         fallback: Option<crate::native_sessions::SessionRoute>,
     ) -> CoreResult<crate::native_sessions::SessionRoute> {
         let settings = self.task_settings(task).await?;
+        // The no-stop policy moved this coordinator to another model after the
+        // owner's latest model choice: it stays there while that route qualifies.
+        if let Some(pin) = self.coordinator_escalation(task).await? {
+            if let Ok(route) = self.routes.pinned_route(&self.host.root, &pin, None) {
+                return Ok(route);
+            }
+        }
         let pin = self.coordinator_pin(task).await?;
         let chosen = settings["model"].as_str().is_some_and(|m| !m.is_empty());
         if !chosen {
@@ -1915,6 +1988,31 @@ impl Runtime {
             Some(route) => Ok(route),
             None => self.routes.route(&self.host.root, "orchestrator"),
         }
+    }
+    /// The newest `NATIVE_COORDINATOR_ESCALATED` pin recorded after the owner's latest
+    /// task settings (an explicit model choice always wins over the escalation).
+    async fn coordinator_escalation(&self, task: &str) -> CoreResult<Option<Value>> {
+        let task = task.to_owned();
+        self.host
+            .executor
+            .read(move |db| {
+                let raw: Option<String> = db
+                    .query_row(
+                        "SELECT payload_json FROM runtime_events WHERE task_id=?1 AND type='NATIVE_COORDINATOR_ESCALATED'
+                         AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='NATIVE_TASK_SETTINGS'),0)
+                         ORDER BY id DESC LIMIT 1",
+                        [&task],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                Ok(raw
+                    .map(|s| serde_json::from_str::<Value>(&s))
+                    .transpose()?
+                    .map(|v| v["pin"].clone())
+                    .filter(Value::is_object))
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))?
     }
     /// The coordinator route persisted when the task started.
     async fn coordinator_pin(&self, task: &str) -> CoreResult<Option<Value>> {
@@ -1968,6 +2066,9 @@ impl Runtime {
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))??;
         let Some(state) = state else {
+            // A resumed task that became a continuation (an unknown-outcome barrier)
+            // is relaunched by the runtime itself.
+            self.follow_continuation(task).await;
             return Ok(());
         };
         let (cancel, cancelled) = tokio::sync::watch::channel(false);
@@ -1983,14 +2084,15 @@ impl Runtime {
                 runtime.progress(&task, &owner, cancelled.clone()).await
             };
             if let Err(error) = result {
-                // The same stop as a live driver's: a completion gap returns to the
-                // coordinator (which then asks the owner) instead of hanging unasked.
+                // The same stop as a live driver's: a continuation on the next rung of
+                // the strategy ladder (no-stop policy), never a hang or an owner hold.
                 if !*cancelled.borrow() && !*runtime.stop.borrow() {
                     runtime
                         .stop_after_error(&task, &owner, error, cancelled.clone())
                         .await;
                 }
             }
+            runtime.driver_ended(&task, &cancelled).await;
             done.send_replace(true);
         })
         .await;
@@ -2062,103 +2164,197 @@ impl Runtime {
             .await
             .map_err(|_| failure("native_control_outcome_unknown"))?
     }
-    /// Workspace's safety tick requalifies the exact blocked route without a model
-    /// prompt. The durable hold remains until route qualification and process
-    /// settlement are both observed under the ordinary host controls.
+    /// Workspace's safety tick continues every task the no-stop policy owes a
+    /// continuation (manual and Automatic alike), and reports whether an Automatic
+    /// sprint task is still active. Each task is continued by [`Self::continue_one`];
+    /// a driver's own end also starts a [`Self::follow_continuation`], so a task
+    /// continues without this tick (an incoming ACP session has none).
     pub(super) async fn continue_automatic_tasks(self: &Arc<Self>) -> CoreResult<bool> {
         use lifecycle::automatic;
-        let _serial = self.controls.lock().await;
         if *self.stop.borrow() {
             return Ok(false);
         }
         let (active, tasks) = self.host.executor.read(|db| {
             let rows = db.prepare(
-                "SELECT t.task_id,o.owner_ref,o.epoch FROM runtime_tasks t
-                 JOIN task_owners o USING(task_id)
+                "SELECT t.task_id,EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=t.task_id AND e.type='AUTOMATIC_POLICY_BOUND')
+                 FROM runtime_tasks t JOIN task_owners o USING(task_id)
                  WHERE t.state NOT IN ('COMPLETED','CANCELLED','FAILED','PAUSED')
-                 AND EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=t.task_id AND e.type='AUTOMATIC_POLICY_BOUND')
                  ORDER BY t.rowid",
-            )?.query_map([], |r| Ok((r.get::<_, String>(0)?, OwnerEpoch {
-                owner:r.get(1)?, epoch:r.get(2)?,
-            })))?.collect::<Result<Vec<_>,_>>()?;
+            )?.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))?
+                .collect::<Result<Vec<_>,_>>()?;
             let mut active = false;
             let mut tasks = Vec::new();
-            for (task, owner) in rows {
-                if let Some(owed) = automatic::owed(db, &task)? {
-                    active = true;
-                    tasks.push((task, owner, owed));
-                } else if !automatic::held(db, &task)? {
+            for (task, bound) in rows {
+                if automatic::owed(db, &task)?.is_some() {
+                    active |= bound;
+                    tasks.push(task);
+                } else if bound && !automatic::held(db, &task)? {
                     active = true;
                 }
             }
             Ok((active, tasks))
         })?.await.map_err(|_| CoreError::Refused("native_host_closed"))??;
-        for (task, owner, owed) in tasks {
-            if self.driven(&task).await {
-                continue;
-            }
-            // A worker-side route hold must see the same role and routing inputs
-            // qualify (with fresh task evidence), not just a usable coordinator.
-            if owed.external {
-                let reason = owed.evidence["reason"].as_str().unwrap_or_default();
-                if reason == "engine_authentication_required" {
-                    // A stale catalogue is not evidence that the account recovered.
-                    let auth = &owed.evidence["authentication"];
-                    let observed = match (auth["connection"].as_str(), auth["at"].as_str()) {
-                        (Some(connection), Some(at)) => self
-                            .routes
-                            .authentication_observed_after(&self.host.root, connection, at)
-                            .unwrap_or(false),
-                        _ => false,
-                    };
-                    if !observed {
-                        continue;
+        for task in tasks {
+            self.continue_one(&task).await?;
+        }
+        Ok(active)
+    }
+    /// Start a follower for every task the no-stop policy owes a continuation.
+    pub(crate) async fn follow_owed_continuations(self: &Arc<Self>) -> CoreResult<()> {
+        let tasks = self
+            .host
+            .executor
+            .read(|db| {
+                let rows = db
+                    .prepare(
+                        "SELECT task_id FROM runtime_tasks WHERE state='RECOVERING' ORDER BY rowid",
+                    )?
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut owed = Vec::new();
+                for task in rows {
+                    if lifecycle::automatic::owed(db, &task)?.is_some() {
+                        owed.push(task);
                     }
                 }
-                let probe = owed.evidence["worker_route"].clone();
-                if let Some(role) = probe["role"].as_str() {
-                    let t = task.clone();
-                    let root = self.host.root.clone();
-                    let evidence = self
-                        .host
-                        .executor
-                        .read(move |db| cortex_core::routing::evidence(db, &t, &root))?
-                        .await
-                        .map_err(|_| CoreError::Refused("native_host_closed"))??;
-                    if self
-                        .routes
-                        .worker_selection(
-                            &self.host.root,
-                            role,
-                            &probe["node"],
-                            &evidence,
-                            probe["escalated"] == true,
-                            probe["previous"].as_str(),
-                        )
-                        .is_err()
-                    {
-                        continue;
-                    }
-                }
-            }
-            let route = match self.coordinator_route(&task, None).await.and_then(|route| {
-                self.routes
-                    .automatic_coordinator_health(&self.host.root, &route)?;
-                Ok(route)
-            }) {
-                Ok(route) => route,
-                Err(error) => {
-                    let (t, event) = (task.clone(), owed.event);
-                    let reason = error.code();
-                    self.host
-                        .executor
-                        .write(move |db| automatic::route_pause_tx(db, &t, event, reason))?
-                        .await
-                        .map_err(|_| CoreError::Refused("native_host_closed"))??;
-                    continue;
-                }
+                Ok(owed)
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        for task in tasks {
+            self.follow_continuation(task).await;
+        }
+        Ok(())
+    }
+    /// Keep continuing `task` until its owed continuation has launched or is no longer
+    /// owed: the runtime's own wait (a session or command whose end the host has not
+    /// yet confirmed, a route that does not qualify yet) is retried with backoff
+    /// (0.2 s doubling to 30 s), never handed to the owner. The follower ends with the
+    /// service.
+    pub(crate) fn follow_continuation(
+        self: &Arc<Self>,
+        task: String,
+    ) -> futures::future::BoxFuture<'static, ()> {
+        // Boxed: a continuation's driver ends by following its next continuation.
+        // A tracked job that never waits on the control lock (shutdown holds it while
+        // draining jobs) and ends with `stop`.
+        let runtime = self.clone();
+        let job = async move {
+            let mut delay = std::time::Duration::from_millis(200);
+            let mut stop = runtime.stop.subscribe();
+            // Continuations without progress in between are spaced out (1 s doubling
+            // to 60 s from the second one); nothing is capped.
+            let t = task.clone();
+            let idle = match runtime
+                .host
+                .executor
+                .read(move |db| lifecycle::automatic::idle_continuations(db, &t))
+            {
+                Ok(reply) => reply.await.ok().and_then(Result::ok).unwrap_or(0),
+                Err(_) => 0,
             };
-            let (t, o, event) = (task.clone(), owner.clone(), owed.event);
+            if idle >= 2 {
+                let wait = std::time::Duration::from_secs(1u64 << (idle - 2).min(6) as u32)
+                    .min(std::time::Duration::from_secs(60));
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {},
+                    _ = stop.changed() => return,
+                }
+            }
+            loop {
+                if *runtime.stop.borrow() {
+                    return;
+                }
+                match runtime.continue_one(&task).await {
+                    Ok(Continuation::Done) => return,
+                    Ok(Continuation::Later) | Err(_) => {}
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {},
+                    _ = stop.changed() => return,
+                }
+                delay = (delay * 2).min(std::time::Duration::from_secs(30));
+            }
+        };
+        let host = self.clone();
+        Box::pin(async move {
+            if !*host.stop.borrow() && host.followers.load(std::sync::atomic::Ordering::SeqCst) {
+                host.spawn_recovery(job).await;
+            }
+        })
+    }
+    /// One attempt to continue one task the no-stop policy holds. `Done`: launched, or
+    /// nothing is owed any more. `Later`: the runtime still waits for its own
+    /// evidence (a driver still ending, an unconfirmed exit or command, a route).
+    pub(super) async fn continue_one(self: &Arc<Self>, task: &str) -> CoreResult<Continuation> {
+        use lifecycle::automatic;
+        if *self.stop.borrow() {
+            return Ok(Continuation::Done);
+        }
+        if self.driven(task).await {
+            return Ok(Continuation::Later);
+        }
+        let t = task.to_owned();
+        let found = self
+            .host
+            .executor
+            .read(move |db| {
+                let owner = db
+                    .query_row(
+                        "SELECT owner_ref,epoch FROM task_owners WHERE task_id=?",
+                        [&t],
+                        |r| {
+                            Ok(OwnerEpoch {
+                                owner: r.get(0)?,
+                                epoch: r.get(1)?,
+                            })
+                        },
+                    )
+                    .optional()?;
+                Ok(match owner {
+                    Some(owner) => automatic::owed(db, &t)?.map(|owed| (owner, owed)),
+                    None => None,
+                })
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        let Some((owner, owed)) = found else {
+            return Ok(Continuation::Done);
+        };
+        // A task parked behind missing access or an outage is the runtime's own wait:
+        // it rechecks what is due (a host probe, an environment preflight) without any
+        // model call, and resumes only once every obstacle closed.
+        if !owed.waiting.is_empty() {
+            self.recheck_obstacles(task).await?;
+            let t = task.to_owned();
+            let open = self
+                .host
+                .executor
+                .read(move |db| Ok(automatic::owed(db, &t)?.map(|o| o.waiting.len())))?
+                .await
+                .map_err(|_| CoreError::Refused("native_host_closed"))??;
+            match open {
+                None => return Ok(Continuation::Done),
+                Some(n) if n > 0 => return Ok(Continuation::Later),
+                Some(_) => {}
+            }
+        }
+        // Never wait on the control lock: shutdown holds it while it drains its jobs.
+        let Ok(_serial) = self.controls.try_lock() else {
+            return Ok(Continuation::Later);
+        };
+        if *self.stop.borrow() {
+            return Ok(Continuation::Done);
+        }
+        if self.driven(task).await {
+            return Ok(Continuation::Later);
+        }
+        // A plan parked behind an obstacle continues where it stopped, on the runtime's
+        // own driver: the parked nodes are retried, and no coordinator turn is needed.
+        if owed.evidence["pause_kind"] == automatic::OBSTACLE_PAUSE
+            && owed.evidence["resume_state"] == "EXECUTING"
+        {
+            let (t, o, event) = (task.to_owned(), owner.clone(), owed.event);
             let ready = self
                 .host
                 .executor
@@ -2168,38 +2364,151 @@ impl Runtime {
                 })?
                 .await
                 .map_err(|_| CoreError::Refused("native_host_closed"))?;
-            let evidence = match ready {
-                Ok(Some(evidence)) => evidence,
-                Ok(None) | Err(CoreError::Refused("stale_owner")) => continue,
+            match ready {
+                Ok(Some(evidence)) => {
+                    // The plan changed or effects need re-verifying: the coordinator
+                    // continues with the retry instruction instead.
+                    let route = if evidence["resume"] == "execution" {
+                        None
+                    } else {
+                        self.coordinator_route(task, None).await.ok()
+                    };
+                    match route {
+                        Some(route) => {
+                            let prompt = continuation_prompt(&evidence);
+                            self.continue_task(task.to_owned(), owner, prompt, route)
+                                .await?
+                        }
+                        None => self.resume_task(task.to_owned(), owner).await?,
+                    }
+                    return Ok(Continuation::Done);
+                }
+                Ok(None) => return Ok(Continuation::Later),
+                Err(CoreError::Refused("stale_owner")) => return Ok(Continuation::Done),
                 Err(CoreError::Refused(
-                    reason @ ("lost_worker_termination_unconfirmed"
-                    | "native_outside_outcome_unknown"),
+                    "lost_worker_termination_unconfirmed" | "native_command_outcome_pending",
                 )) => {
-                    let t = task.clone();
-                    let o = owner.clone();
-                    self.host
-                        .executor
-                        .write(move |db| {
-                            if cortex_core::ownership::check_tx(db, &t, &o).is_ok()
-                                && automatic::owed(db, &t)?
-                                    .is_some_and(|current| current.event == event)
-                            {
-                                automatic::pause_unsettled_tx(db, &t, reason)?;
-                            }
-                            Ok(())
-                        })?
-                        .await
-                        .map_err(|_| CoreError::Refused("native_host_closed"))??;
-                    continue;
+                    drop(_serial);
+                    let _ = self.resettle_unconfirmed_exits().await;
+                    return Ok(Continuation::Later);
                 }
                 Err(error) => return Err(error),
-            };
-            let refs = json!({"reason":evidence["reason"],"processReason":evidence["process_reason"],
-                "revision":evidence["revision"],"events":evidence["events"],"reports":evidence["reports"]});
-            let prompt = format!("Continue the task with a fresh plan. Repair the recorded failure and retain all mandatory checks. Read the current capsule and cited reports. Do not replay effects with unknown outcomes. Runtime evidence: {refs}");
-            self.continue_task(task, owner, prompt, route).await?;
+            }
         }
-        Ok(active)
+        // A worker-side route hold must see the same role and routing inputs
+        // qualify (with fresh task evidence), not just a usable coordinator. The
+        // resumed plan routes escalated, so the probe does too.
+        if owed.external {
+            let reason = owed.evidence["reason"].as_str().unwrap_or_default();
+            if reason == "engine_authentication_required" {
+                // A stale catalogue is not evidence that the account recovered.
+                let auth = &owed.evidence["authentication"];
+                let observed = match (auth["connection"].as_str(), auth["at"].as_str()) {
+                    (Some(connection), Some(at)) => self
+                        .routes
+                        .authentication_observed_after(&self.host.root, connection, at)
+                        .unwrap_or(false),
+                    _ => false,
+                };
+                if !observed {
+                    return Ok(Continuation::Later);
+                }
+            }
+            let probe = owed.evidence["worker_route"].clone();
+            if let Some(role) = probe["role"].as_str() {
+                let t = task.to_owned();
+                let root = self.host.root.clone();
+                let evidence = self
+                    .host
+                    .executor
+                    .read(move |db| cortex_core::routing::evidence(db, &t, &root))?
+                    .await
+                    .map_err(|_| CoreError::Refused("native_host_closed"))??;
+                if self
+                    .routes
+                    .worker_selection(
+                        &self.host.root,
+                        role,
+                        &probe["node"],
+                        &evidence,
+                        true,
+                        probe["previous"].as_str(),
+                    )
+                    .is_err()
+                {
+                    return Ok(Continuation::Later);
+                }
+            }
+        }
+        // The coordinator changes model when the ladder says so (a degenerate model,
+        // the `reassign` rung) or when its own route does not qualify.
+        let health = |route: crate::native_sessions::SessionRoute| -> CoreResult<_> {
+            self.routes
+                .automatic_coordinator_health(&self.host.root, &route)?;
+            Ok(route)
+        };
+        let resolved = self.coordinator_route(task, None).await;
+        let current = resolved.as_ref().ok().cloned();
+        let mut route = resolved.and_then(health);
+        let switch = owed.evidence["switch_coordinator"] == true;
+        let unhealthy = route
+            .as_ref()
+            .err()
+            .is_some_and(|e| automatic::route_blocked(e.code()));
+        if let (true, Some(current)) = (switch || unhealthy, &current) {
+            let reason = match &route {
+                Err(error) => error.code(),
+                Ok(_) => owed.evidence["reason"].as_str().unwrap_or("reassign"),
+            }
+            .to_owned();
+            if let Some(alternate) = self.escalate_coordinator(task, current, &reason).await? {
+                if let Ok(alternate) = health(alternate) {
+                    route = Ok(alternate);
+                }
+            }
+        }
+        let route = match route {
+            Ok(route) => route,
+            Err(error) => {
+                let (t, event) = (task.to_owned(), owed.event);
+                let reason = error.code();
+                self.host
+                    .executor
+                    .write(move |db| automatic::route_pause_tx(db, &t, event, reason))?
+                    .await
+                    .map_err(|_| CoreError::Refused("native_host_closed"))??;
+                return Ok(Continuation::Later);
+            }
+        };
+        let (t, o, event) = (task.to_owned(), owner.clone(), owed.event);
+        let ready = self
+            .host
+            .executor
+            .write(move |db| {
+                cortex_core::ownership::check_tx(db, &t, &o)?;
+                automatic::resume_tx(db, &t, event)
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))?;
+        let evidence = match ready {
+            Ok(Some(evidence)) => evidence,
+            Ok(None) => return Ok(Continuation::Later),
+            Err(CoreError::Refused("stale_owner")) => return Ok(Continuation::Done),
+            // The runtime waits for its own process and command evidence: the host
+            // settles those exits and receipts by itself (`resettle_unconfirmed_exits`).
+            Err(CoreError::Refused(
+                "lost_worker_termination_unconfirmed" | "native_command_outcome_pending",
+            )) => {
+                drop(_serial);
+                let _ = self.resettle_unconfirmed_exits().await;
+                return Ok(Continuation::Later);
+            }
+            Err(error) => return Err(error),
+        };
+        let prompt = continuation_prompt(&evidence);
+        self.continue_task(task.to_owned(), owner, prompt, route)
+            .await?;
+        Ok(Continuation::Done)
     }
     /// Relaunch every coordinator owed by an answered runtime stop question,
     /// after the answer commits or after a restart. A continuation that cannot
@@ -2216,15 +2525,24 @@ impl Runtime {
                     .query_map([], |r| r.get::<_, String>(0))?
                     .collect::<Result<Vec<_>, _>>()?;
                 let mut owed = Vec::new();
+                let mut continued = Vec::new();
                 for task in rows {
                     if domain::stop_continuation_owed_tx(db, &task)? {
                         owed.push(task);
+                    } else if lifecycle::automatic::owed(db, &task)?.is_some() {
+                        continued.push(task);
                     }
                 }
-                Ok(owed)
+                Ok((owed, continued))
             })?
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        let (tasks, continued) = tasks;
+        // The no-stop policy's continuations (after a restart, an answer or a settled
+        // exit) are relaunched by the runtime itself, without a scheduler tick.
+        for task in continued {
+            self.follow_continuation(task).await;
+        }
         for task in tasks {
             self.continue_owed(task).await?;
         }
@@ -2292,6 +2610,9 @@ impl Runtime {
                 answer.as_deref().unwrap_or("Continue.")
             );
             self.continue_task(task, owner, prompt, route).await?;
+        } else {
+            // A relaunch that could not start became a continuation: run it.
+            self.follow_continuation(task).await;
         }
         Ok(())
     }
@@ -2333,4 +2654,42 @@ fn answer_files(mut request: Value) -> io::Result<(Value, Option<cortex_core::in
     request["payload"]["capture"] = capture.fingerprint();
     request["payload"]["captureQuestions"] = Value::Array(owners);
     Ok((request, Some(capture)))
+}
+
+/// What one continuation attempt achieved ([`Runtime::continue_one`]).
+pub(crate) enum Continuation {
+    /// Launched, or nothing is owed any more.
+    Done,
+    /// The runtime still waits for its own evidence; try again later.
+    Later,
+}
+
+/// The coordinator prompt of a resumed continuation: the ladder's strategy and its
+/// instruction, the recorded failure and evidence, and any uncertainty the runtime
+/// recorded about effects whose outcome is unknown.
+pub(crate) fn continuation_prompt(evidence: &Value) -> String {
+    let strategy = evidence["strategy"].as_str().unwrap_or("repair");
+    let instruction = evidence["instruction"]
+        .as_str()
+        .unwrap_or_else(|| lifecycle::automatic::strategy_instruction(strategy));
+    let refs = json!({"reason":evidence["reason"],"processReason":evidence["process_reason"],
+        "revision":evidence["revision"],"events":evidence["events"],"reports":evidence["reports"],
+        "continuation":evidence["count"],"strategy":strategy});
+    let mut prompt = if strategy == "ask_owner" {
+        // An owner decision: the turn asks; it does not plan the blocked work (a plan
+        // is refused with owner_question_required until the question is asked).
+        format!("Ask the owner before planning the blocked work. {instruction} Read the current capsule (obstacles.owner_decisions) and the cited reports. Runtime evidence: {}",
+            json!({"reason":evidence["reason"],"revision":evidence["revision"],"reports":evidence["reports"],
+                "decisions":evidence["decisions"],"classification":evidence["classification"],"strategy":strategy}))
+    } else {
+        format!("Continue the task with a fresh plan and finish it. {instruction} Retain all mandatory checks. Read the current capsule and cited reports. Runtime evidence: {refs}")
+    };
+    let uncertain = evidence["uncertainty"]
+        .as_array()
+        .or_else(|| evidence["unknown_effects"].as_array())
+        .filter(|a| !a.is_empty());
+    if let Some(effects) = uncertain {
+        prompt.push_str(&format!(" Effects with an unknown outcome (they may or may not have taken place): {}. Re-verify each from the files, Git state and receipts before redoing it; never replay one blindly.", json!(effects)));
+    }
+    prompt
 }

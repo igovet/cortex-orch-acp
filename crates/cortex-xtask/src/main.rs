@@ -4,6 +4,7 @@
 //! working directory holding `package-identity.json`) and exits non-zero with a diagnostic on
 //! stderr when an input is stale or inconsistent.
 
+mod builds;
 mod contract;
 mod debian;
 mod driver;
@@ -57,6 +58,8 @@ build helpers:
                         rendered owner journey and visual audit of the built desktop binary (Docker)
   journey-series        --artifacts D --logs D [--runs N] [--display x11|wayland] [--expect-sha256 H]
   rendered-scrollbar    <label> --artifacts D --checkout D --evidence D   scrollbar grab and window-edge input check (run inside the rendered image)
+  clean-builds          [--keep N] [--dry-run]   keep the newest N (default 2) build-* dirs and .cache/<channel>-<image>
+                        caches per channel in .workspace-build (never target/); build-deb runs it after success
   new-build-dir         <parent>
   snapshot              <destination>   copy the container build inputs
 common option: --root DIR";
@@ -142,6 +145,19 @@ fn run(raw: &[String]) -> Res<i32> {
         driver::build_deb(
             &args_root_for_build(raw)?,
             &driver::Options::parse(&strip_root(&raw[1..]))?,
+        )?;
+        return Ok(0);
+    }
+    if raw.first().map(String::as_str) == Some("clean-builds") {
+        // Boolean `--dry-run` makes the generic `--name value` parser unsuitable here.
+        let root = package::absolute_root(&args_root_for_build(raw)?)?;
+        let o = builds::Options::parse(&strip_root(&raw[1..]))?;
+        builds::clean(
+            &root.join(".workspace-build"),
+            o.keep,
+            None,
+            o.dry_run,
+            builds::to_stdout,
         )?;
         return Ok(0);
     }

@@ -13,6 +13,16 @@ RuntimeDirectoryMode=0700
 Restart=on-failure
 RestartSec=5s
 KillMode=control-group
+# Every task process (engines, builds, tests, renders) runs in this unit's cgroup.
+# Under contention the desktop gets the CPU first, and above MemoryHigh the kernel
+# reclaims this unit's memory instead of swapping out the session. Nothing is
+# killed for it (no MemoryMax), and an idle machine runs tasks at full speed.
+CPUWeight=20
+MemoryHigh=60%
+# Disk access of task processes yields to the session wherever the block device's
+# scheduler honours I/O priorities (BFQ); with the `none` scheduler it changes nothing.
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 TimeoutStopSec=30s
 
 [Install]

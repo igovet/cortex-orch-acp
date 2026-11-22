@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { capture, emptyWorkspace, LOCAL_MACHINE_ID, type EngineConnection, type MachineConfig, type Worker, type Message } from "@cortex/workspace-domain";
+import { capture, emptyWorkspace, LOCAL_MACHINE_ID, routeIdOf, type EngineConnection, type MachineConfig, type Worker, type Message } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { createRealPort } from "../src/port/real";
 import { SIDEBAR_DEFAULT, SIDEBAR_MIN } from "../src/prefs";
@@ -901,6 +901,31 @@ describe("new task on real data", () => {
     expect(settings.getAttribute("aria-label")).toBe("Settings. Access mode: Auto, Message language: Russian");
     for (const select of [...route, settings]) expect(select.getAttribute("aria-disabled")).not.toBe("true");
     expect($('[aria-label="Merge into main"]')).toBeTruthy();
+  });
+
+  it.each(["routing", "ceiling"] as const)("uses the project %s to choose and save the permitted coordinator", async restrict => {
+    const codexRoute = "xr_bbbbbbbbbbbbbbbbbbbbbbbb";
+    const s = machine([], [], { config: c => {
+      c.surfaces.routing.engines["codex-acp"].enabled = ["gpt-6-luna"];
+      c.setup["codex-acp"].status = "connected";
+      c.catalogue["codex-acp"].models = [{ id: "gpt-6-luna", routeId: codexRoute, label: "Luna", efforts: ["low"], observed: true }];
+    } });
+    const answer = s.answers["machine.call"]!;
+    s.answers["machine.call"] = message => {
+      if ((message as { op: string }).op !== "project.config.read") return answer(message);
+      const c = emptyWorkspace().machines[0].config;
+      const routing = c.surfaces.routing;
+      routing.engines["codex-acp"].enabled = ["gpt-6-luna"];
+      const ceiling = { ...c.surfaces.user_defaults.ceiling, allowedRoutes: [routeIdOf("codex-acp", "gpt-6-luna")] };
+      return { ok: true, result: { value: restrict === "routing" ? { routing } : { ceiling }, tokens: {} } };
+    };
+    await open(s, NEW);
+    expect(all(".c-route .sel").map(b => b.textContent?.trim())).toEqual(["Luna", "Low"]);
+    expect($("#m-model-new")?.textContent).not.toContain("Opus");
+    type("Describe the task", "Save the chosen route");
+    button("Save draft")!.click();
+    await settled();
+    expect(s.calls.find(c => c.operation === "tasks.create")?.message).toMatchObject({ payload: { settings: { model: codexRoute, effort: "low" } } });
   });
 
   it("Start now creates the task and starts it", async () => {

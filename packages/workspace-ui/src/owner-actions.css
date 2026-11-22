@@ -1,0 +1,9 @@
+/* Access a task lacks: cards at the top corner of the window, never a modal, so the rest of the work stays usable. */
+.owner-stack { position: fixed; right: 16px; top: 56px; z-index: 44; display: flex; flex-direction: column; gap: 10px; width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 112px); overflow-y: auto; }
+.owner-stack[data-shell="phone"] { left: 8px; right: 8px; top: max(56px, calc(env(safe-area-inset-top) + 56px)); width: auto; }
+.owner-card { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--warn-line, var(--line)); border-radius: 10px; background: var(--bg-raised); box-shadow: var(--shadow-menu); min-width: 0; margin: 0; }
+.owner-card > .row { gap: 8px; min-width: 0; }
+.owner-detail { margin: 0; overflow-wrap: anywhere; }
+.owner-command { display: block; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--bg-canvas); font-size: var(--t-sec); overflow-wrap: anywhere; user-select: all; }
+.owner-token { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.owner-card .inp { width: 100%; min-width: 0; }

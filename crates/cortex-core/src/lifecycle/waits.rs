@@ -154,6 +154,102 @@ fn validate_forms(forms: &[QuestionForm]) -> CoreResult<()> {
     }
     Ok(())
 }
+/// A question's identity: its text and its set of options, lowercased with spacing
+/// collapsed and trailing punctuation dropped.
+fn question_identity(question: &str, options: &[String]) -> (String, Vec<String>) {
+    let norm = |s: &str| {
+        super::review::normalize_text(s)
+            .trim_end_matches(['?', '.', '!', ':', '…', ' '])
+            .to_owned()
+    };
+    let mut options: Vec<String> = options.iter().map(|o| norm(o)).collect();
+    options.sort();
+    (norm(question), options)
+}
+/// An earlier question of this task, asked by a coordinator or a worker, that the
+/// owner answered and that equals `question` with `options` ([`question_identity`]):
+/// its id and the owner's answer. Only answers since the newest reopen or owner
+/// message count; a question asked before them may be asked again.
+pub fn answered_question_tx(
+    db: &rusqlite::Connection,
+    task: &str,
+    question: &str,
+    options: &[String],
+) -> CoreResult<Option<(String, String)>> {
+    let since = super::review::repeat_window_tx(db, task)?;
+    let wanted = question_identity(question, options);
+    let rows = db
+        .prepare(
+            "SELECT q.id,q.text,q.options_json,coalesce(q.answer_text,'') FROM pending_questions q
+             WHERE q.task_id=?1 AND q.status='answered' AND (?2=0 OR EXISTS(SELECT 1 FROM runtime_events e
+                 WHERE e.task_id=?1 AND e.id>?2 AND e.type='NATIVE_QUESTION_ANSWERED'
+                 AND json_extract(e.payload_json,'$.question_id')=q.id))
+             ORDER BY q.rowid DESC LIMIT 256",
+        )?
+        .query_map((task, since), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (id, text, options, answer) in rows {
+        let options: Vec<String> = serde_json::from_str::<Vec<Value>>(&options)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|o| o.as_str().map(str::to_owned))
+            .collect();
+        if question_identity(&text, &options) == wanted {
+            return Ok(Some((id, answer)));
+        }
+    }
+    Ok(None)
+}
+/// The refusal of a question set whose members the owner already answered: every
+/// repeated member with the earlier answer, and `LOOP_BROKEN`. `None` when no member
+/// repeats an answered question. The owner is never asked the same question twice.
+pub(crate) fn already_answered_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    node: Option<&str>,
+    forms: &[QuestionForm],
+) -> CoreResult<Option<Value>> {
+    let mut answers = Vec::new();
+    for f in forms {
+        if let Some((id, answer)) = answered_question_tx(db, task, &f.question, &f.options)? {
+            answers.push(json!({"question":f.question,"question_id":id,"answer":answer}));
+        }
+    }
+    if answers.is_empty() {
+        return Ok(None);
+    }
+    for a in &answers {
+        let (question, mut options) = (a["question"].as_str().unwrap_or(""), Vec::new());
+        if let Some(f) = forms.iter().find(|f| f.question == question) {
+            options = f.options.clone();
+            options.sort();
+        }
+        event_tx(
+            db,
+            task,
+            "LOOP_BROKEN",
+            json!({"key":super::review::loop_key("owner_question", node.unwrap_or(""),
+                    &format!("{question}\n{}", options.join("\n"))),
+                "kind":"owner_question","node":node,"action":"earlier_answer_returned",
+                "question_id":a["question_id"],"limits":[]}),
+        )?;
+    }
+    let mut v = json!({"outcome":"refused","error":"question_already_answered","recorded":false,
+        "answers":answers,
+        "next":"The owner already answered this exact question; nothing was asked again. Continue from the recorded answer above. Ask only a question that is genuinely new."});
+    if answers.len() == 1 {
+        v["question_id"] = answers[0]["question_id"].clone();
+        v["answer"] = answers[0]["answer"].clone();
+    }
+    Ok(Some(v))
+}
 /// Channel identity is obtained by the adapter, not accepted as model-selected
 /// authority. Recheck its exact task/attempt/epoch and assignment in this transaction.
 pub fn request_tx_bound(
@@ -204,6 +300,20 @@ pub fn request_tx_bound_topics(
         v}).collect::<Vec<_>>()});
     request_tx(db, task, channel, key, "ask_question", &payload, || {
         check_mutation_tx(db, task, &assignment)?;
+        // A question the owner already answered is not asked again: the reply
+        // carries the earlier answer and no wait is opened.
+        let node: Option<String> = db
+            .query_row(
+                "SELECT node_id FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
+                (task, &assignment),
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(mut refused) = already_answered_tx(db, task, node.as_deref(), forms)? {
+            refused["complete"] = json!(true);
+            refused["status"] = json!("answered");
+            return Ok(refused);
+        }
         let (state, revision) = domain::task_tx(db, task)?;
         let mut questions = Vec::new();
         for (i, f) in forms.iter().enumerate() {

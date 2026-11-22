@@ -17,6 +17,7 @@ struct Fixture {
     root: PathBuf,
     child: Option<Child>,
     bindings: Vec<(String, String)>,
+    data_override: Option<PathBuf>,
 }
 impl Fixture {
     fn new(index: usize) -> Self {
@@ -31,6 +32,7 @@ impl Fixture {
             root,
             child: None,
             bindings: vec![],
+            data_override: None,
         }
     }
     fn config(&self) -> PathBuf {
@@ -46,8 +48,9 @@ impl Fixture {
                 .state_dir(&self.root.join("state"))
                 .join("data")
         } else {
-            // The retained release child environment does not forward XDG_DATA_HOME.
-            self.root.join("home/.local/share")
+            self.data_override
+                .clone()
+                .unwrap_or_else(|| self.root.join("home/.local/share"))
         }
     }
     fn socket(&self) -> PathBuf {
@@ -180,7 +183,11 @@ impl Fixture {
                 .env("PATH", self.root.join("bin"))
                 .env("XDG_CONFIG_HOME", self.root.join("config"))
                 .env("XDG_STATE_HOME", self.root.join("state"))
-                .env("XDG_DATA_HOME", self.root.join("unforwarded-data"))
+                .envs(
+                    self.data_override
+                        .as_ref()
+                        .map(|data| ("XDG_DATA_HOME", data)),
+                )
                 .env("XDG_RUNTIME_DIR", self.root.join("runtime"))
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -365,6 +372,117 @@ async fn keyring_absence_preserves_state_until_backend_is_observed() {
             f.stop().await;
         }
     }
+}
+
+#[tokio::test]
+async fn engine_setup_uses_channel_data_not_home() {
+    let mut f = Fixture::new(3000);
+    let xdg_data = f.root.join("xdg-data");
+    f.data_override = Some(xdg_data.clone());
+    let corpus: Value =
+        serde_json::from_str(include_str!("fixtures/engine-connection-python.json")).unwrap();
+    let files = &corpus["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "codex-acp-recheck-ready")
+        .unwrap()["files"];
+    f.initialize(files);
+    let manifest: Value =
+        serde_json::from_str(include_str!("../../../pinned-dependencies.json")).unwrap();
+    let pin = manifest["engines"]["codex-acp"]["pinned_package_version"]
+        .as_str()
+        .unwrap();
+    let data = f.data();
+    let home_engines = f.root.join("home/.local/share/cortex");
+    let unused_xdg = workspace_protocol::channel::current()
+        .is_dev()
+        .then_some(xdg_data);
+    let engine = "cortex/engines/codex-acp";
+    let install = data.join(engine).join(pin);
+    fs::rename(data.join(engine).join("1.0.0"), &install).unwrap();
+    let package = install.join("node_modules/@agentclientprotocol/codex-acp/package.json");
+    let mut metadata: Value = serde_json::from_slice(&fs::read(&package).unwrap()).unwrap();
+    metadata["version"] = json!(pin);
+    fs::write(package, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    let native = install.join("node_modules/@openai/codex/package.json");
+    fs::write(
+        native,
+        serde_json::to_vec(&json!({
+            "version": manifest["engines"]["codex-acp"]["bundled_dependency_version"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    f.start().await;
+    let read = f
+        .wire("machine.call", json!({"op":"config.read","params":{}}))
+        .await;
+    assert_eq!(
+        read["result"]["result"]["config"]["setup"]["codex-acp"]["status"], "ready_to_connect",
+        "{read}"
+    );
+    let request = json!({
+        "op":"config.action","params":{"action":"install_engine","engine":"codex-acp"}
+    });
+    // Source runtime without a bundle or npm: the generic toast is reproducible
+    // even with a qualified tree present. This refusal precedes any install lock.
+    let refused = f.wire("machine.call", request.clone()).await;
+    assert_eq!(
+        refused["result"]["message"],
+        "Pinned installation is unavailable, busy or failed verification."
+    );
+    assert!(!data.join(engine).join(".lock").exists());
+    assert!(!home_engines.exists());
+
+    let npm = f.root.join("bin/npm");
+    fs::write(&npm, "#!/bin/sh\nexit 99\n").unwrap();
+    fs::set_permissions(&npm, fs::Permissions::from_mode(0o700)).unwrap();
+    // With npm resolvable, the existing pin must be reused without running npm.
+    let installed = f.wire("machine.call", request).await;
+    let connected = f
+        .wire(
+            "machine.call",
+            json!({"op":"engine.connection","params":{"action":"recheck","engine":"codex-acp"}}),
+        )
+        .await;
+    assert_eq!(
+        (
+            installed["result"]["ok"].as_bool(),
+            connected["result"]["ok"].as_bool()
+        ),
+        (Some(true), Some(true)),
+        "install: {installed}; recheck: {connected}"
+    );
+    let discovery = &installed["result"]["result"]["discovery"]["engines"][0];
+    assert_eq!(discovery["engine"], "codex-acp");
+    assert_eq!(discovery["status"], "ready_to_connect");
+    assert_eq!(discovery["qualified"], true);
+    assert_eq!(discovery["version"], pin);
+    let id = connected["result"]["result"]["connectionId"]
+        .as_str()
+        .unwrap();
+    let registry: Value =
+        serde_json::from_slice(&fs::read(f.config().join("cortex/connections.json")).unwrap())
+            .unwrap();
+    let record = &registry["connections"][id];
+    assert_eq!(record["qualified"], true);
+    assert_eq!(
+        record["launch_command"][1],
+        json!(install.join("node_modules/@agentclientprotocol/codex-acp/dist/index.js"))
+    );
+    assert_eq!(
+        record["credential_ref"]["path"],
+        json!(f.root.join("home/.codex"))
+    );
+    assert!(data.join(engine).join(".lock").is_file());
+    assert!(!home_engines.exists());
+    assert_eq!(f.lines("status-called"), json!(["login status"]));
+    if let Some(unused_xdg) = unused_xdg {
+        assert!(!unused_xdg.exists());
+    }
+    f.stop().await;
 }
 
 #[tokio::test]

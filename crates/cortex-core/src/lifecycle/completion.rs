@@ -225,6 +225,18 @@ fn command_words(argv: &[String]) -> &[String] {
     }
     w
 }
+/// The program a launcher-prefixed command finally runs (`timeout 900 cargo ...`
+/// runs `cargo`) when that is not `argv[0]` itself, so the verifier's availability
+/// probe can resolve it on the same search path as the launcher (a bare `cargo`
+/// behind `timeout` had exited 127 in verification). `None` without a launcher, or
+/// when the prefix sets `PATH` itself.
+pub fn launched_program(argv: &[String]) -> Option<&str> {
+    let words = command_words(argv);
+    let program = words.first()?;
+    let prefix = &argv[..argv.len() - words.len()];
+    (!prefix.is_empty() && !prefix.iter().any(|w| w.starts_with("PATH=")))
+        .then_some(program.as_str())
+}
 /// One word of an inline shell script, within the small literal grammar
 /// `shell_script` accepts: `raw` as written, `text` with its quotes removed
 /// (expansions stay literal text).
@@ -807,12 +819,31 @@ enum Independence {
 /// result, never as verified. A listed file whose current bytes have no reviewable
 /// text (binary, an image the review was not shown, opaque encoded or minified
 /// content) is likewise not a missing item but such a recorded limit.
+///
+/// A required file whose exact bytes the task's review lineage already settled as
+/// unread (`settled_unread_tx`) is not a missing item either: it is disclosed with
+/// the approval as a file the reviewer did not read, never required again.
 pub fn review_coverage_missing_tx(
     db: &rusqlite::Connection,
     task: &str,
     assignment: &str,
     result: &Value,
 ) -> CoreResult<Vec<Value>> {
+    let settled = settled_unread_tx(db, task)?;
+    Ok(coverage_gaps(db, task, assignment, result)?
+        .into_iter()
+        .filter(|(_, sha)| !sha.as_ref().is_some_and(|key| settled.contains(key)))
+        .map(|(missing, _)| missing)
+        .collect())
+}
+/// Every missing item of `review_coverage_missing_tx`, each with the
+/// `(path, current_sha256)` it names when it is a listed file.
+fn coverage_gaps(
+    db: &rusqlite::Connection,
+    task: &str,
+    assignment: &str,
+    result: &Value,
+) -> CoreResult<Vec<(Value, Option<(String, String)>)>> {
     let Some(packet) = review_packet_of(db, task, assignment)? else {
         return Ok(Vec::new());
     };
@@ -821,6 +852,15 @@ pub fn review_coverage_missing_tx(
         .is_some_and(|v| v.eq_ignore_ascii_case("INCOMPLETE"));
     let blocked = super::review::blocked_items(result);
     let changed = &packet["changed_files"];
+    let sha_of = |path: &str| {
+        changed["files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|f| f["path"] == path)
+            .and_then(|f| f["current_sha256"].as_str())
+            .map(|sha| (path.to_owned(), sha.to_owned()))
+    };
     let mut missing = Vec::new();
     if !incomplete {
         if packet["read_scope_covers_change"] != true {
@@ -829,7 +869,10 @@ pub fn review_coverage_missing_tx(
                 .into_iter()
                 .flatten()
             {
-                missing.push(json!({"path":path,"reason":"outside reviewer read scope"}));
+                missing.push((
+                    json!({"path":path,"reason":"outside reviewer read scope"}),
+                    path.as_str().and_then(sha_of),
+                ));
             }
         }
     }
@@ -861,7 +904,12 @@ pub fn review_coverage_missing_tx(
             }
             match file_coverage(db, task, channel.as_deref(), file)? {
                 FileCoverage::Covered | FileCoverage::NoText => {}
-                FileCoverage::Missing(reason) => missing.push(json!({"path":path,"reason":reason})),
+                FileCoverage::Missing(reason) => missing.push((
+                    json!({"path":path,"reason":reason}),
+                    file["current_sha256"]
+                        .as_str()
+                        .map(|sha| (path.to_owned(), sha.to_owned())),
+                )),
             }
         }
     }
@@ -893,7 +941,9 @@ enum FileCoverage {
     NoText,
 }
 /// Content kinds the host marks as having no reviewable text (`review_content`).
-const NO_TEXT: [&str; 3] = ["binary", "image", "opaque"];
+/// `bulk` is text too large to require a complete read: generated data or a file
+/// whose required lines span more than about eight `project_read` pages.
+const NO_TEXT: [&str; 4] = ["binary", "image", "opaque", "bulk"];
 fn file_coverage(
     db: &rusqlite::Connection,
     task: &str,
@@ -1006,7 +1056,11 @@ pub fn review_change_set_limits_tx(
             "blocker":"Changes made by commands outside the recorded writes could not be listed; inspect the folder.",
             "source":"runtime"}));
     }
-    let beyond = if attributed {
+    // A packet with an incomplete record still requires only the task's own changes;
+    // its unattributed files were listed as context (the packet's `attribution.note`
+    // says so), and only required files beyond the list are a limit.
+    let incomplete = changed["attribution"]["reason"].is_string();
+    let beyond = if attributed || incomplete {
         &changed["more"]["required"]
     } else {
         &changed["more"]["count"]
@@ -1016,8 +1070,33 @@ pub fn review_change_set_limits_tx(
             "blocker":format!("{more} changed files beyond the review list were not read individually by the reviewer; inspect the folders named in the review packet."),
             "source":"runtime"}));
     }
+    {
+        // Unread after this assignment's own refusals, or settled for these exact
+        // bytes by the review lineage (earlier assignments and revisions included).
+        let own = coverage_settled(db, task, assignment)?;
+        let settled = settled_unread_tx(db, task)?;
+        let unread: Vec<String> = coverage_gaps(db, task, assignment, &json!({}))?
+            .into_iter()
+            .filter(|(_, sha)| own || sha.as_ref().is_some_and(|key| settled.contains(key)))
+            .filter_map(|(m, _)| m["path"].as_str().map(str::to_owned))
+            .collect();
+        if !unread.is_empty() {
+            let shown = unread
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let more = unread.len().saturating_sub(10);
+            limits.push(json!({"name":"Changed files the reviewer did not read","outcome":"unverified",
+                "blocker":format!("{} changed files were still unread after repeated coverage refusals (in this review or an earlier review of the same bytes) and are not reviewed: {shown}{}; inspect them directly.",
+                    unread.len(), if more > 0 { format!(" and {more} more") } else { String::new() }),
+                "paths":unread.iter().take(50).collect::<Vec<_>>(),"source":"runtime"}));
+        }
+    }
     let channel = review_channel(db, task, assignment)?;
     let mut unreviewable = Vec::new();
+    let mut bulk = Vec::new();
     for file in changed["files"].as_array().into_iter().flatten() {
         if file["change"] == "deleted"
             || !file["current_sha256"].is_string()
@@ -1026,8 +1105,21 @@ pub fn review_change_set_limits_tx(
             continue;
         }
         if let FileCoverage::NoText = file_coverage(db, task, channel.as_deref(), file)? {
-            unreviewable.extend(file["path"].as_str().map(str::to_owned));
+            let path = file["path"].as_str().map(str::to_owned);
+            if file["review_content"] == "bulk" {
+                bulk.extend(path);
+            } else {
+                unreviewable.extend(path);
+            }
         }
+    }
+    if !bulk.is_empty() {
+        let shown = bulk.iter().take(10).cloned().collect::<Vec<_>>().join(", ");
+        let more = bulk.len().saturating_sub(10);
+        limits.push(json!({"name":"Changed files too large to require a complete read","outcome":"unverified",
+            "blocker":format!("{} changed files are generated data or longer than about eight project_read pages, so the review did not have to read them completely, and they were not reviewed in full: {shown}{}; inspect them directly.",
+                bulk.len(), if more > 0 { format!(" and {more} more") } else { String::new() }),
+            "paths":bulk.iter().take(50).collect::<Vec<_>>(),"source":"runtime"}));
     }
     if !unreviewable.is_empty() {
         let shown = unreviewable
@@ -1043,6 +1135,109 @@ pub fn review_change_set_limits_tx(
             "paths":unreviewable.iter().take(50).collect::<Vec<_>>(),"source":"runtime"}));
     }
     Ok(limits)
+}
+/// How many times a review result may be refused for unread required files before
+/// the runtime records it anyway, with every file it still did not read disclosed as
+/// an `unverified` limit (owner store 2026-11-21: one review was refused five times
+/// for 32 small generated SVG files and the task waited on the owner). A refusal is
+/// a chance to read, never a loop.
+const COVERAGE_REFUSALS: i64 = 2;
+fn coverage_settled(db: &rusqlite::Connection, task: &str, assignment: &str) -> CoreResult<bool> {
+    let refused: i64 = db.query_row(
+        "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='WORKER_RESULT_REFUSED'
+           AND json_extract(payload_json,'$.assignment_ref')=?
+           AND json_extract(payload_json,'$.code')='review_file_coverage_required'",
+        (task, assignment),
+        |r| r.get(0),
+    )?;
+    Ok(refused >= COVERAGE_REFUSALS)
+}
+/// The changed files, by `(path, sha256)` of their exact bytes, that the task's
+/// review lineage already settled as unread since the task was last reopened: a
+/// file named in `COVERAGE_REFUSALS` coverage refusals of any review assignment
+/// (reassignments, later review cycles and later plan revisions count together,
+/// so a fresh assignment does not start the count again), or one an approval
+/// already disclosed under `Changed files the reviewer did not read`. Such bytes
+/// are never required again; changed bytes are a new file to read (owner store
+/// 2026-11-21: three review assignments were refused twice each for the same 32
+/// files).
+pub fn settled_unread_tx(
+    db: &rusqlite::Connection,
+    task: &str,
+) -> CoreResult<BTreeSet<(String, String)>> {
+    let rows = db
+        .prepare(
+            "SELECT type,payload_json FROM runtime_events WHERE task_id=?1
+             AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='TASK_REOPENED'),0)
+             AND (type='WORKER_RESULT_REFUSED' AND json_extract(payload_json,'$.code')='review_file_coverage_required'
+                  OR type='REVIEW_CHANGE_SET_LIMITED')
+             ORDER BY id",
+        )?
+        .query_map([task], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut packets: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut counts: BTreeMap<(String, String), i64> = BTreeMap::new();
+    let mut settled = BTreeSet::new();
+    for (kind, raw) in rows {
+        let v: Value = serde_json::from_str(&raw)?;
+        let Some(assignment) = v["assignment_ref"].as_str() else {
+            continue;
+        };
+        if !packets.contains_key(assignment) {
+            let files = review_packet_of(db, task, assignment)?
+                .map(|p| {
+                    p["changed_files"]["files"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|f| {
+                            Some((
+                                f["path"].as_str()?.to_owned(),
+                                f["current_sha256"].as_str()?.to_owned(),
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            packets.insert(assignment.to_owned(), files);
+        }
+        let files = &packets[assignment];
+        let paths: Vec<&str> = if kind == "WORKER_RESULT_REFUSED" {
+            // Each item is `<path> (<reason>)` (see `outstanding_tx`).
+            v["missing"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter_map(|item| {
+                    item.strip_suffix(')')
+                        .and_then(|s| s.rsplit_once(" ("))
+                        .map(|(path, _)| path)
+                })
+                .collect()
+        } else {
+            v["limits"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|l| l["name"] == "Changed files the reviewer did not read")
+                .flat_map(|l| l["paths"].as_array().into_iter().flatten())
+                .filter_map(Value::as_str)
+                .collect()
+        };
+        for path in paths {
+            let Some(sha) = files.get(path) else {
+                continue;
+            };
+            let key = (path.to_owned(), sha.clone());
+            let count = counts.entry(key.clone()).or_default();
+            *count += 1;
+            if kind != "WORKER_RESULT_REFUSED" || *count >= COVERAGE_REFUSALS {
+                settled.insert(key);
+            }
+        }
+    }
+    Ok(settled)
 }
 /// What a submitted result leaves undone that its worker can still do, as the
 /// refusal code and the exact outstanding items. `None` when the result may be
@@ -1085,7 +1280,7 @@ pub fn outstanding_tx(
         return Ok(Some(("review_coverage_unfinished", unfinished)));
     }
     let missing = review_coverage_missing_tx(db, task, assignment, result)?;
-    if !missing.is_empty() {
+    if !missing.is_empty() && !coverage_settled(db, task, assignment)? {
         let items = missing
             .iter()
             .map(|m| match m["path"].as_str() {
@@ -1383,7 +1578,11 @@ pub(super) fn review_binding_tx(db: &Transaction<'_>, task: &str) -> CoreResult<
     if let Some((status, result)) = review {
         let v: Value = serde_json::from_str(&result.unwrap_or_default())
             .map_err(|_| CoreError::Refused("completion_review_missing"))?;
-        if status != "completed" || v["verdict"] != "APPROVE" {
+        // An INCOMPLETE review whose only gaps are items its tools cannot reach binds
+        // like an approval once the runtime disclosed those gaps as unverified limits
+        // (`REVIEW_LIMIT_DISCLOSED`); the final result must still disclose them.
+        let disclosed = v["verdict"] == "INCOMPLETE" && v["review_limit_disclosed"] == true;
+        if status != "completed" || !(v["verdict"] == "APPROVE" || disclosed) {
             return refuse("completion_review_missing");
         }
         // The approval's WORKER_COMPLETED event must follow its REVIEW_STARTED.
@@ -1485,6 +1684,444 @@ pub fn retain_check_tx(
         || Ok(retained),
     )
 }
+/// Why a runtime verification command's observed outcome says nothing about the
+/// reviewed work: the verifier's environment failed it, so the runtime reruns the
+/// identical command itself (`VERIFICATION_RERUN`) and, if it fails the same way
+/// again, waits (`VERIFICATION_ENVIRONMENT_WAIT`) instead of replanning. `None`
+/// for a real outcome: a complete run that passed, or a nonzero exit with complete
+/// output, which stays a failure.
+///
+/// Environmental: an incomplete run (output that never reached its end, a launch
+/// or sandbox that failed, a process killed from outside before the verifier's own
+/// deadline); exit 126 or 127 (the program could not be executed or found where
+/// the verifier looked); a full disk or exceeded quota; and a failure of a command
+/// a worker of the task ran identically and passed on the same checkout
+/// (`worker_passed`: the verifier's environment differs, for example a loopback
+/// service its sandbox cannot reach). Real: exceeding the verifier's own deadline
+/// (`command_timeout`), output past the retained limit (`command_output_limit`),
+/// a signal, and the owner stopping the command.
+pub fn verifier_environment(observation: &Value, worker_passed: bool) -> Option<&'static str> {
+    let failure = observation["failure"].as_str();
+    if matches!(
+        failure,
+        Some("command_output_limit" | "command_timeout" | "command_signalled" | "owner_stopped")
+    ) {
+        return None;
+    }
+    if observation["complete"] != true {
+        return Some(match failure {
+            Some("command_output_unavailable") => "output_unavailable",
+            Some(
+                "native_verification_sandbox_unavailable" | "native_command_sandbox_unavailable",
+            ) => "sandbox_unavailable",
+            Some("native_effect_unavailable") => "launch_unavailable",
+            Some("command_wait_failed") => "wait_failed",
+            _ => "incomplete",
+        });
+    }
+    let code = observation["exit_code"].as_i64()?;
+    match code {
+        0 => return None,
+        126 => return Some("not_executable"),
+        127 => return Some("program_not_found"),
+        _ => {}
+    }
+    let tail = |k: &str| {
+        let s = observation[k].as_str().unwrap_or("");
+        let mut start = s.len().saturating_sub(64 * 1024);
+        while !s.is_char_boundary(start) {
+            start += 1;
+        }
+        s[start..].to_owned()
+    };
+    let output = format!("{}\n{}", tail("stdout"), tail("stderr"));
+    if output.contains("No space left on device") || output.contains("ENOSPC") {
+        return Some("disk_full");
+    }
+    if output.contains("Disk quota exceeded") || output.contains("EDQUOT") {
+        return Some("disk_quota");
+    }
+    if output.contains("native_command_sandbox_unavailable")
+        || output.contains("native_verification_sandbox_unavailable")
+    {
+        return Some("sandbox_unavailable");
+    }
+    if worker_passed {
+        let loopback = ["127.0.0.1", "localhost", "::1"]
+            .iter()
+            .any(|h| output.contains(h));
+        let refused = output.contains("ECONNREFUSED") || output.contains("Connection refused");
+        return Some(if refused && loopback {
+            "network_refused"
+        } else {
+            "environment_difference"
+        });
+    }
+    None
+}
+/// Whether a worker of the task ran exactly `argv` and it passed (complete, exit 0,
+/// no failure) on one of `digests` (the checkout the verifier ran in, or the
+/// review binding): the same command on the same bytes, so a verifier failure of it
+/// is the verifier's environment, not the work.
+pub fn worker_passed_tx(
+    db: &rusqlite::Connection,
+    task: &str,
+    argv: &[String],
+    digests: &[&str],
+) -> CoreResult<bool> {
+    let argv = serde_json::to_string(argv)?;
+    for digest in digests.iter().filter(|d| !d.is_empty()) {
+        let passed: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM (SELECT CASE WHEN operation='outside_command'
+                 THEN json_extract(result_json,'$.reply.structuredContent') ELSE result_json END AS r
+               FROM runtime_requests WHERE task_id=? AND operation IN ('command_run','outside_command'))
+             WHERE json_valid(r) AND json_extract(r,'$.argv')=json(?) AND json_extract(r,'$.complete')=1
+               AND json_extract(r,'$.exit_code')=0 AND json_extract(r,'$.failure') IS NULL
+               AND json_extract(r,'$.revision_digest')=?)",
+            (task, &argv, digest),
+            |r| r.get(0),
+        )?;
+        if passed {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+/// Delays between the runtime's own rechecks of a verification its environment
+/// failed twice: 1, 2, 5 and 10 minutes. No model is called. If the 10-minute recheck
+/// still fails the same environmental way, the runtime asks the owner one question
+/// instead of waiting longer (`record_verification_wait_tx`).
+pub const VERIFICATION_WAIT_BACKOFF: [u64; 4] = [60, 120, 300, 600];
+/// The verification environment wait in force for the task's current revision, if
+/// any: the latest `VERIFICATION_ENVIRONMENT_WAIT` not followed by a verification
+/// outcome, a revised procedure, a new plan, a new review or a reopen. Its payload
+/// carries `retry_not_before` (Unix seconds) and `attempt`.
+pub fn verification_wait_tx(db: &rusqlite::Connection, task: &str) -> CoreResult<Option<Value>> {
+    let (state, revision): (String, i64) = db.query_row(
+        "SELECT state,revision FROM runtime_tasks WHERE task_id=?",
+        [task],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if state != "VERIFYING" {
+        return Ok(None);
+    }
+    let last: Option<(i64, String, String)> = db
+        .query_row(
+            "SELECT id,type,payload_json FROM runtime_events WHERE task_id=? AND type IN
+             ('VERIFICATION_ENVIRONMENT_WAIT','VERIFICATION_PASSED','VERIFICATION_FAILED','VERIFICATION_REVISED',
+              'PLAN_ACCEPTED','REVIEW_STARTED','TASK_REOPENED') ORDER BY id DESC LIMIT 1",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((id, kind, raw)) = last else {
+        return Ok(None);
+    };
+    if kind != "VERIFICATION_ENVIRONMENT_WAIT" {
+        return Ok(None);
+    }
+    let mut wait: Value = serde_json::from_str(&raw)?;
+    if wait["revision"] != revision {
+        return Ok(None);
+    }
+    wait["id"] = json!(id);
+    Ok(Some(wait))
+}
+/// Records that the runtime itself reruns the identical verification command once,
+/// with no model call, because its first outcome was environmental (`reason`).
+pub fn record_verification_rerun_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    argv: &Value,
+    reason: &str,
+    receipt_ref: &Value,
+) -> CoreResult<()> {
+    let (_, revision) = domain::task_tx(db, task)?;
+    event_tx(
+        db,
+        task,
+        "VERIFICATION_RERUN",
+        json!({"revision":revision,"argv":argv,"reason":reason,"first_receipt":receipt_ref}),
+    )?;
+    Ok(())
+}
+/// The verification of the current revision failed the same environmental way
+/// after the runtime's own rerun: the task stays VERIFYING as the runtime's own
+/// wait (no replan, no ladder rung, no model call) and the runtime runs the
+/// verification again after the next backoff step. The receipts stay as retained
+/// diagnostics; nothing is recorded as passed.
+pub fn record_verification_wait_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    argv: &Value,
+    reason: &str,
+    receipts: &Value,
+    now: f64,
+) -> CoreResult<Value> {
+    let (state, revision) = domain::task_tx(db, task)?;
+    if state != TaskState::Verifying {
+        return refuse("verification_not_expected");
+    }
+    let attempt = verification_wait_tx(db, task)?
+        .and_then(|w| w["attempt"].as_i64())
+        .unwrap_or(0)
+        + 1;
+    let key = super::loop_guard::key("verifier_environment", "", &format!("{argv}|{reason}"));
+    let mut wait = json!({"revision":revision,"argv":argv,"reason":reason,"receipts":receipts,
+        "attempt":attempt,"class":"verifier_environment","key":key});
+    let delay = VERIFICATION_WAIT_BACKOFF.get(attempt as usize - 1).copied();
+    if let Some(delay) = delay {
+        wait["retry_after_s"] = json!(delay);
+        wait["retry_not_before"] = json!(now + delay as f64);
+    }
+    let id = event_tx(db, task, "VERIFICATION_ENVIRONMENT_WAIT", wait.clone())?;
+    if attempt >= 2 {
+        event_tx(
+            db,
+            task,
+            "LOOP_OBSERVED",
+            json!({"key":key,"kind":"verifier_environment","node":"","count":attempt}),
+        )?;
+    }
+    if delay.is_none() {
+        wait["owner_question"] = json!(verification_environment_question_tx(
+            db, task, revision, argv, reason, &key, id
+        )?);
+        db.execute(
+            "UPDATE runtime_events SET payload_json=? WHERE id=?",
+            (wait.to_string(), id),
+        )?;
+    }
+    Ok(wait)
+}
+/// What an environmental verification outcome means, in plain words.
+fn environment_words(reason: &str, ru: bool) -> &'static str {
+    match (reason, ru) {
+        ("output_unavailable", false) => "its output never reached its end",
+        ("output_unavailable", true) => "её вывод так и не дошёл до конца",
+        ("sandbox_unavailable", false) => "the verifier's sandbox could not start",
+        ("sandbox_unavailable", true) => "песочница проверки не запускается",
+        ("launch_unavailable", false) => "it could not be started",
+        ("launch_unavailable", true) => "её не удаётся запустить",
+        ("wait_failed", false) => "its end could not be observed",
+        ("wait_failed", true) => "не удаётся увидеть её завершение",
+        ("not_executable", false) => "the program cannot be executed there",
+        ("not_executable", true) => "программу там нельзя запустить",
+        ("program_not_found", false) => "the program is not found there",
+        ("program_not_found", true) => "программа там не найдена",
+        ("disk_full", false) => "the disk is full",
+        ("disk_full", true) => "диск заполнен",
+        ("disk_quota", false) => "the disk quota is exceeded",
+        ("disk_quota", true) => "превышена дисковая квота",
+        ("network_refused", false) => "a local service it needs refuses the connection inside the verifier's sandbox, while the same command passed for a worker on the same files",
+        ("network_refused", true) => "нужный ей локальный сервис отказывает в соединении внутри песочницы проверки, хотя у исполнителя та же команда на тех же файлах прошла",
+        ("environment_difference", false) => "it fails there while the same command passed for a worker on the same files",
+        ("environment_difference", true) => "там она падает, хотя у исполнителя та же команда на тех же файлах прошла",
+        (_, false) => "it was stopped before it finished",
+        (_, true) => "её остановили до завершения",
+    }
+}
+/// The runtime's one question (no model call) when its own reruns of a verification
+/// command at 1, 2, 5 and 10 minutes all failed the same environmental way: it names
+/// the command and the reason in the task's language and offers the loop question's
+/// answers (`automatic::LOOP_OPTIONS`): retry now, another approach (the coordinator
+/// changes the verification procedure), accept as not verified (a disclosed limit,
+/// never a pass) or retry later. Returns the question id.
+fn verification_environment_question_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    revision: i64,
+    argv: &Value,
+    reason: &str,
+    key: &str,
+    wait_event: i64,
+) -> CoreResult<String> {
+    let history = super::loop_guard::history(db, task, key, false)?;
+    let attempt: i64 = db.query_row(
+        "SELECT count(*)+1 FROM runtime_events WHERE task_id=?1 AND type='LOOP_BROKEN'
+           AND json_extract(payload_json,'$.key')=?2 AND json_extract(payload_json,'$.action')='ask_owner'
+           AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='TASK_REOPENED'),0)",
+        (task, key),
+        |r| r.get(0),
+    )?;
+    let ru = domain::task_language_tx(db, task)? == "ru";
+    let name = super::automatic::task_name(db, task)?;
+    let command: String = argv
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(160)
+        .collect();
+    let words = environment_words(reason, ru);
+    let again = if attempt > 1 {
+        if ru {
+            format!("Попытка {attempt}. ")
+        } else {
+            format!("Attempt {attempt}. ")
+        }
+    } else {
+        String::new()
+    };
+    let text = if ru {
+        format!("{again}Задача «{name}»: итоговая проверка `{command}` не может выполниться в среде проверки: {words}. Runtime сам повторил её через 1, 2, 5 и 10 минут с тем же результатом; ошибка в самой работе не установлена. Как продолжить?")
+    } else {
+        format!("{again}Task \"{name}\": the final check `{command}` cannot run in the verifier's environment: {words}. The runtime itself ran it again after 1, 2, 5 and 10 minutes with the same result; nothing shows the work itself is at fault. How should it continue?")
+    };
+    let details = json!({"class":"verifier_environment","reason":"verifier_environment","revision":revision,
+        "strategy":"ask_owner","loop_key":key,"switch_coordinator":false,"reports":[],
+        "events":[{"id":wait_event,"type":"VERIFICATION_ENVIRONMENT_WAIT"}],
+        "verification_environment":{"argv":argv,"reason":reason}});
+    super::automatic::runtime_question_tx(
+        db,
+        task,
+        revision,
+        "verifier_environment",
+        &history,
+        &[command.clone(), reason.to_owned()],
+        details,
+        &text,
+        attempt,
+        ru,
+    )?;
+    let question: String = db.query_row(
+        "SELECT json_extract(payload_json,'$.owner_question') FROM runtime_events WHERE task_id=?
+         AND type='AUTOMATIC_CONTINUATION' ORDER BY id DESC LIMIT 1",
+        [task],
+        |r| r.get(0),
+    )?;
+    Ok(question)
+}
+/// Settles every verification run of the current revision that started and never
+/// finished (a restart or crash mid-run): its outcome is recorded as unknown
+/// (`settled_by: runtime_reverify`), never as passed or failed, and the runtime
+/// reruns the verification itself (`VERIFICATION_RERUN`, reason `outcome_unknown`)
+/// instead of refusing every later verification of the revision. Returns how many
+/// runs it settled. Only the serialized driver calls this, so no run can still be
+/// in progress.
+pub fn settle_interrupted_verification_tx(db: &Transaction<'_>, task: &str) -> CoreResult<usize> {
+    let (_, revision) = domain::task_tx(db, task)?;
+    let runs = db
+        .prepare(
+            "SELECT request_key FROM runtime_requests i WHERE task_id=?1 AND operation='native_verification_intent'
+             AND json_extract(result_json,'$.revision')=?2 AND NOT EXISTS(SELECT 1 FROM runtime_requests f
+                WHERE f.task_id=i.task_id AND f.actor='native-verifier-finish' AND f.request_key=i.request_key)
+             ORDER BY rowid",
+        )?
+        .query_map((task, revision), |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if runs.is_empty() {
+        return Ok(0);
+    }
+    let plan: Option<String> = db.query_row(
+        "SELECT plan_json FROM runtime_tasks WHERE task_id=?",
+        [task],
+        |r| r.get(0),
+    )?;
+    let commands = plan
+        .and_then(|p| serde_json::from_str::<Value>(&p).ok())
+        .map(|p| p["verification"].clone())
+        .unwrap_or(Value::Null);
+    for run in &runs {
+        let settled = json!({"settled":true,"outcome":"unknown","settled_by":"runtime_reverify","revision":revision});
+        request_tx(
+            db,
+            task,
+            "native-verifier-finish",
+            run,
+            "native_verification_finished",
+            &json!({"settled_by":"runtime_reverify"}),
+            || Ok(settled.clone()),
+        )?;
+        event_tx(
+            db,
+            task,
+            "VERIFICATION_RERUN",
+            json!({"revision":revision,"argv":commands,"reason":"outcome_unknown","intent":run,
+                "outcome":"unknown","settled_by":"runtime_reverify"}),
+        )?;
+    }
+    Ok(runs.len())
+}
+/// Normalized identity of a failed verification: each failing command's argv, exit
+/// code and a digest of the normalized end of its retained output (lowercased,
+/// digits, hex runs and absolute paths masked, whitespace collapsed, last 2 KB), so
+/// the same failure repeated on new runs has the same key.
+fn verification_failure_key(
+    db: &Transaction<'_>,
+    task: &str,
+    checks: &[Value],
+) -> CoreResult<String> {
+    let mut failing = Vec::new();
+    for check in checks {
+        if check["complete"] == true && check["exit_code"] == 0 {
+            continue;
+        }
+        let output: Option<String> = db
+            .query_row(
+                "SELECT coalesce(json_extract(result_json,'$.observation.stdout'),'')||char(10)||
+                        coalesce(json_extract(result_json,'$.observation.stderr'),'')
+                 FROM runtime_requests WHERE task_id=? AND actor='native-verifier-output'
+                 AND operation='native_command_output' AND json_extract(result_json,'$.tool_call_ref')=? LIMIT 1",
+                (task, check["receipt_ref"].as_str().unwrap_or("")),
+                |r| r.get(0),
+            )
+            .optional()?;
+        let tail = normalized_tail(output.as_deref().unwrap_or(""), 2048);
+        failing.push(json!([
+            check["argv"],
+            check["exit_code"],
+            check["failure"],
+            crate::digest(tail.as_bytes())
+        ]));
+    }
+    Ok(crate::digest(json!(failing).to_string().as_bytes()))
+}
+fn normalized_tail(text: &str, limit: usize) -> String {
+    let mut out = String::new();
+    for word in text.split_whitespace() {
+        let word = word.to_lowercase();
+        let masked: String = if word.starts_with('/') {
+            "/p".into()
+        } else {
+            let mut m = String::new();
+            let mut run = String::new();
+            let flush = |run: &mut String, m: &mut String| {
+                if run.len() >= 6 {
+                    m.push('#');
+                } else {
+                    m.extend(
+                        run.chars()
+                            .map(|c| if c.is_ascii_digit() { '0' } else { c }),
+                    );
+                }
+                run.clear();
+            };
+            for c in word.chars() {
+                if c.is_ascii_hexdigit() {
+                    run.push(c);
+                } else {
+                    flush(&mut run, &mut m);
+                    m.push(c);
+                }
+            }
+            flush(&mut run, &mut m);
+            m
+        };
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&masked);
+    }
+    let mut start = out.len().saturating_sub(limit);
+    while !out.is_char_boundary(start) {
+        start += 1;
+    }
+    out[start..].to_owned()
+}
 pub fn record_verification_tx(
     db: &Transaction<'_>,
     task: &str,
@@ -1568,6 +2205,13 @@ pub fn record_verification_tx(
     if !passed && super::automatic::enabled(db, task)? {
         verification["commands"] = json!(commands);
     }
+    if !passed {
+        let checks = verification["checks"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        verification["failure_key"] = json!(verification_failure_key(db, task, &checks)?);
+    }
     event_tx(
         db,
         task,
@@ -1581,11 +2225,19 @@ pub fn record_verification_tx(
     if passed {
         domain::state_tx(db, task, TaskState::Reconciling, None)?;
     } else {
+        // Each rung of the strategy ladder gets its own direct repairs: past them the
+        // stop is a continuation that changes approach (escalated routes, the senior
+        // consultant, another role), never a stop for the owner.
         let failures: i64 = db.query_row(
-            "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='VERIFICATION_FAILED'",
+            "SELECT count(*) FROM runtime_events WHERE task_id=?1 AND type='VERIFICATION_FAILED'
+             AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1
+                 AND type IN ('AUTOMATIC_RESUMED','TASK_REOPENED')),0)",
             [task],
             |r| r.get(0),
         )?;
+        // Every failure carries its normalized identity (`failure_key`): the strategy
+        // ladder's per-fingerprint rung choice and backoff (`automatic::stop_tx`) see
+        // the same failure repeated across rungs; a rung's own direct repairs stay.
         if failures <= MAX_VERIFICATION_REPAIRS as i64 {
             domain::state_tx(db, task, TaskState::Planning, None)?;
         } else {
@@ -1728,13 +2380,86 @@ pub(super) fn require_repair_commands(
     let commands = proposed
         .as_array()
         .ok_or(CoreError::Refused("verification_commands_missing"))?;
-    if outstanding_commands(db, task, true)?
+    if unaccepted_commands(db, task)?
         .iter()
         .any(|argv| !commands.contains(argv))
     {
         return refuse("verification_failed_check_missing");
     }
     Ok(())
+}
+/// Failed or dropped verification commands still owed, less those the owner accepted
+/// as disclosed unverified limits after a loop question
+/// (`automatic::owner_accepted_commands`): a repair plan may leave those out and
+/// they do not hold completion, but they stay gaps of the final result
+/// (`reconciliation::gaps` reads their `LOOP_BROKEN.limits`) and are never a pass.
+fn unaccepted_commands(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<Value>> {
+    let accepted = super::automatic::owner_accepted_commands(db, task)?;
+    Ok(outstanding_commands(db, task, true)?
+        .into_iter()
+        .filter(|argv| !accepted.contains(argv))
+        .collect())
+}
+/// Coordinator turns that carry the task's retained-state capsule, whose
+/// constraints list every owner message the former runtime stored as a
+/// `task_events` row: a turn of one of these kinds after a message delivered it.
+const CAPSULE_TURNS: &str = "'PLAN_ACCEPTED','NATIVE_COORDINATOR_CONTINUED','SYNTHESIS_SUBMITTED','REPLAN_REQUEST_ACCEPTED'";
+/// Owner messages and clarifications the former runtime stored as `task_events`
+/// rows were never consumed by this runtime, which records owner messages as
+/// `USER_STEERING` and lists those rows in every coordinator's capsule instead.
+/// One that a later coordinator turn carried (`CAPSULE_TURNS`) has been delivered:
+/// it is marked consumed (`runtime:recovery_capsule`), so it no longer holds
+/// completion (an AI-Frontier store held a task's completion on a message from
+/// 2026-10-05 through three passed verifications). One no coordinator has seen yet
+/// still holds it and is named by `pending_input_tx`.
+pub fn settle_delivered_legacy_input_tx(db: &Transaction<'_>, task: &str) -> CoreResult<usize> {
+    Ok(db.execute(
+        &format!(
+            "UPDATE task_events SET consumed_by='runtime:recovery_capsule',delivered_at=coalesce(delivered_at,?2)
+             WHERE task_id=?1 AND event_type IN ('user_message','coordinator_clarification')
+             AND consumed_by IS NULL AND superseded=0 AND EXISTS(SELECT 1 FROM runtime_events e
+                WHERE e.task_id=task_events.task_id AND e.type IN ({CAPSULE_TURNS})
+                AND julianday(e.created_at)>julianday(task_events.created_at))"
+        ),
+        (task, crate::now()),
+    )?)
+}
+/// What holds completion as `completion_pending_input`, each item named: open
+/// questions, owner messages not yet applied or delivered, open waits and a former
+/// runtime's owner message no coordinator turn has carried yet. Empty when nothing
+/// does.
+pub fn pending_input_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<Value>> {
+    let mut items = Vec::new();
+    let questions = db
+        .prepare("SELECT id FROM pending_questions WHERE task_id=? AND status='open'")?
+        .query_map([task], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for id in questions {
+        items.push(json!({"kind":"open_question","id":id}));
+    }
+    let legacy = db
+        .prepare(
+            "SELECT id,event_type,created_at FROM task_events WHERE task_id=?
+             AND event_type IN ('user_message','coordinator_clarification') AND consumed_by IS NULL AND superseded=0",
+        )?
+        .query_map([task], |r| {
+            Ok(json!({"kind":"undelivered_message","source":"task_events","id":r.get::<_,i64>(0)?,
+                "type":r.get::<_,String>(1)?,"recorded_at":r.get::<_,String>(2)?}))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    items.extend(legacy);
+    for message in super::steering::pending(db, task)? {
+        items.push(json!({"kind":"pending_steering","message":message}));
+    }
+    for message in super::steering::undelivered(db, task)? {
+        items.push(json!({"kind":"undelivered_steering","message":message}));
+    }
+    for wait in waits::projection_tx(db, task)? {
+        if ["open", "ready", "resuming"].contains(&wait["status"].as_str().unwrap_or("")) {
+            items.push(json!({"kind":"open_wait","id":wait["id"],"status":wait["status"]}));
+        }
+    }
+    Ok(items)
 }
 /// Runtime alone calls this after reconciling processes and safe artifact reads.
 pub fn complete_tx(
@@ -1762,6 +2487,7 @@ pub fn complete_tx(
     if stopped {
         return refuse("completion_task_stopped");
     }
+    settle_delivered_legacy_input_tx(db, task)?;
     let pending:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM pending_questions WHERE task_id=? AND status='open')
         OR EXISTS(SELECT 1 FROM task_events WHERE task_id=? AND event_type IN ('user_message','coordinator_clarification') AND consumed_by IS NULL AND superseded=0)",
         (task,task),|r|r.get(0))?;
@@ -1927,20 +2653,47 @@ pub fn complete_tx(
                 return refuse("completion_artifact_changed_or_missing");
             }
         }
-        if !outstanding_commands(db, task, true)?.is_empty() {
+        if !unaccepted_commands(db, task)?.is_empty() {
             return refuse("completion_dropped_failed_check");
         }
         let (review_id, reviewed) = review_binding_tx(db, task)?;
         let latest: Option<(i64, String, String)> = db
             .query_row(
                 "SELECT id,type,payload_json FROM runtime_events WHERE task_id=?
-            AND type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED') ORDER BY id DESC LIMIT 1",
+            AND (type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED')
+              OR type='VERIFICATION_REVISED' AND json_extract(payload_json,'$.accepted_unverified') IS NOT NULL)
+            ORDER BY id DESC LIMIT 1",
                 [task],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
         let (id, kind, s) = latest.ok_or(CoreError::Refused("completion_verification_missing"))?;
         let v: Value = serde_json::from_str(&s)?;
+        // The owner accepted every command of the plan as not verified (an explicit
+        // decision, like close as is): no passed verification exists or is needed, the
+        // reviewed bytes must be unchanged, and the limits are disclosed as gaps.
+        if kind == "VERIFICATION_REVISED" {
+            let plan: Option<String> = db.query_row(
+                "SELECT plan_json FROM runtime_tasks WHERE task_id=?",
+                [task],
+                |r| r.get(0),
+            )?;
+            let none_left = plan
+                .and_then(|p| serde_json::from_str::<Value>(&p).ok())
+                .is_some_and(|p| p["verification"].as_array().is_some_and(|a| a.is_empty()));
+            let accepted = super::automatic::owner_accepted_commands(db, task)?;
+            let all_accepted = v["accepted_unverified"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty() && a.iter().all(|argv| accepted.contains(argv)));
+            if !none_left || !all_accepted || id <= review_id || v["revision"] != revision {
+                return refuse("completion_verification_missing");
+            }
+            if bound_digest_tx(db, task, snapshot)? != reviewed {
+                return refuse("completion_project_revision_changed");
+            }
+            super::repair_checks::require_prior_worker_repairs(db, task, revision, &v)?;
+            return domain::state_tx(db, task, TaskState::Completed, None);
+        }
         if kind != "VERIFICATION_PASSED"
             || id <= review_id
             || v["revision"] != revision

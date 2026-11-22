@@ -110,6 +110,48 @@ fn generated_drift_is_detected_in_a_scratch_tree() {
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
+#[test]
+fn test_fast_preserves_the_invokers_tmpdir_for_steps() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = std::env::temp_dir().join(format!("xtask-child-tmp-{}", std::process::id()));
+    let bin = scratch.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(scratch.join("integrations/paseo")).unwrap();
+    fs::write(
+        scratch.join("integrations/paseo/package.json"),
+        r#"{"scripts":{}}"#,
+    )
+    .unwrap();
+    let cargo = bin.join("cargo");
+    fs::write(
+        &cargo,
+        "#!/bin/sh\n[ \"${TMPDIR:-}\" = \"$EXPECTED_TMPDIR\" ] || { echo \"Unexpected TMPDIR: $TMPDIR\" >&2; exit 73; }\n",
+    )
+    .unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_cortex-xtask"))
+        .args(["test-fast", "--only", "build", "--root"])
+        .arg(&scratch)
+        .env("TMPDIR", &scratch)
+        .env("EXPECTED_TMPDIR", &scratch)
+        .env("PATH", path)
+        .output();
+    fs::remove_dir_all(&scratch).unwrap();
+    let out = out.unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn read(relative: &str) -> String {
     std::fs::read_to_string(root().join(relative)).unwrap_or_else(|e| panic!("{relative}: {e}"))
 }

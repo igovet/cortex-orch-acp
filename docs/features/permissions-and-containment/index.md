@@ -17,6 +17,11 @@ A subject longer than 600 characters has an explicit omitted-character count
 in the card title; `rawInput.subject` retains the complete subject. This is a
 display safeguard, not a change to the command or authorization rules.
 
+Standalone extracted Dev qualification exercises the native read-only verifier
+inside the candidate service process before desktop input. It fails on an
+incomplete receipt rather than substituting a successful bare-host check. See
+[extracted Dev readiness gates](../../cortex-workspace/testing-and-acceptance.md#extracted-dev-readiness-gates).
+
 ## Discovery and bounded read batches
 
 [The additive read API](../tool-discovery-and-read-batch/index.md) requires a
@@ -216,6 +221,8 @@ work, and whether a deletion waits for the user.
 | Writing-worker `command_run` | restricted mounts; cwd inside the task tree | host-writable masks, any existing cwd, no card | same as Development |
 | `outside_write` | consent card | consent card | runtime answers the card itself (Cortex private state refused in every mode) |
 | `outside_command` (no sandbox) | consent card | consent card | runtime answers the card itself |
+| Writing-worker `command_run` that needs the host (`sudo`, sandbox unavailable, launcher failure proven before release) | rerun through `outside_command`: consent card | same: consent card | same: runtime answers the card itself |
+| `sudo` in a host command | owner password prompt on the desktop or a paired phone | same | same |
 | Declared deletion (`project_delete`, `command_delete`, native delete) | consent card | consent card | runtime answers the card itself |
 | Reads by any `command_run` command (every role, every mode) | anywhere the owner's account can read, no card (the sandbox masks only Cortex private state) | same | same |
 | Read-only/reviewer `command_run` (every read-only role, every mode) | read-only profile (`read_only`); cwd inside the task tree | read-only profile (`read_only`); any existing cwd | same as Development |
@@ -579,7 +586,8 @@ seconds for each step reported by the per-command supervisor, the namespace and 
 probes up to 20 seconds and the git ignored-path query up to 30 seconds (each step is normally
 well under a second). Exceeding a bound still refuses before launch with
 `native_command_sandbox_unavailable`; the receipt is settled as never launched, and the
-tool's hint tells the model that nothing ran and the identical command may be retried once.
+tool's hint tells a read-only role that nothing ran and the identical command may be retried once.
+A writing worker's command is instead rerun on the host ([host rerouting](#host-rerouting-and-the-sudo-password-prompt)).
 Such a never-launched call does not keep an earlier failed check open (see
 [check history](../orchestration/index.md#check-history-and-current-outcome)).
 
@@ -590,15 +598,61 @@ cannot create another user namespace, whatever the mounts. Nested bubblewrap, fl
 fail inside `command_run`. When the retained output (its first 64 KiB or its last 64 KiB)
 shows one of these refusals, the settled receipt carries `nested_sandbox`
 (`code: nested_sandbox_denied`, the matched signature, and whether `outside_command` is
-offered to the command's profile). It is advisory: the outcome, exit code and evidence
-are unchanged, nothing is rerun, and no authority widens. A writing worker may rerun the
-same argv through the consent-backed `outside_command`; a read-only role reports the check
-as not run with that blocker. The signatures are bubblewrap's, `unshare`'s, a rootless
+offered to the command's profile). The sandboxed receipt's outcome, exit code and evidence
+are unchanged. The receipt carries only this advisory hint: nothing is rerun automatically
+on the host because of it ([host rerouting](#host-rerouting-and-the-sudo-password-prompt)).
+The worker decides whether to ask for a host run, and a read-only role reports the check as
+not run with that blocker. The signatures are bubblewrap's, `unshare`'s, a rootless
 container runtime's `cannot clone` and Chromium's `No usable sandbox!` messages. A nested
 Cortex reports its own `native_command_sandbox_unavailable` or
 `native_verification_sandbox_unavailable` code instead and is not matched. Signatures in the
 middle of a larger output are not scanned (`nested_sandbox_hint` in
 `crates/workspace-service/src/native_command_handles.rs`).
+
+### Host rerouting and the sudo password prompt
+
+A writing worker's `command_run` that needs the host is rerouted in the cases below.
+The runtime reruns the identical argv, cwd and timeout through `outside_command`
+(request key `<key>.host`; Auto answers its consent card, Guarded and Development show
+it with the reason in its title) and returns that host receipt with `rerouted`
+(`from: command_run`, `reason` and the original request key) only when:
+
+| Reason | When |
+|---|---|
+| `privilege` | `sudo`, `pkexec` or `doas` is at a command position of the argv: first, after wrappers such as `env`, `timeout` or `nice`, or in a `sh`/`bash`/`dash`/`zsh` script. Nothing runs in the sandbox first. |
+| `sandbox_unavailable` | The sandbox could not be prepared (`native_command_sandbox_unavailable`); nothing ran. |
+| Sandbox launcher failed before the payload was released | The private supervisor itself reports, over its control pipe before the final `go`, one of four sandbox-facility failures: Bubblewrap missing, launcher spawn failure, namespace or mount setup failure, or launcher probe timeout. The original row settles as not launched with dedicated supervisor evidence, and only then is the host rerun dispatched once. A supervisor timeout, a lost pipe, an authority failure or an unrelated preparation refusal is not such evidence. |
+
+Once the sandboxed payload has started, the command is never replayed on the host
+automatically, whatever its exit status or output. Output that looks like a refused nested
+sandbox or a refused root (`nested_sandbox`, `sandbox_privilege`) is child-controlled text,
+so it stays an advisory hint on the unchanged original receipt; the worker decides whether
+to ask for a host run. Output text never selects the host route.
+
+The sandboxed receipt is kept and records `rerouted_to` when a host rerun was dispatched, so the same request replayed
+answers the same host receipt and nothing runs twice. Read-only roles, reviewers and
+verification are never rerouted; their receipts carry the `sandbox_privilege` or
+`nested_sandbox` hint telling them to report the check as not run. A long command whose
+first reply is `running` is not rerouted when it later settles. A consent refusal on the
+host route is the outside route's own refusal (`outside_action_not_confirmed`) with
+`rerouted` attached; nothing ran.
+
+`sudo` on the host asks the owner. Each host command gets a private askpass route
+(`SUDO_ASKPASS`, a `sudo` shim first on `PATH` that adds `-A`, a per-command socket and
+token). The service accepts only its own helper started by a root `sudo` and opens a
+"Password for sudo" prompt naming sudo's command line, cwd, project, task and worker on
+the desktop and on paired phones ([screens](../../cortex-workspace/SCREENS.md#sudo-password-prompt)).
+Only that command waits. The password goes to sudo's pipe once and is never stored,
+logged, put in an event, receipt or output, or shown to a model; a cancel, 10 minutes
+without an answer, or the command ending makes sudo fail normally, and the receipt's
+`sudo_prompts` lists each prompt's outcome. `sudo -n` never asks. A phone may send a
+password only while the owner's "Passwords and tokens from phones" setting (formerly
+"Sudo passwords from phones") is on (default on).
+See [SECURITY.md](../../../SECURITY.md#owner-password-for-sudo-askpass-and-host-rerouting)
+for the trust boundary (`native_askpass.rs`, `native_commands.rs`). When the task lacks
+access instead (a GitHub, Codex or Claude login, or sudo), the owner gets an owner action
+card (`native_owner_actions.rs`); see
+[owner actions](../../../SECURITY.md#owner-actions-sign-ins-and-pasted-tokens).
 
 A settled receipt whose retained output shows a program that could not be found
 (bubblewrap's `execvp NAME: No such file or directory`, or exit 127 with a shell's

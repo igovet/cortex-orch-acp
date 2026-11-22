@@ -1,6 +1,7 @@
 import { batch, createMemo, createSignal, onCleanup } from "solid-js";
 import { applyFacts, applyMachineFacts, applyProjection, applySprintDeletion, capabilityOf, compareVersions, emptyWorkspace, FEATURES, hasCapability, noCapabilities, projectionKey } from "@cortex/workspace-domain";
 import type { Attachment, AttachmentInput, AttachmentRef, CommandEnvelope, CommandReceipt, FileRead, GitInterest, FileSaveResult, FolderListing, FolderListRequest, IntegrationText, IntegrationTextRequest, MachineFacts, RemoteOperation, RemoteRequests, RemoteStatus, PortCapabilities, PortConnection, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectSkills, WorkspaceCommand, WorkspacePort, WorkspaceState } from "@cortex/workspace-domain";
+import type { OwnerActionVerb } from "@cortex/workspace-domain";
 import { downloadAttachment } from "./attachments";
 import { COPY } from "./copy";
 import { buildIndex, stableIndex, type WorkspaceIndex } from "./selectors";
@@ -474,6 +475,14 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
     /** The local machine's remote access, when its service offers it; otherwise a refusal in words. */
     remoteAccess: <O extends RemoteOperation>(operation: O, message: RemoteRequests[O]): Promise<RemoteStatus> => port.remoteAccess && can(FEATURES.remoteAccess) ? port.remoteAccess.call(operation, message) : Promise.reject(new Error("Remote access is not available in this build.")),
     watchRemoteAccess: (listener: () => void) => port.remoteAccess?.watch(listener) ?? (() => {}),
+    /** The machine's open sudo password prompts; null when its service has none. The password is sent once and never kept. */
+    sudoPrompts: () => port.sudoPrompts ? port.sudoPrompts.list() : Promise.resolve(null),
+    answerSudo: (promptId: string, password: string) => port.sudoPrompts ? port.sudoPrompts.answer(promptId, password) : Promise.reject(new Error(COPY.notOffered)),
+    cancelSudo: (promptId: string) => port.sudoPrompts ? port.sudoPrompts.cancel(promptId) : Promise.reject(new Error(COPY.notOffered)),
+    /** Access the machine's tasks lack (sign-ins, sudo); null when its service has none. A token is sent once and never kept. */
+    ownerActions: () => port.ownerActions ? port.ownerActions.list() : Promise.resolve(null),
+    actOwner: (projectId: string, actionId: string, action: OwnerActionVerb) => port.ownerActions ? port.ownerActions.act(projectId, actionId, action) : Promise.reject(new Error(COPY.notOffered)),
+    ownerToken: (projectId: string, actionId: string, token: string) => port.ownerActions ? port.ownerActions.token(projectId, actionId, token) : Promise.reject(new Error(COPY.notOffered)),
     /** Null when this backend has no folder search. */
     searchDirectories: (request: Parameters<NonNullable<WorkspacePort["searchDirectories"]>>[0]) => port.searchDirectories?.(request) ?? Promise.resolve(null),
     cancelDirectorySearch: (machineId: string, session: string) => port.cancelDirectorySearch?.(machineId, session) ?? Promise.resolve(),

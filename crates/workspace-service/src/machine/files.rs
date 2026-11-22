@@ -183,6 +183,38 @@ fn held(folder: &File, name: &str) -> Result<Option<(Vec<u8>, u32)>> {
     }
     Ok(Some((data, info.mode() & 0o7777)))
 }
+/// Bounded, descriptor-relative observation of the current working copy.
+pub(super) fn checkout_digest(checkout: &Path, name: &str) -> Result<Option<String>> {
+    let (folder, leaf) = match parent(checkout, name) {
+        Err(e) if e.code == "folder_missing" => return Ok(None),
+        other => other?,
+    };
+    let open = || open_at(&folder, &leaf, libc::O_RDONLY | libc::O_NONBLOCK, 0);
+    let mut file = match open() {
+        Err(e) if e.code == "file_missing" => return Ok(None),
+        other => other?,
+    };
+    let info = file.metadata()?;
+    if !info.is_file() || info.nlink() != 1 || info.len() > MAX_FILE as u64 {
+        return Err(refuse(
+            "evidence_unavailable",
+            "Recorded file cannot be observed.",
+        ));
+    }
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(MAX_FILE as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    let stamp = |m: &fs::Metadata| (m.dev(), m.ino(), m.ctime(), m.ctime_nsec(), m.len());
+    if bytes.len() as u64 != info.len() || stamp(&open()?.metadata()?) != stamp(&info) {
+        return Err(refuse(
+            "evidence_unavailable",
+            "Recorded file changed during observation.",
+        ));
+    }
+    Ok(Some(revision(&bytes)))
+}
+
 fn inside(checkout: &Path, name: &str) -> Result<PathBuf> {
     relative(name)?;
     let base = fs::canonicalize(checkout)?;

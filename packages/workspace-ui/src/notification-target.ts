@@ -27,8 +27,12 @@ export const NOTIFICATION_KINDS = [
   { id: "paused", label: "Sprints that paused" },
 ] as const;
 export type NotificationKind = typeof NOTIFICATION_KINDS[number]["id"];
-/** What the focused window shows (a task or sprint), and the kinds the owner wants; the service raises nothing for that place. */
-export type NotificationReport = { focused: { project: string; task: string } | { project: string; sprint: string } | null; kinds: NotificationKind[] };
+/** What the focused window shows (a task or sprint), and the kinds the owner wants; the service raises nothing for that place.
+ *  `stalled` asks for a notification when a working task has made no progress for `stallHours` hours (see `STALL_HOURS`). */
+export type NotificationReport = { focused: { project: string; task: string } | { project: string; sprint: string } | null; kinds: (NotificationKind | "stalled")[]; stallHours?: number };
+/** The no-progress thresholds the owner can pick, in hours; 0 turns the notification off. 3 hours unless the owner changes it. */
+export const STALL_HOURS = [0, 1, 2, 3, 6] as const;
+export const STALL_DEFAULT = 3;
 /** The machine service's notifications, when it raises them: the window reports to it and collects a click that started it. */
 export type NotificationService = {
   report(report: NotificationReport): Promise<{ raising?: boolean }>;

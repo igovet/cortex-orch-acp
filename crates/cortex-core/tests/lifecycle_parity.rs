@@ -531,30 +531,22 @@ fn pause_restart_resume_preserves_decision_but_fences_old_session() {
     .unwrap();
     assert_eq!(state(&s), "EXECUTING");
 }
-// Mirrors tests/test_runtime_task_machine.py::test_runtime_stop_question_releases_the_stopped_plans_nodes
-// and tests/test_stop_answers.py::test_a_stop_answer_or_the_runtime_stop_option_stops_the_task.
+// The no-stop policy replaces the runtime stop question: a runtime stop is a
+// continuation on the strategy ladder, never an owner question.
 #[test]
-fn stop_question_force_finish_is_cancelled_not_completed() {
+fn a_runtime_stop_continues_instead_of_asking_the_owner() {
     let (_p, s, _) = setup();
-    let q = s
-        .write(|db| {
-            assert_eq!(
-                stop_tx(db, "t", "coordinator_prompt_failed")?,
-                TaskState::WaitingUser
-            );
-            Ok(db.query_row(
-                "SELECT id FROM pending_questions WHERE status='open'",
-                [],
-                |r| r.get::<_, String>(0),
-            )?)
-        })
-        .unwrap();
     s.write(|db| {
-        assert!(answer_tx(db, "t", &q, "2", "text", None)?);
+        assert_eq!(
+            stop_tx(db, "t", "coordinator_prompt_failed")?,
+            TaskState::Recovering
+        );
+        assert!(cortex_core::lifecycle::automatic::owed(db, "t")?.is_some());
         Ok(())
     })
     .unwrap();
-    assert_eq!(state(&s), "CANCELLED");
+    assert_eq!(support::count(&s, "pending_questions"), 0);
+    assert_eq!(state(&s), "RECOVERING");
 }
 // Mirrors tests/test_recovery_cancellation_targets.py::test_recovery_cancels_and_terminates_only_the_assignments_that_were_live.
 #[test]
@@ -611,6 +603,7 @@ fn replans_and_coordinator_returns_are_durable_and_user_bounded() {
         })
         .unwrap();
     }
+    // No replan limit: the fourth replan changes approach to a senior consultation.
     assert_eq!(
         s.write(|db| propose_replan_tx(
             db,
@@ -620,9 +613,8 @@ fn replans_and_coordinator_returns_are_durable_and_user_bounded() {
             "replan_request",
             &json!({})
         ))
-        .unwrap_err()
-        .code(),
-        "replan_limit_requires_user_input"
+        .unwrap()["decision"],
+        "senior_consultation"
     );
 }
 // Mirrors tests/test_runtime_task_machine.py::test_plan_atomic_and_idempotent,\n// additionally exercising stale task owner fencing through the writer executor.
@@ -1259,5 +1251,149 @@ fn metadata_only_or_incomplete_observations_refuse_the_waiver() {
         finish_execution(&s, &mut e);
         s.write(|db| add_review_tx(db, "t", &e)).unwrap();
         assert_eq!(state(&s), "REVIEWING", "{metadata_only}/{incomplete}");
+    }
+}
+/// Owner store 2026-11-21: cross-cutting documentation findings on a QA node were
+/// routed to QA and the coordinator had to replan them. A fix now goes to the
+/// specialist for the files its findings name: documentation to the technical
+/// writer, anything else to the node's own writing role.
+#[test]
+fn a_review_fix_goes_to_the_specialist_for_the_files_its_findings_name() {
+    for (findings, role) in [
+        (
+            json!([{"node":"n","cross_cutting":true,"files":["SECURITY.md","docs/a.md"],"fix":"Match the gh text to the code"}]),
+            "worker-technical-writer",
+        ),
+        (
+            json!([{"node":"n","cross_cutting":true,"files":["SECURITY.md","src/lib.rs"],"fix":"Fix both"}]),
+            "NODE",
+        ),
+        (
+            json!([{"node":"n","cross_cutting":true,"files":["crates/x/tests/flow.rs","ui/a.test.tsx"],"fix":"Fix the tests"}]),
+            "worker-qa-engineer",
+        ),
+    ] {
+        let (_p, s, _) = setup();
+        let mut e = evidence('b');
+        finish_execution(&s, &mut e);
+        let (own, fixed) = s
+            .write(|db| {
+                add_review_tx(db, "t", &e)?;
+                db.execute("UPDATE runtime_nodes SET status='completed',result_json=? WHERE node_id='_review_1'",
+                    [json!({"verdict":"REQUEST_CHANGES","summary":"s","report_ref":"review","findings":findings}).to_string()])?;
+                cortex_core::lifecycle::review::advance_tx(db, "t")?;
+                let own: String = db.query_row("SELECT role FROM runtime_nodes WHERE node_id='n'", [], |r| r.get(0))?;
+                let fixed: String = db.query_row("SELECT role FROM runtime_nodes WHERE node_id='_fix_1_n'", [], |r| r.get(0))?;
+                Ok((own, fixed))
+            })
+            .unwrap();
+        assert_eq!(fixed, if role == "NODE" { own.as_str() } else { role });
+    }
+}
+
+/// Product code a review names on a testing or writing node goes to a developer
+/// chosen by the files, never back to QA or the technical writer.
+#[test]
+fn code_findings_on_a_qa_node_go_to_a_developer_for_the_files() {
+    for (files, role) in [
+        (json!(["crates/a/src/lib.rs"]), "worker-backend-dev"),
+        (
+            json!(["packages/ui/src/view.tsx", "packages/ui/src/view.css"]),
+            "worker-frontend-dev",
+        ),
+        (
+            json!(["packages/ui/src/view.tsx", "crates/a/src/lib.rs"]),
+            "worker-fullstack-dev",
+        ),
+        (json!(["scripts/build.sh"]), "worker-devops-engineer"),
+        (json!(["crates/a/tests/flow.rs"]), "worker-qa-engineer"),
+    ] {
+        let (_p, s, _) = setup();
+        let mut e = evidence('b');
+        finish_execution(&s, &mut e);
+        let fixed = s
+            .write(|db| {
+                db.execute("UPDATE runtime_nodes SET role='worker-qa-engineer' WHERE node_id='n'", [])?;
+                add_review_tx(db, "t", &e)?;
+                db.execute("UPDATE runtime_nodes SET status='completed',result_json=? WHERE node_id='_review_1'",
+                    [json!({"verdict":"REQUEST_CHANGES","summary":"s","report_ref":"review","findings":[
+                        {"node":"n","cross_cutting":true,"files":files,"fix":"Fix it"}]}).to_string()])?;
+                cortex_core::lifecycle::review::advance_tx(db, "t")?;
+                Ok(db.query_row("SELECT role FROM runtime_nodes WHERE node_id='_fix_1_n'", [], |r| r.get::<_, String>(0))?)
+            })
+            .unwrap();
+        assert_eq!(fixed, role, "{files}");
+    }
+}
+
+/// The reviewer can name the writing specialist for a fix (any domain, for
+/// example a render pipeline); the runtime keeps it only when every finding of
+/// the fix agrees and the role writes, and otherwise chooses from the files.
+#[test]
+fn a_fix_goes_to_the_writing_specialist_its_findings_propose() {
+    for (findings, role) in [
+        (
+            json!([{"node":"n","cross_cutting":true,"files":["render/scene.json"],"fix":"Re-render the intro","role":"general"}]),
+            "worker-general",
+        ),
+        (
+            json!([{"node":"n","cross_cutting":true,"files":["src/lib.rs"],"fix":"A","role":"devops-engineer"},
+                   {"node":"n","cross_cutting":true,"files":["src/lib.rs"],"fix":"B","role":"frontend-dev"}]),
+            "worker-backend-dev",
+        ),
+        (
+            json!([{"node":"n","cross_cutting":true,"files":["docs/a.md"],"fix":"A","role":"security-auditor"}]),
+            "worker-technical-writer",
+        ),
+    ] {
+        let (_p, s, _) = setup();
+        let mut e = evidence('b');
+        finish_execution(&s, &mut e);
+        let fixed = s
+            .write(|db| {
+                db.execute("UPDATE runtime_nodes SET role='worker-qa-engineer' WHERE node_id='n'", [])?;
+                add_review_tx(db, "t", &e)?;
+                db.execute("UPDATE runtime_nodes SET status='completed',result_json=? WHERE node_id='_review_1'",
+                    [json!({"verdict":"REQUEST_CHANGES","summary":"s","report_ref":"review","findings":findings}).to_string()])?;
+                cortex_core::lifecycle::review::advance_tx(db, "t")?;
+                Ok(db.query_row("SELECT role FROM runtime_nodes WHERE node_id='_fix_1_n'", [], |r| r.get::<_, String>(0))?)
+            })
+            .unwrap();
+        assert_eq!(fixed, role, "{findings}");
+    }
+}
+
+/// Owner store 2026-11-21: the owner answered "close as is" ten times while each
+/// closing review re-raised the same declined reads as an owner decision. An owner
+/// decision already routed and answered becomes a disclosed limit instead of
+/// another question; a new one is still routed to the owner.
+#[test]
+fn an_answered_owner_decision_is_disclosed_not_asked_again() {
+    for answered in [false, true] {
+        let (_p, s, _) = setup();
+        let mut e = evidence('b');
+        finish_execution(&s, &mut e);
+        let (state, disclosed) = s
+            .write(|db| {
+                let blocked = json!([{"item":"art/wide.json","blocker":"owner_decision","reason":"the owner declined the read"}]);
+                event_tx(db, "t", "REVIEW_DEAD_END_ROUTED", json!({"review":"_review_0","revision":1,"blocked":blocked}))?;
+                if answered {
+                    event_tx(db, "t", "USER_ANSWER_RECEIVED", json!({"question_id":"pq_1"}))?;
+                }
+                add_review_tx(db, "t", &e)?;
+                db.execute("UPDATE runtime_nodes SET status='completed',result_json=? WHERE node_id='_review_1'",
+                    [json!({"verdict":"INCOMPLETE","summary":"s","report_ref":"review","findings":[],
+                        "not_covered":[{"item":"art/wide.json","blocker":"owner_decision","reason":"the owner declined the read"}]}).to_string()])?;
+                cortex_core::lifecycle::review::advance_tx(db, "t")?;
+                let disclosed: i64 = db.query_row("SELECT count(*) FROM runtime_events WHERE type='REVIEW_LIMIT_DISCLOSED'", [], |r| r.get(0))?;
+                Ok((cortex_core::lifecycle::domain::task_tx(db, "t")?.0, disclosed))
+            })
+            .unwrap();
+        if answered {
+            assert_eq!((state, disclosed), (TaskState::Verifying, 1));
+        } else {
+            assert_ne!(state, TaskState::Verifying);
+            assert_eq!(disclosed, 0);
+        }
     }
 }

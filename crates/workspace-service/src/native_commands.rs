@@ -1,5 +1,5 @@
 //! Durable command identities, private full output and owner-only running handles.
-//! Brokered execution uses bubblewrap filesystem/process views; no uncontained fallback.
+//! Brokered execution uses bubblewrap; host routing requires the outside-command policy.
 use crate::{
     native_project::{digest, safe, writable},
     native_sessions::ClientPermissions,
@@ -353,15 +353,26 @@ pub(super) async fn outside_capture(
     root: PathBuf,
     args: &Value,
     mut cancel: watch::Receiver<bool>,
+    rerouted: Option<Value>,
 ) -> CoreResult<Value> {
     let c = credential.clone();
-    let (task, dir, project_root) = recv(executor.publication(move |store| {
+    let (task, dir, project_root, worker, goal) = recv(executor.publication(move |store| {
         let i = store.read(|db| channels::authenticate(db, &c.channel_id, c.secret(), true))?;
         store.write(|db| writable(db, &i, None))?;
+        let goal: Option<String> = store.read(|db| {
+            Ok(db
+                .query_row(
+                    "SELECT goal FROM runtime_tasks WHERE task_id=?",
+                    [&i.task],
+                    |r| r.get(0),
+                )
+                .optional()?)
+        })?;
+        let worker = i.profile.clone().unwrap_or_else(|| i.role.clone());
         let dir = store.key().directory().join(&i.task).join(".native-output");
         cortex_core::store::locks::private_directory(&store.key().directory().join(&i.task), true)?;
         cortex_core::store::locks::private_directory(&dir, true)?;
-        Ok((i.task, dir, store.key().root().to_path_buf()))
+        Ok((i.task, dir, store.key().root().to_path_buf(), worker, goal))
     })?)
     .await?;
     let argv: Vec<String> = serde_json::from_value(args["argv"].clone())?;
@@ -413,8 +424,27 @@ pub(super) async fn outside_capture(
             done: finished,
         },
     );
-    let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..])
+    // `sudo` in this host command asks the owner for its password through a private
+    // askpass route (`native_askpass`); without one the command still runs, and sudo
+    // fails as it would without a terminal.
+    let askpass = crate::native_askpass::Channel::open(crate::native_askpass::Meta {
+        task: task.clone(),
+        task_title: goal,
+        worker,
+        project_root: project_root.clone(),
+        argv: argv.clone(),
+        cwd: root.clone(),
+    })
+    .ok();
+    let launched = match &askpass {
+        Some(_) => crate::native_askpass::with_askpass(&argv),
+        None => argv.clone(),
+    };
+    let mut cmd = Command::new(&launched[0]);
+    if let Some(channel) = &askpass {
+        cmd.envs(channel.env());
+    }
+    cmd.args(&launched[1..])
         .current_dir(&root)
         .env_remove("CORTEX_CHANNEL_SECRET")
         .stdin(Stdio::null())
@@ -453,8 +483,13 @@ pub(super) async fn outside_capture(
         );
         let changes = crate::native_change_set::record(&listed, &after);
         let revision_digest = if started_digest == ended_digest { ended_digest } else { None };
-        let value=json!({"revision_digest":revision_digest,"tool_call_ref":reference,"argv":argv,"cwd":root,"profile":"outside_confirmed","exit_code":code,"complete":failure.is_none()&&code.is_some(),
+        let mut value=json!({"revision_digest":revision_digest,"tool_call_ref":reference,"argv":argv,"cwd":root,"profile":"outside_confirmed","exit_code":code,"complete":failure.is_none()&&code.is_some(),
             "settled":true,"failure":failure,"output":String::from_utf8_lossy(&prefix),"output_truncated":size>65536,"byte_count":size,"large_output_id":id});
+        // Why the runtime ran a command_run here, and how each sudo password prompt
+        // ended (answered, cancelled, expired, refused): outcomes only, never an answer.
+        if let Some(note)=&rerouted {value["rerouted"]=note.clone();}
+        let prompts=askpass.as_ref().map(|c|c.outcomes()).unwrap_or_default();
+        if !prompts.is_empty() {value["sudo_prompts"]=json!(prompts);}
         let c=credential.clone();let mut event=value.clone();event.as_object_mut().unwrap().remove("output");
         crate::native_change_set::add(&mut event,&changes);
         recv(executor.write(move|db|{
@@ -641,7 +676,7 @@ async fn drain(mut r: impl AsyncRead + Unpin, output: Arc<Mutex<File>>) -> CoreR
 }
 pub(super) fn denials(db: &rusqlite::Connection, task: &str) -> CoreResult<Vec<String>> {
     // The owner's write denials in force (lifted ones excluded), sorted.
-    let paths = cortex_core::lifecycle::steering::denials(db, task)?;
+    let paths = cortex_core::lifecycle::steering::write_denials(db, task)?;
     for path in &paths {
         safe(path)?;
     }
@@ -664,6 +699,168 @@ fn deletion(argv: &[String]) -> bool {
     }) || argv
         .windows(2)
         .any(|p| p[0] == "git" && ["clean", "rm"].contains(&p[1].as_str()))
+}
+/// Programs that gain root: they cannot work in the command sandbox (no_new_privs).
+const PRIVILEGED: &[&str] = &["sudo", "pkexec", "doas"];
+/// Programs that run the rest of their argv as a command.
+const WRAPPERS: &[&str] = &[
+    "env", "exec", "nice", "nohup", "timeout", "command", "time", "stdbuf", "ionice", "setsid",
+    "xargs", "then", "do", "else", "elif", "if", "while", "until", "!",
+];
+fn program(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+/// Whether one simple command's words start a privileged program, past wrappers,
+/// their options and numbers, and variable assignments.
+fn privileged_words<'a>(words: impl IntoIterator<Item = &'a str>) -> bool {
+    for word in words {
+        let name = program(word);
+        if PRIVILEGED.contains(&name) {
+            return true;
+        }
+        let assignment = word.split_once('=').is_some_and(|(k, _)| {
+            !k.is_empty() && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        });
+        if WRAPPERS.contains(&name)
+            || word.starts_with('-')
+            || assignment
+            || word
+                .trim_end_matches(['s', 'm', 'h', 'd'])
+                .parse::<f64>()
+                .is_ok()
+        {
+            continue;
+        }
+        return false;
+    }
+    false
+}
+/// Whether a `command_run` argv starts `sudo`, `pkexec` or `doas`, directly, through
+/// a wrapper (`env`, `timeout`, ...) or in a command position of a `sh`/`bash`/`dash`/
+/// `zsh` script. A routing decision, not a security boundary: a privileged program
+/// hidden in a script may emit an advisory `sandbox_privilege` diagnostic.
+pub(super) fn privileged(argv: &[String]) -> bool {
+    if privileged_words(argv.iter().map(String::as_str)) {
+        return true;
+    }
+    let Some(shell) = argv
+        .iter()
+        .position(|w| matches!(program(w), "sh" | "bash" | "dash" | "zsh"))
+    else {
+        return false;
+    };
+    argv[shell + 1..]
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .any(|script| {
+            script
+                .split(|c: char| ";|&()\n`{}".contains(c) || c == '$')
+                .any(|command| {
+                    privileged_words(
+                        command
+                            .split_whitespace()
+                            .map(|w| w.trim_matches(|c| c == '\'' || c == '"' || c == '\\')),
+                    )
+                })
+        })
+}
+/// The store must contain trusted supervisor evidence for this exact attempt.
+fn eligible_prestart_receipt(receipt: &Value) -> bool {
+    receipt["settled"] == true
+        && receipt["complete"] == false
+        && receipt["failure"] == "command_not_started"
+        && receipt["launched"] == false
+        && receipt["settlement_evidence"]
+            == crate::native_command_handles::PRESTART_LAUNCHER_FAILURE
+}
+/// The outside_command request a rerouted command_run becomes: the identical argv,
+/// cwd and timeout under a derived request key, so a replay finds the same receipt.
+fn reroute_request(
+    args: &Value,
+    argv: &[String],
+    cwd: &std::path::Path,
+    reason: &'static str,
+    first: Option<Value>,
+) -> CoreResult<(Value, Value)> {
+    let key = args["request_key"]
+        .as_str()
+        .ok_or(CoreError::Refused("invalid_request"))?;
+    let outside = json!({"argv":argv,"cwd":cwd,
+        "timeout_seconds":args["timeout_seconds"].as_u64().unwrap_or(1800),
+        "request_key":format!("{key}.host")});
+    let note =
+        json!({"from":"command_run","reason":reason,"request_key":key,"sandbox_receipt":first});
+    Ok((outside, note))
+}
+/// Runs a writing worker's command_run on the host through the outside_command
+/// consent route (Auto answers it; Guarded and Development ask the owner) and answers
+/// that route's receipt, or its refusal, each naming why.
+#[allow(clippy::too_many_arguments)]
+async fn reroute(
+    executor: Arc<StoreExecutor>,
+    credential: Credential,
+    root: PathBuf,
+    permissions: Option<Arc<dyn ClientPermissions>>,
+    protected_roots: Vec<PathBuf>,
+    running: Running,
+    outside: Value,
+    note: Value,
+) -> CoreResult<Value> {
+    let reply = crate::native_access::execute_rerouted(
+        executor,
+        credential,
+        root,
+        permissions,
+        protected_roots,
+        running,
+        outside,
+        note.clone(),
+    )
+    .await?;
+    let mut reply = crate::native_tool_errors::enrich(reply);
+    if reply["isError"] == true && reply["structuredContent"].is_object() {
+        reply["structuredContent"]["rerouted"] = note;
+    }
+    Ok(reply)
+}
+/// Bind the consent route only to this attempt's settled pre-launch receipt.
+async fn mark_rerouted(
+    executor: &StoreExecutor,
+    credential: &Credential,
+    key: &str,
+    reference: String,
+    to: Value,
+) -> CoreResult<bool> {
+    let c = credential.clone();
+    let key = key.to_owned();
+    recv(executor.write(move |db| {
+        let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
+        let raw: Option<String> = db
+            .query_row(
+                "SELECT result_json FROM runtime_requests
+                 WHERE task_id=? AND actor=? AND request_key=? AND operation='command_run'",
+                (&i.task, &c.channel_id, &key),
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(raw) = raw else {
+            return Ok(false);
+        };
+        let receipt: Value = serde_json::from_str(&raw)?;
+        if !eligible_prestart_receipt(&receipt)
+            || receipt["tool_call_ref"] != reference
+            || !receipt["rerouted_to"].is_null()
+        {
+            return Ok(false);
+        }
+        let updated = db.execute(
+            "UPDATE runtime_requests SET result_json=json_set(result_json,'$.rerouted_to',json(?))
+             WHERE task_id=? AND actor=? AND request_key=? AND operation='command_run'",
+            (to.to_string(), &i.task, &c.channel_id, &key),
+        )?;
+        Ok(updated == 1)
+    })?)
+    .await
 }
 pub(super) async fn execute(
     executor: Arc<StoreExecutor>,
@@ -709,6 +906,23 @@ pub(super) async fn execute(
         Ok((i,mode,scopes,None,dir))
     })?).await?;
     if let Some(v) = saved {
+        // Old output-driven annotations must not resume a host effect after upgrade.
+        if eligible_prestart_receipt(&v)
+            && v["rerouted_to"]["note"]["reason"] == "sandbox_unavailable"
+            && v["rerouted_to"]["args"].is_object()
+        {
+            return reroute(
+                executor,
+                credential,
+                root,
+                permissions,
+                protected_roots,
+                running,
+                v["rerouted_to"]["args"].clone(),
+                v["rerouted_to"]["note"].clone(),
+            )
+            .await;
+        }
         return Ok(crate::native_sources::reply(v));
     }
     let readonly = i.role != "worker"
@@ -821,6 +1035,32 @@ pub(super) async fn execute(
     {
         return Err(CoreError::Refused("outside_cwd_denied"));
     }
+    // A writing worker's sudo, pkexec or doas cannot work in the sandbox: the runtime
+    // runs it on the host at once. Read-only roles are never rerouted (they stay in
+    // their read-only sandbox, where the privileged program fails).
+    if name == "command_run" && !readonly && privileged(&argv) {
+        let (outside, note) = reroute_request(&args, &argv, &cwd, "privilege", None)?;
+        return reroute(
+            executor,
+            credential,
+            root,
+            permissions,
+            protected_roots,
+            running,
+            outside,
+            note,
+        )
+        .await;
+    }
+    let host_route = (
+        executor.clone(),
+        credential.clone(),
+        root.clone(),
+        permissions.clone(),
+        protected_roots.clone(),
+        running.clone(),
+        cwd.clone(),
+    );
     let is_delete = name == "command_run" && deletion(&argv);
     if is_delete && readonly {
         return Err(CoreError::Refused("readonly_delete_refused"));
@@ -920,6 +1160,7 @@ pub(super) async fn execute(
     .await?;
     if name == "command_run" {
         drop(out);
+        let (args_copy, argv_copy) = (args.clone(), argv.clone());
         // The work set's digest before launch (`native_work_set`); its end is observed
         // once the process ended and the receipt settled.
         let start = match &work_set {
@@ -960,11 +1201,60 @@ pub(super) async fn execute(
             let (executor, running, i, root) = observer;
             if let Some(assignment) = i.assignment {
                 crate::native_work_set::finish(
-                    executor, running, i.task, assignment, reference, root, set, start,
+                    executor,
+                    running,
+                    i.task,
+                    assignment,
+                    reference.clone(),
+                    root,
+                    set,
+                    start,
                 );
             }
         }
-        return reply;
+        // Never inspect a command reply's output or exit status for routing.
+        // The private supervisor handshake and a durably settled receipt must
+        // both prove a launcher failure before the payload could run.
+        if readonly
+            || !matches!(
+                reply,
+                Err(CoreError::Refused("native_command_sandbox_unavailable"))
+            )
+        {
+            return reply;
+        }
+        let (executor, credential, root, permissions, protected_roots, running, cwd) = host_route;
+        let first = json!({"tool_call_ref":reference});
+        let (outside, note) = reroute_request(
+            &args_copy,
+            &argv_copy,
+            &cwd,
+            "sandbox_unavailable",
+            Some(first),
+        )?;
+        let key = args_copy["request_key"].as_str().unwrap_or_default();
+        if !mark_rerouted(
+            &executor,
+            &credential,
+            key,
+            reference,
+            json!({"args":outside,"note":note}),
+        )
+        .await?
+        {
+            return reply;
+        }
+        return reroute(
+            executor,
+            credential,
+            root,
+            permissions,
+            protected_roots,
+            running,
+            outside,
+            note,
+        )
+        .await;
     }
     let (cancel, mut cancelled) = watch::channel(false);
     let (done, finished) = watch::channel(false);
@@ -1040,4 +1330,84 @@ pub(super) async fn execute(
     done.send_replace(true);
     running.lock().await.remove(&reference);
     result
+}
+
+#[cfg(test)]
+mod reroute_tests {
+    use super::{eligible_prestart_receipt, privileged, reroute_request};
+    use crate::native_command_handles::PRESTART_LAUNCHER_FAILURE;
+    use serde_json::json;
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| (*w).to_owned()).collect()
+    }
+
+    #[test]
+    fn privileged_programs_are_found_past_wrappers_and_in_shell_scripts() {
+        for yes in [
+            &["sudo", "apt-get", "install", "make"][..],
+            &["/usr/bin/sudo", "-n", "true"],
+            &["pkexec", "true"],
+            &["env", "LANG=C", "sudo", "true"],
+            &["timeout", "30", "sudo", "true"],
+            &["sh", "-c", "make && sudo make install"],
+            &["bash", "-lc", "if true; then sudo -v; fi"],
+            &["sh", "-c", "echo $(sudo cat /etc/shadow)"],
+            &["sh", "-c", "FOO=1 doas true"],
+        ] {
+            assert!(privileged(&argv(yes)), "{yes:?}");
+        }
+        for no in [
+            &["make", "install"][..],
+            &["echo", "sudo"],
+            &["sh", "-c", "echo sudo is not run"],
+            &["grep", "-r", "sudo", "."],
+            &["cargo", "test", "--", "sudo"],
+        ] {
+            assert!(!privileged(&argv(no)), "{no:?}");
+        }
+    }
+
+    #[test]
+    fn only_trusted_prestart_launcher_evidence_allows_host_routing() {
+        let mut receipt = json!({
+            "settled": true, "complete": false, "launched": false,
+            "failure": "command_not_started",
+            "settlement_evidence": PRESTART_LAUNCHER_FAILURE,
+        });
+        assert!(eligible_prestart_receipt(&receipt));
+        receipt["settlement_evidence"] = json!("payload_never_released");
+        assert!(!eligible_prestart_receipt(&receipt));
+        receipt["settlement_evidence"] = json!(PRESTART_LAUNCHER_FAILURE);
+        receipt["settled"] = json!(false);
+        assert!(!eligible_prestart_receipt(&receipt));
+        for receipt in [
+            json!({"settled":true,"complete":true,"exit_code":4,
+                "nested_sandbox":{"code":"nested_sandbox_denied"},
+                "sandbox_privilege":{"code":"privilege_refused_in_sandbox"}}),
+            json!({"settled":true,"complete":false,"failure":"command_outcome_unknown"}),
+        ] {
+            assert!(!eligible_prestart_receipt(&receipt));
+        }
+    }
+
+    #[test]
+    fn a_rerouted_request_keeps_argv_cwd_and_timeout_under_a_derived_key() {
+        let args = json!({"argv":["sudo","true"],"request_key":"k1"});
+        let (outside, note) = reroute_request(
+            &args,
+            &argv(&["sudo", "true"]),
+            std::path::Path::new("/p"),
+            "privilege",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            outside,
+            json!({"argv":["sudo","true"],"cwd":"/p","timeout_seconds":1800,"request_key":"k1.host"})
+        );
+        assert_eq!(note["from"], "command_run");
+        assert_eq!(note["reason"], "privilege");
+        assert_eq!(note["request_key"], "k1");
+    }
 }

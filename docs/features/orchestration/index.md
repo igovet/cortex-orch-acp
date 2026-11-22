@@ -30,7 +30,7 @@ itself is unchanged.
 
 ## Review after a replan or reopen
 
-The review packet lists paths changed against the current execution baseline and paths recorded by this task across its plans. For each listed task write, the packet identifies its latest event, node and plan revision. A matching SHA-256 confirms the currently observed bytes. A mismatch calls for a fresh read. A missing comparison or incomplete baseline remains explicit. The reviewer examines the objective and material changes. Each listed file is marked `required` when this task changed it (see [review of the task's own changes](#review-of-the-tasks-own-changes)); approval and verification bind those files' bytes, or the whole checkout when the task's changes could not be attributed completely.
+The review packet lists paths changed against the current execution baseline and paths recorded by this task across its plans. For each listed task write, the packet identifies its latest event, node and plan revision. A matching SHA-256 confirms the currently observed bytes. A mismatch calls for a fresh read. A missing comparison or incomplete baseline remains explicit. The reviewer examines the objective and material changes. Each listed file is marked `required` when this task changed it (see [review of the task's own changes](#review-of-the-tasks-own-changes)); approval and verification bind those files' bytes (the whole checkout only when the task changed more than 20,000 files).
 
 ## Review of the task's own changes
 
@@ -113,8 +113,12 @@ before, for required files.
   `settled_without_listing`; an unknown outcome, `outcome_unknown`,
   `turn_outcome_unknown`; a command or turn started and never settled,
   `command_unsettled`, `turn_unsettled`). The packet then sets
-  `changed_files.attribution_complete: false` with `attribution.reason`, every
-  listed file is required, and the review binds the whole checkout. A task-file
+  `changed_files.attribution_complete: false` with `attribution.reason`. The
+  required set stays the task's recorded changes and the review binds only those
+  files; unattributed files stay context, and `attribution.note` tells the
+  reviewer so (owner store 2026-11-21: one
+  writer turn with an unknown outcome had made all 197 changed files of a dirty
+  checkout required, 92 of them other actors' work). A task-file
   set past 20,000 paths also binds the whole checkout (`too_many_task_files`) while
   requiring only the task's files. A packet recorded by an earlier build has no
   binding and binds the whole checkout.
@@ -407,7 +411,7 @@ Retried nodes and fix nodes are covered because the decision
 compares the whole project, not individual worker claims. No model argument or
 hint can waive review; `EXECUTING → VERIFYING` is refused without the runtime's own
 record. A review result binds to the digest recorded in `REVIEW_STARTED`: the
-task's own files' states, or the whole checkout when attribution is incomplete
+task's own files' states, or the whole checkout when the task changed too many files
 ([review of the task's own changes](#review-of-the-tasks-own-changes)).
 If what the review binds changed while it ran, for example because another writer
 edited one of the task's files, `result_submit` refuses the verdict with
@@ -433,6 +437,18 @@ and a hint to re-check the change and resubmit with a fresh key. Before this, th
 was never refreshed, so one change refused every later submission of that review.
 The refusal names the other Cortex task when one of that project's writing workers
 made the change.
+
+A change by another actor outside the task's own files is charged to the runtime,
+never to the reviewer. It can refuse a review only when the review binds the whole
+checkout (attribution was incomplete). When no writer of this task changed a file
+since the review first bound its revision, the re-binding and unstable records carry
+`drift: "external"`, and `review::checkout_drift_tx` returns the evidence for the
+reviewer's assignment. A review that then fails is classified `external_outage`
+(`rule: checkout_drift`) with a time-only wait (`probe: timer`, host
+`project-checkout`): the runtime waits with the usual backoff, without model calls,
+and reviews again, without a rung of the strategy ladder and without a review cycle.
+A task-file binding re-binds only when one of the task's own files changed, which the
+reviewer must re-read, so it never counts as external.
 
 When the project changed after the review and the change came from another Cortex
 task's writer in the same project (`state.foreign_project_writers`: a write
@@ -467,18 +483,58 @@ to its end, and a file's `review_lines` ranges end at its last line as
 (its packet's `predecessor_reports`) not read to its last page
 (`review_predecessor_reports_required`) and a BLOCK without
 findings (`review_block_findings_required`); the review stays the one running
-assignment and the same session continues. An accepted INCOMPLETE schedules no
+assignment and the same session continues. The file-coverage refusal is a chance to
+read, never a loop: after two `review_file_coverage_required` refusals of the same
+review assignment the next result is recorded, and an approval carries the
+`unverified` runtime check `Changed files the reviewer did not read` naming every
+required file still unread, disclosed under Not verified (owner store 2026-11-21:
+one review was refused five times for 32 small generated SVG files and the task
+waited on the owner). The count belongs to the review lineage and the file's exact
+bytes, not to one assignment: refusals of every review assignment of the task since
+it was last reopened (reassignments, later review cycles and later plan revisions
+alike) count together per path and `current_sha256`, so once a file's bytes were
+named in two refusals, or an approval already disclosed them as unread, no later
+review of the task is required to read those bytes again; they are disclosed the
+same way (`settled_unread_tx`, `crates/cortex-core/src/lifecycle/completion.rs`;
+owner store 2026-11-21: three assignments were each refused twice for the same 32
+files). Changed bytes are a new file to read. The refusal hint points to
+`read_batch`, up to eight inline `project_read` items per call. An accepted INCOMPLETE schedules no
 second review of the same revision: actionable findings start their fixes,
-otherwise `REVIEW_DEAD_END_ROUTED` records the blocked parts and the task stops
-with `review_incomplete` (Automatic: coordinator continuation, the senior
-consultant on the fourth, the owner at the cap; Manual and Hybrid: the owner's
-stop question naming each part with its blocker). A fix and review round
-continues only on progress: when a REQUEST_CHANGES review of a revision finds the
-reviewed bytes unchanged since the previous review, or the same findings (plan
-task, files and fix) again, the runtime records `REVIEW_NO_PROGRESS` and stops
-once with `review_no_progress` (Manual and Hybrid: the coordinator first, then
-the owner; Automatic: the continuation path) instead of another round; the
-three-cycle `review_cycle_limit` still bounds rounds that do progress. Every reviewer's assignment
+otherwise `REVIEW_DEAD_END_ROUTED` records the blocked parts. When every blocked
+part is one the reviewer's tools cannot reach (`tool_unavailable`), the parts
+become disclosed unverified limits (`REVIEW_LIMIT_DISCLOSED`) and the task
+continues to verification. The same holds for an `owner_decision` part the owner
+already decided, in this plan revision or an earlier one since the newest reopen or
+owner message: its reason cites an owner question that was answered, or an earlier
+review routed the same item as an `owner_decision` dead end and an owner answer
+followed. The same item is recognised after rewording: the same item name without
+the reviewer's detail, or only file names the decided items already named (one item
+for three generated files split into one item per file). It becomes a disclosed
+limit (`Review did not read …`, with `LOOP_BROKEN` naming the earlier answer), not
+another question (owner store 2026-11-21: ten identical questions after the owner
+chose to close as is, the last ones after the decided item had been split per file); otherwise the task continues with `review_incomplete`
+on the next rung of the strategy ladder, in every run mode, and a dead end that
+repeats on the same item takes the `reassign` rung ([no-stop
+policy](../task-lifecycle/index.md#no-stop-policy-and-the-strategy-ladder)). A decided
+owner item is skipped when that stop is classified, so it never becomes an `ask_owner`
+continuation either. A fix and review round
+continues only on progress: when a REQUEST_CHANGES review finds the reviewed bytes
+unchanged since the previous review of its revision, or the same findings (files and
+fix, with case and spacing normalized) as the previous review of the task, also when
+that review belongs to an earlier plan revision, the runtime records
+`REVIEW_NO_PROGRESS` (`previous_revision`, `across_revisions`, the findings `key`)
+and `LOOP_OBSERVED` (`kind: review_findings`, with how many reviews of the task
+returned those findings) and stops once with `review_no_progress`, a continuation
+that changes approach, instead of another round. The review-cycle budget belongs to
+the task, not to one plan: `review_cycle` still numbers the reviews and fixes of one
+revision and bounds them at three, and every new revision gets its mandatory review,
+but once three change-requesting reviews were recorded across the task's revisions
+(since the newest reopen), a further fix round is granted only while the review names
+strictly fewer findings than the previous change-requesting review. Otherwise the
+review stops with `review_cycle_limit` (`LOOP_OBSERVED`, `kind: review_cycle`, with
+both counts). Before this, each continuation's new plan started a fresh budget, and
+one task ran nine review-cycle ladders with eighteen change requests (owner store
+2026-11-21). Every reviewer's assignment
 carries a `review_packet`: the files the reviewed work changed (path, change kind,
 the plan node that wrote it; at most 200, the rest counted by folder), built from
 the difference between the execution baseline's per-file manifest and the folder
@@ -495,10 +551,16 @@ approval then carries an `unverified` runtime check (`REVIEW_CHANGE_SET_LIMITED`
 that the final result discloses under Not verified, telling the owner to inspect
 the folder. A listed file whose current bytes (exactly those of its
 `current_sha256`) have no reviewable text is not a missing read either: the packet
-marks it `review_content` `binary` (not UTF-8, or containing NUL), `image`, or
+marks it `review_content` `binary` (not UTF-8, or containing NUL), `image` (a
+recognised raster image, or an SVG: text that opens with `<svg`, an XML prolog or
+a comment and names `<svg` within its first 4 KiB), or
 `opaque` (encoded or minified text of at least 8 KiB whose lines average over 1,000
-bytes, or whose lines are all base64-like), and a read of such bytes that found no
-text proves the same. Unless the review read it completely (an image through a
+bytes, or whose lines are all base64-like), or `bulk` (text whose required bytes, its
+`review_lines` ranges or else the whole file, exceed 64 KiB, about eight
+`project_read` pages, such as large generated data; the packet then adds
+`review_content_guidance`), and a read of such bytes that found no text proves the
+same. A `bulk` file the review did not read completely is disclosed as the
+`unverified` runtime check `Changed files too large to require a complete read`. Unless the review read it completely (an image through a
 direct `project_read`, which shows it), an approval carries the `unverified` runtime
 check `Changed files without reviewable text` naming those paths, disclosed the same
 way. Every binary read records hash-bound coverage of its bytes, single or in
@@ -566,7 +628,7 @@ Implemented in `crates/cortex-core/src/lifecycle/review.rs` and the `workspace-s
 
 A failed worker (`worker_failed`), a worker the owner stopped when nothing else can run (`worker_stopped_by_owner`), a lost worker whose retries are used up, or a review that requests changes without findings on a plan with several implementers (`review_changes_without_findings`) returns the task to the coordinator instead of stopping. The runtime records `RETURNED_TO_COORDINATOR`, revokes the worker channels, cancels the live assignments and moves through RECOVERING to PLANNING. `MAX_COORDINATOR_RETURNS` bounds these returns. The count covers `RETURNED_TO_COORDINATOR` events after the task's latest `PLAN_ACCEPTED`, `USER_ANSWER_RECEIVED` or `USER_STEERING` event. An accepted plan or explicit user guidance therefore renews the allowance, and failures in earlier plan revisions do not exhaust later work. A second bound, `MAX_AUTONOMOUS_COORDINATOR_RETURNS` (6), counts returns since the user last spoke (`USER_STEERING`, `USER_ANSWER_RECEIVED` or `WORKER_USER_ANSWER_RECEIVED`), across plan revisions. A new plan alone does not renew it, so a coordinator that answers every return with another plan of failing work stops for the user instead of looping. The boundaries are event ids, so existing stores need no migration.
 
-When either allowance is exhausted, the return is refused. A worker failure or an exhausted lost-worker retry then moves the task to BLOCKED through the usual stop handling, which may ask the user a stop question. A review without findings instead falls through to the conservative fallback fixes described under [targeted review fixes](#targeted-review-fixes).
+When either allowance is exhausted, the return is refused. A worker failure or an exhausted lost-worker retry then becomes a continuation on the strategy ladder (no-stop policy): the next attempt escalates its route, consults, or hands the work to another role; the owner is not asked. A review without findings instead falls through to the conservative fallback fixes described under [targeted review fixes](#targeted-review-fixes).
 
 An owner-stopped worker or reviewer (its node is `cancelled` and a `WORKER_STOPPED_BY_OWNER` event follows the latest return to the coordinator) does not end the task. Cancellations the runtime makes itself when it returns to the coordinator carry no such event, so they never trigger another return. The stopped worker's open question is cancelled with it. Independent siblings keep running. Once no node is running and none is runnable, the runtime returns the task to the coordinator with the reason `worker_stopped_by_owner`, so it can replan or finish. Dependents of the stopped node never start silently: the return cancels them with the other unfinished nodes. When the return allowance is exhausted, the stop question says in plain words that a worker was stopped and the remaining planned work depends on it or has nothing left to run; it never shows an internal code.
 
@@ -602,7 +664,7 @@ remain parallel. It never infers a contract change; a reviewer marks one
 `cross_cutting`. `REVIEW_CHANGES_REQUESTED` records
 `targeted` and the `fallback` reason. The three-cycle ceiling is unchanged.
 
-**Fix role.** A fix node never keeps a read-only source role. The runtime replaces a role in its `READ_ONLY` class (for example reviewer, architect, UX designer, consultant or auditor) with a writing specialist chosen from the original node's effective scope: `worker-technical-writer` when every path is under `docs/` or is a Markdown file, `worker-qa-engineer` when every path is under `tests/`, and `worker-backend-dev` for any other scope, including mixed and whole-project scopes. A writing role is kept unchanged. The fix keeps that effective scope exactly, so a finding cannot widen it, and the choice does not read the finding's prose. The same selection applies to targeted and fallback fixes. The review after the fixes remains a fresh reviewer assignment.
+**Fix role.** A review finding may name, in its optional `role`, the writing specialist who should make the fix (any domain: documentation, build scripts, interface code, a render pipeline). A fix goes to that specialist when every finding it carries (its own findings for a targeted fix, every finding for a fallback fix) proposes the same writing role; a read-only or conflicting proposal is ignored. Otherwise it goes by the files those findings name: `worker-technical-writer` when every named file is under `docs/` or is a Markdown file, `worker-qa-engineer` when every named file is a test (under a `tests`, `test` or `__tests__` folder, or named `*.test.*`, `*.spec.*`, `*_test.*` or `test_*`), and, on a QA, technical-writer or read-only node, a developer for the product code they name (`worker-frontend-dev` for interface sources, `worker-devops-engineer` for scripts and CI, `worker-fullstack-dev` for a mix, `worker-backend-dev` otherwise). Owner store 2026-11-21: documentation findings on a QA node were routed to QA and the coordinator had to replan them. Without named files a fix node never keeps a read-only source role. The runtime replaces a role in its `READ_ONLY` class (for example reviewer, architect, UX designer, consultant or auditor) with a writing specialist chosen from the original node's effective scope: `worker-technical-writer` when every path is under `docs/` or is a Markdown file, `worker-qa-engineer` when every path is under `tests/`, and `worker-backend-dev` for any other scope, including mixed and whole-project scopes. A writing role is kept unchanged. The fix keeps that effective scope exactly, so neither a finding nor its proposed role can widen it, and the choice never reads the findings' prose. The same selection applies to targeted and fallback fixes. The review after the fixes remains a fresh reviewer assignment.
 
 ### Execution failure repair
 
@@ -614,11 +676,21 @@ the runtime returns it to the coordinator within the existing recovery limits.
 Read-only workers report the failure for a writing assignment.
 
 A published execution failure with a verified open check survives a replan.
-Completion requires a verified passing worker check on the reviewed digest
-with the matching command identity, or, for a project command, a complete final
-verification receipt with the same argv and working directory. The original
-failure remains in its report. An unresolved prior check sends the task back
-for repair within the coordinator return budget.
+Completion requires a later verified pass of the same intent on the current
+revision, bound to the reviewed digest: a worker check with the same argv and
+working directory (on any profile, `command_run` or `outside_command`), a worker
+check passed under the same check name, or, for a project command, a complete
+final verification receipt with the same argv and working directory. The
+original failure remains in its report. An unresolved prior project check sends the
+task back to the coordinator once (`unresolved_prior_worker_check`); after that one
+continuation, a prior check that is still neither rerun nor superseded is
+disclosed instead of blocking completion. A worker's own diagnostic probe from an
+earlier failed revision is disclosed at once, without that continuation (owner store
+2026-11-22: returning one cost a whole plan revision): `PRIOR_WORKER_CHECK_DISCLOSED` records
+it as an `unverified` runtime limit naming its revision, node and whether it was
+the worker's own diagnostic probe (an inline `python -c` or `sh -c` script, a
+`git status` or `git diff` scope probe) or a project check. It is never recorded
+as passed. The coordinator has no tool to retract a prior probe with a reason.
 
 Worker results bind to a published report owned by the exact provisioned attempt.
 The result receipt retains a content digest.
@@ -843,6 +915,13 @@ repair budget is bounded by the existing verification-repair limit, after which
 the task pauses with the failure and evidence exposed to the owner. Automatic
 continuation never turns a missing, failed, truncated or unobservable check into
 a pass and never waives independent review, permissions or final verification.
+An outcome caused by the verifier's environment (an incomplete run, exit 126 or 127,
+a full disk, or a failure of a command a worker passed identically on the same
+checkout) is not a failed verification and uses no repair: the runtime reruns it
+once, rechecks it itself after 1, 2, 5 and 10 minutes and then asks the owner one
+question (see the verifier environment in
+[task lifecycle](../task-lifecycle/index.md#no-stop-policy-and-the-strategy-ladder)).
+A failed verification carries its `failure_key` for the strategy ladder.
 
 ### Check history and current outcome
 
@@ -925,7 +1004,7 @@ entries, a folder outside a Git repository, a nested checkout in the set, or mor
 than 20,000 files or 256 MiB; such a run binds only to the whole checkout, as
 before. `outside_command` receipts bind only to the whole checkout. None of this
 weakens what is accepted later: the independent review binds the task's own files
-(or the whole checkout when their attribution is incomplete), and final runtime
+(or the whole checkout when there are too many of them), and final runtime
 verification runs the plan's commands against the real checkout while that binding
 holds, so a cross-task breakage still fails there.
 
@@ -1152,6 +1231,34 @@ routes only when decomposition must change; unavailable evidence remains an
 explicit report limitation. The runtime does not classify arbitrary question
 prose with keyword heuristics, and a question or answer never grants access.
 
+The owner is never asked the same question twice. A worker `ask_question` or a
+coordinator `user_question_request` whose question and set of options equal (case,
+spacing and trailing punctuation aside, options in any order) a question of the same
+task the owner already answered is not asked: the tool reply is `outcome: refused`,
+`error: question_already_answered`, with the earlier `question_id` and the owner's
+recorded `answer` (every repeated member in `answers` for a batch), no wait or
+pending question is opened and `LOOP_BROKEN` (`kind: owner_question`) is recorded.
+Only answers since the newest reopen or owner message count, so after either the
+question may be asked again. A skill proposal keeps its own rules.
+
+An obstacle the owner already settled is not raised again. A failed node's or
+stop's owner decision that repeats one the owner answered in any revision since the
+newest reopen or owner message (its text cites the answered question, names only
+the same files, or uses mostly the same words) opens no second
+`OWNER_DECISION_REQUIRED` and no `ask_owner` continuation: it is classified
+`technical` (`rule: owner_decision_answered`) with the owner's answer in its detail,
+and the failed node's result carries the disclosed `unverified` runtime check `Owner
+decision applied: …`. Missing access whose owner action for the same service was
+resolved or dismissed twice (`ACCESS_REPEAT_LIMIT`) opens no third action: the
+failure is `technical` (`rule: access_repeats`) and the node's result discloses
+`Access to <service> not available`. Both record `LOOP_BROKEN` (`action:
+disclosed_limit`). A rate limit (an HTTP 429 or a rate-limit phrase in the worker's
+words, the recorded texts or a service command's output) is an outage for any host
+and beats a missing-access reading of the same evidence: a built-in endpoint is
+rechecked as before, any other host gets a time-only wait (`probe: timer`) that ends
+after its backoff (`EXTERNAL_WAIT_ENDED` reason `backoff_elapsed`) and retries the
+node without contacting the host. "Disk quota exceeded" is not a rate limit.
+
 Each worker turn receives `user_question_language` (`en` or `ru`) derived
 from the same selected language/automatic language resolution used by the
 coordinator. The advertised question contract requires the question and every
@@ -1258,6 +1365,14 @@ user input or a new plan, and any user message or completed question answer rest
 the replan budget. Worker-local answers emit `WORKER_USER_ANSWER_RECEIVED` in the
 answer transaction; a batch resets the budget only once all its answers are
 recorded. Runtime access decisions never count as user input.
+
+Materialized sprint coordinators can inspect their authenticated dependency
+graph with `sprint_graph` and read a member's bounded durable outcome and
+published reports with `sprint_task_result`. The runtime supplies direct
+predecessor/dependent context at coordinator start and keeps these reads within
+the current sprint. Code availability is reported only from exact, receipt-bound
+file evidence. The graph view does not alter dependency scheduling, review,
+verification or acceptance.
 
 ## Timing diagnostics
 

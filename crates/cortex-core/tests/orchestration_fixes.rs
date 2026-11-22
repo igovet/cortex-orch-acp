@@ -413,7 +413,7 @@ fn a_stopped_workers_open_question_is_closed_visibly_and_none_survives_the_retur
 }
 
 #[test]
-fn the_owner_stop_blocker_is_a_work_stop_the_coordinator_is_asked_about() {
+fn the_owner_stop_blocker_continues_with_the_owner_stop_in_the_evidence() {
     let p = Project::new();
     let s = p.open();
     TaskMachine::new(&s).create("t", "goal", "owner").unwrap();
@@ -425,7 +425,7 @@ fn the_owner_stop_blocker_is_a_work_stop_the_coordinator_is_asked_about() {
     let asked: String = s
         .read(|db| {
             Ok(db.query_row(
-                "SELECT payload_json FROM runtime_events WHERE type='ASK_USER_REQUIRED'",
+                "SELECT payload_json FROM runtime_events WHERE type='AUTOMATIC_CONTINUATION'",
                 [],
                 |r| r.get(0),
             )?)
@@ -1146,11 +1146,13 @@ fn a_task_file_binding_without_the_files_states_is_unavailable() {
     assert_eq!(bindings(&s).len(), 1);
 }
 
-/// When any of the task's commands has no complete change record, attribution is
-/// incomplete: every listed file is required and the review binds the whole
-/// checkout, as before.
+/// Owner store 2026-11-21: one writer turn with an unknown outcome made all 197
+/// changed files of a dirty checkout required (92 of them other actors' work), and
+/// reviews were refused `review_file_coverage_required` again and again. An
+/// incomplete record keeps the required set to the task's own recorded changes,
+/// binds only those files, and is disclosed as an unverified limit.
 #[test]
-fn incomplete_command_attribution_falls_back_to_requiring_every_changed_file() {
+fn incomplete_command_attribution_still_requires_only_the_tasks_own_changes() {
     for (record, reason) in [
         (
             json!({"changed_paths_complete":false,"changed_paths_reason":"too_many_paths"}),
@@ -1163,27 +1165,24 @@ fn incomplete_command_attribution_falls_back_to_requiring_every_changed_file() {
         let changed = &packet["changed_files"];
         assert_eq!(changed["attribution_complete"], false, "{reason}");
         assert_eq!(changed["attribution"]["reason"], reason);
-        assert_eq!(changed["required"], 103);
-        assert!(changed["files"]
+        assert_eq!(changed["required"], 1, "{reason}");
+        let readme = changed["files"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|f| f["required"] == true));
+            .find(|f| f["path"] == "README.md")
+            .unwrap();
+        assert_eq!(readme["required"], false, "{reason}");
         assert_eq!(
             packet["review_binding"],
-            json!({"kind":"checkout","reason":reason})
+            json!({"kind":"task_files","paths":["src/lib.rs"]})
         );
-        assert_eq!(bindings(&s)[0]["binding"], "checkout");
+        assert_eq!(bindings(&s)[0]["binding"], "task_files");
         read_task_files(&s);
-        let missing = missing_paths(&s);
-        assert_eq!(missing.len(), 101, "{reason}");
-        assert!(missing.contains(&"README.md".to_owned()));
-        // An unrelated change re-binds a whole-checkout review, as before.
+        assert!(missing_paths(&s).is_empty(), "{reason}");
+        // Another actor's change does not make the review stale.
         e.project_digest = Some("c".repeat(64));
-        assert_eq!(
-            preflight(&s, "k0", &e).as_deref(),
-            Some("review_project_revision_changed")
-        );
+        assert_eq!(preflight(&s, "k0", &e), None, "{reason}");
     }
 }
 
@@ -1238,7 +1237,7 @@ fn a_writing_turns_changes_are_the_tasks_and_an_unrecorded_turn_falls_back() {
     );
     assert_eq!(packet["changed_files"]["required"], 2);
     assert_eq!(readme(&packet)["required"], false);
-    // Incomplete, unsettled and unrecorded turns fall back to every changed file.
+    // Incomplete, unsettled and unrecorded turns still require only recorded changes.
     for (events, reason) in [
         (
             turn(
@@ -1264,7 +1263,44 @@ fn a_writing_turns_changes_are_the_tasks_and_an_unrecorded_turn_falls_back() {
     ] {
         let (_p, _s, _e, _o, packet) = attributed_review_with(generated(), &events);
         assert_eq!(packet["changed_files"]["attribution"]["reason"], reason);
-        assert_eq!(packet["changed_files"]["required"], 103, "{reason}");
-        assert_eq!(packet["review_binding"]["kind"], "checkout");
+        assert_eq!(packet["changed_files"]["required"], 2, "{reason}");
+        assert_eq!(packet["review_binding"]["kind"], "task_files");
     }
+}
+
+/// Owner store 2026-11-21: one review was refused five times for unread files and
+/// the task waited on the owner. After two coverage refusals of the same review
+/// assignment the result is recorded, and every file still unread is disclosed as
+/// an unverified limit of the approval.
+#[test]
+fn repeated_coverage_refusals_record_the_review_with_unread_files_disclosed() {
+    let (_p, s, _e, _o, _packet) = attributed_review(generated());
+    let approve = json!({"verdict":"APPROVE"});
+    let outstanding = |s: &Store| {
+        s.read(|db| outstanding_tx(db, "t", "ar", "review", &approve))
+            .unwrap()
+            .map(|(code, _)| code)
+    };
+    assert_eq!(outstanding(&s), Some("review_file_coverage_required"));
+    for n in 0..2 {
+        s.write(|db| {
+            event_tx(
+                db,
+                "t",
+                "WORKER_RESULT_REFUSED",
+                json!({"assignment_ref":"ar","code":"review_file_coverage_required","n":n}),
+            )
+        })
+        .unwrap();
+    }
+    assert_eq!(outstanding(&s), None);
+    let limits = s
+        .read(|db| review_change_set_limits_tx(db, "t", "ar"))
+        .unwrap();
+    let unread = limits
+        .iter()
+        .find(|l| l["name"] == "Changed files the reviewer did not read")
+        .expect("disclosed");
+    assert_eq!(unread["outcome"], "unverified");
+    assert_eq!(unread["paths"], json!(["src/generated.rs", "src/lib.rs"]));
 }

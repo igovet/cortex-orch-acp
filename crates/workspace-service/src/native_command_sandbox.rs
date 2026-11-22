@@ -888,7 +888,9 @@ mod tests {
                 fs::read_to_string(root.join("source")).unwrap(),
                 "unchanged"
             );
-            eprintln!("namespace capability unavailable; all three profiles refused before payload launch");
+            eprintln!(
+                "namespace capability unavailable; all three profiles refused before payload launch"
+            );
             return;
         }
         let marker = format!("private-{}", crate::native_effects::identity().unwrap());
@@ -992,7 +994,9 @@ mod tests {
                 "protected-fixture"
             );
         }
-        eprintln!("real namespace fixtures passed: scratch, metadata, protected descendants, process view, restart");
+        eprintln!(
+            "real namespace fixtures passed: scratch, metadata, protected descendants, process view, restart"
+        );
     }
     #[test]
     fn ignored_grants_relocated_caches_and_project_toolchain() {

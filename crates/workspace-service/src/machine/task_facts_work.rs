@@ -370,6 +370,13 @@ fn nonempty_command(value: &Value) -> bool {
     })
 }
 fn policy(check: &Value) -> bool {
+    // A limitation the runtime itself disclosed (an unread file, an earlier failed
+    // check, an owner-accepted gap) is never a policy restriction, whatever words its
+    // explanation uses: on 2026-11-21 "after repeated coverage refusals" matched
+    // "refus" and held an Automatic sprint for the owner.
+    if check["source"] == "runtime" {
+        return paid_command(&check["command"]);
+    }
     let text = check["blocker"].as_str().unwrap_or("").to_lowercase();
     [
         "paid",

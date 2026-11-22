@@ -46,7 +46,9 @@ function PrButton(props: { m: SessionModel }) {
   const ws = useWs();
   const view = () => props.m.view, t = () => view().task;
   useWantOverview();
-  return <button class="btn btn-sm" aria-disabled={view().machine.ghAvailable === false || t().integration?.method === "pr" ? "true" : undefined} data-why={view().machine.ghAvailable === false ? "Install and sign in to GitHub CLI (gh) to create a pull request" : t().integration?.method === "pr" ? "A pull request is already open for this version" : undefined} {...ws.needs("integrate")} onClick={() => { if (view().machine.ghAvailable !== false && t().integration?.method !== "pr") ws.open({ kind: "merge", taskId: t().id, how: "pr" }); }}>Create PR…</button>;
+  const why = () => t().integration?.method === "pr" ? "A pull request is already open for this version"
+    : view().machine.ghAvailable === false ? "Install and sign in to GitHub CLI (gh) to create a pull request" : finishBlocked(t());
+  return <button class="btn btn-sm" aria-disabled={why() ? "true" : undefined} data-why={why() ?? undefined} {...ws.needs("integrate")} onClick={() => { if (!why()) ws.open({ kind: "merge", taskId: t().id, how: "pr" }); }}>Create PR…</button>;
 }
 
 function CreatedPrRow(props: { task: Task }) {
@@ -164,7 +166,7 @@ export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
       <Show when={!noGit()} fallback={<ActionBar place="card" class="rv-card-f"><SetUpGit /><CloseAsIs /></ActionBar>}>
       <ActionBar place="card" class="rv-card-f" start={<Flow from={t().checkout.branch} to={view().target} behind={behind()} />}>
         <Show when={remote()}><PrButton m={props.m} /></Show>
-        <button class="btn btn-primary btn-sm" {...ws.needs("integrate")} onClick={() => ws.open({ kind: "merge", taskId: t().id, how: "squash" })}>Merge…</button></ActionBar>
+        <button class="btn btn-primary btn-sm" aria-disabled={finish() ? "true" : undefined} data-why={finish() ?? undefined} {...ws.needs("integrate")} onClick={() => { if (!finish()) ws.open({ kind: "merge", taskId: t().id, how: "squash" }); }}>Merge…</button></ActionBar>
       </Show>
     </div>}</Show>
     <Show when={remote() && t().integrationFacts?.pushStatus}>{status => <div class="cap faint">{status() === "pushed" ? "Target branch is pushed (last fetched state)." : status() === "not_pushed" ? "Target branch has unpushed commits (last fetched state)." : "Push status unknown; set a tracking upstream and fetch to check."} This never blocks closing.</div>}</Show>

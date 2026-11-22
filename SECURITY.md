@@ -6,6 +6,10 @@ Execution baselines record the project checkout’s resolved Git HEAD, or null f
 
 Updating a task from its target advances only the Changes comparison baseline, not the task’s original integration base. If a retained update is committed outside Workspace, Finish merge verifies that HEAD has the saved task and target commits as its two parents before advancing the comparison base. This check does not modify Git. The updated tree still needs a fresh result and review before integration.
 
+Ordinary Workspace Git Commit does not rerun or replace verification. For an accepted native result in the project folder, the service can retain the original result identity only when the commit is a direct child on the accepted branch, its full Git tree matches the accepted deliverable paths, bytes and Git file modes, and the resulting index and checkout are still current. The proof compares raw file bytes rather than relying on Git status or running filters. Incomplete observations, changed files and every unproven checkout keep the existing stale-result checks. Creating a pull request still needs owner confirmation and a separate push.
+
+The extracted Workspace Dev `smoke` and `drive` launchers check only the active GitHub CLI account on `github.com`, under a timeout. They retain the exit code, not authentication output. Broader host diagnostics, including other provider, Docker and sudo checks, run only when `probe` is explicitly invoked.
+
 A skipped check in Workspace result facts records its reason in `detail`, including when paid qualification was not requested. The row is not execution evidence and grants no permission to rerun a prohibited command.
 
 Conversation fallback text grants no decision authority. Answers still require the existing decision identity, capability and runtime validation. A draft kept visible in a read-only composer remains unsent; its explanation does not enable message delivery or change the capability check. For route consent, an option plus a comment must match exactly one recorded option in the stored answer format. The comment cannot grant another route or set effort, but recognized refusals still apply.
@@ -595,7 +599,7 @@ owner), decided by the scheduler alone. An agent repair (a repairable result or
 a run that failed with every effect known) reopens the same task for its
 coordinator under the machine lock, after the runtime confirms that the
 previous processes and dispatched effects have settled; it is deduplicated per
-reason and bounded to two per task. Each owner consent recorded on the hold
+reason (one repair per distinct failure fingerprint, no per-task cap). Each owner consent recorded on the hold
 (`product.sprint` action `allow`, accepted only while the saved hold still names
 that task, code and action) allows exactly one further repair. A repair grants no
 permission, and never applies to an unknown effect or to a result whose only open
@@ -604,8 +608,9 @@ own confirmation.
 
 Before a queue hold is saved, the service checks the task's dispatched actions
 whose outcome is still unknown. While only command receipts are unsettled the
-runtime acts next and the owner is offered nothing; a command still unsettled
-after 30 minutes, or any other unknown effect, is the owner's, and the hold
+runtime acts next and the owner is offered nothing; a command stays the
+runtime's to settle with no time cap, and any other unknown effect of a result
+the queue would finish (one no continuation re-verified) is the owner's, and the hold
 offers only actions the service accepts in that state (never an agent repair,
 renewed attempts or an automatic finish). Close as is is checked without effect
 (`product.task` `close` with `preflight: true`) before the run records its
@@ -672,13 +677,15 @@ redacted the same way. Outputs, read bodies, plan bodies and report, draft and
 result bodies are never selected. Display data never advances lifecycle authority.
 
 The additive Rust route candidate binder is not dispatch authorization and is not
-connected to desktop controls. It bounds JSON/catalog reads, checks private file
+a substitute for runtime checks. It bounds JSON/catalog reads, checks private file
 ownership/modes/link counts and parent directories, rejects seed/forged identities
 and changed approved command fingerprints, and never reads credential contents.
 Its exact coordinator/default and restricted worker-pin bindings do not enforce
 project/task ceilings, quota, current account readiness or complete automatic
-routing policy. Embedders must not treat them as permission to dispatch. No native
-execution cutover or production-account qualification is implied.
+routing policy. Embedders must not treat them as permission to dispatch. The
+Workspace new-task chooser's project filtering is not an authorization boundary,
+and continuing on a saved task route still checks route eligibility against the
+current routing rules. No production-account qualification is implied.
 
 The native host driver alone claims graph nodes, schedules mandatory independent
 review after observed changes, consumes verdict/fix loops and certifies completion.
@@ -744,6 +751,15 @@ Git-ignored directories, explicit caches and temp. Private stores remain hidden,
 Git stays read-only, networking is disabled and procfs is private. This does not
 replace the active Python verifier's discarded-project-write overlay or claim
 hostile-code isolation.
+A sandboxed command that has started is never replayed on the host automatically:
+output that resembles a refused nested sandbox or refused root is child-controlled and
+stays an advisory hint on the original receipt. Only the private supervisor's own
+proof that the launcher failed before the payload was released permits the single
+consent-backed host rerun. Pull request creation passes an explicit `--repo` derived
+from the validated `origin`, drops `GH_REPO` and a conflicting `GH_HOST`, and refuses
+to save or open an address for another host, owner or repository. Background outage
+rechecks probe only the service's built-in HTTPS endpoints, refuse any non-public
+resolved address and use a config-free, credential-free client.
 An intent precedes command launch; an unsettled intent is never an automatic
 rerun. Brokered worker-command supervisors can restore output/exit observations;
 lost supervisors, outside-command and verification handles remain unknown (a
@@ -1117,6 +1133,9 @@ dependencies, and the sprint's created state commit in one project-store transac
 the saved sprint record, or none of them does; task identities derive from the sprint, plan version and
 plan key, so a repeat never creates a
 second set, and tasks an interrupted earlier client-side creation left are reported, never adopted. The owner selects Project folder or Separate worktree for the sprint; materialization copies that checkout kind to every task's saved create options, used by the existing start route. Worktree mode remains per-task Git checkout separation, not hostile-code containment. Project-folder tasks share the owner’s files, and a non-Git folder still falls back to the project folder. Existing saved sprints and running checkouts are not moved.
+
+Cross-task inspection is a coordinator-only read boundary. `sprint_graph` and `sprint_task_result` are bound to the authenticated task's materialized sprint. They expose bounded relationships, durable outcomes and immutable published reports, without private prompts, attachments, drafts or raw runtime logs. Code availability is evidence-based: matching write receipts and exact bytes can produce `confirmed`; absent or ambiguous evidence stays `unknown`. These reads grant no mutation, acceptance, merge or scheduler authority.
+
 The service may restore the exact durable, settled COMPLETED session for owner actions. It does not adopt a database owner for a live task or alter generic ACP ownership checks. Retained technical blockers remain unpassed evidence, not fabricated passes; acknowledging them still requires explicit owner consent and current result binding. A real failed executable check is not an acknowledgement waiver.
 Review follow-ups retain implementation content only while the observed source digest is unchanged; new
 checks and runtime evidence still govern acceptance. Missing-command/tool blockers survive session-owner
@@ -1768,6 +1787,34 @@ and nothing is recorded. Only the owner lifts a denial: an explicit `allow-write
 working task no longer cancels running workers, review or verification; stopping work stays the
 explicit Stop, worker Stop and command stop.
 
+Project agent and process-rule files are write-protected by default: `AGENTS.md`, `CLAUDE.md`,
+`CLAUDE.local.md`, `GEMINI.md`, `.agents/`, `.claude/` and `docs/project/verification.md` at the
+project root (`lifecycle::steering::RULE_FILES`). A worker's file write to one of them is refused
+(`rule_file_protected`) unless the owner asked for it: the task goal or an owner message names the
+exact project path (whole-token match; a nested or home path does not count), the explicit
+`/skill-management` command names `.agents` and `.claude`, or the owner sends `allow-write: <path>`
+or removes the protection through the `allow_write` control. Model text never lifts it. The
+protection is enforced at write time only (plan and claim scopes containing such a path are not
+refused), and the coordinator's capsule lists it (`rule_file_protection`). Writing commands see the
+protected paths read-only once the command launcher passes the same set
+(`lifecycle::steering::write_denials`) to its sandbox. This guards the project's own process rules
+against a task rewriting them; it is not a boundary against the owner's other tools.
+
+At task start the service records an environment preflight (`ENVIRONMENT_PREFLIGHT`, carried in the
+coordinator capsule as `environment`). It runs `gh auth status`, `codex login status`, `claude auth
+status`, `sudo -n true` and `docker info` from the owner's tool search path with stdin, stdout and
+stderr closed and prompts disabled, so only exit codes are recorded and no account, token or prompt
+text is read; `sudo -n` never asks for a password and runs only `true`. `git --no-optional-locks
+status` output is read (bounded to 64 KiB) for branch, upstream and change counts only, never file
+names. Free space and display variables (short names such as `:0`) complete the record. Every probe
+shares a 3-second budget and a probe that runs out of time is killed with its process group. An
+engine CLI (`codex`, `claude`) runs only where that engine's native login files already exist, as
+the passive settings marker checks them (`~/.codex/auth.json`, `~/.claude/.credentials.json` in a
+private, owner-owned, non-symlinked directory); otherwise the fact is `not_logged_in` (or `unknown`
+for an unusable native home) without a launch, because those CLIs create their native home on first
+run and a probe must never create or alter one. The facts inform planning only; they grant nothing
+and never stop a task.
+
 Owner-triggered retention removes session access-default rows before deleted host
 sessions, without changing surviving defaults or explicit access choices. The
 foreign-key boundary and committed-deletion recovery remain in force; this grants
@@ -2280,35 +2327,55 @@ The Cortex Workspace desktop slice has a user-level machine service that owns th
 
 - The service listens only on a Unix domain socket in a private per-user runtime directory (directory mode 0700, socket mode 0600). Both ends compare the peer's effective user with their own. It opens no TCP, loopback HTTP or WebSocket listener. The one network listener it can open is the iroh UDP endpoint of remote access, described below, bound only while the owner has turned remote access on (off by default).
 - The service's own private folders (runtime directory and, in the dev channel, the config, state, cache and data folders it gives started processes) must be real directories owned by the current user. One that is merely too permissive (for example 0775 under the user's own primary group from a 002 umask, or 0755) is made 0700 in place through the opened directory; a world-writable folder, a folder group-writable by another group or a foreign-owned folder stays refused, and the owner sees a refusal naming the folder and the problem instead of a generic filesystem failure.
+- **Extracted Workspace Dev.** Only a Dev build honors the native startup opt-in
+  `CORTEX_WORKSPACE_DEV_EXTRACTED_PREFIX`. It requires a user-owned 0700 prefix and private
+  per-run XDG roots there. The service accepts only the Dev runtime in that prefix's Debian
+  layout, with owned, non-group/world-writable payload entries and no symlink escape. Only
+  direct relative links to files inside the bundled engines tree are accepted there. This is a
+  layout and permissions check, not archive authentication; verify the trusted archive separately.
+  A malformed request does not fall back to the installed service or profile. The desktop uses only
+  the private socket and never asks systemd to start the installed unit; native notifications and
+  their installed desktop activation path are disabled for the extracted run. This separates
+  registries from the persistent installation, not authority from the same OS user. Use a separate
+  disposable project: the Dev project-store name and the native account HOME do not change.
+  See [configuration](docs/configuration.md#workspace-dev-extracted-package).
 - **Opening a pull request in the browser.** **View PR** (on the merge card and in the Git menu) is the
   only action that opens a pull request address. The UI displays the recorded address as text and sends
   only the project and task identifiers; it never passes the displayed URL to the opener. The service
   returns the recorded address only if it is an `https` address on the host of the repository's `origin`
   remote, shaped `https://<host>/<owner>/<repo>/pull/<number>`, and checks it against the remote again at
   the press. The desktop checks it once more (an `https://` prefix, host characters limited to letters,
-  digits, `.` and `-`, no whitespace or control characters, at most 2048 bytes) and then starts the first
+  digits, `.` and `-`, no whitespace or control characters, at most 2048 bytes). Outside extracted
+  Dev, the desktop then starts the first
   of two fixed programs that is an existing regular file with an execute bit:
   `/usr/bin/xdg-open <address>`, or `/usr/bin/gio open <address>` when `/usr/bin/xdg-open` is not
   runnable. The address is the last argument, no shell is used, and the program's standard streams are
   discarded. A launcher that exits with a failure is reported as "The browser could not open this pull
   request."; one still running after 8 seconds counts as handed over. The item is offered only when the
-  same search finds one of those two programs.
-- **GitHub CLI (`gh`).** The service runs `gh` in one place only: **Create PR…** in the Finish task
-  dialog. It runs `gh pr create --base <target> --head <task branch> --title <first line of the title> --body <description>`,
+  same search finds one of those two programs. Extracted Dev never reaches those programs from
+  View PR. Only a desktop executable in a validated private Dev extraction can use the native
+  qualification recorder; it appends the address digest to a private, existing 0600 file. A
+  missing or invalid recorder never falls through to a system opener. The launcher also requires
+  a complete native verifier result from the candidate service process before desktop input.
+  See [the qualification gates](docs/cortex-workspace/testing-and-acceptance.md#extracted-dev-readiness-gates).
+- **GitHub CLI (`gh`).** The service runs `gh pr create` in one place only: **Create PR…** in the Finish task
+  dialog. It runs `gh pr create --repo <HOST/OWNER/REPO> --base <target> --head <task branch> --title <first line of the title> --body <description>`,
   with `--draft` when the owner chooses a draft, in the task's checkout, with `GIT_TERMINAL_PROMPT=0`,
-  `LC_ALL=C`, an empty standard input, standard error discarded and a 25-second limit. It runs only after
-  the service has checked, from local Git state alone, that the branch has a resolvable upstream tracking
-  ref (`@{u}`) and no commits in `@{u}..HEAD`; otherwise the action is refused with "Push this task branch
-  from Git first, then create the pull request." That is local evidence only: the service does not query
-  the remote, so a remote branch deleted since the last fetch can still pass it. The service never pushes
-  for it. Only the standard output of a successful run is considered. All of it is collected, but only its
+  `LC_ALL=C`, an empty standard input, standard error discarded and a 25-second limit. The repository comes
+  from the validated `origin`; `GH_REPO` and a conflicting `GH_HOST` are removed from the child. It runs only
+  after the owner-confirmed Push witness check (repository, full commit and remote ref recorded by that push)
+  and a read-only `gh api --method GET --hostname <HOST> repos/<OWNER>/<REPO>/git/ref/heads/<BRANCH>` lookup
+  that must return exactly the witnessed commit; otherwise nothing is dispatched to `gh pr create` and the
+  action is refused. After creation, a read-only `gh api` read of `repos/<OWNER>/<REPO>/pulls/<N>` must match
+  the repository, head ref, full head SHA, base, open state and exact address before the address is saved.
+  The service never pushes for it. Only the standard output of a successful run is considered. All of it is collected, but only its
   first 64 KiB is inspected: the last non-empty line of that part is the candidate, and it is recorded as
   the pull request address only if it passes the https and remote-host check above. The output of a failed
   or timed-out run is never read for an address. Any other output records the pull request without an
   address, and the pull request is still recorded as created. If `gh` cannot be started or exits with an
   error, the action is refused with "GitHub CLI could not create the pull request. Check gh login and
   repository access." If it does not
-  finish within 25 seconds, it is refused with "GitHub did not answer. Check your pull requests before retrying." A recorded attempt is not repeated by the service, and a later Create PR… for the same task is refused with "A pull request was already attempted. Check GitHub before creating another." Before it starts, the service only looks for `gh` on its own search path (`ghAvailable`); when `gh` is not found, the action is refused with "Install and sign in to GitHub CLI (gh) to create a pull request." The service never runs `gh` to read a pull request, a login or a status.
+  finish within 25 seconds, it is refused with "GitHub did not answer. Check your pull requests before retrying." A recorded attempt is not repeated by the service, and a later Create PR… for the same task is refused with "A pull request was already attempted. Check GitHub before creating another." Before it starts, the service only looks for `gh` on its own search path (`ghAvailable`); when `gh` is not found, the action is refused with "Install and sign in to GitHub CLI (gh) to create a pull request." Besides `gh pr create`, the service runs `gh` only for the scoped read-only `gh api --method GET` lookups above and for `gh auth status` probes in preflight and owner-action rechecks.
 - The actor of a Workspace request is the authenticated peer. Client-supplied actor values are replaced, and the ACP child receives a cleared environment.
 - Cortex exposes the `_cortex/workspace` extension method alongside the unchanged standard ACP methods. Its operations are a closed set; the desktop shell has a closed bridge command forwarding that set and a separate bounded native notification command.
 - Owner file saves run through that same fixed helper. A save names the revision the owner read and writes only over it, through a temporary file and a rename. It reaches the file without following any link, refuses `.git`, `.cortex` and `.cortex-dev` at any depth, is bounded to 512 KiB of UTF-8 text, and is refused while the project store does not show every task on that checkout stopped. See [editing files](docs/cortex-workspace/local-task-execution.md#editing-files). This is a check of recorded runtime state, not a lease: a model writer is not held back by it, and one running without that record could still race a save.
@@ -2370,7 +2437,7 @@ The Cortex Workspace desktop slice has a user-level machine service that owns th
   the window's process alone, and the window withdraws them when it closes.
 - Workspace invalidation hooks are connection-local to supported Store writers, not a security boundary on arbitrary SQLite clients. Independent/older writers do not need Workspace tables or callbacks; their writes are not guaranteed to publish notifications. Normal writable initialization retires legacy persistent outbox hooks; inspection leaves the durable schema untouched.
 - Both channels ship a root-owned runtime under `/usr/lib/<package>/runtime`. Units ignore legacy `service.env` files and use fixed absolute launch paths. Login-start symlinks and minimal best-effort maintainer scripts start/restart/stop only the matching user unit; they never access Paseo or delete user data. The native service-start path runs absolute `/usr/bin/systemctl --user` with fixed reload/start arguments, not webview-supplied commands. The separate editor action accepts only a registered project identity and fixed VS Code arguments. Dev XDG isolation and unchanged native account references remain in force.
-- [Paid standalone desktop qualification](docs/project/verification.md#standalone-cortex-workspace-desktop) requires explicit owner authorization for this surface and mode, a private screen and session bus, a disposable project and XDG roots, and a candidate service isolated from the production installation and user manager. A private socket path alone does not prevent the desktop's systemd startup fallback from touching the production user manager. Real HOME is for the selected existing native account, not permission to reuse production Workspace or Paseo state. Before/after metadata-only checks of known Cortex/Workspace locations detect stray writes within their coverage; neither XDG separation nor an unchanged snapshot proves same-user filesystem containment.
+- [Standalone desktop qualification](docs/project/verification.md#standalone-cortex-workspace-desktop) runs a trusted, locally built Dev archive extracted without installation (`dpkg-deb -x`, no maintainer scripts) as the owner, in the owner's real environment: real HOME, session bus/keyring, native Codex/Claude and GitHub CLI logins (`GH_CONFIG_DIR` points at the owner's existing gh configuration; nothing is copied). Its five XDG roots and service socket are private to the run, so the persistent release and Dev installations, their settings, registrations and stores, production `~/.paseo` and the owner's projects are not used; the extracted app cannot fall back to either installed unit, and the launcher unsets inherited `CORTEX_ROUTING`. There is no nested namespace lab: this is the product's own channel separation, not a boundary for hostile same-user code. Smoke may use the owner's display. Drive requires a private, authenticated Xvfb (per-run X authority cookie, own Xvfb process) and refuses missing private display tools before archive handling. Before any program from the archive is extracted or run with the owner's HOME, gh configuration and session bus, the launcher requires the build's own manifest to be a regular, non-symlink, user-owned, not group/world-writable file whose package identity and SHA-256 match the archive; an absent, symlinked, unreadable or mismatching manifest refuses nonzero before extraction or launch. `drive` is bound to the exact archive digest recorded by a successful private-Xvfb smoke and refuses any other archive. A screenshot counts only when capture exits 0 and the file is a complete, decodable PNG; a failed or partial capture is refused and no digest is retained. Smoke checks logins by exit status, retains sanitized route/default readback and never account output or settings bodies; environment gaps (no display, missing tool, missing login) are recorded as unobserved steps and never count as a pass. Optional installation passes the verified private Dev archive snapshot to apt via sudo, not the mutable build path. Cleanup refuses an unlisted Debian archive anywhere under either named build directory. Paid use still requires explicit authorization for this surface and mode.
 - The package depends on bubblewrap but does not weaken AppArmor or kernel policy. A namespace refusal blocks sandboxed engine execution and remains an explicit qualification limit; see [platforms](docs/cortex-workspace/platforms.md).
 - `history.page` exposes bounded display text, plans, tool titles/status and each call's selected target (path, command, query, skill or report reference) and non-private edit text, not raw tool arguments/results or private report bodies. An untitled update is judged private or not by the title retained for its call, and stays private when none was retained. A refused call keeps only a credential-redacted reason of at most 1,000 characters: the runtime refusal's `message`, or a Cortex tool's error text; engine tool output and report/draft refusals are not kept. A worker's edit lines come from the runtime's own record of that write (unclipped records only), credential-redacted and bounded per edit and per read. Its cursor binds the project, task, session, page size and frozen high-water mark. Owner queue and review drafts live in private service state, separate from immutable captured source history.
 - The service-only `_cortex/workspace_control` method resolves the registered execution and live session/current owner epoch before accepting prompts, worker guidance, worker cancellation or a command-stop request. Stop/Close alone may cancel the exact bound launch before its runtime row exists even when retries have advanced the coordinator epoch; prompts and other controls retain current-epoch checks. It is not a model MCP tool. Worker guidance targets one live channel and is marked delivered when appended to a successful Cortex tool response, not when read or acted on. It grants no authority. The exact gateway command reference and a reason remain required for stopping a command; native engine actions cannot be stopped through this control.
@@ -2403,10 +2470,17 @@ The Cortex Workspace desktop slice has a user-level machine service that owns th
   qualification can be retained as a report note after verification of the current work. The note grants
   no permission and supplies no passing receipt. Required plan commands, attempted checks and other policy
   refusals retain their evidence requirements. Closing an unaccepted result as is records an owner
-  disposition with a verification warning and creates no commit. A stop is recorded as a continuation or a
-  pause with its reason, not as a question to the owner. The scheduler can recheck a known finish refusal
+  disposition with a verification warning and creates no commit. A runtime stop of any task (manual or Automatic) is recorded as a continuation with its reason, evidence and
+  strategy-ladder rung (the [no-stop policy](docs/features/task-lifecycle/index.md#no-stop-policy-and-the-strategy-ladder)),
+  never as a question or hold for the owner, and with no attempt cap; only a route the host cannot
+  qualify waits (`external_blocker`), resumed by the runtime itself. Access actions are a separate
+  wait: authentication errors are evaluated only in recognized access-related command receipts
+  or reported explicitly as missing access. A dotted service name is a display key, not a
+  login command or probe target; only built-in service keys offer those actions.
+  Escalated routes, a senior
+  consultation, another role or another coordinator model are routing and planning changes only. The scheduler can recheck a known finish refusal
   only against the same saved hold under the existing Git and machine
-  admission checks; no dispatched or unknown effect is replayed. Cancellation and archival never certify unfinished prerequisites or authorize discarding existing changes. At the retry limit, explicit task Resume requires the exact current version, settled processes and no unresolved effects before a fresh planning turn renews the retry budget. Neither the policy nor a continuation grants permission or changes review, verification or access rules. See [sprint run modes](docs/cortex-workspace/local-task-execution.md#sprint-run-modes).
+  admission checks; no dispatched or unknown effect is replayed. Cancellation and archival never certify unfinished prerequisites or authorize discarding existing changes. A continuation resumes only once every owned session is confirmed gone; an effect with an unknown outcome is then settled as `unknown` (`settled_by: runtime_reverify`, `RUNTIME_UNCERTAINTY_RECORDED`) for the coordinator to re-verify from files, Git state and receipts, never replayed and never certified, and a command that may still run is waited for until the host settles it with process evidence. Neither the policy nor a continuation grants permission or changes review, verification or access rules. See [sprint run modes](docs/cortex-workspace/local-task-execution.md#sprint-run-modes).
 - Post-merge cleanup uses Git without force only after the integration is recorded. A retained dirty/failed cleanup never masquerades as a failed merge. Source updates retain the previous result identity/version and require different, passing runtime evidence before renewed acceptance. Large and non-text conflicts retain bounded metadata and explicit manual Git instructions rather than writing placeholder text into a file.
 - Task titles, commit messages and pull request texts are written by a model, so their inputs leave the
   machine for the chosen connection's provider (Anthropic for Claude, OpenAI for Codex), under the owner's
@@ -2891,7 +2965,9 @@ code, alternate host aliases, hardlinks outside the tree, process access or Dock
 unable to circumvent them. The daemon resolves bind paths in its own namespace;
 rootful Docker may have host-root authority, rootless Docker still has owner
 authority, and remote contexts have their own authority. No endpoint switching,
-sudo, group change, daemon installation or credential copying is implicit.
+group change, daemon installation or credential copying is implicit; root comes
+only from `sudo` on the host with the password the owner types
+([askpass](#owner-password-for-sudo-askpass-and-host-rerouting)).
 
 Capability is not authorization to delete data, modify production/shared systems,
 change credentials, upload/push/deploy or run paid checks. Those effects still
@@ -2998,8 +3074,119 @@ lives in the owner's config directory, which the sandbox cannot write. Git also
 uses `SSH_ASKPASS` for HTTPS credential prompts. Any process in the sandbox can
 also draw windows on the owner's display, including a fake of this prompt, so
 type a password only for a connection you expect. When no display session or
-dialog program is available, nothing is added. `sudo` still fails: bubblewrap
-sets no_new_privs, which setuid programs refuse.
+dialog program is available, nothing is added. `sudo` never works inside the
+command sandbox: bubblewrap sets no_new_privs, which setuid programs refuse. A
+writing worker's command that needs root runs on the host instead (next section).
+
+### Owner password for sudo (askpass) and host rerouting
+
+**Rerouting.** A writing worker's `command_run` that needs the host is rerun by
+the runtime through the existing `outside_command` consent route instead of
+returning a refusal: `sudo`, `pkexec` or `doas` at a command position of the argv
+(directly, after `env`/`timeout`-style wrappers, or in a `sh`/`bash`/`dash`/`zsh`
+script) is sent there before any sandboxed run; a sandbox that could not be prepared
+(`native_command_sandbox_unavailable`, nothing ran) and a launcher failure that the
+private supervisor itself proved before the payload was released are rerun there once.
+Once a sandboxed payload has started it is never replayed on the host from its output.
+Auto answers that consent card itself; Guarded and Development show it to the owner as
+for any `outside_command`, titled with the reason. The identical argv, cwd and
+timeout run under the derived request key `<key>.host`; the host receipt carries
+`rerouted` (`from`, `reason` and the original request key); the sandboxed receipt stays as it was and
+records `rerouted_to`, so a replay of the same request answers the same host
+receipt. Read-only roles, reviewers and verification are never rerouted: their
+privileged program fails in their read-only sandbox and the receipt's
+`sandbox_privilege` hint says the role cannot run it. A privileged program hidden
+in a script or build tool is recognized only by its sandbox failure output. This
+is a routing rule, not a security boundary: the outside route's own checks (live
+writing channel, non-empty scope, owner wait gate, Cortex private state refused in
+every mode) apply unchanged.
+
+**Askpass.** Every host command (`outside_command`, including a rerouted
+`command_run`) gets one private askpass route: a 0700 directory in
+`$XDG_RUNTIME_DIR` (or the temporary directory) with a Unix socket, an `askpass`
+script and a `sudo` shim placed first on `PATH`, plus `SUDO_ASKPASS` and a
+per-command random token in the command's environment. The shim runs the next
+`sudo` on `PATH` with `-A` first, unless the arguments already choose `-n`, `-S`,
+`-A` or only ask for help, the version or `-K`; an argv whose first word is `sudo`
+or `…/sudo` gets the same `-A` (the receipt keeps the original argv). When sudo
+needs the password it runs the helper (this service binary). The service accepts
+the helper only if the connecting process is the same uid, is the very binary the
+script names (same device and inode), is not traced, and its parent runs with
+effective uid 0 for this user with the name `sudo`; the helper then makes itself
+undumpable and refuses a stdout pipe that another readable process of the owner
+holds, so the answer reaches only sudo's own pipe. Then the service opens the
+prompt "Password for sudo", naming sudo's command line, cwd, project, task and
+worker, on the desktop and on paired phones (`askpass.list`/`askpass.answer`).
+Only the waiting command waits; the task's other work goes on.
+
+The password is sent once in `askpass.answer`, moved into the waiting helper and
+written to sudo's pipe. It is never written to the store, an event, a receipt, a
+log, command output or a notification and never reaches a model. The service
+overwrites its copy and the helper's with zeros after use; transient copies in the
+socket transport buffers are freed, not zeroed. A prompt ends when it is answered,
+cancelled, after 10 minutes, when its helper goes away or when its command ends;
+then the helper exits non-zero and sudo fails as it would without a password. The
+receipt's `sudo_prompts` lists how each prompt ended (`answered`, `cancelled`,
+`expired`, `withdrawn`, `refused:<reason>`), never an answer. `sudo -n` never asks,
+and sudo's own credential cache applies after a correct password. `pkexec` uses
+the desktop's polkit agent on the machine's own screen, not this prompt.
+
+**Phone.** A paired phone may list prompts and send a cancel; it may send a
+password only while Settings, Remote access, "Passwords and tokens from phones"
+(formerly "Sudo passwords from phones"; the stored setting is unchanged) is on
+(the default, by owner decision). The password then crosses the paired,
+end-to-end encrypted remote channel and, if one is used, the relay as ciphertext.
+The setting is kept in `askpass.json` (0600) in the service's state directory and
+changed only by the owner-only `remote.sudo.set`, which the remote policy refuses
+to a phone like every `remote.*` method.
+
+**Limits.** This is a same-user boundary. Code already running as the owner with
+the host command's environment can start its own `sudo -A` (and so a genuine
+prompt naming that command), and hostile same-user code can still observe input
+through other means (for example an X11 keylogger, or a reader it hides from the
+pipe check by making itself undumpable). Type the password only for a command you
+expect. Checked by no-paid tests only, with a fake `sudo`: no real sudo, password or
+device was used.
+
+### Owner actions: sign-ins and pasted tokens
+
+When the runtime records `OWNER_ACTION_REQUIRED` for a task (a GitHub, Codex or
+Claude login is missing, or `sudo` needs the owner), the machine service lists it
+(`owner_actions.list`) as a card on the desktop and on paired phones, and resolves it
+only by recording `OWNER_ACTION_RESOLVED` (`how`: `terminal_login`, `token`,
+`recheck` or `dismissed`), on which the runtime retries the blocked work. An action
+resolves on evidence only: the service reruns the one preflight probe for that
+service (`gh auth status`, `codex login status`, `claude auth status`, `sudo -n
+true`; exit codes only, output discarded, never creating a native engine home) when
+the owner asks and every 60 seconds while the action is open, and a `sudo` action
+also resolves when a "Password for sudo" prompt of the same task is answered. The
+owner can always dismiss a card; the runtime then retries anyway.
+
+**Terminal sign-in.** "Open sign-in in terminal" types the installed CLI's own
+interactive login (`gh auth login`, `codex login`, `claude auth login`) into the
+desktop's project terminal, in the project folder. The command comes from the
+service, never from the model or the event. A phone never sends this action (both
+allowlists refuse it); it shows the command to run on the computer.
+
+**Pasted token.** Only a service whose CLI documents a non-interactive login reading
+stdin offers a token field: GitHub (`gh auth login --with-token`). Codex's
+`codex login --with-api-key` would replace the owner's native subscription login with
+API-key billing, and Claude has no stdin login, so neither offers one. The token is
+sent once in `owner_actions.act` and handled like a sudo password: the request's
+string is moved into a buffer that is overwritten with zeros after use, written once
+with a newline to the CLI's stdin (spawned with a cleared environment, the owner's
+tool search path and `GH_PROMPT_DISABLED=1`), and the pipe is closed. The CLI's
+stdout and stderr are discarded and only its exit code is used. The token is never
+written to the store, an event, a receipt, a reply, a log, a notification or command
+output, and never reaches a model; the client allowlist passes it through without
+keeping it. Transient copies in socket and JSON transport buffers are freed, not
+zeroed. `gh` itself stores the accepted token in its own credential store, as its
+interactive login would. A paired phone may send a token only while "Passwords and
+tokens from phones" is on; with it off the remote policy refuses the request before
+it reaches the service. This is the same same-user boundary as the sudo prompt.
+Checked by no-paid tests only, with a fake `gh` and a fake token: no real account,
+token or CLI login was used.
+
 
 Automatic verification has the same private-path isolation and a completely
 read-only project except its scratch (`HOME`/`TMPDIR`/`TMP`/`TEMP`) and private
@@ -3181,7 +3368,13 @@ native directory without copying it; Download engine, which runs npm to install 
 Workspace npm uses the remaining 30-second request budget, reserving one second for kill/reap and reply),
 with no caller-supplied package, version, path or binary and no npm output returned; and default-preset
 read, apply (missing files only) and reset (confirmed, revision-checked, with private backups first). The
-manual Download engine action starts network access on an explicit press. Separately, plugin activation or
+manual Download engine action starts network access on an explicit press when an npm
+install is needed. Native Workspace prefers the verified channel bundle. Otherwise,
+release Settings discovery, install and native-account recheck use the service's
+`XDG_DATA_HOME` (falling back to `$HOME/.local/share` only when unset); Dev uses
+its own state directory's `data` subtree. This selects the Cortex-managed adapter
+store; it neither relocates native accounts nor confines npm or engine children to
+those directories. Separately, plugin activation or
 agent startup automatically downloads these same qualified manifest pins in a non-blocking background pass
 (600-second npm bound per engine), registers a missing native-account connection only when its native
 login marker exists, and observes models immediately through prompt-free discovery.
