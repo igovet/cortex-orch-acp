@@ -715,11 +715,14 @@ fn no_progress_tx(
 /// one plan revision (it names review and fix nodes and bounds one revision's
 /// reviews); a new plan revision restarts that count but not this budget. Once
 /// [`MAX_REVIEW_CYCLES`] change-requesting reviews were recorded in the lineage
-/// (this one included), a further fix round is granted only while the findings
-/// strictly shrink: this review names fewer distinct findings than the previous
-/// change-requesting review. A strictly decreasing count cannot cycle. Before this,
-/// each continuation's new revision started a fresh budget, and one task ran nine
-/// review-cycle ladders with eighteen change requests (owner store 2026-11-21).
+/// (this one included), a further fix round is granted while this review raises a
+/// finding no earlier review of the lineage raised (same files and normalized fix):
+/// new problems are progress. It is refused when every finding was already raised
+/// before (the work is going around), and after [`MAX_LINEAGE_REVIEW_CYCLES`] rounds
+/// in any case, so reworded repeats cannot cycle forever. Counting findings instead
+/// stopped a task whose three reviews each found one different problem (owner store
+/// 2026-11-22); before any budget, one task ran nine review-cycle ladders with
+/// eighteen change requests (2026-11-21).
 /// `Some((rounds, previous, current))` when the budget refuses another round.
 fn lineage_budget_exhausted_tx(
     db: &Transaction<'_>,
@@ -737,15 +740,17 @@ fn lineage_budget_exhausted_tx(
     if rounds < MAX_REVIEW_CYCLES {
         return Ok(None);
     }
-    let current = finding_subjects(result).len();
-    let previous = earlier
-        .first()
-        .map_or(usize::MAX, |p| finding_subjects(p).len());
-    if current < previous {
+    let current = finding_subjects(result);
+    let seen: BTreeSet<_> = earlier.iter().flat_map(finding_subjects).collect();
+    let previous = earlier.first().map_or(0, |p| finding_subjects(p).len());
+    let new_problem = current.iter().any(|f| !seen.contains(f));
+    if new_problem && rounds < MAX_LINEAGE_REVIEW_CYCLES {
         return Ok(None);
     }
-    Ok(Some((rounds, previous, current)))
+    Ok(Some((rounds, previous, current.len())))
 }
+/// Change-requesting reviews one task lineage may run while each raises a new problem.
+const MAX_LINEAGE_REVIEW_CYCLES: usize = 12;
 /// The parts of the change a review reports it did not cover, as given in its
 /// `not_covered`.
 fn uncovered(result: &Value) -> Vec<Value> {

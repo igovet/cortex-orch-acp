@@ -589,10 +589,12 @@ fn identical_findings_across_revisions_break_instead_of_cycling() {
     );
 }
 
-/// Business t_d530de978253: after three change-requesting reviews in the lineage, a
-/// new revision gets further fix rounds only while the findings strictly shrink.
+/// Business t_d530de978253 and cortex t_fc045ba2 (2026-11-22): after three
+/// change-requesting reviews in the lineage, a new revision gets a further fix round
+/// while its review raises a problem no earlier review raised (even more of them),
+/// and is refused once every finding was already raised before.
 #[test]
-fn shrinking_findings_still_allow_rounds_and_growing_ones_stop() {
+fn new_problems_still_allow_rounds_and_repeated_ones_stop() {
     let (_p, s, task) = started();
     let f = |n: usize, tag: &str| {
         findings(
@@ -616,19 +618,18 @@ fn shrinking_findings_still_allow_rounds_and_growing_ones_stop() {
         latest(&s, &task, "AUTOMATIC_CONTINUATION")["reason"],
         "review_cycle_limit"
     );
-    // Revision 2: fewer findings than the last review: another fix round.
+    // Revision 2: new problems, one fix round each, even when there are more of them.
     review_round(&s, &task, 2, 1, "d", &f(4, "count"));
     assert_eq!(fixes(&s, &task, 2), 1);
     assert_eq!(
         latest(&s, &task, "REVIEW_CHANGES_REQUESTED")["review"],
         "_review_1"
     );
-    // Still shrinking: one more.
-    review_round(&s, &task, 2, 2, "e", &f(2, "schema"));
+    review_round(&s, &task, 2, 2, "e", &f(6, "schema"));
     assert_eq!(fixes(&s, &task, 2), 2);
-    // Growing again: the lineage budget refuses the round, without a fresh one.
+    // Only problems an earlier review already raised: the lineage budget refuses.
     let continuations = count(&s, &task, "AUTOMATIC_CONTINUATION");
-    review_round(&s, &task, 3, 1, "f", &f(3, "checkout"));
+    review_round(&s, &task, 3, 1, "f", &f(2, "bootstrap"));
     assert_eq!(fixes(&s, &task, 3), 0);
     assert_eq!(
         count(&s, &task, "AUTOMATIC_CONTINUATION"),
@@ -645,6 +646,6 @@ fn shrinking_findings_still_allow_rounds_and_growing_ones_stop() {
             observed["findings"].as_i64(),
             observed["previous_findings"].as_i64()
         ),
-        (Some("review_cycle"), Some(3), Some(2))
+        (Some("review_cycle"), Some(2), Some(6))
     );
 }

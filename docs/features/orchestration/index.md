@@ -529,10 +529,13 @@ that changes approach, instead of another round. The review-cycle budget belongs
 the task, not to one plan: `review_cycle` still numbers the reviews and fixes of one
 revision and bounds them at three, and every new revision gets its mandatory review,
 but once three change-requesting reviews were recorded across the task's revisions
-(since the newest reopen), a further fix round is granted only while the review names
-strictly fewer findings than the previous change-requesting review. Otherwise the
-review stops with `review_cycle_limit` (`LOOP_OBSERVED`, `kind: review_cycle`, with
-both counts). Before this, each continuation's new plan started a fresh budget, and
+(since the newest reopen), a further fix round is granted while the review raises a
+finding no earlier review of the task raised (same files and normalized fix): a new
+problem is progress, however many there are. When every finding was already raised
+before, or after twelve change-requesting reviews in any case, the review stops with
+`review_cycle_limit` (`LOOP_OBSERVED`, `kind: review_cycle`, with both counts).
+Counting findings instead had stopped a task whose reviews each found one different
+problem (owner store 2026-11-22). Before this, each continuation's new plan started a fresh budget, and
 one task ran nine review-cycle ladders with eighteen change requests (owner store
 2026-11-21). Every reviewer's assignment
 carries a `review_packet`: the files the reviewed work changed (path, change kind,
