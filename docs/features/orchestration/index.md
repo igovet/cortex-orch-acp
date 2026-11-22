@@ -484,7 +484,12 @@ to its end, and a file's `review_lines` ranges end at its last line as
 (its packet's `predecessor_reports`) not read to its last page
 (`review_predecessor_reports_required`) and a BLOCK without
 findings (`review_block_findings_required`); the review stays the one running
-assignment and the same session continues. The file-coverage refusal is a chance to
+assignment and the same session continues. A later review round reads only what
+changed since an earlier one: a listed file that an earlier completed review of
+the same task read completely (or through all of its own packet's `review_lines`)
+at exactly the current `current_sha256` counts as read, and the packet marks it
+`reviewed_before: true` with `reviewed_before_guidance`; any change produces new
+bytes that need a fresh read. The file-coverage refusal is a chance to
 read, never a loop: after two `review_file_coverage_required` refusals of the same
 review assignment the next result is recorded, and an approval carries the
 `unverified` runtime check `Changed files the reviewer did not read` naming every

@@ -235,6 +235,7 @@ impl NativeHost {
                                 review_reading(db,&t,&node,&mut packet)?;
                                 let base=crate::native_project::review_base(db,&t,&packet)?;
                                 crate::native_project::add_review_lines(&review_root,base.as_deref(),&mut packet);
+                                completion::mark_reviewed_before(db,&t,&a,&mut packet)?;
                                 item["review_packet"]=packet.clone();
                                 // Persist the exact authoritative packet used for this
                                 // reviewer.  Result submission must validate coverage

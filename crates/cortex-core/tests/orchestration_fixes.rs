@@ -1304,3 +1304,51 @@ fn repeated_coverage_refusals_record_the_review_with_unread_files_disclosed() {
     assert_eq!(unread["outcome"], "unverified");
     assert_eq!(unread["paths"], json!(["src/generated.rs", "src/lib.rs"]));
 }
+
+/// A later review round need not re-read a file an earlier completed review of
+/// the task read at the same bytes (owner store 2026-11-22: every fix round
+/// re-required ~80 unchanged files and the review hit its cycle limit). A file
+/// whose bytes changed since still needs a fresh read, and the packet marks only
+/// the unchanged one.
+#[test]
+fn a_later_review_round_skips_files_an_earlier_review_read_at_the_same_bytes() {
+    let same = "a".repeat(64);
+    let earlier_changed = "b".repeat(64);
+    let now_changed = "c".repeat(64);
+    let (_p, s, e) = review_with_packet(json!({"files":[
+        {"path":"SECURITY.md","change":"written","by":["n"],"current_sha256":same},
+        {"path":"src/a.rs","change":"written","by":["n"],"current_sha256":now_changed}],
+        "total":2,"complete":true}));
+    use sha2::Digest;
+    let key = |p: &str| format!("file-read:{:x}", sha2::Sha256::digest(p.as_bytes()));
+    s.write(|db| {
+        // An earlier review round, completed, whose channel read both files.
+        db.execute("INSERT INTO runtime_nodes(task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status,assignment_ref)
+            VALUES ('t',0,'_review_0','worker-code-reviewer','review','[]','[]','review','completed','ar0')", [])?;
+        db.execute("INSERT INTO trusted_channels(channel_id,secret_hash,task_id,principal_thread_id,role,assignment_id,attempt_id,owner_epoch,issued_at)
+            VALUES ('cr0','fixture','t','thread0','worker','ar0','xr0',1,'now')", [])?;
+        for (path, sha) in [("SECURITY.md", &same), ("src/a.rs", &earlier_changed)] {
+            db.execute("INSERT INTO runtime_requests VALUES ('t',?,'cr0','native_file_read','fixture',?)",
+                (key(path), json!({"complete":true,"sha256":sha}).to_string()))?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let missing = s
+        .read(|db| review_coverage_missing_tx(db, "t", "ar", &json!({"verdict":"APPROVE"})))
+        .unwrap();
+    assert_eq!(
+        missing,
+        vec![json!({"path":"src/a.rs","reason":"current complete read is missing or stale"})]
+    );
+    let mut packet = json!({"changed_files":{"files":[
+        {"path":"SECURITY.md","current_sha256":same},
+        {"path":"src/a.rs","current_sha256":now_changed}]}});
+    s.read(|db| cortex_core::lifecycle::completion::mark_reviewed_before(db, "t", "ar", &mut packet))
+        .unwrap();
+    assert_eq!(packet["changed_files"]["files"][0]["reviewed_before"], true);
+    assert!(packet["changed_files"]["files"][1].get("reviewed_before").is_none());
+    assert!(packet["changed_files"]["reviewed_before_guidance"].is_string());
+    read_completely(&s, "src/a.rs", &now_changed);
+    approve(&s, &e).unwrap();
+}

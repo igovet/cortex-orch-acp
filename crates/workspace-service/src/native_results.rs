@@ -1301,6 +1301,7 @@ fn refresh_rebound_review_packet_tx(
     }
     let base = crate::native_project::review_base(db, task, &event["packet"])?;
     crate::native_project::add_review_lines(root, base.as_deref(), &mut event["packet"]);
+    lifecycle::completion::mark_reviewed_before(db, task, assignment, &mut event["packet"])?;
     event["refreshed_from"] = json!(recorded);
     lifecycle::event_tx(db, task, "REVIEW_PACKET", event)?;
     Ok(())

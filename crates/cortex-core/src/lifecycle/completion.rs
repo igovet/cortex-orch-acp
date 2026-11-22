@@ -902,7 +902,7 @@ fn coverage_gaps(
             if incomplete && outside.contains(path) {
                 continue;
             }
-            match file_coverage(db, task, channel.as_deref(), file)? {
+            match file_coverage(db, task, assignment, channel.as_deref(), file)? {
                 FileCoverage::Covered | FileCoverage::NoText => {}
                 FileCoverage::Missing(reason) => missing.push((
                     json!({"path":path,"reason":reason}),
@@ -947,12 +947,20 @@ const NO_TEXT: [&str; 4] = ["binary", "image", "opaque", "bulk"];
 fn file_coverage(
     db: &rusqlite::Connection,
     task: &str,
+    assignment: &str,
     channel: Option<&str>,
     file: &Value,
 ) -> CoreResult<FileCoverage> {
     let no_text = file["review_content"]
         .as_str()
         .is_some_and(|k| NO_TEXT.contains(&k));
+    // Bytes an earlier completed review of this task already read in full are
+    // not read again: a later round reviews only what changed since.
+    if let (Some(path), Some(sha)) = (file["path"].as_str(), file["current_sha256"].as_str()) {
+        if reviewed_before(db, task, assignment, path, sha)? {
+            return Ok(FileCoverage::Covered);
+        }
+    }
     let Some(channel) = channel else {
         return Ok(if no_text {
             FileCoverage::NoText
@@ -992,6 +1000,91 @@ fn file_coverage(
     } else {
         FileCoverage::Missing("current complete read is missing or stale")
     })
+}
+/// Whether an earlier completed review of `task` (not `assignment` itself) read
+/// `path` at exactly `sha256` completely, or read every line of its own packet's
+/// `review_lines` for that file. Its reviewer saw these exact bytes, so a later
+/// review round need not read them again; any change produces new bytes and needs
+/// a fresh read.
+fn reviewed_before(
+    db: &rusqlite::Connection,
+    task: &str,
+    assignment: &str,
+    path: &str,
+    sha256: &str,
+) -> CoreResult<bool> {
+    let key = format!("file-read:{}", crate::digest(path.as_bytes()));
+    let reads = db
+        .prepare(
+            "SELECT n.assignment_ref, r.result_json FROM runtime_nodes n
+             JOIN trusted_channels c ON c.task_id=n.task_id AND c.assignment_id=n.assignment_ref
+             JOIN runtime_requests r ON r.task_id=n.task_id AND r.actor=c.channel_id
+               AND r.request_key=? AND r.operation='native_file_read'
+             WHERE n.task_id=? AND n.stage='review' AND n.status='completed'
+               AND n.assignment_ref IS NOT NULL AND n.assignment_ref<>?",
+        )?
+        .query_map((&key, task, assignment), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (earlier, raw) in reads {
+        let Ok(read) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        if read["sha256"] != sha256 || read["content"] == "binary" {
+            continue;
+        }
+        if read["complete"] == true {
+            return Ok(true);
+        }
+        let ranges = review_packet_of(db, task, &earlier)?
+            .and_then(|p| {
+                p["changed_files"]["files"]
+                    .as_array()?
+                    .iter()
+                    .find(|f| f["path"] == path && f["current_sha256"] == sha256)
+                    .map(|f| f["review_lines"].clone())
+            })
+            .unwrap_or(Value::Null);
+        if review_lines_read(&ranges, &read["lines"]) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+/// Marks each listed changed file an earlier completed review of this task
+/// already read at its current bytes (`reviewed_before`), so the reviewer of
+/// `assignment` reads only what changed since the last review round.
+pub fn mark_reviewed_before(
+    db: &rusqlite::Connection,
+    task: &str,
+    assignment: &str,
+    packet: &mut Value,
+) -> CoreResult<()> {
+    let mut marked = 0usize;
+    if let Some(files) = packet["changed_files"]["files"].as_array_mut() {
+        for file in files {
+            let (Some(path), Some(sha)) = (file["path"].as_str(), file["current_sha256"].as_str())
+            else {
+                continue;
+            };
+            let seen = reviewed_before(db, task, assignment, path, sha)?;
+            if seen {
+                marked += 1;
+                file["reviewed_before"] = json!(true);
+            } else if let Some(entry) = file.as_object_mut() {
+                entry.remove("reviewed_before");
+            }
+        }
+    }
+    if marked > 0 {
+        packet["changed_files"]["reviewed_before_guidance"] = json!(
+            "A file with reviewed_before: true was already read at these exact bytes by an earlier completed review of this task, so you need not read it again; read it only for context. Read the other files (or their review_lines)."
+        );
+    } else if let Some(changed) = packet["changed_files"].as_object_mut() {
+        changed.remove("reviewed_before_guidance");
+    }
+    Ok(())
 }
 /// Whether a read of the current bytes covered every line of the packet's
 /// `review_lines` ranges (the lines that differ from HEAD, with context). A file
@@ -1104,7 +1197,7 @@ pub fn review_change_set_limits_tx(
         {
             continue;
         }
-        if let FileCoverage::NoText = file_coverage(db, task, channel.as_deref(), file)? {
+        if let FileCoverage::NoText = file_coverage(db, task, assignment, channel.as_deref(), file)? {
             let path = file["path"].as_str().map(str::to_owned);
             if file["review_content"] == "bulk" {
                 bulk.extend(path);

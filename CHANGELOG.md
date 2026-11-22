@@ -4,6 +4,8 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Fixed: a later review round no longer re-reads the whole change set. A changed file an earlier completed review of the same task read at exactly its current bytes counts as read and is marked `reviewed_before` in the packet, so a fix round reads only what changed since; previously every round re-required every unchanged file and large tasks hit the review cycle limit.
+
 - Fixed: an ordinary **Git → Commit…** that lands exactly the accepted files and bytes of an accepted project-folder result no longer marks that result stale. The same accepted version stays current and Finish (Merge…/Create PR…) stays available. Extra or changed files, a partial commit or an amend still make the result stale.
 
 - Create PR now needs a push witness. The owner-confirmed Push records the canonical host/owner/repository, full commit SHA and remote ref it reached; Finish refuses before any `gh` dispatch when the witness is missing, `origin` was retargeted, or a read-only repository-scoped lookup does not return exactly the witnessed commit. After creation, repository, source ref, head SHA, base, open state and address are read back independently before the address is saved, and an ambiguous outcome is never replayed.
