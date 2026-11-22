@@ -317,6 +317,44 @@ fn decision(row: Value) -> Value {
     };
     json!({"id":row["id"],"type":row["type"],"payload":compact})
 }
+/// The latest failed runtime verification not followed by a passing one: its revision,
+/// failed commands and the excerpt of what failed
+/// (`completion::verification_diagnostics`). The runtime's full output is not readable
+/// from any worker channel, so this is how the coordinator and workers learn which
+/// step and test failed without rerunning everything.
+fn verification_failure(db: &Connection, task: &str) -> CoreResult<Value> {
+    let latest: Option<(i64, String)> = db
+        .query_row(
+            "SELECT id,payload_json FROM runtime_events WHERE task_id=?1 AND type='VERIFICATION_FAILED'
+             AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='VERIFICATION_PASSED'),0)
+             ORDER BY id DESC LIMIT 1",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, raw)) = latest else {
+        return Ok(Value::Null);
+    };
+    let failed: Value = serde_json::from_str(&raw)?;
+    let commands: Vec<Value> = failed["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| !(c["complete"] == true && c["exit_code"] == 0))
+        .map(|c| json!({"argv":clipped_value(&c["argv"],300),"exit_code":c["exit_code"],"failure":c["failure"]}))
+        .collect();
+    let diagnostics: Vec<Value> = failed["diagnostics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(3)
+        .cloned()
+        .collect();
+    Ok(
+        json!({"event":id,"revision":failed["revision"],"failed_commands":commands,"diagnostics":diagnostics,
+        "note":"what the runtime's own verification found; the full verifier output is the runtime's record and not readable from a worker channel. Start from these lines instead of rerunning the whole suite."}),
+    )
+}
 fn plan_summary(plan: Option<&str>) -> CoreResult<Value> {
     let Some(plan) = plan else {
         return Ok(Value::Null);
@@ -534,7 +572,7 @@ pub fn snapshot_for(
         "note":RULE_FILE_NOTE});
     let mut context = json!({"task":task,"owner_epoch":owner,"state":state,"revision":revision,"original_goal":goal,
         "retained_user_messages":messages,"retained_decisions":decisions,"constraints":constraints,"questions":questions,
-        "owner_write_denials":denials,"rule_file_protection":rule_files,"environment":environment(db, task)?,"obstacles":crate::lifecycle::obstacles::capsule(db, task)?,
+        "owner_write_denials":denials,"rule_file_protection":rule_files,"environment":environment(db, task)?,"verification_failure":verification_failure(db, task)?,"obstacles":crate::lifecycle::obstacles::capsule(db, task)?,
         "plan_summary":plan_summary(plan.as_deref())?,"current_nodes":nodes,"sources":sources,"attempts":attempts,
         "unresolved_commands":unresolved,"command_events_not_restated":command_events,
         "access_mode":crate::access::current(db,task)?,"clipping":notices});

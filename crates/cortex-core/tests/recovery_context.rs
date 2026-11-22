@@ -640,3 +640,59 @@ fn per_call_chatter_never_fills_retained_decisions_and_coordinators_get_no_capac
         "a worker capsule keeps its capacity"
     );
 }
+
+/// Owner store 2026-11-22: a failed verification's output was the runtime's own record,
+/// unreadable from any worker channel, so every failure cost a plan revision that only
+/// rediscovered the failing test. The capsule now carries what failed, until a later
+/// verification passes.
+#[test]
+fn a_failed_verification_reaches_the_capsule_with_what_failed() {
+    let p = Project::new();
+    let s = p.open();
+    let _o = TaskMachine::new(&s).create("t", "goal", "owner").unwrap();
+    let output = "Step 1: build (cargo build)\nStep 1: exit=0, 1.2s\nStep 2: cargo (cargo test)\n\
+running 3 tests\ntest a ... ok\n\
+thread 'native_controls::resume_tests::a_legacy_worker' (33103) panicked at crates/workspace-service/src/native_controls.rs:1146:9:\n\
+assertion `left == right` failed\n  left: \"2\"\n right: \"1\"\nnote: run with `RUST_BACKTRACE=1`\n\
+test result: FAILED. 2 passed; 1 failed\nStep 2: exit=101, 122.47s\nStep 3: exit=0, 4.0s\n";
+    let excerpt = cortex_core::lifecycle::completion::failure_excerpt(output);
+    for line in [
+        "Step 2: exit=101",
+        "panicked at crates/workspace-service/src/native_controls.rs:1146:9",
+        "left: \"2\"",
+        "right: \"1\"",
+        "test result: FAILED",
+    ] {
+        assert!(excerpt.contains(line), "{line}: {excerpt}");
+    }
+    assert!(
+        !excerpt.contains("Step 1: exit=0") && !excerpt.contains("test a ... ok"),
+        "{excerpt}"
+    );
+    let capsule = |s: &cortex_core::Store| s.read(|db| snapshot(db, "t")).unwrap();
+    assert!(capsule(&s)["verification_failure"].is_null());
+    s.write(|db| {
+        lifecycle::event_tx(db, "t", "VERIFICATION_FAILED", json!({"revision":6,
+            "checks":[{"argv":["cargo","fmt","--check"],"complete":true,"exit_code":0},
+                      {"argv":["scripts/cortex-xtask.sh","test-fast"],"complete":true,"exit_code":1}],
+            "diagnostics":[{"argv":["scripts/cortex-xtask.sh","test-fast"],"exit_code":1,"excerpt":excerpt}]}))
+    })
+    .unwrap();
+    let failure = &capsule(&s)["verification_failure"];
+    assert_eq!(failure["revision"], 6);
+    assert_eq!(failure["failed_commands"].as_array().unwrap().len(), 1);
+    assert!(failure["diagnostics"][0]["excerpt"]
+        .as_str()
+        .unwrap()
+        .contains("native_controls.rs:1146"));
+    s.write(|db| {
+        lifecycle::event_tx(
+            db,
+            "t",
+            "VERIFICATION_PASSED",
+            json!({"revision":7,"checks":[]}),
+        )
+    })
+    .unwrap();
+    assert!(capsule(&s)["verification_failure"].is_null());
+}

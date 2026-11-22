@@ -2050,6 +2050,89 @@ pub fn settle_interrupted_verification_tx(db: &Transaction<'_>, task: &str) -> C
 /// code and a digest of the normalized end of its retained output (lowercased,
 /// digits, hex runs and absolute paths masked, whitespace collapsed, last 2 KB), so
 /// the same failure repeated on new runs has the same key.
+/// Per failed verification command, a bounded excerpt of its retained output naming
+/// what failed: failing steps, panics with their next lines, assertion values,
+/// compiler errors and test failures, at most [`DIAGNOSTIC_LINES`] lines and
+/// [`DIAGNOSTIC_CHARS`] characters each. The full output stays the runtime's own
+/// record, which no worker channel can read; without this excerpt every failed
+/// verification cost a plan revision that only rediscovered the failing test
+/// (owner store 2026-11-22).
+pub fn verification_diagnostics(
+    db: &rusqlite::Connection,
+    task: &str,
+    checks: &[Value],
+) -> CoreResult<Vec<Value>> {
+    let mut out = Vec::new();
+    for check in checks {
+        if check["complete"] == true && check["exit_code"] == 0 {
+            continue;
+        }
+        let output: Option<String> = db
+            .query_row(
+                "SELECT coalesce(json_extract(result_json,'$.observation.stdout'),'')||char(10)||
+                        coalesce(json_extract(result_json,'$.observation.stderr'),'')
+                 FROM runtime_requests WHERE task_id=? AND actor='native-verifier-output'
+                 AND operation='native_command_output' AND json_extract(result_json,'$.tool_call_ref')=? LIMIT 1",
+                (task, check["receipt_ref"].as_str().unwrap_or("")),
+                |r| r.get(0),
+            )
+            .optional()?;
+        let excerpt = failure_excerpt(output.as_deref().unwrap_or(""));
+        if excerpt.is_empty() {
+            continue;
+        }
+        out.push(json!({"argv":check["argv"],"exit_code":check["exit_code"],"failure":check["failure"],"excerpt":excerpt}));
+    }
+    Ok(out)
+}
+const DIAGNOSTIC_LINES: usize = 40;
+const DIAGNOSTIC_CHARS: usize = 4000;
+/// The lines of a command's output that say what failed (see
+/// [`verification_diagnostics`]); empty when nothing matches.
+pub fn failure_excerpt(text: &str) -> String {
+    let marks = [
+        "panicked at",
+        "assertion",
+        "left:",
+        "right:",
+        "error[",
+        "error:",
+        " failed",
+        "FAILED",
+        "failures:",
+        "Error:",
+        "AssertionError",
+        "FAIL ",
+        "✗",
+        "×",
+        "timed out",
+    ];
+    let lines: Vec<&str> = text.lines().collect();
+    let mut keep = std::collections::BTreeSet::new();
+    for (i, line) in lines.iter().enumerate() {
+        let failing_step =
+            line.starts_with("Step ") && line.contains(": exit=") && !line.contains(": exit=0,");
+        if failing_step || marks.iter().any(|m| line.contains(m)) {
+            keep.insert(i);
+            // A panic's message follows on the next lines.
+            if line.contains("panicked at") {
+                for j in i + 1..(i + 4).min(lines.len()) {
+                    keep.insert(j);
+                }
+            }
+        }
+    }
+    let mut excerpt = String::new();
+    for i in keep.into_iter().take(DIAGNOSTIC_LINES) {
+        let line: String = lines[i].chars().take(300).collect();
+        if excerpt.chars().count() + line.chars().count() + 1 > DIAGNOSTIC_CHARS {
+            break;
+        }
+        excerpt.push_str(&line);
+        excerpt.push('\n');
+    }
+    excerpt
+}
 fn verification_failure_key(
     db: &Transaction<'_>,
     task: &str,
@@ -2211,6 +2294,10 @@ pub fn record_verification_tx(
             .cloned()
             .unwrap_or_default();
         verification["failure_key"] = json!(verification_failure_key(db, task, &checks)?);
+        let diagnostics = verification_diagnostics(db, task, &checks)?;
+        if !diagnostics.is_empty() {
+            verification["diagnostics"] = json!(diagnostics);
+        }
     }
     event_tx(
         db,

@@ -259,7 +259,18 @@ async fn a_real_failure_stays_a_failure() {
         assert_eq!(count(&s, "VERIFICATION_RERUN"), 0);
         assert_eq!(count(&s, "VERIFICATION_ENVIRONMENT_WAIT"), 0);
         assert_eq!(count(&s, "VERIFICATION_FAILED"), 1);
-        assert!(latest(&s, "VERIFICATION_FAILED")["failure_key"].is_string());
+        let failed = latest(&s, "VERIFICATION_FAILED");
+        assert!(failed["failure_key"].is_string());
+        // What failed travels with the event (and the capsule), since no worker
+        // channel can read the runtime's own verifier output.
+        assert_eq!(
+            failed["diagnostics"][0]["argv"],
+            json!(["/bin/sh", "check.sh", "fail"])
+        );
+        assert!(failed["diagnostics"][0]["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("assertion failed: left == right"));
         assert_eq!(state(&s), "PLANNING");
     }
     close(h).await;

@@ -291,7 +291,14 @@ while its return budget remains ([coordinator return budget](../orchestration/in
 every original plan task a fix
 (see [targeted review fixes](../orchestration/index.md#targeted-review-fixes)). Verification is a
 runtime command observation, independent of model review. Nonzero exit, incomplete
-output or project drift prevents a passing verification event. After a command exits, its
+output or project drift prevents a passing verification event. A failed verification
+records, per failed command, a bounded excerpt of what failed (`diagnostics`: failing
+steps, panics with their next lines, assertion values, compiler errors and test
+failures; at most 40 lines and 4,000 characters each), and the coordinator's and
+workers' capsule carries it as `verification_failure` until a later verification
+passes. The full verifier output stays the runtime's own record, which no worker
+channel can read; before this, each failed verification cost a plan revision that only
+rediscovered the failing test (owner store 2026-11-22). After a command exits, its
 output streams may take up to 30 seconds to reach their end before the output counts as
 unavailable (one second had turned a passing command under host load into an unknown
 outcome, 2026-11-21). A dropped failed
