@@ -4,6 +4,8 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Fixed: the Automatic finish counts a failed worker check as closed by a later passing run of the same command when that run was bound to its runtime-verified work set, as completion already did; such results no longer ask the owner to rerun a check that passed.
+
 - Fixed: a plan that only investigated no longer closes its task with a runtime-composed "work done"; the coordinator keeps the turn to ask the owner or plan the change. A task that changed nothing through read-only workers finishes in Automatic as a no-op instead of pausing the sprint with "no record of which files changed".
 
 - Fixed: the Automatic finish commits the bytes the task's final approved and verified review read, even when someone else changed a task file after the task wrote it.

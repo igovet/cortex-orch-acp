@@ -271,6 +271,10 @@ pub(crate) fn withdrawn(
             }
         }
         assessor::observe_outputs(db, task, &mut runs, &artifacts)?;
+        // Like completion: a run bound to its runtime-verified work set keeps that
+        // binding, so a later passing run of a project-part check still closes the
+        // earlier failure here (owner store 2026-11-23).
+        assessor::accept_recorded_bindings(db, task, checks, &mut runs)?;
         assessor::evaluate(checks, &runs, result["project_digest"].as_str())
     })();
     let Ok(now) = derived else { return none };
@@ -982,3 +986,4 @@ fn evaluate_exact(
         not_run_checks,
     })
 }
+
