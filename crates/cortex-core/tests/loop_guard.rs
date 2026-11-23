@@ -519,6 +519,142 @@ fn the_same_interruption_repeating_without_progress_is_waited_out_by_the_runtime
     assert_eq!(count(&s, &task, "AUTOMATIC_CONSULTATION_REQUESTED"), 0);
 }
 
+fn finish_interruption_wait(db: &Transaction<'_>, task: &str) -> cortex_core::CoreResult<Value> {
+    let owed = automatic::owed(db, task)?.unwrap();
+    if !owed.waiting.is_empty() {
+        assert!(automatic::resume_tx(db, task, owed.event)?.is_none());
+        db.execute(
+            "UPDATE runtime_events SET payload_json=json_set(payload_json,'$.not_before',0) WHERE id=?",
+            [owed.event],
+        )?;
+    }
+    Ok(automatic::resume_tx(db, task, owed.event)?.unwrap())
+}
+
+#[test]
+fn real_progress_resets_the_coordinator_interruption_series_but_plan_acceptance_does_not() {
+    let (_p, s, task) = start();
+    let reason = "native_turn_outcome_unknown";
+    s.write(|db| {
+        for n in 1..=7 {
+            assert_eq!(domain::stop_tx(db, &task, reason)?, TaskState::Recovering);
+            let evidence = finish_interruption_wait(db, &task)?;
+            assert_eq!(evidence["loop"]["count"], n);
+            if n >= 3 {
+                assert_eq!(evidence["pause_kind"], "infrastructure");
+            }
+            plan::accept_tx(db, &task, "coordinator", &format!("plan-{n}"), &test_plan())?;
+        }
+        lifecycle::event_tx(
+            db,
+            &task,
+            "TASK_PROGRESS",
+            json!({"kind":"node_completed","node":"work"}),
+        )?;
+        for n in 1..=3 {
+            assert_eq!(domain::stop_tx(db, &task, reason)?, TaskState::Recovering);
+            let evidence = finish_interruption_wait(db, &task)?;
+            assert_eq!(evidence["loop"]["count"], n);
+            assert_eq!(evidence["loop"]["breaks"], 0);
+            if n == 3 {
+                assert_eq!(evidence["backoff_seconds"], 300);
+            } else {
+                assert!(evidence["pause_kind"].is_null());
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(count(&s, &task, "USER_QUESTION_REQUESTED"), 0);
+}
+
+#[test]
+fn the_owner_sees_the_coordinator_reason_and_can_delay_or_give_new_direction() {
+    for (answer_text, choice) in [
+        ("3", "retry_later"),
+        (
+            "Use the existing evidence and investigate the connection.",
+            "other_approach",
+        ),
+    ] {
+        let (_p, s, task) = start();
+        let reason = "native_turn_outcome_unknown";
+        let question = s
+            .write(|db| {
+                lifecycle::event_tx(
+                    db,
+                    &task,
+                    "NATIVE_TASK_SETTINGS",
+                    json!({"settings":{"language":"ru"}}),
+                )?;
+                for _ in 0..7 {
+                    assert_eq!(domain::stop_tx(db, &task, reason)?, TaskState::Recovering);
+                    finish_interruption_wait(db, &task)?;
+                }
+                assert_eq!(domain::stop_tx(db, &task, reason)?, TaskState::WaitingUser);
+                Ok(db.query_row(
+                    "SELECT id FROM pending_questions WHERE task_id=? AND status='open'",
+                    [&task],
+                    |r| r.get::<_, String>(0),
+                )?)
+            })
+            .unwrap();
+        let card = workspace::control::decisions(
+            &s,
+            "p",
+            "owner",
+            &json!({"operation":"decisions.get","target":format!("wd_{question}")}),
+        )
+        .unwrap();
+        assert_eq!(card["status"], "pending");
+        assert_eq!(card["allowedOperations"], json!(["decisions.answer"]));
+        assert!(card["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("ход координатора был прерван"));
+        assert_eq!(card["options"].as_array().unwrap().len(), 3);
+
+        let owed = answer(&s, &task, &question, answer_text);
+        assert_eq!(owed.evidence["owner_choice"], choice);
+        if choice == "retry_later" {
+            assert_eq!(owed.waiting.len(), 1);
+            assert!(s
+                .write(|db| automatic::resume_tx(db, &task, owed.event))
+                .unwrap()
+                .is_none());
+        } else {
+            assert!(owed.waiting.is_empty());
+            assert_eq!(owed.evidence["owner_direction"], answer_text);
+        }
+        assert!(s
+            .read(|db| automatic::owner_accepted_commands(db, &task))
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[test]
+fn repeated_worker_interruptions_keep_cooling_down_past_the_coordinator_boundary() {
+    let (_p, s, task) = start();
+    s.write(|db| {
+        for n in 1..=9 {
+            assert_eq!(
+                domain::stop_tx(db, &task, "lost_worker_action_outcome_unknown")?,
+                TaskState::Recovering
+            );
+            let evidence = finish_interruption_wait(db, &task)?;
+            assert_eq!(evidence["loop"]["count"], n);
+            if n >= 8 {
+                assert_eq!(evidence["pause_kind"], "infrastructure");
+                assert_eq!(evidence["backoff_seconds"], 3600);
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(count(&s, &task, "USER_QUESTION_REQUESTED"), 0);
+}
+
 #[test]
 fn a_sandbox_that_could_not_be_prepared_is_not_the_workers_failure() {
     let (_p, s, task) = start();

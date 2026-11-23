@@ -1,10 +1,8 @@
-//! Runtime-owned continuation of every task (the no-stop policy). A stop of the
-//! runtime's own making (a failed worker, a failed check, a review that made no
-//! progress, an unknown effect outcome, a degenerate model turn, an exhausted step
-//! window) never parks the task for the owner: the runtime records an
-//! `AUTOMATIC_CONTINUATION` with the next rung of a strategy ladder and continues
-//! with a fresh plan. Only a route the host cannot qualify waits (`external_blocker`),
-//! and the runtime resumes it by itself. `AUTOMATIC_POLICY_BOUND` still marks a task
+//! Runtime-owned continuation of every task (the no-stop policy). The runtime
+//! records a continuation on the strategy ladder, continues on the same rung
+//! for infrastructure interruptions, or waits as recorded. The sixth series
+//! of identical coordinator turn interruptions without progress asks the owner
+//! instead of scheduling another cooldown. `AUTOMATIC_POLICY_BOUND` marks a task
 //! an Automatic sprint started (its finish and file-tool rules); the continuation
 //! itself applies to every task. Events are additive in format 12.
 use super::{domain, event_tx, obstacles, waits};
@@ -31,7 +29,7 @@ const PAUSED: &str = "automatic_continuation_paused";
 /// that fell short (`node_escalated`).
 pub const STRATEGIES: [&str; 4] = ["repair", "escalate_route", "consult", "reassign"];
 /// Model-facing note for every coordinator session.
-pub const COORDINATOR_NOTE: &str = "Runtime no-stop policy: the runtime never parks this task for runtime failures, retries, caps or unknown effect outcomes; it records them and continues the task with a changed strategy. Do not ask the owner how to handle runtime failures, repairs, retries, limits or approvals. Ask only for decisions about the work itself, and keep working on everything the answer does not block. When the runtime reports effects with an unknown outcome, re-verify them from the files, Git state and receipts before redoing them. Keep using the normal permission and access routes. Never waive required review or verification.";
+pub const COORDINATOR_NOTE: &str = "Runtime no-stop policy: the runtime owns recovery, cooldowns and any owner question about a repeated runtime failure. Do not ask the owner how to handle runtime failures, repairs, retries, limits or approvals. Ask only for decisions about the work itself, and keep working on everything the answer does not block. When the runtime reports effects with an unknown outcome, re-verify them from the files, Git state and receipts before redoing them. Keep using the normal permission and access routes. Never waive required review or verification.";
 
 /// The rung of the strategy ladder for continuation `count` (1-based) of a stop
 /// without a fingerprint: the plain cycle over [`STRATEGIES`].
@@ -616,6 +614,9 @@ fn dead_end_item(item: &str) -> String {
 /// progress in between) after which the runtime stops relaunching at once and waits
 /// without model calls (`AUTOMATIC_PAUSED {pause_kind: infrastructure}`).
 const INFRA_LOOP: i64 = 3;
+/// The sixth coordinator interruption series asks the owner instead of cooling down.
+const COORDINATOR_INTERRUPTION_SERIES_LIMIT: i64 = 6;
+const COORDINATOR_TURN_INTERRUPTED: &str = "native_turn_outcome_unknown";
 /// The pause kind of an infrastructure loop the runtime waits out by itself.
 pub const INFRASTRUCTURE_PAUSE: &str = "infrastructure";
 /// Model-facing note of a continuation that takes no rung: the attempt was
@@ -1022,8 +1023,8 @@ fn disclose_review_tx(
 }
 
 /// Records a stop as a continuation on the strategy ladder and fences the old
-/// revision. It never parks the task for the owner. Only a route the host cannot
-/// qualify waits (`external_blocker`), and the runtime resumes it by itself.
+/// revision. The runtime resumes its own waits, except when it records a runtime
+/// loop question for the owner.
 ///
 /// The ladder is chosen per stop fingerprint ([`stop_fingerprint`], loop guard kind
 /// `stop`): the rung is the first one this fingerprint has not used since the owner
@@ -1035,7 +1036,8 @@ fn disclose_review_tx(
 /// one runtime question without any model call ([`loop_question_tx`]). An infrastructure, host or owner interruption
 /// ([`infrastructure_stop`]) takes no rung: it resumes on the current rung, and when
 /// the same interruption repeats without progress the runtime waits it out
-/// (`pause_kind: infrastructure`). An owner decision the owner already answered for
+/// (`pause_kind: infrastructure`). A coordinator turn interruption asks the owner
+/// instead of taking its sixth cooldown. An owner decision already answered for
 /// the same items is not asked again: its items are disclosed instead.
 ///
 /// It does not prove that a child exited: resuming still requires every owned
@@ -1265,6 +1267,11 @@ pub(super) fn stop_tx(db: &Transaction<'_>, task: &str, reason: &str) -> CoreRes
         // No rung is used: the attempt resumes on the rung it was on. The same
         // interruption repeating without progress is waited out without model calls.
         let rung = current_rung(db, task)?;
+        // At the task-stop boundary this code comes from a dispatched coordinator
+        // prompt. Worker prompt errors go through worker retry; start failure,
+        // service restart and owner pause keep their own policies.
+        let coordinator_interruption =
+            reason == COORDINATOR_TURN_INTERRUPTED && infra == "runtime_restart";
         let (history, verdict, _) = guard::observe_tx(
             db,
             task,
@@ -1274,7 +1281,14 @@ pub(super) fn stop_tx(db: &Transaction<'_>, task: &str, reason: &str) -> CoreRes
             json!({"stop":reason,"class":infra}),
             true,
             |h| {
-                if h.count >= INFRA_LOOP {
+                if coordinator_interruption
+                    && h.count >= INFRA_LOOP
+                    && h.breaks + 1 >= COORDINATOR_INTERRUPTION_SERIES_LIMIT
+                {
+                    Verdict::Break {
+                        action: "ask_owner",
+                    }
+                } else if h.count >= INFRA_LOOP {
                     Verdict::Break {
                         action: "infrastructure_wait",
                     }
@@ -1291,6 +1305,34 @@ pub(super) fn stop_tx(db: &Transaction<'_>, task: &str, reason: &str) -> CoreRes
         details["switch_coordinator"] = json!(false);
         details["loop_key"] = json!(history.key);
         details["loop"] = loop_json(&history, "infrastructure");
+        if matches!(
+            verdict,
+            Verdict::Break {
+                action: "ask_owner"
+            }
+        ) {
+            let ru = domain::task_language_tx(db, task)? == "ru";
+            let name = task_name(db, task)?;
+            let failure = domain::owner_readable_blocker(reason, ru);
+            let text = if ru {
+                format!("Задача «{name}»: {failure}. Это шестая серия одинаковых прерываний без продвижения. Автоматические повторы приостановлены. Как продолжить?")
+            } else {
+                format!("Task \"{name}\": {failure}. This is the sixth series of identical interruptions without progress. Automatic retries are paused. How should it continue?")
+            };
+            let attempt = question_attempt(db, task, &history.key)?;
+            return runtime_question_tx(
+                db,
+                task,
+                revision,
+                reason,
+                &history,
+                &[],
+                details,
+                &text,
+                attempt,
+                ru,
+            );
+        }
         if matches!(verdict, Verdict::Break { .. }) {
             let wait = guard::backoff_seconds(history.breaks + 1);
             details["pause_kind"] = json!(INFRASTRUCTURE_PAUSE);
@@ -1368,6 +1410,44 @@ const LOOP_OPTIONS_RU: [&str; 4] = [
     "Принять без проверки: отметить как непроверенное и завершить задачу",
     "Повторить позже: автоматически через 30 минут",
 ];
+const INTERRUPTION_OPTIONS: [&str; 3] = ["retry_now", "other_approach", "retry_later"];
+const INTERRUPTION_OPTIONS_EN: [&str; 3] = [
+    "Retry now: continue on the current approach",
+    LOOP_OPTIONS_EN[1],
+    LOOP_OPTIONS_EN[3],
+];
+const INTERRUPTION_OPTIONS_RU: [&str; 3] = [
+    "Повторить сейчас: продолжить с текущим подходом",
+    LOOP_OPTIONS_RU[1],
+    LOOP_OPTIONS_RU[3],
+];
+
+fn question_options(
+    interruption: bool,
+    ru: bool,
+) -> (&'static [&'static str], &'static [&'static str]) {
+    match (interruption, ru) {
+        (true, true) => (&INTERRUPTION_OPTIONS, &INTERRUPTION_OPTIONS_RU),
+        (true, false) => (&INTERRUPTION_OPTIONS, &INTERRUPTION_OPTIONS_EN),
+        (false, true) => (&LOOP_OPTIONS, &LOOP_OPTIONS_RU),
+        (false, false) => (&LOOP_OPTIONS, &LOOP_OPTIONS_EN),
+    }
+}
+
+fn interruption_question(details: &Value) -> bool {
+    details["reason"] == COORDINATOR_TURN_INTERRUPTED && details["loop"]["kind"] == "infrastructure"
+}
+
+fn question_attempt(db: &Connection, task: &str, key: &str) -> CoreResult<i64> {
+    Ok(db.query_row(
+        "SELECT count(*)+1 FROM runtime_events WHERE task_id=?1 AND type='LOOP_BROKEN'
+           AND json_extract(payload_json,'$.key')=?2 AND json_extract(payload_json,'$.action')='ask_owner'
+           AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='TASK_REOPENED'),0)",
+        (task, key),
+        |r| r.get(0),
+    )?)
+}
+
 /// The wait of a `retry_later` answer, without model calls.
 pub const RETRY_LATER_SECONDS: i64 = 30 * 60;
 
@@ -1413,13 +1493,7 @@ fn loop_question_tx(
     items: &[String],
     details: Value,
 ) -> CoreResult<TaskState> {
-    let attempt: i64 = db.query_row(
-        "SELECT count(*)+1 FROM runtime_events WHERE task_id=?1 AND type='LOOP_BROKEN'
-           AND json_extract(payload_json,'$.key')=?2 AND json_extract(payload_json,'$.action')='ask_owner'
-           AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='TASK_REOPENED'),0)",
-        (task, &history.key),
-        |r| r.get(0),
-    )?;
+    let attempt = question_attempt(db, task, &history.key)?;
     let ru = domain::task_language_tx(db, task)? == "ru";
     let name = task_name(db, task)?;
     let failure = domain::owner_readable_blocker(reason, ru);
@@ -1451,7 +1525,7 @@ fn loop_question_tx(
 }
 
 /// Records the runtime's own loop question (`text`, already in the task's language)
-/// with the fixed answers of [`LOOP_OPTIONS`], the continuation that waits on it and
+/// with its fixed answer options, the continuation that waits on it and
 /// the task's move to WAITING_USER; the answer is applied like a loop question's.
 /// Also used for a verification its environment keeps failing
 /// (`completion::record_verification_wait_tx`).
@@ -1468,7 +1542,8 @@ pub(crate) fn runtime_question_tx(
     attempt: i64,
     ru: bool,
 ) -> CoreResult<TaskState> {
-    let options = if ru { LOOP_OPTIONS_RU } else { LOOP_OPTIONS_EN };
+    let interruption = interruption_question(&details);
+    let (option_ids, options) = question_options(interruption, ru);
     let question = format!("pq_{}", uuid::Uuid::new_v4().simple());
     db.execute(
         "INSERT INTO pending_questions(id,task_id,dedup_key,text,options_json,status,created_at)
@@ -1489,7 +1564,11 @@ pub(crate) fn runtime_question_tx(
         db,
         task,
         history,
-        "stop",
+        if interruption {
+            "infrastructure"
+        } else {
+            "stop"
+        },
         "ask_owner",
         json!([]),
         json!({"stop":reason,"question_id":question,"attempt":attempt,"items":items}),
@@ -1498,7 +1577,7 @@ pub(crate) fn runtime_question_tx(
         db,
         task,
         "USER_QUESTION_REQUESTED",
-        json!({"question_id":question,"question":text,"options":options,"option_ids":LOOP_OPTIONS,
+        json!({"question_id":question,"question":text,"options":options,"option_ids":option_ids,
             "resume_state":"RECOVERING","revision":revision,"blocker":reason,
             "runtime_loop":{"key":history.key,"attempt":attempt,"continuation_event":id,"stop":reason}}),
     )?;
@@ -1508,19 +1587,17 @@ pub(crate) fn runtime_question_tx(
 
 /// The answer to a loop question: its option id and the owner's own words. An answer
 /// that names no option is the owner's direction (`other_approach`).
-fn loop_choice(answer: &str) -> (&'static str, String) {
+fn loop_choice(answer: &str, interruption: bool) -> (&'static str, String) {
     let first = answer.lines().next().unwrap_or("").trim();
     let rest = answer
         .split_once("\n\n")
         .map(|(_, r)| r.trim().to_owned())
         .unwrap_or_default();
-    for (i, id) in LOOP_OPTIONS.iter().enumerate() {
+    let (ids, en) = question_options(interruption, false);
+    let (_, ru) = question_options(interruption, true);
+    for (i, id) in ids.iter().enumerate() {
         let number = (i + 1).to_string();
-        if first == LOOP_OPTIONS_EN[i]
-            || first == LOOP_OPTIONS_RU[i]
-            || first == *id
-            || first == number
-        {
+        if first == en[i] || first == ru[i] || first == *id || first == number {
             return (id, rest);
         }
     }
@@ -1595,9 +1672,10 @@ fn loop_answered(
 /// (`owner_choice`), the coordinator's instruction for it, and for `retry_later` the
 /// wait before the runtime continues.
 fn apply_loop_answer(evidence: &mut Value, answer: Option<(String, i64)>) -> Vec<Value> {
+    let interruption = interruption_question(evidence);
     let (choice, words, at) = match answer {
         Some((text, at)) => {
-            let (choice, words) = loop_choice(&text);
+            let (choice, words) = loop_choice(&text, interruption);
             (choice, words, at)
         }
         // A question another authority replaced: continue as on `retry_now`.
@@ -1606,6 +1684,12 @@ fn apply_loop_answer(evidence: &mut Value, answer: Option<(String, i64)>) -> Vec
     evidence["owner_choice"] = json!(choice);
     let round = "The owner was asked after every strategy failed the same way";
     let instruction = match choice {
+        "other_approach" if interruption && !words.is_empty() => {
+            evidence["owner_direction"] = json!(words);
+            format!("The owner gave this direction after repeated coordinator interruptions: \"{words}\". Continue along it from the retained task state.")
+        }
+        "other_approach" if interruption => "The owner asked for a different approach after repeated coordinator interruptions. Plan it from the retained task state.".to_owned(),
+        _ if interruption => format!("The owner approved another attempt after repeated coordinator interruptions. {}", evidence["instruction"].as_str().unwrap_or(INFRA_NOTE)),
         "other_approach" if !words.is_empty() => {
             evidence["owner_direction"] = json!(words);
             format!("{round} and gave this direction for the next plan: \"{words}\". Plan the work along it; do not repeat the approaches that failed.")
@@ -1671,6 +1755,11 @@ pub fn owner_accepted_commands(db: &Connection, task: &str) -> CoreResult<Vec<Va
 /// `accept_unverified`, never a pass); any other answer starts a new round of the
 /// ladder whose first rung is the resumed attempt.
 fn record_loop_answer_tx(db: &Transaction<'_>, task: &str, evidence: &Value) -> CoreResult<()> {
+    // The exact owner answer resets this loop's window; it is not another
+    // interruption and does not consume a repair rung or waive any verification.
+    if interruption_question(evidence) {
+        return Ok(());
+    }
     let Some(choice) = evidence["owner_choice"].as_str() else {
         return Ok(());
     };

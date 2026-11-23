@@ -255,7 +255,18 @@ A queue hold of a task whose dispatched actions still have an unknown outcome is
 
 ### No-stop policy and the strategy ladder
 
-Every task, manual or Automatic, finishes or keeps working: the runtime never parks a task for the owner because of its own failures, except for the one loop question it asks when the same failure used every rung of the strategy ladder and cannot be disclosed (see the loop guard below). There is no continuation cap, review-cycle stop, replan limit, coordinator no-progress stop, step-window stop, repair cap or outcome-unknown hold that waits for an owner decision. A stop of the runtime's own making (a failed or lost worker, a failed or unobserved check after its direct repairs, a blocking review, a review that made no progress, a review-cycle or step window used up, a degenerate model turn, an interrupted service, an effect with an unknown outcome) is recorded as `AUTOMATIC_CONTINUATION` with its reason, evidence and the next rung of the **strategy ladder**, enters RECOVERING (`automatic_continuation_pending`) and resumes with a fresh plan (`AUTOMATIC_RESUMED`) once the host has settled the processes. The relaunch is the runtime's own: a driver that ends starts a follower that continues the task with backoff (0.2 s doubling to 30 s), without the Workspace scheduler tick (an incoming ACP session has none); the scheduler's safety tick continues the same tasks too.
+Every task, manual or Automatic, uses the same recovery policy. Work failures
+normally become an `AUTOMATIC_CONTINUATION` with recorded evidence and the next
+rung of the **strategy ladder**, enter RECOVERING
+(`automatic_continuation_pending`), and resume with a fresh plan
+(`AUTOMATIC_RESUMED`) once the host has settled the processes. Infrastructure
+interruptions use the same rung and the waits described below. The runtime
+asks the owner when it cannot disclose a work failure that exhausted every
+strategy, or when a coordinator interruption reaches the sixth series without
+progress. A driver that ends starts a follower for any owed continuation with
+backoff (0.2 s doubling to 30 s), without the Workspace scheduler tick (an
+incoming ACP session has none); the scheduler's safety tick also follows owed
+continuations.
 
 The rung is chosen per stop **fingerprint**: the stop reason, its classification detail, the items that block it (review dead ends by item name), the failed checks (argv and exit code) and the failed workers (node and blocker kind), normalized so that counters, ids, timestamps and absolute paths do not make a repeat look new; the checkout digest and the plan revision are left out. A stop takes the first rung its fingerprint has not used yet (`STRATEGIES` in `crates/cortex-core/src/lifecycle/automatic.rs`), and `escalate_route` is skipped when every worker of the stopped revision already ran escalated or had a single candidate route:
 
@@ -278,11 +289,30 @@ The **loop guard** (`crates/cortex-core/src/lifecycle/loop_guard.rs`) records ev
 - anything that cannot be disclosed, such as a check that keeps failing the same way or the same findings again (`ask_owner`), is put to the owner as one question the runtime asks itself, without a model call: in the task's language, naming the task, the repeated failure and how many full rounds of the ladder were tried. While it is open the task waits in WAITING_USER without model calls. The runtime applies the answer itself; its options have fixed ids: `retry_now` (a new round of the ladder at once), `other_approach` (the owner's own words, or a free-text answer, reach the next plan as the owner's direction, and a new round starts), `accept_unverified` (the failure becomes a disclosed `unverified` limit, `LOOP_BROKEN` action `accept_unverified`, that the final result lists under Not verified and is never a pass; an Automatic repair plan may then leave the accepted failed command out) and `retry_later` (the runtime continues by itself after 30 minutes, without model calls in between). The same failure asks again only after the chosen answer was tried and every rung was used again; that question names its attempt number, so the owner never gets the identical question twice. The question is not a coordinator question, so the coordinator's repeated-question refusal does not apply to it.
 
 
-Infrastructure, host and owner events are never the model's failure: they take no rung, escalate no node and cause no replan. A stop for an effect with an unknown or unconfirmed outcome, a service restart or interrupted turn, a recovery the service could not finish, the owner's pause during the attempt or the owner's stop of a worker, an engine session that could not start, a retry limit reached only by infrastructure or route retries, a worker failure the command sandbox caused, or a verification whose every failing command failed for its environment (no complete output, a timeout, exit 126 or 127) continues on the rung the task was on (`class: infrastructure`). The same interruption repeating three times without real progress is waited out by the runtime (`AUTOMATIC_PAUSED {pause_kind: infrastructure}`, `LOOP_BROKEN` action `infrastructure_wait`) with growing waits of 5, 15, 30 and then every 60 minutes, then resumes by itself on that rung. A review that failed only because another actor kept changing the checkout waits on the runtime's timer and is then run again directly in REVIEWING, without a coordinator turn or a rung. The continuation prompt carries the rung's instruction and the evidence. Every coordinator session also carries the runtime's no-stop note: it asks the owner only about the work itself and keeps working on everything the answer does not block. A pause an earlier version recorded for the owner (`continuation_cap`, `owner_blocker`, `outcome_unknown`) is resumed by the runtime itself on an escalated rung.
+Infrastructure, host and owner interruptions take no rung or model escalation.
+Starting at the third identical interruption without real progress, the runtime
+records `AUTOMATIC_PAUSED {pause_kind: infrastructure}` and `LOOP_BROKEN` with
+action `infrastructure_wait`, then resumes on the same approach after 5, 15, 30
+and then 60 minutes per recurrence. For an already-running coordinator turn
+interrupted with an unknown outcome, the sixth series instead records
+`LOOP_BROKEN` with action `ask_owner` and waits in WAITING_USER with the recorded
+reason. The owner can retry immediately, retry after 30 minutes, or give new
+direction; neither the question nor an answer waives verification. The series
+survives restart and resets on real progress, not on a newly accepted plan.
+Worker retry and service restart policies are unchanged. See
+[transient engine failures](../failures-and-cancellation/index.md#transient-engine-failures).
+
+A review that failed only because another actor kept changing the checkout
+waits on the runtime's timer and is then run again directly in REVIEWING, without
+a coordinator turn or a rung. The continuation prompt carries the rung's
+instruction and evidence. The coordinator itself asks the owner only about the
+work. A pause an earlier version recorded for the owner (`continuation_cap`,
+`owner_blocker`, `outcome_unknown`) is resumed by the runtime itself on an
+escalated rung.
 
 What remains: a route, connection, quota or authentication problem waits as `external_blocker` and the runtime resumes it by itself as soon as that route, or another qualified coordinator route, is usable; a session or command whose end the host has not yet confirmed is waited for until the host settles it with process evidence (the runtime's own wait, never an owner hold). Genuine safety refusals are unchanged: Cortex private state, credential and deletion consent in Guarded and Development, the owner's own Pause and Stop, and questions the coordinator asks about the work. One completion refusal is such a work decision: outside Automatic, a final result that replaced a failed mandatory check (`completion_dropped_failed_check`) stays RECONCILING on its verified revision and returns to its coordinator (`ASK_USER_REQUIRED`), which asks the owner whether to accept the replacement.
 
-An effect whose outcome is unknown is never replayed blindly and never holds the task. When the continuation resumes and every owned session is confirmed gone, each write, edit, call or other synchronous effect without a complete receipt is settled with outcome `unknown` (`settled_by: runtime_reverify`) and listed in `RUNTIME_UNCERTAINTY_RECORDED` and in the coordinator's prompt, which re-verifies it from the files, Git state and receipts before redoing it. A command receipt that may still run is waited for until the host settles it (`native_command_outcome_pending`).
+An effect whose outcome is unknown is never replayed blindly. When the continuation resumes and every owned session is confirmed gone, each write, edit, call or other synchronous effect without a complete receipt is settled with outcome `unknown` (`settled_by: runtime_reverify`) and listed in `RUNTIME_UNCERTAINTY_RECORDED` and in the coordinator's prompt, which re-verifies it from the files, Git state and receipts before redoing it. A command receipt that may still run is waited for until the host settles it (`native_command_outcome_pending`).
 
 A review whose only gaps are items its tools cannot reach (`tool_unavailable`), with nothing to repair, records them as disclosed unverified limits (`REVIEW_LIMIT_DISCLOSED`, `unverified` runtime checks on the review result that the final result must disclose) and the task continues to verification; the review is not waived. A failed final check returns to planning for three direct repairs per rung of the ladder, then continues on the next rung; a failed required check is never dropped from a repair plan. A verification outcome caused by the verifier's environment is not a failed check: the runtime reruns it and otherwise waits (see **Verifier environment** below). A limit the runtime disclosed when it broke a loop (`LOOP_BROKEN.limits`, since the last reopen) is a gap of the final result, which must list it under Not verified even after a replan. From the fourth replan since the owner's last input, a replan or scope request is accepted as a senior consultation (`decision: senior_consultation`, `strategy: consult`) instead of being refused. Continuations never waive review or verification and grant no permission.
 

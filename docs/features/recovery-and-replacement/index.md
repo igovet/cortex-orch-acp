@@ -334,7 +334,11 @@ receipt or a duplicate coordinator/worker.
 
 ## Coordinator launch failure diagnostics
 
-The initial coordinator engine launch can fail after task identity is persisted but before the `runtime_tasks` row is created. That failure records a safe structured diagnostic tagged with `engine_launch`, the task/session/attempt identities that exist, and the running runtime package version; the useful reason is included in the ACP error text because hosts may discard JSON-RPC `data`. A transient launch failure is retried automatically, and each retry is shown in the chat (see [transient engine failures](../failures-and-cancellation/index.md#transient-engine-failures)). The diagnostic and the error are written only once the runtime gives up. Every retry, including a later user resend, reuses the existing task identity and recovery path. Initial pipeline publication is idempotent across those retries. The former diagnostics script (`cortex_diagnose`, removed) reported the installed runtime package version separately from the checkout version. A diagnostic does not imply a live engine child was started successfully.
+The current Rust launch diagnostics and the conditions for a rapid retry are
+described under [native session start failures](#native-session-start-failures).
+A final coordinator start failure remains part of ordinary task recovery; the
+[owner wait for repeated turn interruptions](../failures-and-cancellation/index.md#transient-engine-failures)
+applies only after a coordinator turn has been dispatched.
 
 ## Native session start failures
 

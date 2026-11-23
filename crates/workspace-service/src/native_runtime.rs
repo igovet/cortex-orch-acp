@@ -112,6 +112,9 @@ while IFS= read -r line; do
             if [ -f "$0/defer-refusal-$1" ]; then
                 while [ ! -f "$0/release-$1" ]; do /usr/bin/sleep .02; done
             fi
+            if [ -f "$0/interrupt-$1" ]; then
+                exit 0
+            fi
             if [ -f "$0/refuse-$1" ]; then
                 IFS= read -r error < "$0/refuse-$1"
                 if [ -f "$0/notice-$1" ]; then
@@ -511,6 +514,128 @@ done
         assert_eq!(starts(&root), ["coordinator", "coordinator"]);
         tokio::task::spawn_blocking(move || drop(runtime)).await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn coordinator_transport_loss_stops_only_when_the_turn_did_not_commit_a_checkpoint() {
+        enum Checkpoint {
+            None,
+            Plan,
+            Synthesis,
+        }
+
+        for (checkpoint, initial, expected, expected_revision, expected_stop, expected_synthesis) in [
+            (Checkpoint::None, "PLANNING", "RECOVERING", 1, 1, 0),
+            (Checkpoint::Plan, "PLANNING", "PLAN_READY", 2, 0, 0),
+            (Checkpoint::Synthesis, "RECONCILING", "RECONCILING", 1, 0, 1),
+        ] {
+            let (runtime, owner, task, root) = fixture().await;
+            runtime
+                .host
+                .executor
+                .write(move |db| {
+                    db.execute(
+                        "UPDATE runtime_tasks SET state=? WHERE task_id='t'",
+                        [initial],
+                    )?;
+                    Ok(())
+                })
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap();
+            let mut route = CapacityPeer.route(&root, "coordinator").unwrap();
+            route
+                .launch
+                .args
+                .extend(["fixture-model".into(), "read-only".into()]);
+            std::fs::write(root.join("interrupt-coordinator"), "").unwrap();
+            std::fs::write(root.join("defer-refusal-coordinator"), "").unwrap();
+            let (_cancel, cancelled) = watch::channel(false);
+            let job = {
+                let (runtime, owner, task, cancelled) = (
+                    runtime.clone(),
+                    owner.clone(),
+                    task.clone(),
+                    cancelled.clone(),
+                );
+                tokio::spawn(async move {
+                    runtime
+                        .turn(
+                            &task,
+                            &owner,
+                            SessionRole::Coordinator,
+                            route,
+                            "plan the work",
+                            cancelled,
+                        )
+                        .await
+                })
+            };
+            entered(&root, "coordinator").await;
+            // Commit the checkpoint (if any) before the peer drops the ACP reply.
+            runtime
+                .host
+                .executor
+                .write(move |db| {
+                    match checkpoint {
+                        Checkpoint::None => {}
+                        Checkpoint::Plan => {
+                            db.execute(
+                                "UPDATE runtime_tasks SET state='PLAN_READY',revision=2 WHERE task_id='t'",
+                                [],
+                            )?;
+                        }
+                        Checkpoint::Synthesis => {
+                            cortex_core::lifecycle::reconciliation::submit_synthesis_tx(
+                                db,
+                                "t",
+                                &json!({"text":"Final synthesis","not_verified":[]}),
+                            )?;
+                        }
+                    }
+                    Ok(())
+                })
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap();
+            std::fs::write(root.join("release-coordinator"), "").unwrap();
+            if let Err(error) = end_provider_turn(job).await {
+                assert_eq!(error.code(), "native_turn_outcome_unknown");
+                runtime
+                    .stop_after_error(&task, &owner, error, cancelled)
+                    .await;
+            }
+            let (state, revision, stops, syntheses): (String, i64, i64, i64) = runtime
+                .host
+                .executor
+                .read(|db| {
+                    Ok(db.query_row(
+                        "SELECT state, revision,
+                            (SELECT count(*) FROM runtime_events WHERE task_id='t' AND type='LOOP_OBSERVED'
+                             AND json_extract(payload_json,'$.stop')='native_turn_outcome_unknown'),
+                            (SELECT count(*) FROM runtime_events WHERE task_id='t' AND type='SYNTHESIS_SUBMITTED')
+                         FROM runtime_tasks WHERE task_id='t'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )?)
+                })
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (state.as_str(), revision, stops, syntheses),
+                (expected, expected_revision, expected_stop, expected_synthesis),
+                "initial state: {initial}"
+            );
+            assert_eq!(starts(&root), ["coordinator"]);
+            tokio::task::spawn_blocking(move || drop(runtime))
+                .await
+                .unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1525,6 +1650,10 @@ struct Pump {
     cancel: watch::Sender<bool>,
     done: watch::Receiver<bool>,
 }
+struct TurnMarker {
+    state_and_revision: (String, i64),
+    has_synthesis: bool,
+}
 fn err(e: CoreError) -> io::Error {
     failure(e.code())
 }
@@ -1936,7 +2065,7 @@ impl Runtime {
             .await
         {
             Err(error) if error.code() == DEGENERATE => {}
-            other => return other,
+            other => return self.keep_committed_turn(task, &before, other).await,
         }
         if assignment.is_some() {
             // The replacement routes as an escalated redispatch of the same node.
@@ -1944,7 +2073,7 @@ impl Runtime {
         }
         // A degenerate turn that still changed the task (a plan, a question) stands;
         // the driver continues from that state as after any other turn.
-        if self.turn_marker(task).await? != before {
+        if self.turn_marker(task).await?.state_and_revision != before.state_and_revision {
             return Ok(());
         }
         match self
@@ -1960,9 +2089,9 @@ impl Runtime {
             .await
         {
             Err(error) if error.code() == DEGENERATE => {}
-            other => return other,
+            other => return self.keep_committed_turn(task, &before, other).await,
         }
-        if self.turn_marker(task).await? != before {
+        if self.turn_marker(task).await?.state_and_revision != before.state_and_revision {
             return Ok(());
         }
         // Never the same model a third time: move the coordinator to another one.
@@ -1986,9 +2115,30 @@ impl Runtime {
             .await
         {
             Err(error) if error.code() == DEGENERATE => Err(CoreError::Refused(DEGENERATE)),
-            other => other,
+            other => self.keep_committed_turn(task, &before, other).await,
         }
     }
+
+    /// A tool can commit a plan, result or question before the prompt reply is
+    /// lost. Keep that checkpoint rather than stopping or replaying the turn.
+    async fn keep_committed_turn(
+        &self,
+        task: &str,
+        before: &TurnMarker,
+        result: CoreResult<()>,
+    ) -> CoreResult<()> {
+        if matches!(&result, Err(error) if error.code() == "native_turn_outcome_unknown") {
+            let after = self.turn_marker(task).await?;
+            // Submitting the final synthesis can commit without changing state or revision.
+            if after.state_and_revision != before.state_and_revision
+                || (!before.has_synthesis && after.has_synthesis)
+            {
+                return Ok(());
+            }
+        }
+        result
+    }
+
     /// Move the task's coordinator to another qualified model than `current`
     /// (preferably another engine or account), recorded as
     /// `NATIVE_COORDINATOR_ESCALATED`. Later coordinator turns of the task use it
@@ -2022,16 +2172,21 @@ impl Runtime {
             .map_err(|_| CoreError::Refused("native_host_closed"))??;
         Ok(Some(route))
     }
-    /// The task's state and plan revision: what a turn changed, if anything.
-    async fn turn_marker(&self, task: &str) -> CoreResult<(String, i64)> {
+    /// Read the durable checkpoint indicators together, without loading synthesis text.
+    async fn turn_marker(&self, task: &str) -> CoreResult<TurnMarker> {
         let t = task.to_owned();
         self.host
             .executor
             .read(move |db| {
                 Ok(db.query_row(
-                    "SELECT state,revision FROM runtime_tasks WHERE task_id=?",
+                    "SELECT state,revision,synthesis IS NOT NULL FROM runtime_tasks WHERE task_id=?",
                     [&t],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| {
+                        Ok(TurnMarker {
+                            state_and_revision: (r.get(0)?, r.get(1)?),
+                            has_synthesis: r.get(2)?,
+                        })
+                    },
                 )?)
             })?
             .await
@@ -2305,10 +2460,11 @@ a question to the owner (question text and option labels). Write reports, report
         if attempt.refused_channel.is_some() && !*worker_cancelled.borrow() {
             return Err(CoreError::Refused(LIMITED));
         }
-        // result_submit can revoke its channel before ACP returns. Only a persisted
-        // result/plan checked by advance permits progress, never transport loss alone.
+        // Worker endings are consumed by the worker retry path. A coordinator
+        // interruption instead reaches the task driver, unless the turn committed
+        // a checkpoint (checked by `keep_committed_turn`).
         if let Err(e) = turn {
-            if e.code() != "native_turn_outcome_unknown" {
+            if !is_worker || e.code() != "native_turn_outcome_unknown" {
                 return Err(e);
             }
         }
@@ -2378,12 +2534,9 @@ a question to the owner (question text and option labels). Write reports, report
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))?
     }
-    /// Stop a driver that failed. Under the no-stop policy (every task) the stop is a
-    /// continuation on the next rung of the strategy ladder
-    /// (`cortex_core::lifecycle::automatic`), never an owner question or hold: the
-    /// driver's end starts a [`Runtime::follow_continuation`] that relaunches the
-    /// coordinator with a fresh plan once the host has settled the processes. A task
-    /// that already waits on a question keeps it.
+    /// Record why the driver stopped and let the automatic policy decide whether
+    /// to resume, cool down or ask the owner. The driver's end follows only an
+    /// owed continuation; an open runtime question is not owed until answered.
     pub(super) async fn stop_after_error(
         self: &Arc<Self>,
         task: &str,

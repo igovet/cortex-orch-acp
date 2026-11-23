@@ -260,6 +260,10 @@ pub(crate) fn owner_readable_blocker(blocker: &str, ru: bool) -> String {
         "scheduler_capacity_timeout" => ("no capacity became free for the next step in time", "для следующего шага вовремя не освободилась мощность"),
         // What held the step is stated from recorded facts by `stop_notice`, never guessed here.
         "native_continuation_unavailable" => ("no planned step could be started", "не удалось запустить ни один запланированный шаг"),
+        "native_turn_outcome_unknown" => (
+            "the coordinator's turn was interrupted and whether some of its actions finished is unknown",
+            "ход координатора был прерван, и неизвестно, завершились ли некоторые его действия",
+        ),
         "lost_worker_action_outcome_unknown" => (
             "a worker's turn ended without an accepted result, and whether some of its actions finished is not known",
             "ход воркера закончился без принятого результата, и неизвестно, завершились ли некоторые его действия",
@@ -349,12 +353,9 @@ pub fn owner_stopped_work_is_idle_tx(db: &Transaction<'_>, task: &str) -> CoreRe
         .collect::<CoreResult<Vec<_>>>()?;
     Ok(crate::scheduler::dependency_ready(&nodes, "execution")?.is_empty())
 }
-/// Stop is not successful completion, and no runtime stop parks a task for the owner
-/// (the no-stop policy, every task): the stop becomes a continuation on the next rung
-/// of the strategy ladder ([`super::automatic`]), which the host resumes with a fresh
-/// plan. The runtime asks the owner nothing about its own failures; the coordinator
-/// still asks about the work itself. A task already waiting on a question or wait
-/// keeps it.
+/// Stop is not successful completion. The automatic policy decides whether to
+/// continue, cool down or record an owner question ([`super::automatic`]). A task
+/// already waiting on a question or wait keeps it.
 pub fn stop_tx(db: &Transaction<'_>, task: &str, blocker: &str) -> CoreResult<TaskState> {
     let (source, _) = task_tx(db, task)?;
     if source.terminal() || source == TaskState::Paused {

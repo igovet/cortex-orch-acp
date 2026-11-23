@@ -2192,7 +2192,7 @@ mod restart_tests {
     use super::*;
     use cortex_core::{lifecycle::TaskMachine, OpenMode, ProjectKey, Store, StoreChannel};
     use std::os::unix::fs::PermissionsExt;
-    fn store() -> (std::path::PathBuf, Store) {
+    fn empty_store() -> (std::path::PathBuf, Store) {
         let root = std::env::temp_dir().join(format!(
             "native-restart-resume-{}",
             crate::native_effects::identity().unwrap()
@@ -2207,6 +2207,10 @@ mod restart_tests {
         TaskMachine::new(&store)
             .create("t", "goal", "owner")
             .unwrap();
+        (root, store)
+    }
+    fn store() -> (std::path::PathBuf, Store) {
+        let (root, store) = empty_store();
         store
             .write(|db| {
                 db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=4", [])?;
@@ -2302,6 +2306,133 @@ mod restart_tests {
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn the_sixth_coordinator_interruption_series_waits_across_restart_and_resumes_once() {
+        use cortex_core::lifecycle::automatic;
+
+        let (root, mut store) = empty_store();
+        store
+            .write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='PLANNING',revision=4", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let reopen = || {
+            Store::open(
+                ProjectKey::new(&root, StoreChannel::Dev).unwrap(),
+                OpenMode::Initialize,
+            )
+            .unwrap()
+        };
+        let reason = "native_turn_outcome_unknown";
+        // Two immediate continuations, followed by five cooldowns. Fast-forward
+        // only the stored deadline, keeping the actual persisted policy history.
+        for (index, delay) in [0, 0, 300, 900, 1800, 3600, 3600].into_iter().enumerate() {
+            store
+                .write(|db| {
+                    assert_eq!(domain::stop_tx(db, "t", reason)?, TaskState::Recovering);
+                    let owed = automatic::owed(db, "t")?.unwrap();
+                    assert_eq!(owed.evidence["loop"]["count"], index + 1);
+                    if delay > 0 {
+                        assert_eq!(owed.evidence["backoff_seconds"], delay);
+                        assert!(automatic::resume_tx(db, "t", owed.event)?.is_none());
+                        db.execute(
+                            "UPDATE runtime_events SET payload_json=json_set(payload_json,'$.not_before',0) WHERE id=?",
+                            [owed.event],
+                        )?;
+                    } else {
+                        assert!(owed.waiting.is_empty());
+                    }
+                    assert!(automatic::resume_tx(db, "t", owed.event)?.is_some());
+                    Ok(())
+                })
+                .unwrap();
+        }
+        assert_eq!(count(&store, "AUTOMATIC_PAUSED"), 5);
+        assert_eq!(count(&store, "USER_QUESTION_REQUESTED"), 0);
+        drop(store);
+        store = reopen();
+        let question = store
+            .write(|db| {
+                // A newly interrupted turn's effect has no final receipt.
+                db.execute(
+                    "INSERT INTO runtime_requests VALUES ('t','last-write','c1','project_write','digest','{\"path\":\"src/lib.rs\"}')",
+                    [],
+                )?;
+                lifecycle::event_tx(db, "t", "NATIVE_DRIVER_STOPPED", json!({"reason":reason}))?;
+                assert_eq!(domain::stop_tx(db, "t", reason)?, TaskState::WaitingUser);
+                assert_eq!(domain::stop_tx(db, "t", reason)?, TaskState::WaitingUser);
+                assert!(automatic::owed(db, "t")?.is_none());
+                let (id, text): (String, String) = db.query_row(
+                    "SELECT id,text FROM pending_questions WHERE task_id='t' AND status='open'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                assert!(text.contains("the coordinator's turn was interrupted"), "{text}");
+                assert!(text.contains("sixth series"), "{text}");
+                let asked: String = db.query_row(
+                    "SELECT payload_json FROM runtime_events WHERE task_id='t' AND type='USER_QUESTION_REQUESTED'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let asked: Value = serde_json::from_str(&asked)?;
+                assert_eq!(asked["question_id"], id);
+                assert_eq!(asked["question"], text);
+                assert_eq!(asked["blocker"], reason);
+                assert_eq!(asked["option_ids"], json!(["retry_now", "other_approach", "retry_later"]));
+                Ok(id)
+            })
+            .unwrap();
+        drop(store);
+        store = reopen();
+        store
+            .write(|db| {
+                // The startup recovery path must preserve this exact question;
+                // even an unresolved effect cannot turn it back into a retry.
+                recover_task_tx(
+                    db,
+                    "t",
+                    "WAITING_USER",
+                    "owner".into(),
+                    1,
+                    false,
+                    true,
+                    Some("boot-after-interruption"),
+                )?;
+                assert_eq!(domain::task_tx(db, "t")?, (TaskState::WaitingUser, 4));
+                assert!(automatic::owed(db, "t")?.is_none());
+                assert!(waits::answer_tx(db, "t", &question, "retry_now", "text", None)?);
+                assert!(!waits::answer_tx(db, "t", &question, "retry_now", "text", None)?);
+                let event = automatic::owed(db, "t")?.unwrap().event;
+                let resumed = automatic::resume_tx(db, "t", event)?.unwrap();
+                assert_eq!(resumed["owner_question"], question);
+                assert_eq!(resumed["owner_choice"], "retry_now");
+                assert_eq!(resumed["uncertainty"][0]["operation"], "project_write");
+                assert!(automatic::resume_tx(db, "t", event)?.is_none());
+                assert_eq!(domain::task_tx(db, "t")?, (TaskState::Planning, 4));
+                let (outcome, settlement): (String, String) = db.query_row(
+                    "SELECT json_extract(result_json,'$.outcome'),json_extract(result_json,'$.settled_by')
+                     FROM runtime_requests WHERE request_key='last-write'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                assert_eq!((outcome.as_str(), settlement.as_str()), ("unknown", "runtime_reverify"));
+
+                // The answer opens a fresh window without consuming a rung or a sighting.
+                assert_eq!(domain::stop_tx(db, "t", reason)?, TaskState::Recovering);
+                let owed = automatic::owed(db, "t")?.unwrap();
+                assert_eq!(owed.evidence["loop"]["count"], 1);
+                assert!(owed.waiting.is_empty());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(count(&store, "AUTOMATIC_PAUSED"), 5);
+        assert_eq!(count(&store, "AUTOMATIC_RESUMED"), 8);
+        assert_eq!(count(&store, "USER_QUESTION_REQUESTED"), 1);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// A restart in the middle of the final verification left its run without a
     /// finish record; it used to become a ladder continuation (a replan). The task
     /// stays VERIFYING on the same rung, and the driver settles that run as unknown

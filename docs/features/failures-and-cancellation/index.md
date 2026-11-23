@@ -164,33 +164,24 @@ anywhere for an external mutation whose fate cannot be observed.
 
 ### Transient engine failures
 
-An engine that fails for an infrastructure reason is retried automatically,
-and the chat shows each retry as it happens.
-`windowed_retry` sets the timing. The first retry waits
-5 s, and each later wait doubles, up to 60 s. The work stops only after
-failures have kept repeating for 10 minutes (`RETRY_WINDOW_SECONDS`). A
-failure more than 10 minutes after the previous one starts a new streak.
-
-- **Coordinator launch.** If the coordinator engine fails to start (stage
-  `engine_launch`), `OrchestratingRuntime._ensure_coordinator_retrying`
-  starts it again. The chat shows `⟳ The engine did not start (<cause>).
-  Retry N in X s…`. A later success shows `✓ The engine started after N
-  retries.`, and giving up shows `✗ The engine kept failing for N min …
-  Stopping.` before the usual `engine_launch` error. Each new start goes
-  through coordinator recovery, the same path a user's resend takes. Some
-  failures are never retried, because starting again cannot help:
-  - a structured route refusal (exhausted plan, rate limit, unavailable
-    model);
-  - a provider restriction, refusal or cancellation;
-  - a rejected configuration;
-  - a validation or authorization `PortableError`, such as a missing launch
-    command.
-- **Coordinator turn.** A coordinator turn can fail for an engine or
-  transport reason (a dead session, `engine_error`) before it streams text
-  or calls a tool. The controller then resends the same prompt, after
-  reopening the session if it died, and the chat shows `⟳ The coordinator's
-  engine failed before answering …`. A turn that already streamed or called
-  a tool may have acted, so it is not resent. It blocks as before.
+- **Coordinator launch.** The native host makes one rapid second attempt only
+  for a transport loss during configuration or access-mode setup before the
+  session is bound, and only after the first attempt is confirmed exited. A
+  final `coordinator_session_start_failed` follows the existing task recovery
+  strategies, not a separate timed retry window. See
+  [native session start failures](../recovery-and-replacement/index.md#native-session-start-failures).
+- **Coordinator turn.** If the reply to a dispatched turn is lost after it
+  advanced the task state or plan revision, or saved the final synthesis, the
+  runtime continues from that checkpoint without replaying the turn.
+  Otherwise `native_turn_outcome_unknown` continues on the current
+  approach. Without real progress, the third identical interruption starts a cooldown;
+  each recurrence schedules the next one. The first five waits are 5, 15, 30,
+  60 and 60 minutes. On the sixth series, the runtime records the reason and
+  asks the owner instead of scheduling another cooldown. The question survives
+  restart. Real progress such as a completed node or passed check resets the
+  series; accepting a new plan by itself does not. On resumption, the runtime
+  re-verifies uncertain effects rather than replaying the interrupted prompt.
+  See [the task lifecycle](../task-lifecycle/index.md#no-stop-policy-and-the-strategy-ladder).
 - **Workers.** In `retry_lost`, an assignment whose attempt ended for an
   infrastructure reason (see [Why a worker attempt ended](#why-a-worker-attempt-ended))
   is retried on the runtime's backoff. The `ASSIGNMENT_RETRIED` event records

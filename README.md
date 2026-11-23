@@ -368,7 +368,16 @@ mutation fallback. A built-binary socket test covers native create/start through
 completion with PATH fake engines and private HOME/XDG state; it does not qualify
 real engine accounts or a released application. Native worktree execution still fails closed rather than being ignored. Owner attachments (new task, follow-up and Request-changes messages, and question answers) are retained as private source bodies and delivered to the engine; the native service advertises `attachments: true` in its capabilities, and worker guidance carries no files.
 
-Every task finishes or keeps working: the runtime never parks a task for the owner because of its own failures, and there are no attempt, review-cycle, replan or repair caps. A runtime stop (a failed or lost worker, a failed check after its direct repairs, a blocking or stalled review, a degenerate model turn, an interrupted service, an effect with an unknown outcome) becomes a continuation that changes approach along a strategy ladder (repair, escalated routes, the senior consultant, another role and coordinator model) and resumes by itself; unknown effects are re-verified, never replayed; a review that cannot read an item with its tools records it as a disclosed unverified limit. When a route is unusable, the runtime waits and resumes it by itself
+The runtime normally continues work on its own. Work failures use a strategy
+ladder (repair, escalated routes, the senior consultant, another role and
+coordinator model); infrastructure interruptions keep the current approach.
+If a coordinator's reply is lost after it saved the final synthesis, the runtime
+continues from that saved result without replaying the turn.
+An already-running coordinator that reaches a sixth series of identical
+interruptions without progress instead waits for the owner and shows the
+recorded reason. The wait survives restart. Unknown effects are re-verified,
+never replayed. A review that cannot read an item with its tools records it as
+an unverified limit, and an unusable route waits for the runtime's recheck
 (see [no-stop policy](docs/features/task-lifecycle/index.md#no-stop-policy-and-the-strategy-ladder)).
 Missing access can pause the affected work, but the owner can dismiss the action
 even for a registry or other named host without a built-in sign-in. A failing

@@ -731,41 +731,38 @@ mod tests {
         assert_eq!(run(&args(&["--home", "relative", "--check"])).1, 2);
         let dir = std::env::temp_dir().join(format!("paseo-dev-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let paseo = dir.join("paseo");
-        fs::write(&paseo, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&paseo, fs::Permissions::from_mode(0o755)).unwrap();
-        let (paseo_arg, home_arg) = (
-            paseo.display().to_string(),
-            dir.join("home").display().to_string(),
-        );
+        // An existing no-op avoids ETXTBSY when a parallel test forks while
+        // this fixture would otherwise have its executable open for writing.
+        let paseo_arg = "/bin/true";
+        let home_arg = dir.join("home").display().to_string();
         for forbidden in [
             &["--home", "/x"][..],
             &["--home=/x"],
             &["--host", "h"],
             &["--host=h"],
         ] {
-            let mut given = vec!["--paseo", &paseo_arg, "--home", &home_arg, "--"];
+            let mut given = vec!["--paseo", paseo_arg, "--home", &home_arg, "--"];
             given.push("status");
             given.extend(forbidden);
             assert_eq!(run(&args(&given)).1, 2, "{forbidden:?}");
         }
         assert_eq!(
             run(&args(&[
-                "--paseo", &paseo_arg, "--home", &home_arg, "--check", "--", "status"
+                "--paseo", paseo_arg, "--home", &home_arg, "--check", "--", "status"
             ]))
             .1,
             2
         );
         assert_eq!(
             run(&args(&[
-                "--paseo", &paseo_arg, "--home", &home_arg, "--", "status"
+                "--paseo", paseo_arg, "--home", &home_arg, "--", "status"
             ]))
             .1,
             0
         );
         assert_eq!(
             run(&args(&[
-                "--paseo", &paseo_arg, "--home", &home_arg, "--", "plugin", "update"
+                "--paseo", paseo_arg, "--home", &home_arg, "--", "plugin", "update"
             ]))
             .1,
             2
@@ -773,7 +770,7 @@ mod tests {
         assert_eq!(
             run(&args(&[
                 "--paseo",
-                &paseo_arg,
+                paseo_arg,
                 "--home",
                 &home_arg,
                 "--installed-runtime",

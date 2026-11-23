@@ -562,6 +562,13 @@ settles them only when no engine process works in the project, and never
 signals, kills or replays anything. Unknown sessions, controls, claimed answer
 deliveries and verification intents are not replayed. Paused state and retained
 questions/waits survive, without granting replacement-session authority.
+A final synthesis saved before a coordinator reply is lost remains a settled
+checkpoint; it does not require replaying the turn or waive completion checks.
+After the sixth series of identical interruptions to a running coordinator
+without progress, the runtime records a durable owner question rather than
+another timed retry. It reports the safe recorded reason, not engine output.
+An answer authorizes continuation, not replay of uncertain effects or a waiver
+of verification or process-settlement checks.
 Installed desktop qualification remains a separate exact-archive gate.
 
 Native worker guidance binds one live assignment/attempt, persists before queuing,
