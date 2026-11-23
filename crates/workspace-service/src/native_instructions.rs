@@ -107,6 +107,19 @@ pub(crate) fn compose(name: &str, stage: Option<&str>, engine: EngineKind) -> Co
         .filter(|t| supports(stage, t["name"].as_str().unwrap_or("")))
         .collect::<Vec<_>>();
     let mut text = p.body.clone();
+    if engine == EngineKind::Claude
+        && role == "worker"
+        && name != "worker-senior-consultant"
+        && matches!(stage, Some("execution" | "review"))
+    {
+        text.push_str(
+            "\n## Work without narration\n\n\
+             Do not write assistant text before the first tool call, between tool calls, or after a tool result while work remains. \
+             Use tools for questions, reports and the structured result. \
+             After the last tool call, if a closing response is needed, give at most one short sentence. \
+             It never replaces the structured result.\n",
+        );
+    }
     text.push_str("\n## Native capability boundary\n\nThis host is partially migrated. Only the tools advertised on this channel are available. Missing capabilities must be reported, never replaced with native engine mutations or invented receipts.\n");
     let discovery = if engine == EngineKind::Claude {
         "`mcp__cortex__tools_discover`"
@@ -222,6 +235,50 @@ mod tests {
         assert!(read_skill("worker-ux-designer", "design-colors").is_ok());
         assert!(read_skill("worker-senior-consultant", "tool-discipline-worker").is_err());
         assert!(read_skill("worker-explorer", "skill-authoring").is_err());
+    }
+    #[test]
+    fn only_claude_execution_and_review_specialists_receive_the_narration_rule() {
+        for (name, stage, engine, expected) in [
+            (
+                "worker-backend-dev",
+                Some("execution"),
+                EngineKind::Claude,
+                true,
+            ),
+            (
+                "worker-code-reviewer",
+                Some("review"),
+                EngineKind::Claude,
+                true,
+            ),
+            ("orchestrator", None, EngineKind::Claude, false),
+            (
+                "worker-senior-consultant",
+                Some("execution"),
+                EngineKind::Claude,
+                false,
+            ),
+            ("worker-backend-dev", None, EngineKind::Claude, false),
+            (
+                "worker-backend-dev",
+                Some("execution"),
+                EngineKind::Codex,
+                false,
+            ),
+            (
+                "worker-backend-dev",
+                Some("execution"),
+                EngineKind::OpenCode,
+                false,
+            ),
+        ] {
+            let text = compose(name, stage, engine).unwrap();
+            assert_eq!(
+                text.contains("## Work without narration"),
+                expected,
+                "{name} {stage:?} {engine:?}",
+            );
+        }
     }
     /// Every tool any catalogue advertises has a handler, and every Cortex tool
     /// name the shipped profiles and skills mention is one a role is served.

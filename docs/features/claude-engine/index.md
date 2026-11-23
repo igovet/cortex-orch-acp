@@ -32,6 +32,13 @@ In the Rust native task path, Cortex sends strict MCP configuration via
 engine-advertised identity and the external server's description and schema.
 An unavailable tool or server does not become a Cortex tool.
 
+The [unified system prompt](../unified-system-prompt/index.md#parts-in-order)
+instructs delegated Claude execution workers and reviewers to use tools without
+interim assistant text, with at most one short closing sentence if needed. The
+Claude coordinator and senior consultant do not receive this instruction. This
+is prompt guidance, not enforcement or filtering: interim assistant text, if
+generated, is still recorded in worker activity.
+
 Behavior changes relevant to Cortex:
 
 - With no `permissions.defaultMode` in the user's settings the session now
