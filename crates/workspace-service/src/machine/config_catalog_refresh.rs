@@ -7,6 +7,8 @@ use std::{ffi::CString, fs, time::Duration};
 mod opencode;
 #[path = "config_catalog_producer.rs"]
 mod producer;
+#[cfg(test)]
+pub(crate) use producer::fixture_catalogue;
 #[path = "config_catalog_startup.rs"]
 pub(crate) mod startup;
 

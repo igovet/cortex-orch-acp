@@ -57,10 +57,9 @@ Native incoming ACP now persists client-owned Development/Guarded/Auto access
 separately from display history. Worker engine modes must be actually offered
 and confirmed after model selection; route parameters cannot override that
 floor. Permission decisions recheck live channel/session identity and access.
-The new outside-write/command gateway requires a writing worker and checks
-assignment waits, explicit consent policy and payload-bound durable identities.
-Development routine outside writes bypass cards, selected control-plane roots
-still ask, and Auto answers cards itself. These outside routes are intentionally
+The outside-write/command gateway requires a writing worker and checks
+assignment waits and payload-bound durable identities. Guarded and Development
+ask for each eligible action; Auto settles it automatically. These are
 unsandboxed owner actions, not a containment fallback. No-follow file replacement
 does not isolate hostile same-user code. Native command output is now retained
 whole in private files and hash-checked when paged; a clipped inline
@@ -697,11 +696,10 @@ cancellation, a signalled child and unavailable or truncated output. Incomplete,
 signalled, nonzero or truncated output cannot pass. Bubblewrap namespace/mount preparation is
 mandatory and failure reports `native_verification_sandbox_unavailable`; plan
 preflight preserves that reason rather than claiming the executable is missing.
-Plan preflight looks a bare program name up on the same command search path the
-verifier launch and worker commands use (the project's `.venv/bin`, `venv/bin` and
-`node_modules/.bin`, then the owner's tool search path described below), and probes
-the found file inside that read-only sandbox; it never widens what the verifier can
-read or write.
+Plan preflight checks for executable files in the same live read-only command
+view used for verification. Availability does not say whether the check will pass.
+
+<a id="host-effects-and-tool-search-path"></a>
 
 **Tool search path.** The installed service is started by the systemd user manager
 with a fixed minimal `PATH`, which lacks what the owner's terminal adds (nvm,
@@ -738,24 +736,13 @@ same way. A settled command receipt whose output shows a missing program carries
 advisory `missing_program` hint; it changes no outcome and grants nothing. Every launch
 re-validates the list, and the sandbox's command path additionally drops any entry
 inside the command's own project, so a project can never add a program directory
-beyond its fixed `.venv/bin`, `venv/bin` and `node_modules/.bin`. No mount is
-added for these directories and no write access is widened: every command view
-already mounts the whole host filesystem (except masked private stores), so the
-tool directories and their symlink targets (for example nvm's `bin/npm` into its
-version's `lib`) are readable; they are read-only to the verifier and read-only
-roles, and worker commands keep exactly the write access their access mode
-already has. Engine launches keep their own fixed environment and bundled
-Node; the systemd unit's minimal `PATH` is unchanged.
-There is no unsandboxed retry. The host/project is read-only except existing
-Git-ignored directories, explicit caches and temp. Private stores remain hidden,
-Git stays read-only, networking is disabled and procfs is private. This does not
-replace the active Python verifier's discarded-project-write overlay or claim
-hostile-code isolation.
-A sandboxed command that has started is never replayed on the host automatically:
-output that resembles a refused nested sandbox or refused root is child-controlled and
-stays an advisory hint on the original receipt. Only the private supervisor's own
-proof that the launcher failed before the payload was released permits the single
-consent-backed host rerun. Pull request creation passes an explicit `--repo` derived
+beyond its fixed `.venv/bin`, `venv/bin` and `node_modules/.bin`. Verification
+and its program preflight use this same project-then-owner search order. The
+owner's NVM directory and symlink targets are visible under the existing
+read-only profile; the verifier does not stage a separate Node bundle.
+The verifier disables networking and does not retry on the host. Ordinary worker
+command routing is described under [the sudo password prompt and host rerouting](#owner-password-for-sudo-askpass-and-host-rerouting).
+Pull request creation passes an explicit `--repo` derived
 from the validated `origin`, drops `GH_REPO` and a conflicting `GH_HOST`, and refuses
 to save or open an address for another host, owner or repository. Background outage
 rechecks probe only the service's built-in HTTPS endpoints, refuse any non-public
@@ -1747,23 +1734,12 @@ because its license could not be established. See
 [UI/UX design workflow](docs/features/design-workflow/index.md).
 
 
-Read-only roles (reviewer, auditor, explorer, architect and the other read-only
-profiles) run `command_run` in the read-only profile (receipts name it `read_only`) in every
-access mode: HOME is read-only except an explicit tool-cache allowlist, and the command runs in
-a private PID namespace. A read-only role's project writes go to a private overlay discarded when
-the command ends (refused where the host cannot overlay), so it can run a suite that writes
-temporary output while the project keeps nothing. AppArmor's world-writable query file
-`/sys/kernel/security/apparmor/.access` is writable in this profile so a private `dbus-daemon`
-can accept connections; it is a query interface and grants no policy change. Automatic runtime verification uses the same profile in every mode;
-inside a check the project's git-ignored directories are writable in place, and any other project write (a tracked file a tool regenerates, such as `next-env.d.ts`) goes to a private overlay discarded when the check ends (refused where the host's bubblewrap cannot overlay).
-The reviewed sources and revision therefore never change, and no access mode, permission or user
-consent alters this profile. Writing workers keep
-the access-mode profile. Cache writes are allowed, so a read-only command can poison a cache
-that a later run reads. The read-only profile does not mask the host `/tmp`, the session D-Bus and
-systemd user manager under `/run/user`, the host `/dev`, or a Docker socket if one exists, so a
-read-only command can still write `/tmp` and reach those services. The profile shares the owner's
-network, as every owner command does, so it limits writes, not egress. Read-only commands keep
-running across a mode switch. This is not hostile-code isolation. The deletion classifier
+Ordinary read-only worker commands use `read_only` in every mode. Automatic
+verification uses the same host-visible profile with networking disabled.
+The profile restricts writes and uses a private PID namespace and private
+`/var/tmp`. Host `/tmp`, allowed tool caches and the verifier's existing
+writable ignored-directory grants are not private outputs. Neither route is
+hostile-code isolation. The deletion classifier
 is lexical: it recognises `rm` and the other common deletion commands, but not deletions
 hidden inside scripts, interpreters or build tools.
 
@@ -1883,7 +1859,7 @@ settlement once, with a bounded join; uncertain exit retains quarantine rather
 than causing a second teardown in the same shutdown. Declared-command evidence
 gaps require identical argv at the task-root cwd, in the read-only profile, the task mode's own writer
 profile, or the Guarded writer profile (`restricted`); a different-cwd receipt cannot close them, and
-a host-writable receipt cannot close one once the task is Guarded. Unknown consumption remains unknown;
+a `development`-profile receipt cannot close one once the task is Guarded. Unknown consumption remains unknown;
 see [usage settlement](docs/features/token-and-plan-usage/index.md#coverage-and-interrupted-turns).
 The read-only synthesis aggregate keeps unfinished reconciliation explicit and
 withholds its share; it never turns a pending outcome into a completed fallback
@@ -2438,7 +2414,7 @@ The Cortex Workspace desktop slice has a user-level machine service that owns th
 - Workspace invalidation hooks are connection-local to supported Store writers, not a security boundary on arbitrary SQLite clients. Independent/older writers do not need Workspace tables or callbacks; their writes are not guaranteed to publish notifications. Normal writable initialization retires legacy persistent outbox hooks; inspection leaves the durable schema untouched.
 - Both channels ship a root-owned runtime under `/usr/lib/<package>/runtime`. Units ignore legacy `service.env` files and use fixed absolute launch paths. Login-start symlinks and minimal best-effort maintainer scripts start/restart/stop only the matching user unit; they never access Paseo or delete user data. The native service-start path runs absolute `/usr/bin/systemctl --user` with fixed reload/start arguments, not webview-supplied commands. The separate editor action accepts only a registered project identity and fixed VS Code arguments. Dev XDG isolation and unchanged native account references remain in force.
 - [Standalone desktop qualification](docs/project/verification.md#standalone-cortex-workspace-desktop) runs a trusted, locally built Dev archive extracted without installation (`dpkg-deb -x`, no maintainer scripts) as the owner, in the owner's real environment: real HOME, session bus/keyring, native Codex/Claude and GitHub CLI logins (`GH_CONFIG_DIR` points at the owner's existing gh configuration; nothing is copied). Its five XDG roots and service socket are private to the run, so the persistent release and Dev installations, their settings, registrations and stores, production `~/.paseo` and the owner's projects are not used; the extracted app cannot fall back to either installed unit, and the launcher unsets inherited `CORTEX_ROUTING`. There is no nested namespace lab: this is the product's own channel separation, not a boundary for hostile same-user code. Smoke may use the owner's display. Drive requires a private, authenticated Xvfb (per-run X authority cookie, own Xvfb process) and refuses missing private display tools before archive handling. Before any program from the archive is extracted or run with the owner's HOME, gh configuration and session bus, the launcher requires the build's own manifest to be a regular, non-symlink, user-owned, not group/world-writable file whose package identity and SHA-256 match the archive; an absent, symlinked, unreadable or mismatching manifest refuses nonzero before extraction or launch. `drive` is bound to the exact archive digest recorded by a successful private-Xvfb smoke and refuses any other archive. A screenshot counts only when capture exits 0 and the file is a complete, decodable PNG; a failed or partial capture is refused and no digest is retained. Smoke checks logins by exit status, retains sanitized route/default readback and never account output or settings bodies; environment gaps (no display, missing tool, missing login) are recorded as unobserved steps and never count as a pass. Optional installation passes the verified private Dev archive snapshot to apt via sudo, not the mutable build path. Cleanup refuses an unlisted Debian archive anywhere under either named build directory. Paid use still requires explicit authorization for this surface and mode.
-- The package depends on bubblewrap but does not weaken AppArmor or kernel policy. A namespace refusal blocks sandboxed engine execution and remains an explicit qualification limit; see [platforms](docs/cortex-workspace/platforms.md).
+- The package depends on Bubblewrap but does not weaken AppArmor or kernel policy. A namespace refusal blocks the affected sandboxed route, not necessarily other engine launches. See [platforms](docs/cortex-workspace/platforms.md).
 - `history.page` exposes bounded display text, plans, tool titles/status and each call's selected target (path, command, query, skill or report reference) and non-private edit text, not raw tool arguments/results or private report bodies. An untitled update is judged private or not by the title retained for its call, and stays private when none was retained. A refused call keeps only a credential-redacted reason of at most 1,000 characters: the runtime refusal's `message`, or a Cortex tool's error text; engine tool output and report/draft refusals are not kept. A worker's edit lines come from the runtime's own record of that write (unclipped records only), credential-redacted and bounded per edit and per read. Its cursor binds the project, task, session, page size and frozen high-water mark. Owner queue and review drafts live in private service state, separate from immutable captured source history.
 - The service-only `_cortex/workspace_control` method resolves the registered execution and live session/current owner epoch before accepting prompts, worker guidance, worker cancellation or a command-stop request. Stop/Close alone may cancel the exact bound launch before its runtime row exists even when retries have advanced the coordinator epoch; prompts and other controls retain current-epoch checks. It is not a model MCP tool. Worker guidance targets one live channel and is marked delivered when appended to a successful Cortex tool response, not when read or acted on. It grants no authority. The exact gateway command reference and a reason remain required for stopping a command; native engine actions cannot be stopped through this control.
 - Task options are session-local, and verified linked worktrees share the logical project store. Worktree cleanup never forces dirty removal. Owner-confirmed integration checks current runtime evidence and checkout observation, refuses a dirty or incompatible target, and never hides a push. PR attempts use the installed GitHub CLI and retain ambiguous outcomes without copying credentials. Archive purge uses the existing exclusive-lock/journaled runtime cleanup, active-execution protection and explicit space-reclamation outcome. Project removal keeps files and history; the native editor action resolves only a registered project, never a webview-supplied command. See [task execution](docs/cortex-workspace/local-task-execution.md).
@@ -2664,10 +2640,9 @@ ux-designer, explorer, planner, security-auditor, accessibility-auditor,
 database-architect, performance-engineer, the runtime-reserved build-verification
 profile, the code reviewer and every review-stage session) get only the read rows;
 their native write, delete and execute requests are refused in every mode under the
-`read_only` rule. Every native request of the consultant is refused. The table
-narrows native engine tools only: a command run through `command_run` can still
-read anywhere the owner can (see
-[Attack-surface review and limits](#attack-surface-review-and-limits)).
+`read_only` rule. Every native request of the consultant is refused. This table
+applies to native engine tools only. Cortex gateway commands follow a separate
+filesystem policy (see [Attack-surface review and limits](#attack-surface-review-and-limits)).
 
 "Ask the owner" is a card titled `Owner decision: <role> wants to
 <read|write|delete|run|fetch> <paths> because <reason>` with only Allow once and
@@ -2772,12 +2747,13 @@ the project (for example its own session files).
 
 ### OpenCode (optional engine)
 
-OpenCode v2 is launched only after the owner's explicit
-`add-opencode-connection` step, only from a trusted binary whose sandboxed
-`--version` and `initialize` `agentInfo.version` are both in the `2.x.x` range, and
-only inside the engine jail. Anything else fails before a session. Its additional
-boundaries, checked by no-paid tests against the installed binary
-([OpenCode adapter](docs/features/opencode-engine/index.md)):
+The current Rust launch paths are described in
+[Attack-surface review and limits](#attack-surface-review-and-limits) and
+[OpenCode launch boundaries](docs/features/opencode-engine/index.md#current-rust-launch-boundaries).
+
+The following bullets describe the **former Python engine jail**, not the
+installed Rust task or short-text engine. They do not establish current
+containment or account behavior.
 
 - **Process isolation.** Each `opencode acp` starts a loopback control server
   whose password is in its environment. The OpenCode jail has its own user,
@@ -2955,10 +2931,13 @@ SDK/cache state and authorized outside-project cwd need no routine permission
 card merely for crossing the project boundary. The mode decides
 the host for writing workers: Development and Auto give them the host-writable profile (a
 `docker build` check can record its builder state in `~/.docker/buildx`), and Guarded keeps
-them restricted. Read-only roles, reviewers and automatic verification always get the
-read-only profile (`read_only`), while their project stays read-only -- verification writes
-git-ignored directories in place and every other project write to a discarded overlay (refused
-without host overlay support), and a check whose project digest changes is incomplete. A mode switch
+them restricted. Read-only roles and reviewers always get the
+read-only host-visible profile (`read_only`). Automatic verification uses that
+profile with networking disabled and the existing grants for eligible ignored
+directories, such as build outputs and dependency directories. Other checkout
+writes go to a discarded overlay where supported, or are refused. The verifier
+keeps the profile's private scratch and never retries on the host. A check whose project digest changes is
+incomplete. A mode switch
 does not stop a read-only command or a verification check. Only a host-writable (Development or
 Auto) writing-worker command is stopped by a mode switch or a denial change. Engine processes themselves are not sandboxed (see [Native engine tools](#native-engine-tools)).
 
@@ -2993,9 +2972,9 @@ Literal non-shell argv arguments containing separators and `rm` text do not
 request deletion consent. Refused, absent or malformed approval starts no process.
 This lexical classifier
 is not a semantic firewall: interpreters, scripts and daemon operations can hide
-effects. `project_delete` and `outside_command` consent remains. An `outside_write`
-asks the owner in Development as in Guarded and is allowed and recorded in Auto; a
-target in Cortex private state is refused in every mode.
+effects. `project_delete` consent remains. Eligible `outside_write` and
+`outside_command` ask in Guarded and Development; Auto settles them
+automatically. Cortex private targets remain refused.
 The access mode never changes an engine session's own mode.
 
 **Guarded** remains the explicit restrictive command profile (host/HOME mostly
@@ -3053,17 +3032,9 @@ the agent (`ssh-add -D`, or a keyring lock) to withhold that. An agent
 configured to confirm each use (`ssh-add -c`) still asks the owner on the
 desktop.
 
-Unprivileged bubblewrap maps only the owner's uid into the sandbox, so a file
-root owns on the host appears owned by `nobody` there. ssh rejects an
-`Include`d config file (for example `/etc/ssh/ssh_config.d/*.conf`) owned by
-anyone but root or the user. Each sandbox that shows the whole host
-therefore mounts, at the real path of every `~/.ssh/config` or `Include`d
-file that root owns and no group or other user can write, a read-only copy of
-the same bytes owned by the owner
-(`orchestration.ssh_askpass.mount_trusted_configs`). These are exactly the
-files ssh accepts on the host. A file ssh rejects on the host stays as it is
-and is rejected the same way. The copies live in the command's own scratch
-directory, mounted read-only.
+Runtime verification uses the same host-visible read-only command profile with
+networking disabled, not a separate SSH input policy. An eligible explicit host
+command is not subject to the broker's command mounts.
 
 ### Optional ssh password dialog
 
@@ -3084,31 +3055,20 @@ dialog program is available, nothing is added. `sudo` never works inside the
 command sandbox: bubblewrap sets no_new_privs, which setuid programs refuse. A
 writing worker's command that needs root runs on the host instead (next section).
 
-### Owner password for sudo (askpass) and host rerouting
+<a id="owner-password-for-sudo-askpass-and-host-rerouting"></a>
 
-**Rerouting.** A writing worker's `command_run` that needs the host is rerun by
-the runtime through the existing `outside_command` consent route instead of
-returning a refusal: `sudo`, `pkexec` or `doas` at a command position of the argv
-(directly, after `env`/`timeout`-style wrappers, or in a `sh`/`bash`/`dash`/`zsh`
-script) is sent there before any sandboxed run; a sandbox that could not be prepared
-(`native_command_sandbox_unavailable`, nothing ran) and a launcher failure that the
-private supervisor itself proved before the payload was released are rerun there once.
-Once a sandboxed payload has started it is never replayed on the host from its output.
-Auto answers that consent card itself; Guarded and Development show it to the owner as
-for any `outside_command`, titled with the reason. The identical argv, cwd and
-timeout run under the derived request key `<key>.host`; the host receipt carries
-`rerouted` (`from`, `reason` and the original request key); the sandboxed receipt stays as it was and
-records `rerouted_to`, so a replay of the same request answers the same host
-receipt. Read-only roles, reviewers and verification are never rerouted: their
-privileged program fails in their read-only sandbox and the receipt's
-`sandbox_privilege` hint says the role cannot run it. A privileged program hidden
-in a script or build tool is recognized only by its sandbox failure output. This
-is a routing rule, not a security boundary: the outside route's own checks (live
-writing channel, non-empty scope, owner wait gate, Cortex private state refused in
-every mode) apply unchanged.
+### Owner password for sudo (askpass) and outside commands
 
-**Askpass.** Every host command (`outside_command`, including a rerouted
-`command_run`) gets one private askpass route: a 0700 directory in
+An eligible writing worker's `command_run` goes through the `outside_command`
+route before any sandboxed run if it requests recognized privilege escalation
+(`sudo`, `pkexec` or `doas`). If the supervisor proves the sandbox failed before
+launching the payload, the runtime can route it to the host once under a derived
+request key. Started or ambiguous runs are not replayed; nested-sandbox or
+privilege refusal text is only advisory. Read-only workers are never rerouted.
+Direct and rerouted host commands use the same eligibility and private-target
+checks: Auto decides automatically; Guarded and Development ask the owner.
+
+**Askpass.** A host command gets one private askpass route: a 0700 directory in
 `$XDG_RUNTIME_DIR` (or the temporary directory) with a Unix socket, an `askpass`
 script and a `sudo` shim placed first on `PATH`, plus `SUDO_ASKPASS` and a
 per-command random token in the command's environment. The shim runs the next
@@ -3263,9 +3223,9 @@ writers also use persistent LFS storage, so staging/committing cannot discard ne
 LFS objects with disposable command scratch.
 
 The project's own `.claude` and `.codex` are ordinary project paths: a writing
-worker may read, write and delete them with the file tools and commands like any
-other project file, and `project_git` status/diff and revision digests include
-them. Residual risk: their settings, hooks, MCP server entries, agents, commands
+worker may change permitted files through file tools and through eligible
+live writer commands. `project_git` status/diff and revision digests include
+these paths where available. Residual risk: their settings, hooks, MCP server entries, agents, commands
 and skills configure later Claude Code and Codex sessions opened in this project,
 the owner's own interactive ones included, and a hook or MCP command written
 there runs outside any Cortex jail when such a session starts. Review changes to
@@ -3343,10 +3303,8 @@ still used everywhere the runtime creates its own files/directories directly --
 npm, make and similar tools a worker or a check runs create files with
 unexpectedly restrictive permissions with no security benefit: everything such
 a command can write is already inside the project tree or its own scratch
-directory, both already scoped to the running command. A whole engine process
-(`engine_jail`) is not covered by this and keeps the runtime's stricter
-default, since its own state directory can hold real credentials (a native
-account's session tokens) that should stay owner-only.
+directory, both already scoped to the running command. Engine processes are
+not covered by command umask and may hold native account state.
 
 ## Configuration management UI and RPC boundary
 
@@ -3496,21 +3454,30 @@ pins.
 - The model sees the user's project data and can attempt prompt injection.
 - A subagent cannot bypass the runtime permissions because subagents are disabled.
 - Sandboxing assumes Linux user/mount/PID/network namespaces and bubblewrap.
-- **Known exposure: the command sandbox limits writes, not reads.** Every sandbox
-  view for worker and verification commands mounts the whole host filesystem
-  read-only, masking only Cortex's private stores. A command run on behalf of a
-  model can therefore read anything the owner's account can read outside the
-  project: the rest of the home directory, other projects, and credential files
-  such as `~/.ssh`, cloud and package-manager tokens and shell history. Where the
-  command's network access is permitted, it could also send that data elsewhere.
-  Assignment scope, write denials and deletion consent do not restrict these
-  reads. Reads are not narrowed to the project folder and tool directories in this
-  release, and no access request is needed to read outside the project. Treat
-  every project opened in Cortex as able to expose the owner's readable files to
-  the selected model providers, and do not keep secrets readable by the account
-  that runs Cortex if that is not acceptable.
-- Scope strings are not treated as proof of authorization; they are validated and
-  checked at each operation boundary.
+- **Known exposure: ordinary command reads and engine processes.** Ordinary
+  worker commands retain host visibility and profile-specific writable mounts.
+  Checkout scope and mask rules are not a general host-read policy. A command
+  can read owner-readable data outside the checkout where exposed by its view;
+  network access can allow disclosure. Guarded and read-only worker profiles
+  limit writes, not general host reads. Eligible Development/Auto writers can
+  use a non-private canonical host working directory and write the live checkout.
+- **Runtime verification limits writes, not general reads.** It uses the live
+  read-only command profile with networking disabled, private scratch and
+  private-store masks. Eligible existing ignored checkout directories and
+  permitted host cache paths can still receive writes. A setup refusal is not
+  a pass and never triggers a host rerun. This does not establish hostile-code
+  isolation or installed-package behavior.
+- **No general engine filesystem jail.** Normal sessions and Claude/Codex
+  catalogue and usage helpers do not inherit the verifier view. OpenCode keeps
+  its separate [catalogue and version probe boundaries](docs/features/opencode-engine/index.md#current-rust-launch-boundaries).
+  Experimental synthetic engine/account views do not establish production
+  enforcement. Eligible outside actions, including authorized command reroutes,
+  are host actions, not containment.
+- **Declared work scope is not a filesystem write boundary.** Scope and path
+  reservations coordinate concurrent writers; eligible Development/Auto commands
+  can persist changes directly in the live checkout without using a project-file
+  tool. Role, mode, protected paths and explicit denials still apply at the
+  relevant operation boundaries.
 
 
 Quota-window associations are exact owner settings, not model-family inference. Unmapped windows conservatively retain account-wide applicability, including exhaustion; missing numeric evidence is not zero. Settings validation precedes quota IO, and invalid reset policy cannot erase an engine-reported refusal. Associations cannot expand enabled/deny/provider/consent eligibility. See [the quota settings contract](docs/configuration.md#exact-quota-window-associations); install data is not a runtime overlay and existing profiles/configuration require explicit adoption.

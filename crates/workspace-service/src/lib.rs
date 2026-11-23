@@ -27,6 +27,8 @@ pub async fn maintenance_worker(state: &Path, id: &str) -> io::Result<()> {
         .map_err(|e| io::Error::other(e.code))
 }
 mod native_access;
+#[cfg(test)]
+mod native_account_fixture;
 mod native_activity;
 #[doc(hidden)]
 pub mod native_askpass;
@@ -36,6 +38,7 @@ mod native_change_set;
 #[doc(hidden)]
 pub mod native_codex_runtime;
 mod native_command_handles;
+mod native_command_live;
 mod native_command_sandbox;
 #[doc(hidden)]
 pub mod native_command_supervisor;

@@ -91,6 +91,9 @@ the implementation is partial, the entry says so.
 
 ### Read-only roles and the command host profile
 
+This entry records the earlier command host profile. For the current native command
+view and verifier limits, see [the security boundary audit](security.md).
+
 Read-only roles (reviewer, auditor, explorer, architect) never receive a host-writable
 `command_run`. Their commands run through `sandbox.readonly_command`, in every access
 mode, with an explicit allowlist of writable home caches (`READ_ONLY_HOME_CACHES`),

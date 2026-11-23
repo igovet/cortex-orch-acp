@@ -69,6 +69,10 @@ async fn task_session_leaves_owner_codex_config_byte_identical() {
     let stderr = f.0.join("agent.stderr");
     let mut command = tokio::process::Command::from(f.command(EXE));
     command.env("TMPDIR", &f.0);
+    // The scripted Codex stand-in execs the fake engine from the cargo target
+    // directory, which no engine filesystem view shows; this test is about Codex
+    // trust and config, so the debug build starts it without a view.
+    command.env("CORTEX_TEST_UNCONFINED_ENGINES", "1");
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

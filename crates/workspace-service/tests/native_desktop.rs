@@ -74,6 +74,7 @@ impl NativeRoutes for Routes {
                 credential_directory: root.into(),
                 base_environment: BTreeMap::new(),
                 codex_launcher: None,
+                confinement: None,
             },
             relay: exe,
             broker_parent: root.join(if workspace_protocol::channel::current().is_dev() {
@@ -3175,6 +3176,9 @@ async fn binary_journey(scenario: &str) {
                 "PATH",
                 format!("{}:/usr/bin:/bin", f.0.join("bin").display()),
             )
+            // The wrapper execs this test binary from the cargo target directory,
+            // which no engine filesystem view shows (debug-build opt-out).
+            .env("CORTEX_TEST_UNCONFINED_ENGINES", "1")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

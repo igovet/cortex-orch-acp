@@ -803,15 +803,17 @@ mod effective_scope_tests {
         let i = store
             .read(|db| channels::authenticate(db, &c.channel_id, c.secret(), true))
             .unwrap();
-        let check = |path: &str| {
+        let check_with_scope = |path: &str, scoped: bool| {
             store
                 .write(|db| {
                     authorize(db, &i, &c, None)?;
-                    writable_target(db, &i, &root, path, true)
+                    writable_target(db, &i, &root, path, scoped)
                 })
                 .err()
                 .map(|e| e.code())
         };
+        let check = |path: &str| check_with_scope(path, true);
+        assert_eq!(check_with_scope("other/a.rs", false), None);
         assert_eq!(check("src/a.rs"), None);
         assert_eq!(check("other/a.rs"), Some("write_outside_assignment_scope"));
         store
@@ -832,6 +834,7 @@ mod effective_scope_tests {
             Ok(())
         }).unwrap();
         assert_eq!(check("other/a.rs"), Some("write_denied"));
+        assert_eq!(check_with_scope("other/a.rs", false), Some("write_denied"));
         store
             .write(|db| {
                 db.execute("UPDATE runtime_tasks SET revision=2", [])?;

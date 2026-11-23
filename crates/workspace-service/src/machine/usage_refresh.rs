@@ -129,10 +129,10 @@ fn pass(config: &crate::Config, env: &RouteEnvironment) {
             let _ = usage_refresh::refresh(&env.state, &id, now, || {
                 cortex_core::store::locks::private_directory(&cwd, true).ok()?;
                 if engine == "codex-acp" {
-                    let response = codex(&binary, &env.home, &directory, &cwd)?;
+                    let response = codex(&binary, &env.home, &directory, &cwd, None)?;
                     usage_refresh::parse_codex(&response, now)
                 } else {
-                    let out = claude(&binary, &env.home, &directory, &cwd)?;
+                    let out = claude(&binary, &env.home, &directory, &cwd, None)?;
                     usage_refresh::parse_claude(&out, now)
                 }
             });
@@ -142,7 +142,12 @@ fn pass(config: &crate::Config, env: &RouteEnvironment) {
 
 /// Cleared environment with only the native account's own variables, an empty
 /// private working directory and its own process group.
-fn command(binary: &Path, home: &Path, cwd: &Path) -> Option<Command> {
+fn command(
+    binary: &Path,
+    home: &Path,
+    cwd: &Path,
+    view: Option<&cortex_engine::filesystem_view::Confinement>,
+) -> Option<Command> {
     let path: Vec<_> = std::env::var_os("PATH")
         .map(|p| {
             std::env::split_paths(&p)
@@ -150,9 +155,13 @@ fn command(binary: &Path, home: &Path, cwd: &Path) -> Option<Command> {
                 .collect()
         })
         .unwrap_or_default();
-    let mut command = Command::new(binary);
+    let mut command = match view {
+        Some(view) => view.command(binary, std::iter::empty::<&str>()),
+        None => Command::new(binary),
+    };
     command
         .env_clear()
+        .envs(view.map(|v| v.environment().clone()).unwrap_or_default())
         .env("HOME", home)
         .env("PATH", std::env::join_paths(path).ok()?)
         .current_dir(cwd)
@@ -174,14 +183,22 @@ fn end(child: &mut Child) {
 }
 
 /// One bounded `claude -p /usage` run: stdout of a successful exit, else `None`.
-fn claude(binary: &Path, home: &Path, directory: &Path, cwd: &Path) -> Option<Vec<u8>> {
-    let mut command = command(binary, home, cwd)?;
+pub(crate) fn claude(
+    binary: &Path,
+    home: &Path,
+    directory: &Path,
+    cwd: &Path,
+    view: Option<&cortex_engine::filesystem_view::Confinement>,
+) -> Option<Vec<u8>> {
+    let mut command = command(binary, home, cwd, view)?;
     command
         .args(CLAUDE_ARGS)
         .env("CLAUDE_CONFIG_DIR", directory)
         // Reset times print as UTC, so no time zone table is needed to read them.
         .env("TZ", "UTC")
         .stdin(Stdio::null());
+    #[cfg(test)]
+    crate::native_account_fixture::on_exec(&mut command, "usage", home).ok()?;
     let deadline = Instant::now() + RUN_BUDGET;
     let mut child = command.spawn().ok()?;
     let mut stdout = child.stdout.take()?;
@@ -213,13 +230,21 @@ fn claude(binary: &Path, home: &Path, directory: &Path, cwd: &Path) -> Option<Ve
 /// Server carries the same non-persistent layers as every Cortex-launched one, so
 /// the owner's plugin marketplaces are not synced (a `git ls-remote` to each
 /// configured remote source) every time the limits are read.
-fn codex(binary: &Path, home: &Path, directory: &Path, cwd: &Path) -> Option<Value> {
-    let mut command = command(binary, home, cwd)?;
+pub(crate) fn codex(
+    binary: &Path,
+    home: &Path,
+    directory: &Path,
+    cwd: &Path,
+    view: Option<&cortex_engine::filesystem_view::Confinement>,
+) -> Option<Value> {
+    let mut command = command(binary, home, cwd, view)?;
     command
         .args(crate::native_codex_runtime::BASE)
         .arg("app-server")
         .env("CODEX_HOME", directory)
         .stdin(Stdio::piped());
+    #[cfg(test)]
+    crate::native_account_fixture::on_exec(&mut command, "usage", home).ok()?;
     let deadline = Instant::now() + RUN_BUDGET;
     let mut child = command.spawn().ok()?;
     let stdout = child.stdout.take()?;
@@ -358,10 +383,11 @@ mod tests {
         let cwd = std::env::temp_dir().join(format!("cw-usage-live-{}", std::process::id()));
         std::fs::create_dir(&cwd).unwrap();
         let now = now().unwrap();
-        let out = claude(&claude_cli, &home, &home.join(".claude"), &cwd).expect("claude ran");
+        let out =
+            claude(&claude_cli, &home, &home.join(".claude"), &cwd, None).expect("claude ran");
         let windows = usage_refresh::parse_claude(&out, now).expect("free local /usage");
         let codex_answer =
-            codex(&codex_cli, &home, &home.join(".codex"), &cwd).expect("codex answered");
+            codex(&codex_cli, &home, &home.join(".codex"), &cwd, None).expect("codex answered");
         let codex_windows =
             usage_refresh::parse_codex(&codex_answer, now).expect("documented shape");
         let _ = std::fs::remove_dir_all(&cwd);
@@ -401,7 +427,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let response = codex(&fake, &root, &root, &root).expect("the fake answered");
+        let response = codex(&fake, &root, &root, &root, None).expect("the fake answered");
         assert_eq!(response["id"], 2);
         let argv: Vec<String> = std::fs::read_to_string(root.join("argv"))
             .unwrap()

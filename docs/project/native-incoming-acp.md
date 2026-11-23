@@ -852,13 +852,11 @@ cannot approve a non-read/search native request; Cortex gateway and attached ext
 still pass because their own channel checks apply. See the
 [permission contract](../../SECURITY.md#current-acp-boundary-106).
 
-The new outside_write and outside_command routes require a current writing
-worker, a nonempty scope and no pending assignment wait. Guarded outside writes
-and all non-Auto outside commands require an exact one-shot client approval.
-Development routine outside writes need no card; recognized control-plane
-components and the selected engine's credential/install roots still ask.
-Auto answers these cards itself. These are explicit same-user host routes,
-not an escape retry after a sandbox refusal. Symlink aliases and inside-project
+The `outside_write` and `outside_command` routes require a current writing
+worker, nonempty scope and no pending assignment wait. Eligible operations
+ask in Guarded and Development; Auto answers automatically. These are
+same-user host routes subject to their own authorization checks, not a way to
+bypass a denial. Symlink aliases and inside-project
 outside-write targets refuse. Writes use held no-follow parent descriptors,
 private temporary files, fsync and atomic replacement. Request identities bind
 complete payloads before effects; acknowledged retries return saved results,
@@ -1172,23 +1170,14 @@ No branch relaunches a payload. Engine sessions and detached unsandboxed descend
 Read-only Git disables hooks, fsmonitor, external
 diff/text conversion and configured clean/smudge/process filters.
 
-Ordinary worker commands use the [bubblewrap backend](#brokered-command-namespace-backend)
-for read-only, Guarded and host-writable Development/Auto filesystem views.
-Private descendants are overlaid after grants instead of refusing a writable
-parent solely because it contains protected children. Writing roles receive the
-whole-project grant independently of declared reservations (including absent
-reserved paths). Development/Auto detach external writable hardlinks under
-bounded, authority-checked preparation; other unsafe aliases stay read-only. They permit a
-canonical outside cwd; Guarded requires outside_command for that cwd. Existing
-literal and expanded glob owner denials are reapplied after grants.
-Verification grants existing Git-ignored directories, excluding aliases/private
-paths. Project virtualenv/bin paths are preferred, relocated explicit caches are
-validated, and only an owner-owned ssh-agent socket may pass the auth filter.
-Advanced Git/HOME/SSH/askpass/discarded-write policy is described in the
-[command backend](#brokered-command-namespace-backend); engine containment
-remains separate. Outside commands remain explicitly authorized unsandboxed
-owner actions and retain full output and exact live handles. These boundaries
-are not hostile-code isolation.
+Ordinary worker commands use the [Bubblewrap backend](#brokered-command-namespace-backend).
+Read-only and Guarded are host-visible profiles with limited writes; Guarded
+writers can write the live checkout. Eligible Development/Auto writers can
+write the checkout and use a non-private canonical host cwd. Private targets,
+role checks and owner write denials still apply. Eligible writers can use
+`outside_command` directly; recognized privilege requests and supervisor-proven
+pre-launch failures also use that route. Auto decides automatically, while
+Guarded and Development ask the owner. Started or uncertain runs are not replayed.
 
 Worker results derive evidence strength: verified passed checks require intact
 native output, a nontrivial argv, a unique receipt and an unchanged command
@@ -1318,17 +1307,17 @@ do not qualify live accounts, installed clients or a complete release.
 
 ## Brokered command namespace backend
 
-Worker commands and runtime verification use `native_command_sandbox.rs`, a
-Rust launcher for the Linux bubblewrap mount/process-view mechanism. It probes the exact view with
+Ordinary worker commands and runtime verification use `native_command_live.rs`,
+the host-visible Linux Bubblewrap launcher. It probes the exact view with
 `/bin/true` before admitting a payload and refuses unavailable setup; there is
 no unsandboxed or Landlock-only fallback. Availability is not cached across
-launches or restart.
+launches or restart. The scoped snapshot has a separate backend in
+`native_command_sandbox.rs`.
 
 Read-only commands receive a private PID namespace/procfs and read-only host
 mounts. Where the installed bubblewrap and filesystem support it, project writes
 go to a private disk-backed overlay discarded at command end; otherwise they
-remain read-only. Explicit existing Git-ignored verification directories remain
-writable in place. Read-only/Guarded commands bind private scratch over literal
+remain read-only. Read-only/Guarded commands bind private scratch over literal
 `/var/tmp`; host `/tmp` remains writable. Development/Auto makes the host writable
 but remounts the project read-only before grants. Mount sources use retained
 no-follow descriptors. Private/control-plane descendants and expanded owner
@@ -1348,22 +1337,15 @@ Guarded HOME exposes existing non-sensitive tool-state directories, creating
 relocated environment caches cannot overlap sensitive/control-plane paths,
 HOME ancestors or the project. Development retains its host-writable HOME.
 External writable hardlinks are atomically detached only for Development/Auto;
-internal writable aliases remain usable, denied/private aliases are not
-detached, and hardlink-heavy disposable ignored directories stay read-only.
-Preparation has byte/time bounds, preserves file metadata and rechecks authority
-after a durable command intent. An interrupted preparation never replays.
+internal writable aliases remain usable, and denied/private aliases are not
+detached. Preparation is bounded and rechecks authority before launch.
 
-Owner SSH-agent sockets are validated. Trusted root-owned SSH includes are shown
-as owner-owned read-only copies. Opted-in askpass generates a sealed dialog script;
-without an enabled owner setting, a display or an installed dialog it adds nothing.
-Named control-plane targets, including absent relocated paths, cannot be treated
-as routine outside writes; the existing consent/Auto policy still decides them.
-
-The existing receipt, output-capture and cancellation paths remain in place.
-Engine launch containment and external MCP parity remain separate. External MCP
-retains the Landlock/seccomp boundary below; that boundary alone does not protect metadata.
-These command fixtures do not qualify installed desktop rendering or a
-complete release. See [namespace checks](verification.md#native-command-namespace-checks).
+Runtime verification and program preflight use the live read-only profile with
+networking disabled, the owner's tool path and baseline writable grants for
+eligible existing ignored checkout directories and allowed caches. Private
+scratch and masks still apply; this is not a host-read policy or an engine
+boundary. Output capture and cancellation remain separate from containment. See
+[namespace checks](verification.md#native-command-namespace-checks).
 
 ## External MCP boundary
 

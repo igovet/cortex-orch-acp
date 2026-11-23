@@ -52,6 +52,18 @@ fn writer(db: &rusqlite::Transaction<'_>, c: &Credential) -> CoreResult<Identity
     waits::check_mutation_tx(db, &i.task, assignment)?;
     Ok(i)
 }
+pub(super) fn still_confirmed(
+    db: &rusqlite::Transaction<'_>,
+    credential: &Credential,
+    expected_mode: &str,
+) -> CoreResult<()> {
+    let identity = writer(db, credential)?;
+    if access::current(db, &identity.task)? != expected_mode {
+        return Err(CoreError::Refused("access_mode_changed"));
+    }
+    Ok(())
+}
+
 fn absolute(path: &Path) -> CoreResult<()> {
     if !path.is_absolute()
         || path
@@ -234,11 +246,7 @@ async fn execute_as(
             .map(|p| path.starts_with(p))
             .unwrap_or(true)
     });
-    // The access mode's decision table, as for native engine requests: Cortex
-    // private state is refused in every mode; Auto allows and records the rest;
-    // Guarded and Development ask the owner on the same decision card (a write
-    // outside the project asks in Development too). The scope, path-safety and
-    // consent checks above stay as they are.
+    // Auto decides eligible outside effects; all modes refuse private paths.
     use cortex_engine::permission::PathClass;
     let class = match crate::native_engine_policy::path_class(&root, &path) {
         PathClass::Ordinary
@@ -292,13 +300,7 @@ async fn execute_as(
         }
         let c = credential.clone();
         let expected = mode.clone();
-        recv(executor.write(move |db| {
-            let i = writer(db, &c)?;
-            if access::current(db, &i.task)? != expected {
-                return Err(CoreError::Refused("access_mode_changed"));
-            }
-            Ok(())
-        })?)
+        recv(executor.write(move |db| still_confirmed(db, &c, &expected))?)
         .await?;
         if write {
             let root = root.clone();
@@ -311,16 +313,14 @@ async fn execute_as(
             let c = credential.clone();
             let expected = mode.clone();
             recv(executor.write(move |db| {
-                let i = writer(db, &c)?;
-                if access::current(db, &i.task)? != expected {
-                    return Err(CoreError::Refused("access_mode_changed"));
-                }
+                still_confirmed(db, &c, &expected)?;
                 atomic_write(&root, &args, &data)
             })?).await
         } else {
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
             let pending = crate::native_commands::outside_capture(
-                executor.clone(),credential.clone(),running,path,&args,cancelled,rerouted.clone(),
+                executor.clone(), credential.clone(), running, path, &args, &mode, cancelled,
+                rerouted,
             );
             tokio::pin!(pending);
             loop {
@@ -328,7 +328,7 @@ async fn execute_as(
                     result=&mut pending=>break result,
                     _=tokio::time::sleep(std::time::Duration::from_millis(50))=>{
                         let c=credential.clone();let expected=mode.clone();
-                        if recv(executor.write(move|db|{let i=writer(db,&c)?;if access::current(db,&i.task)?!=expected{return Err(CoreError::Refused("access_mode_changed"));}Ok(())})?).await.is_err() {
+                        if recv(executor.write(move|db|still_confirmed(db, &c, &expected))?).await.is_err() {
                             cancel.send_replace(true);
                         }
                     }

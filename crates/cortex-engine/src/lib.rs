@@ -4,6 +4,7 @@ pub mod broker;
 pub mod engine;
 pub mod environment;
 pub mod external;
+pub mod filesystem_view;
 pub mod gateway;
 pub mod permission;
 pub mod schema;

@@ -11,6 +11,9 @@ mod policy;
 mod presentation;
 mod quota;
 pub mod short_text;
+#[cfg(test)]
+#[path = "native_routes_view.rs"]
+pub(crate) mod view;
 use cortex_core::{CoreError, CoreResult};
 use cortex_engine::environment::{CodexLauncher, EngineKind, LaunchSpec};
 use serde_json::{json, Value};
@@ -216,8 +219,38 @@ pub(crate) fn read_bytes(path: &Path, private: bool) -> CoreResult<Option<Vec<u8
     }
     Ok(Some(bytes))
 }
-pub(crate) fn codex_quota(home: &Path) -> Value {
-    quota::codex(home)
+/// The newest Codex rollout limits of a connection: its native directory (the
+/// owner's own Codex runs) and its private `CODEX_HOME`, where its confined
+/// sessions keep their rollouts (`view`). Read only; nothing is created.
+pub(crate) fn codex_quota(environment: &RouteEnvironment, connection: &str, home: &Path) -> Value {
+    let native = quota::codex(home);
+    if connection.is_empty()
+        || !connection
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return native;
+    }
+    let private = quota::codex(
+        &environment
+            .state
+            .join("cortex/engine-private")
+            .join(connection)
+            .join("codex-home"),
+    );
+    let observed = |w: &Value| {
+        ["primary", "secondary"]
+            .iter()
+            .filter_map(|n| w[n]["observed_at"].as_f64())
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    if private.as_object().is_some_and(|m| !m.is_empty())
+        && (native.as_object().is_none_or(|m| m.is_empty()) || observed(&private) > observed(&native))
+    {
+        private
+    } else {
+        native
+    }
 }
 fn private_parents(path: &Path) -> CoreResult<()> {
     for parent in path.parent().into_iter().flat_map(Path::ancestors) {
@@ -343,6 +376,9 @@ impl SelectedRoute {
                 })
                 .collect(),
             codex_launcher: None,
+            // The filesystem-view experiment is exercised only by synthetic
+            // fixtures. Normal sessions retain the installed engine route.
+            confinement: None,
         };
         launch
             .environment()
@@ -373,6 +409,32 @@ impl SelectedRoute {
         Ok(launch)
     }
 }
+#[cfg(test)]
+pub(crate) fn fixture_session_launch(
+    environment: RouteEnvironment,
+    root: &Path,
+    record: Value,
+) -> CoreResult<LaunchSpec> {
+    let entry = json!({"route":{"engine":record["engine"]}});
+    let confined = view::RouteConfiner::request(
+        &environment.state,
+        record["id"].as_str().ok_or(CoreError::Refused("invalid_route"))?,
+    );
+    let mut launch = SelectedRoute {
+        candidate: Candidate {
+            connection: record,
+            entry,
+        },
+        parameters: BTreeMap::new(),
+        basis: "offline_fixture",
+        decision: Value::Null,
+        environment,
+    }
+    .session_launch(root)?;
+    launch.confinement = Some(confined);
+    Ok(launch)
+}
+
 pub struct RouteResolver {
     environment: RouteEnvironment,
     rules: Value,

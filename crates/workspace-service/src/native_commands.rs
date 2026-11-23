@@ -345,13 +345,15 @@ pub(super) fn read_output(
         "integrity_verified":native,"next_offset":if offset+(b.len() as u64)<count as u64{json!(offset+b.len() as u64)}else{Value::Null},"complete":offset==0&&b.len() as i64==count}),
     ))
 }
-/// Called only after native_access has committed consent for the exact request.
+/// Called only after native_access commits consent for the exact request.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn outside_capture(
     executor: Arc<StoreExecutor>,
     credential: Credential,
     running: Running,
     root: PathBuf,
     args: &Value,
+    confirmed_mode: &str,
     mut cancel: watch::Receiver<bool>,
     rerouted: Option<Value>,
 ) -> CoreResult<Value> {
@@ -455,6 +457,19 @@ pub(super) async fn outside_capture(
     let output = Arc::new(Mutex::new(file));
     let deadline = Duration::from_secs(args["timeout_seconds"].as_u64().unwrap_or(600));
     let result=async{
+        // Worktree observation and askpass setup can outlast an owner decision.
+        // Recheck the writer and access mode here, not only before preparation.
+        let c = credential.clone();
+        let mode = confirmed_mode.to_owned();
+        let live = recv(executor.write(move |db| {
+            crate::native_access::still_confirmed(db, &c, &mode)
+        })?).await.is_ok();
+        if !live || *cancel.borrow() {
+            return Ok((None, Some("authority_changed")));
+        }
+        if *stopped.borrow() {
+            return Ok((None, Some("owner_stopped")));
+        }
         let mut child=cmd.spawn()?;let pid=child.id().unwrap();let mut group=Group(Some(pid));
         retain_process(&executor,&task,&reference,pid).await?;
         let mut out=tokio::spawn(drain(child.stdout.take().unwrap(),output.clone()));
@@ -962,20 +977,23 @@ pub(super) async fn execute(
     let mut argv: Vec<String> = if name == "project_git" {
         if args["kind"] == "status" {
             vec![
-                "git".into(),
+                "/usr/bin/git".into(),
                 "-c".into(),
                 "core.fsmonitor=false".into(),
                 "status".into(),
                 "--short".into(),
+                "--ignore-submodules=dirty".into(),
             ]
         } else {
             vec![
-                "git".into(),
+                "/usr/bin/git".into(),
                 "-c".into(),
                 "core.fsmonitor=false".into(),
                 "diff".into(),
                 "--no-ext-diff".into(),
                 "--no-textconv".into(),
+                "--ignore-submodules=dirty".into(),
+                "--submodule=short".into(),
                 "HEAD".into(),
                 "--".into(),
             ]
@@ -984,11 +1002,12 @@ pub(super) async fn execute(
         serde_json::from_value(args["argv"].clone())?
     };
     if name == "project_git" {
-        let mut probe = Command::new("git");
+        let mut probe = Command::new("/usr/bin/git");
         probe
             .args([
                 "config",
                 "--null",
+                "--includes",
                 "--name-only",
                 "--get-regexp",
                 r"^filter\.",
@@ -1038,16 +1057,12 @@ pub(super) async fn execute(
         .as_str()
         .map(PathBuf::from)
         .unwrap_or(root.clone());
-    // Access mode selects outside-cwd availability, never a role's write authority.
+    // Access mode selects outside-cwd availability, not write authority.
+    // Scope and path protections are checked before looking up outside paths.
     if !cwd.is_absolute()
         || cwd
             .components()
             .any(|p| matches!(p, std::path::Component::ParentDir))
-        || cwd
-            .canonicalize()
-            .map_err(|_| CoreError::Refused("invalid_cwd"))?
-            != cwd
-        || !cwd.is_dir()
     {
         return Err(CoreError::Refused("invalid_cwd"));
     }
@@ -1059,12 +1074,16 @@ pub(super) async fn execute(
         return Err(CoreError::Refused("scoped_command_cwd_refused"));
     } else if mode == "guarded"
         || crate::native_access::protected(&cwd)
+        || crate::native_command_live::policy::protected_target(&root, &cwd)
         || crate::native_command_sandbox::policy::protected_target(&root, &cwd)
         || protected_roots
             .iter()
-            .any(|p| p.canonicalize().map(|p| cwd.starts_with(p)).unwrap_or(true))
+            .any(|path| path.canonicalize().map(|p| cwd.starts_with(p)).unwrap_or(true))
     {
         return Err(CoreError::Refused("outside_cwd_denied"));
+    }
+    if cwd.canonicalize().map_err(|_| CoreError::Refused("invalid_cwd"))? != cwd || !cwd.is_dir() {
+        return Err(CoreError::Refused("invalid_cwd"));
     }
     // A writing worker's sudo, pkexec or doas cannot work in the sandbox: the runtime
     // runs it on the host at once. Read-only roles are never rerouted (they stay in
@@ -1143,7 +1162,7 @@ pub(super) async fn execute(
     let checks_work = !scoped
         && name == "command_run"
         && !cortex_core::lifecycle::completion::trivial_command(&argv);
-    let writes = if !scoped && !readonly && name != "project_git" {
+    let writes = if !scoped && !readonly && name == "command_run" {
         vec![root.clone()]
     } else {
         Vec::new()
@@ -1313,18 +1332,22 @@ pub(super) async fn execute(
             done: finished,
         },
     );
+    // This role-gated observation is not a command_run or verifier receipt.
     let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..]);
-    cmd.current_dir(&cwd)
+    cmd.args(&argv[1..])
+        .current_dir(&cwd)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", "/nonexistent")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .process_group(0)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null");
-    let started_digest = check_digest(root.clone(), &argv).await;
+        .process_group(0);
     let output = Arc::new(Mutex::new(out));
     let result=async{
         let mut child=cmd.spawn()?;let pid=child.id().unwrap();let mut group=Group(Some(pid));retain_process(&executor,&i.task,&reference,pid).await?;let mut out=tokio::spawn(drain(child.stdout.take().unwrap(),output.clone()));let mut err=tokio::spawn(drain(child.stderr.take().unwrap(),output.clone()));
@@ -1356,9 +1379,7 @@ pub(super) async fn execute(
     let mut retained=File::open(output_dir.join(&file))?;let (full,size)=fingerprint(&mut retained)?;
     retained.seek(SeekFrom::Start(0))?;let mut prefix=Vec::new();retained.take(65536).read_to_end(&mut prefix)?;
     let inline=String::from_utf8_lossy(&prefix).into_owned();
-    let ended_digest = check_digest(root, &argv).await;
-    let revision_digest = if started_digest == ended_digest { ended_digest } else { None };
-    let value=json!({"revision_digest":revision_digest,"tool_call_ref":reference,"argv":argv,"cwd":cwd,"profile":profile,"access_mode":mode,"exit_code":code,
+    let value=json!({"revision_digest":null,"tool_call_ref":reference,"argv":argv,"cwd":cwd,"profile":profile,"access_mode":mode,"exit_code":code,
         "complete":failure.is_none()&&code.is_some(),"settled":true,"failure":failure,"output":inline,"output_truncated":size>65536,"byte_count":size,"large_output_id":id});
     let c=credential.clone();let v=value.clone();let n=name;let task=i.task;let key=args["request_key"].as_str().unwrap().to_owned();
     let recorded=recv(executor.write(move|db|{

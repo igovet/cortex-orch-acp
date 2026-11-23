@@ -21,7 +21,7 @@ mod legacy_source_git;
 pub(crate) mod maintenance;
 mod mcp_discovery;
 mod mcp_redact;
-mod usage_refresh;
+pub(crate) mod usage_refresh;
 // Display activity redacts selected tool inputs with the same credential rules.
 pub(crate) use mcp_redact::redact as redact_display_text;
 mod native;

@@ -108,8 +108,34 @@ pub struct LaunchSpec {
     pub base_environment: BTreeMap<String, String>,
     /// Codex only: the native Codex launcher prepared at launch.
     pub codex_launcher: Option<CodexLauncher>,
+    /// The filesystem view the engine and all its descendants start in. Service
+    /// routes always set it; a view that cannot be prepared refuses the launch.
+    pub confinement: Option<ConfinementRequest>,
+}
+/// The service policy that prepares a launch's view, and the session's private
+/// broker directories that view must show (read-only, at
+/// [`crate::broker::VIEW_DIRECTORY`]).
+#[derive(Clone)]
+pub struct ConfinementRequest {
+    pub confiner: Arc<dyn crate::filesystem_view::Confiner>,
+    pub exposed: Vec<PathBuf>,
+}
+impl ConfinementRequest {
+    pub fn new(confiner: Arc<dyn crate::filesystem_view::Confiner>) -> Self {
+        Self {
+            confiner,
+            exposed: Vec::new(),
+        }
+    }
 }
 impl LaunchSpec {
+    /// Show these private broker directories to a confined launch. No effect
+    /// on an unconfined launch, which reaches them through their host paths.
+    pub fn expose(&mut self, directories: impl IntoIterator<Item = PathBuf>) {
+        if let Some(request) = &mut self.confinement {
+            request.exposed.extend(directories);
+        }
+    }
     pub fn environment(&self) -> Result<BTreeMap<String, String>> {
         for p in [
             &self.executable,

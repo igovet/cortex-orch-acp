@@ -88,6 +88,7 @@ impl NativeRoutes for Routes {
                 credential_directory: root.into(),
                 base_environment: BTreeMap::new(),
                 codex_launcher: None,
+                confinement: None,
             },
             relay: exe,
             broker_parent: root.join(if workspace_protocol::channel::current().is_dev() {

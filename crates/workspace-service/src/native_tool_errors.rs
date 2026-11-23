@@ -156,8 +156,9 @@ fn hint(code: &str) -> &'static str {
         "file_outcome_unknown" | "command_outcome_unknown" | "outside_outcome_unknown" | "project_effect_outcome_unknown" => "An earlier identical request has no settled outcome. Do not repeat it; inspect the current state and report the uncertainty.",
         "command_output_create_failed" => "The private output file could not be created before launch. No command was started by this attempt.",
         "unknown_command_ref" => "Use the exact tool_call_ref returned by command_run on this channel.",
-        "invalid_cwd" => "cwd must be an existing absolute directory without '..' components.",
-        "verification_executable_unavailable" => "The program was not found on the verification command path (the project's .venv/bin, venv/bin and node_modules/.bin, then the owner's tool search path, which already includes the existing usual per-user tool folders such as ~/.local/bin, ~/.cargo/bin and the default nvm, fnm or Volta Node). Install it project-privately without system changes or choose another executable check; ask the owner if neither is possible.",
+        "invalid_cwd" => "cwd must be an existing absolute directory without '..' components or aliases.",
+        "outside_cwd_denied" => "This role, access mode or protected location does not permit that working directory. Choose a directory in the task worktree.",
+        "verification_executable_unavailable" => "The program was not found as an executable in the read-only verification environment. For a bare program name, the verification command searches existing project tool directories (.venv/bin, venv/bin, node_modules/.bin), then the owner's validated PATH entries (or system defaults if none are retained).",
         "invalid_verification_command" | "verification_shell_syntax" => "Supply one literal argv: no shell operators, redirections or command substitution.",
         "native_command_sandbox_unavailable" => "The command did not start: its supervisor could not prepare or confirm the sandbox before release. Nothing ran. This refusal does not authorize running on the host. Report the preparation blocker; a fresh contained attempt is appropriate only if the problem has cleared and the original receipt confirms it never launched.",
         "project_mount_alias_refused" => "Use a path directly in the bound checkout; this path crosses a mount boundary.",
@@ -269,6 +270,21 @@ mod tests {
         let ok = json!({"content":[],"isError":false});
         assert_eq!(enrich(ok.clone()), ok);
     }
+    #[test]
+    fn missing_verification_executable_explains_the_search_path() {
+        let reply = reply("verification_executable_unavailable");
+        assert_eq!(reply["isError"], true);
+        assert_eq!(
+            reply["structuredContent"]["code"],
+            "verification_executable_unavailable"
+        );
+        let hint = reply["structuredContent"]["hint"].as_str().unwrap();
+        assert!(hint.contains("read-only verification environment"));
+        assert!(
+            hint.contains("(.venv/bin, venv/bin, node_modules/.bin), then the owner's validated PATH")
+        );
+    }
+
     #[test]
     fn an_unprepared_command_sandbox_does_not_authorize_host_execution() {
         let reply = reply("native_command_sandbox_unavailable");

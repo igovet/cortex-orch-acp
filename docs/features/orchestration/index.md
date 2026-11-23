@@ -957,6 +957,8 @@ A command's **identity** is its operation, exact `argv` and effective `cwd`;
 `command_run` also includes its profile: `restricted` (a Guarded writing worker), `development`
 (a host-writable writing worker in Development or Auto) or `read_only` (read-only roles and automatic
 verification). Guarded writer commands run in the task's working tree; Development may select another `cwd`.
+Eligible Development/Auto writer commands may use a non-private canonical host
+`cwd`; that is distinct from an explicit `outside_command`.
 An `outside_command` identity also retains its profile, `outside_confirmed`. Closure compares exact argv/cwd across `command_run` and `outside_command` in either direction; the approved outside route necessarily has a different profile. Within one operation the profile must still match. Both receipts retain their original operation/profile. This exception does not grant permission to run either command. Legacy `command_run` receipts without `cwd` map only to the task root and
 restricted profile. An `outside_command` receipt records its `cwd` too. A receipt without
 `argv` (or an `outside_command` receipt without `cwd`) has no identity and
@@ -1092,7 +1094,7 @@ the gap declares a non-empty `command` as literal argv, a verified, still-curren
 `command_run` pass with exactly matching argv and the task's working
 tree as its effective cwd in the same plan revision closes it, including across
 nodes. The pass may come from the read-only profile, from the task's own writer profile (for a writing worker in
-Development or Auto, the host-writable profile), or from the Guarded writer profile (`restricted`); a host-writable
+Development or Auto, the `development` profile), or from the Guarded writer profile (`restricted`); a `development` profile
 pass never counts once the task is Guarded. A different cwd cannot substitute for that check. The runtime
 reads argv from the cited `tool_call_ref` receipt and keeps the task and attempt evidence
 checks.
@@ -1331,11 +1333,10 @@ After denial the worker may use an allowed alternative, issue a new logical
 access request when conditions change, or use scope/replan for a replacement
 decomposition; it must not replay a refused action.
 
-These declared-scope extensions coordinate runtime writers; they do not
-dynamically remount or widen the OS jail. In the current launch boundary,
-ordinary writing workers already have whole-project write authority, and
-native-tool actions remain subject to existing jail, role and owner-policy
-boundaries. The logical wait fences Cortex gateway writes, command starts and
+A granted extension reserves additional paths to coordinate parallel writers.
+The ordinary assignment reservation is not a gateway write boundary. It does not
+remount or widen the OS jail, command mounts or read scope, and native-tool actions
+remain subject to existing jail, role and owner-policy boundaries. The logical wait fences Cortex gateway writes, command starts and
 publication while active, but is not a universal freeze of arbitrary native
 edits. See [permissions and containment](../permissions-and-containment/index.md).
 

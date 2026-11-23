@@ -191,6 +191,10 @@ pub(crate) fn probe_version(binary: &Path, path: Option<&OsString>) -> Option<St
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        #[cfg(test)]
+        if crate::native_account_fixture::guest().is_ok() {
+            command.stderr(Stdio::inherit());
+        }
         let mut child = command.spawn().ok()?;
         let mut stdout = child.stdout.take()?;
         let reader = std::thread::spawn(move || {
@@ -881,9 +885,11 @@ pub(crate) fn launch(
     }
     c.arg("--chdir")
         .arg(workspace)
-        .arg("--")
-        .arg(binary)
-        .arg(ACP);
+        .arg("--");
+    // Only the explicitly selected synthetic guest gets extra setup.
+    #[cfg(test)]
+    c.args(crate::native_account_fixture::prefix("catalogue", home)?);
+    c.arg(binary).arg(ACP);
     c.env_clear().env("PATH", "/usr/bin:/bin");
     // The descriptors were created close-on-exec: only this child inherits them.
     unsafe {

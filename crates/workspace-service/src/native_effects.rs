@@ -1,7 +1,7 @@
 //! Host effects. Never accepts a model's project digest or command pass flag.
 use crate::{
     machine::files::revision,
-    native_command_sandbox::{Profile, Sandbox},
+    native_command_live::{command_path, ignored_directories, Profile, Sandbox},
 };
 use cortex_core::{
     lifecycle::completion::{test_fast_failure_line, EvidenceSnapshot},
@@ -243,9 +243,7 @@ pub(super) async fn verify_cancelled(
 ) -> CoreResult<Value> {
     verify_in(root, argv, cancel, None).await
 }
-/// The verifier launch. Production passes no environment: the sandbox takes the
-/// service's own with `PATH` set to the owner's tool search path
-/// (`crate::tool_path`); tests pass an explicit owner environment.
+/// Production uses the owner's resolved tool path; tests can supply a fixture environment.
 async fn verify_in(
     root: PathBuf,
     argv: &[String],
@@ -253,6 +251,12 @@ async fn verify_in(
     environment: Option<BTreeMap<OsString, OsString>>,
 ) -> CoreResult<Value> {
     verify_with_deadline(root, argv, cancel, environment, VERIFICATION_DEADLINE).await
+}
+
+fn is_test_fast(argv: &[String]) -> bool {
+    matches!(argv, [program, action, ..]
+        if Path::new(program).file_name().and_then(|s| s.to_str()) == Some("cortex-xtask.sh")
+            && action == "test-fast")
 }
 
 async fn verify_with_deadline(
@@ -264,7 +268,7 @@ async fn verify_with_deadline(
 ) -> CoreResult<Value> {
     let r = root.clone();
     let sandbox = tokio::task::spawn_blocking(move || {
-        let ignored = crate::native_command_sandbox::ignored_directories(&r)?;
+        let ignored = ignored_directories(&r)?;
         match environment {
             None => Sandbox::prepare(&r, Profile::ReadOnly, &ignored, &[], false),
             Some(environment) => {
@@ -276,10 +280,7 @@ async fn verify_with_deadline(
     .map_err(|_| refused())?
     .map_err(|_| CoreError::Refused("native_verification_sandbox_unavailable"))?;
     let c = Command::from(sandbox.command(argv)?);
-    let test_fast = matches!(argv, [program, action, ..]
-        if Path::new(program).file_name().and_then(|s| s.to_str()) == Some("cortex-xtask.sh")
-            && action == "test-fast");
-    let result = capture_limited(c, deadline, cancel, OUTPUT, test_fast).await;
+    let result = capture_limited(c, deadline, cancel, OUTPUT, is_test_fast(argv)).await;
     let receipt = match result {
         Ok(o) => {
             let mut observation = json!({"complete":o.complete,"exit_code":o.code,"output_truncated":o.truncated,
@@ -432,8 +433,7 @@ async fn verification_program_available(
         let candidates: Vec<PathBuf> = if argv[0].contains('/') {
             vec![root.join(&argv[0])]
         } else {
-            let path =
-                crate::native_command_sandbox::command_path(&root, environment).unwrap_or_default();
+            let path = command_path(&root, environment).unwrap_or_default();
             std::env::split_paths(&path)
                 .filter(|directory| directory.is_absolute())
                 .map(|directory| directory.join(&argv[0]))
@@ -459,9 +459,7 @@ async fn verification_program_available(
             )
             .await?;
             if probe["observation"]["failure"] == "native_verification_sandbox_unavailable" {
-                return Err(CoreError::Refused(
-                    "native_verification_sandbox_unavailable",
-                ));
+                return Err(CoreError::Refused("native_verification_sandbox_unavailable"));
             }
             let executable_confirmed =
                 probe["observation"]["complete"] == true && probe["observation"]["exit_code"] == 0;
@@ -1223,7 +1221,7 @@ mod tests {
         }
     }
     async fn sandbox_available(root: &Path) -> bool {
-        match verify(root.to_owned(), &["/bin/true".into()]).await {
+        let available = match verify(root.to_owned(), &["/bin/true".into()]).await {
             Err(e) => {
                 assert_eq!(e.code(), "native_verification_sandbox_unavailable");
                 false
@@ -1238,7 +1236,15 @@ mod tests {
                 assert_eq!(r["observation"]["exit_code"], 0);
                 true
             }
+        };
+        if !available {
+            assert!(
+                std::env::var_os("CORTEX_REQUIRE_NAMESPACE_FIXTURES").is_none(),
+                "verifier namespace required but unavailable"
+            );
+            eprintln!("verifier namespace unavailable: prelaunch refusal only");
         }
+        available
     }
     fn git_cmd(dir: &Path, args: &[&str]) {
         let status = std::process::Command::new("git")
@@ -1951,6 +1957,70 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn verifier_reads_host_tools_and_limits_live_writes() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("checkout");
+        let home = fixture.0.join("account");
+        let host_input = home.join("host-input");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(&host_input, "benign host input\n").unwrap();
+        std::fs::create_dir(&root).unwrap();
+        git_cmd(&root, &["init"]);
+        std::fs::write(root.join(".gitignore"), "/outputs/\n").unwrap();
+        std::fs::create_dir(root.join("outputs")).unwrap();
+        std::fs::write(root.join("main.c"), "int main(void) { return 0; }\n").unwrap();
+        for name in [".cortex", ".cortex-dev"] {
+            let store = root.join(name);
+            std::fs::create_dir(&store).unwrap();
+            std::fs::write(store.join("private"), "synthetic").unwrap();
+        }
+        if !sandbox_available(&root).await {
+            return;
+        }
+
+        let environment = BTreeMap::from([
+            ("HOME".into(), home.into_os_string()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+        ]);
+        verification_preflight_in(root.clone(), &json!([["cc"]]), environment.clone())
+            .await
+            .unwrap();
+        let argv = [
+            "/bin/sh".into(),
+            "-ec".into(),
+            r#"
+                test "$(cat "$1")" = 'benign host input'
+                if touch "$HOME/unapproved" 2>/dev/null; then exit 86; fi
+                if test -r .cortex/private || test -r .cortex-dev/private; then exit 87; fi
+                cc main.c -o "$TMPDIR/compiler-probe"
+                "$TMPDIR/compiler-probe"
+                printf 'retained\n' > outputs/marker
+                printf 'discarded\n' > "$2"
+                printf '%s\n' "$TMPDIR"
+            "#.into(),
+            "verifier-fixture".into(),
+            host_input.to_str().unwrap().into(),
+            format!("/var/tmp/{}.marker", identity().unwrap()),
+        ];
+        let (_keep, cancel) = tokio::sync::watch::channel(false);
+        let receipt = verify_in(root.clone(), &argv, cancel, Some(environment))
+            .await
+            .unwrap();
+        let stdout = receipt["observation"]["stdout"].as_str().unwrap();
+        assert!(clean_verifier_receipt(&receipt, stdout), "{receipt}");
+        let scratch = Path::new(stdout.trim_end());
+        assert!(scratch.is_absolute());
+        assert!(!scratch.exists(), "private scratch survived");
+        assert!(!Path::new(&argv[5]).exists(), "private /var/tmp write reached host");
+        assert!(!host_input.with_file_name("unapproved").exists());
+        assert_eq!(std::fs::read_to_string(host_input).unwrap(), "benign host input\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join("outputs/marker")).unwrap(),
+            "retained\n"
+        );
+    }
+
+    #[tokio::test]
     async fn sandboxed_verifier_retains_only_bounded_output() {
         let f = Fixture::new();
         if !sandbox_available(&f.0).await {
@@ -2133,8 +2203,7 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(missing.code(), "verification_executable_unavailable");
-        // A launcher's program is resolved on the same path (cortex t_e308 274436:
-        // `timeout 900 cargo ...` exited 127 in verification).
+        // The verifier resolves a launcher's inner program on the same tool path.
         verification_preflight_in(
             project.clone(),
             &json!([["timeout", "900", "cortex-fixture-tool", "--version"]]),
@@ -2158,6 +2227,97 @@ mod tests {
                 .unwrap_err();
         assert_eq!(dangling.code(), "verification_executable_unavailable");
     }
+    /// No-paid host check: run the unchanged UI stage through the production
+    /// verifier. Supply the observed toolchain HOME without changing test HOME.
+    #[tokio::test]
+    #[ignore = "requires locked UI dependencies and the real verifier namespace"]
+    async fn verifier_node_runs_bounded_ui_stage() {
+        let home = PathBuf::from(
+            std::env::var_os("CORTEX_VERIFIER_OBSERVED_HOME")
+                .expect("set CORTEX_VERIFIER_OBSERVED_HOME to the host toolchain home"),
+        );
+        let search = crate::tool_path::inherited_with_usual(
+            &home,
+            &std::env::var_os("PATH").unwrap_or_default(),
+            &[],
+        )
+        .unwrap();
+        let environment = BTreeMap::from([
+            ("HOME".into(), home.into_os_string()),
+            ("PATH".into(), search),
+        ]);
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        verification_preflight_in(
+            root.clone(),
+            &json!([["node"], ["npm"], ["npx"], ["cargo"]]),
+            environment.clone(),
+        )
+        .await
+        .expect("owner tools must be available in the verifier");
+        let (_cancel, receiver) = tokio::sync::watch::channel(false);
+        let versions = verify_in(
+            root.clone(),
+            &["/bin/sh".into(), "-ec".into(),
+                "node --version; npm --version; npx --version".into()],
+            receiver,
+            Some(environment.clone()),
+        ).await.unwrap();
+        let stdout = versions["observation"]["stdout"].as_str().unwrap();
+        assert!(clean_verifier_receipt(&versions, stdout), "{versions}");
+        assert_eq!(stdout.lines().count(), 3, "{versions}");
+        println!("Verifier Node versions {}: {stdout}", versions["tool_call_ref"]);
+
+        let argv = ["scripts/cortex-xtask.sh", "test-fast", "--only", "ui"].map(str::to_owned);
+        let (_cancel, receiver) = tokio::sync::watch::channel(false);
+        verification_preflight_in(root.clone(), &json!([argv]), environment.clone())
+            .await
+            .unwrap();
+        let receipt = verify_in(root.clone(), &argv, receiver, Some(environment))
+            .await
+            .unwrap();
+        let observed = &receipt["observation"];
+        assert_eq!(observed["exit_code"], 0, "{receipt}");
+        assert_eq!(observed["complete"], true, "{receipt}");
+        assert_eq!(observed["output_truncated"], false);
+        assert_eq!(observed["failure"], Value::Null);
+        assert_eq!(receipt["profile"], "native-readonly-bubblewrap");
+        assert_eq!(receipt["argv"], json!(argv));
+        assert_eq!(receipt["cwd"], json!(root));
+
+        // Parse the reporter's SGR-coloured summaries without changing the runner
+        // or the environment of the command being verified.
+        let stdout = observed["stdout"].as_str().unwrap();
+        let mut segments = stdout.split('\x1b');
+        let mut plain = String::from(segments.next().unwrap_or_default());
+        for segment in segments {
+            let text = segment
+                .strip_prefix('[')
+                .and_then(|s| s.split_once('m'))
+                .filter(|(params, _)| params.bytes().all(|b| b.is_ascii_digit() || b == b';'))
+                .map_or(segment, |(_, text)| text);
+            plain.push_str(text);
+        }
+        assert!(plain.contains("Step 1: ui (") && plain.contains("Step 1: exit=0"));
+        for label in ["Test Files", "Tests"] {
+            let row = plain
+                .lines()
+                .find_map(|line| line.trim_start().strip_prefix(label)?.strip_prefix(' '))
+                .unwrap_or_else(|| panic!("missing {label} summary"));
+            let mut words = row.split_whitespace();
+            assert!(words.next().and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| n > 0));
+            assert_eq!(words.next(), Some("passed"), "{label}: {row}");
+            println!("{label} {}", row.trim());
+        }
+        println!(
+            "Verifier {}: complete=true exit=0 output_truncated=false; {}",
+            receipt["tool_call_ref"],
+            plain.lines().find(|line| line.starts_with("Step 1: exit=0")).unwrap()
+        );
+    }
+
     /// Plan admission and the program probe (`check_preflight` calls the same
     /// `verification_preflight`) refused a program the owner's terminal has, because
     /// the service's session-manager PATH lacks the shell's directories. With the

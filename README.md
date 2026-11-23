@@ -831,10 +831,10 @@ flowchart LR
   serializes conflicting writes; read-only roles (including the coordinator)
   cannot write the project at all; Development/Guarded/Auto access modes
   control where a writing worker may write and which engine-tool reads, writes
-  and deletions ask you first. In every mode a command can read (in Guarded,
-  never write) anything your account can read, outside the project included,
-  without asking. See
-  [permissions and containment](docs/features/permissions-and-containment/index.md).
+  and deletions ask you first. Eligible Development/Auto writer commands can
+  see the host and write the live checkout. Ordinary command reads are not
+  limited to the project, and native engine processes do not run in a general
+  filesystem jail. See [permissions and containment](docs/features/permissions-and-containment/index.md).
 
 Documentation never references internal task/assignment/report identifiers —
 these pages describe product behavior, not how a particular run was tracked.
@@ -1226,25 +1226,32 @@ scripts/cortex-paseo-tools.sh acp-smoke          # no-paid startup smoke
 ```
 
 For final runtime verification of this checkout, use the [bounded suite command groups](docs/project/verification.md#running-the-suite-inside-a-runtime-sandbox) so the verifier can retain a receipt for each group.
+The final verifier and program preflight use the host-visible read-only command
+profile with the owner's resolved tool path, including NVM when present. The
+verifier disables networking and permits writes only through the profile's
+existing grants and scratch, including eligible ignored output directories.
+Install locked project dependencies before running checks. See the
+[verification boundary](docs/features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for the current ACP sandboxing and permission
-boundary, and [PRIVACY.md](PRIVACY.md) for data handling. Report
-vulnerabilities as described there rather than in a public issue.
+See [SECURITY.md](SECURITY.md#attack-surface-review-and-limits) for the current
+boundaries and [PRIVACY.md](PRIVACY.md) for data handling. Report vulnerabilities
+privately as described in SECURITY.md.
 
-A task never stops merely because a command needs root or the command sandbox
-cannot run it: a writing worker's command that uses `sudo`, `pkexec` or `doas`, or
-that the sandbox could not start (the supervisor proves the payload never launched), is rerun on the host through the consent-backed
-outside route (Auto answers it); a command that already started in the sandbox is never
-replayed automatically, and refusal-looking output is only an advisory hint. `sudo` on the host asks the owner for the password
-in a "Password for sudo" card on the desktop or a paired phone. The password goes
-to sudo once and is never stored or shown to a model; Settings, Remote access can
-turn off phone answers. See [host rerouting and the sudo password
-prompt](docs/features/permissions-and-containment/index.md#host-rerouting-and-the-sudo-password-prompt).
+An eligible writing worker's command that requests recognized privilege
+escalation (`sudo`, `pkexec` or `doas`) uses the `outside_command` route. A
+sandbox launch can be retried once through that route only if the supervisor
+proves the payload never started. Started or uncertain commands are not
+replayed. Both direct and rerouted host actions get an action-specific decision:
+Auto answers it automatically; Guarded and Development ask you. If an approved host command needs
+a sudo password, the desktop or a paired phone shows a "Password for sudo"
+card. The password goes to sudo once and is never stored or shown to a model;
+Settings, Remote access can turn off phone answers. See [outside commands and
+the sudo password prompt](docs/features/permissions-and-containment/index.md#outside-commands-and-the-sudo-password-prompt).
 
-Nor does a task stop when it lacks access: a missing GitHub, Codex or Claude login,
-or sudo, becomes an owner action card on the desktop and paired phones ("Sign in to
+A missing GitHub, Codex or Claude login, or sudo access, can become an owner
+action card on the desktop and paired phones ("Sign in to
 GitHub", for example). It opens the CLI's own login (`gh auth login`, `codex login`,
 `claude auth login`) in the app's project terminal, takes a pasted GitHub token for
 `gh auth login --with-token` (sent to that CLI's stdin once, never stored or shown

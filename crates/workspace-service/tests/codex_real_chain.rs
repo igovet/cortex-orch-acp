@@ -114,6 +114,7 @@ fn session(root: &Path, bundle: &Path, session_launch: bool) -> BTreeSet<String>
             ("LANG".to_owned(), "C.UTF-8".to_owned()),
         ]),
         codex_launcher: Some(CodexLauncher::new(move || Ok(prepared.clone()))),
+        confinement: None,
     };
     // Exactly the environment a Cortex session launch passes to codex-acp, plus the
     // relay hand-over (here one stand-in named like the Cortex relay).

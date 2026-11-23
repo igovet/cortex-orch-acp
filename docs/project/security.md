@@ -19,44 +19,23 @@ them (linked inline); this page does not restate their design docs.
 
 ## Current brokered command boundary
 
-Fresh ACP sessions initialize Development for writing-worker host commands;
-engine and automatic-verification jails remain unchanged. Direct runtime/private,
-Git and owner-denied path protections reduce accidental effects, not arbitrary
-owner-code or Docker-daemon authority. Legacy sessions/tasks and unreadable state
-remain Guarded, and explicit client choices persist without owner-settings changes.
-See [current permission semantics](../features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto),
-not the historical containment assertions below. Real namespace skips do not
-qualify containment, and stopping a CLI does not roll back daemon resources.
+Fresh ACP sessions initialize Development; legacy or unreadable state stays
+Guarded. Ordinary writing-worker commands can write the live checkout, and
+eligible Development/Auto writers can use a non-private host cwd. Ordinary
+command profiles expose owner-readable host paths; assignment scope, direct
+private-path masks and owner-denied path protections do not provide a general
+host-read boundary. Direct host requests and eligible command reroutes use
+`outside_command`: Guarded and Development ask; Auto decides automatically.
+See [host rerouting](../../SECURITY.md#owner-password-for-sudo-askpass-and-host-rerouting).
 
-Development/Auto writing-worker commands with a whole-project grant (`.`,
-`**`, `**/*`) allow repository-data writes, including index, objects, refs,
-logs and merge/rebase/stash state, for ordinary repositories, linked worktrees
-and existing submodules under the superproject. Narrow scopes do not grant Git
-metadata writes. Config, config.worktree, hooks, info (attributes, excludes and
-sparse-checkout), commondir/gitdir pointers and legacy remote definitions stay
-protected; sibling worktrees and modules containers stay read-only. Existing
-submodule data is reopened with its own configuration guards. Standalone
-submodule logical roots remain unsupported. Development commands default hooks
-to /dev/null and fsmonitor to false through inherited command configuration;
-explicit Git command-line overrides are not blocked. Existing protected files
-are read-only bind mounts (including against lockfile+rename); absent entries
-retain the half-second GitGuard cleanup and its race/detached-process limitation.
-The .cortex store, other control-plane paths, read-only roles, verification and
-runtime-owned Git observations keep their existing protections. Namespace-skipped
-execution tests do not establish mount or rename enforcement.
-
-As of 2026-10-14, read-only roles (reviewer, auditor, explorer, architect and the other
-read-only profiles) run `command_run` through the read-only profile in every mode: HOME is
-read-only except an explicit tool-cache allowlist, with a private PID namespace. The profile is
-receipted as `read_only`; it does not mask the host `/tmp`, the session D-Bus under `/run/user`, the
-host `/dev` or a Docker socket. Automatic
-runtime verification uses the same profile in every mode (see the decisions log), and
-inside a check only the project's git-ignored directories are writable. Cache writes stay
-possible, so a read-only command can poison a cache that a later run reads; this narrows
-exposure but is not hostile-code isolation. The profile shares the owner's network, as every
-owner command does, so it limits writes, not egress. Deletion recognition for `command_run` is lexical and covers more
-commands than `rm` (for example `unlink`, `find -delete`, `git clean`, `shred -u`, `rsync --delete`);
-it does not recognise deletions inside scripts, interpreters or build tools.
+The runtime verifier uses the host-visible read-only command profile with
+networking disabled. It has private scratch and can retain writes in existing
+Git-ignored checkout directories and permitted tool caches. Other checkout
+writes are discarded or refused. Real disposable fixtures exercised compiler
+output and store protection; setup refusals alone do not qualify execution.
+Normal engine sessions are not placed in a general filesystem jail. See
+[current permissions](../features/permissions-and-containment/index.md) and
+[exposure and limits](../../SECURITY.md#attack-surface-review-and-limits).
 
 The relay credential for a brokered MCP server is in neither process argv nor the environment:
 the broker writes it to a 0600 `relay.token` file beside its socket, and the relay reads that

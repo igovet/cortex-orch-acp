@@ -1,21 +1,31 @@
 # OpenCode v2 outgoing adapter (optional)
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
+OpenCode remains an optional outgoing engine. Native account state stays in place;
+this is not a recommendation to copy logins, move the database or enable new routes.
 
+## Current Rust launch boundaries
 
-Cortex can run [OpenCode v2](https://opencode.ai/v2/docs/cli/acp/) (`opencode acp`) as a third outgoing ACP engine, next to Codex and Claude. It is **optional and fail-closed**:
+- **Task and short text:** the engine starts directly as the owner. Verified
+  binary selection and ACP mode checks are not an OS filesystem jail.
+- **Catalogue:** the separate verified launch uses Bubblewrap with user, PID and
+  IPC namespaces, a read-only host-root bind and writable native state mounts.
+  That includes the existing OpenCode data directory, not just the database.
+- **Version check:** a separate network-disabled Bubblewrap probe uses a
+  throwaway HOME and a read-only host-root bind. It does not need a native
+  database grant.
 
-- startup never discovers it or creates a connection for it;
-- you onboard it with one explicit setup step;
-- automatic worker routing never picks it unless `routing.json` opts in (a `models` selection list or an exact `auto_allow` entry);
-- only OpenCode **2.x.x** is accepted (1.x and 3.x are refused), and it runs only inside the engine jail with process isolation.
+The catalogue and version implementations are in
+`crates/workspace-service/src/machine/config_opencode.rs`; the session launch is in
+`crates/cortex-engine/src/engine.rs`. These source boundaries are not evidence of
+installed per-engine filesystem isolation. The intended future exception is the
+combined native database and its necessary sidecars for the adapter and
+catalogue only. It is not an authorization for sibling files or metadata,
+ordinary commands, other engines or helpers.
 
-The binary trust and version check, configuration, prompt and option mapping, Code Mode tool cards and the OpenCode branches of the engine, routing and catalogue code were implemented in the former Python runtime. The Rust host has an OpenCode engine kind, but the behavior described on this page was not re-verified against it; the Settings paths that need the version probe refuse (below). The setup commands are in `cortex-paseo-tools` (`add-opencode-connection`, `refresh-catalog`).
-
-Workspace Settings refresh currently handles only
-[metadata-only OpenCode install rejections](../../configuration.md#opencode-pre-probe-rejection)
-natively. For a potentially usable install the version probe must run in the OpenCode network-less namespace jail, which the Rust host does not provide: `discover_opencode`, `onboard_opencode` and `onboard_connection` refuse with `config_api_unavailable`, and `discover_connections` reports `discovery_unavailable` (see [native Settings limits](../../project/native-incoming-acp.md#paseo-settings-under-the-rust-launch)). Provider import and prompt-free catalog observation for OpenCode are likewise unavailable.
-This is not a native successful OpenCode producer or isolation qualification.
+The sections below retain the former Python adapter description and historical
+qualification. In particular, engine-jail, process-secret and launch claims
+there are not current Rust guarantees. Do not use the old setup recipes as
+qualification steps.
 
 ## Onboarding
 

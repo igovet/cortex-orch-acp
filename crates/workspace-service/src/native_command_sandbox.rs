@@ -1,12 +1,15 @@
 //! Brokered command filesystem/process views, using the production bubblewrap mechanism.
-//! Read-only mounts also deny metadata writes; writable scratch/cache mounts do not.
+//! The actual checkout is read-only; writes stay in separate private paths.
 //! No unsandboxed or Landlock-only fallback. This is not hostile-code isolation.
 #[path = "native_command_policy.rs"]
 pub(crate) mod policy;
 #[path = "native_command_scoped.rs"]
 mod scoped;
-#[path = "native_command_ssh.rs"]
-mod ssh;
+#[path = "native_command_runtime_files.rs"]
+mod runtime_files;
+#[cfg(test)]
+#[path = "native_command_git.rs"]
+mod git;
 pub(crate) const CODEX_SCRATCH: &str = "codex_scratch";
 use std::{
     collections::BTreeMap,
@@ -31,10 +34,8 @@ pub(crate) struct Sandbox {
     scratch: PathBuf,
     environment: BTreeMap<OsString, OsString>,
     pins: Vec<std::sync::Arc<fs::File>>,
-    guard: Option<policy::GitGuard>,
-    overlay: bool,
-    ssh_environment: BTreeMap<OsString, OsString>,
     scoped_root: Option<PathBuf>,
+    git_context: Option<(PathBuf, PathBuf)>,
 }
 
 fn unavailable(reason: &str) -> io::Error {
@@ -85,29 +86,6 @@ impl Sandbox {
             network,
             environment,
             &mut || Ok(()),
-        )
-    }
-
-    /// `timings` receives per-stage durations (milliseconds) and counts, also when
-    /// preparation fails: numbers only, never paths or names.
-    pub(crate) fn prepare_authorized(
-        root: &Path,
-        profile: Profile,
-        writes: &[PathBuf],
-        protected: &[PathBuf],
-        before_write: &mut dyn FnMut() -> io::Result<()>,
-        timings: &mut BTreeMap<&'static str, u64>,
-    ) -> io::Result<Self> {
-        Self::with_environment_timed(
-            root,
-            profile,
-            writes,
-            protected,
-            true,
-            // In the per-command supervisor this is the PATH the service resolved for it.
-            crate::tool_path::environment(),
-            before_write,
-            timings,
         )
     }
 
@@ -192,16 +170,31 @@ impl Sandbox {
         binary: PathBuf,
         root: &Path,
         profile: Profile,
-        writes: &[PathBuf],
+        _writes: &[PathBuf],
         protected: &[PathBuf],
         network: bool,
         environment: BTreeMap<OsString, OsString>,
-        before_write: &mut dyn FnMut() -> io::Result<()>,
+        _before_write: &mut dyn FnMut() -> io::Result<()>,
         timings: &mut BTreeMap<&'static str, u64>,
     ) -> io::Result<Self> {
-        let millis = |since: Instant| since.elapsed().as_millis() as u64;
         let root = root.canonicalize()?;
-        let scratch = std::env::temp_dir().join(format!(
+        if ["/", "/proc", "/dev", "/run"].iter().any(|p| {
+            root == Path::new(p) || (*p != "/" && root.starts_with(p))
+        }) {
+            return Err(unavailable("invalid_project_mount"));
+        }
+        let temp = Path::new("/tmp").canonicalize()?;
+        if temp.starts_with(&root) || Path::new("/var/tmp").starts_with(&root) {
+            return Err(unavailable("scratch_overlaps_checkout"));
+        }
+        if policy::env_path(&environment, "HOME")
+            .filter(|home| home.is_absolute())
+            .and_then(|home| home.canonicalize().ok())
+            .is_some_and(|home| home.starts_with(&root))
+        {
+            return Err(unavailable("project_overlaps_owner_home"));
+        }
+        let scratch = temp.join(format!(
             "cortex-command-{}",
             crate::native_effects::identity().map_err(|_| unavailable("scratch_identity"))?
         ));
@@ -212,181 +205,160 @@ impl Sandbox {
             scratch,
             environment,
             pins: Vec::new(),
-            guard: None,
-            overlay: false,
-            ssh_environment: BTreeMap::new(),
             scoped_root: None,
+            git_context: None,
         };
-        fs::create_dir(s.scratch.join("var-tmp"))?;
         s.args.push("--die-with-parent".into());
         if profile == Profile::ReadOnly {
-            s.args.push("--unshare-pid".into());
+            s.args.extend(["--unshare-pid", "--proc", "/proc", "--remount-ro", "/proc"].map(OsString::from));
         }
+        // In a shared PID namespace, host procfs is not a project input. Do
+        // not mount it into the view; the existing network and IPC stay shared.
         if !network {
             s.args.push("--unshare-net".into());
         }
         s.args.extend(
-            [
-                "--clearenv",
-                "--setenv",
-                "PATH",
-                "/usr/local/bin:/usr/bin:/bin",
-                "--setenv",
-                "LANG",
-                "C.UTF-8",
-            ]
-            .map(OsString::from),
+            ["--clearenv", "--cap-drop", "ALL", "--dev", "/dev",
+             "--setenv", "LANG", "C.UTF-8"]
+                .map(OsString::from),
         );
-        // Only the filtered owner environment reaches the child.
-        // HOME is intentionally the real owner's home; its cache grants are mounts.
-        s.mount(
-            if profile == Profile::Development {
-                "--bind"
-            } else {
-                "--ro-bind"
-            },
-            Path::new("/"),
-            Path::new("/"),
-        )?;
-        s.args
-            .extend(["--proc", "/proc", "--dev-bind", "/dev", "/dev"].map(OsString::from));
-        s.mount("--bind", Path::new("/tmp"), Path::new("/tmp"))?;
-        if profile != Profile::Development {
-            s.mount("--bind", &s.scratch.join("var-tmp"), Path::new("/var/tmp"))?;
+        for path in ["/tmp", "/var/tmp"] {
+            s.args.extend(
+                ["--perms", "01777", "--size", "1073741824", "--tmpfs", path]
+                    .map(OsString::from),
+            );
         }
-        let home = s
-            .environment
-            .get(std::ffi::OsStr::new("HOME"))
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute() && p.is_dir());
+        // Large build artifacts go to a fresh, owner-only directory on disk,
+        // not the host HOME, a shared cache, or RAM-backed temp.
+        s.mount("--bind", &s.scratch.clone(), Path::new(runtime_files::HOME))?;
         let controls = Instant::now();
-        let mut protected = policy::expand(&root, protected)?;
-        protected.extend(policy::controls(&root, &s.environment)?);
-        let git_dirs = policy::git_dirs(&root)?;
-        timings.insert("controls_ms", millis(controls));
-        protected.extend(git_dirs.iter().cloned());
-        policy::home(&mut s, &root, profile, &protected)?;
-        for p in &protected {
-            s.protect(p)?;
+        let mut hidden = policy::controls(&root, &s.environment)?;
+        hidden.extend(policy::expand(&root, protected)?);
+        if hidden.iter().any(|p| root.starts_with(p)) {
+            return Err(unavailable("protected_project_mount"));
         }
-        // A project beneath a writable host or /tmp is always remounted read-only first.
-        let project_mount = s.args.len();
-        s.mount("--ro-bind", &root, &root)?;
-        if profile == Profile::ReadOnly {
-            let overlay = Instant::now();
-            s.discard_project_writes(project_mount, &root)?;
-            timings.insert("overlay_probe_ms", millis(overlay));
-            let options = s
-                .environment
-                .get(std::ffi::OsStr::new("PYTEST_ADDOPTS"))
-                .map(|v| v.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            s.environment.insert(
-                "PYTEST_ADDOPTS".into(),
-                format!(
-                    "{options} -o '{}'",
-                    format!("cache_dir={}/pytest-cache", s.scratch.display())
-                        .replace('\'', "'\"'\"'")
-                )
-                .into(),
-            );
-        }
-        let materialization_denials: Vec<_> = protected
-            .iter()
-            .filter(|p| !git_dirs.contains(p))
-            .cloned()
-            .collect();
-        let walked = Instant::now();
-        let tree = policy::scan(&root, writes, &materialization_denials)?;
-        timings.insert("tree_walk_ms", millis(walked));
-        timings.insert("tree_entries", tree.entries as u64);
-        let hardlinks = Instant::now();
-        let link_overlays = policy::links_from(&tree, &root, profile, before_write)?;
-        timings.insert("hardlink_policy_ms", millis(hardlinks));
-        for p in writes {
-            let p = match p.canonicalize() {
-                Ok(p) => p,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e),
-            };
-            if !p.starts_with(&root) {
-                return Err(unavailable("write_grant_outside_project"));
-            }
-            s.mount("--bind", &p, &p)?;
-        }
-        // Private controls and owner denials always follow writable grants.
-        s.private_entries(&tree.private)?;
-        for p in &protected {
-            if p.starts_with(&root) && !git_dirs.contains(p) {
-                s.protect(p)?;
-            }
-        }
-        let whole = writes.iter().any(|p| p == &root);
-        let git = Instant::now();
-        policy::git(&mut s, &root, &git_dirs, profile, whole)?;
-        timings.insert("git_policy_ms", millis(git));
-        for p in link_overlays {
-            s.mount("--ro-bind", &p, &p)?;
-        }
-        // Scratch last: even when the caller's temp directory is under /var/tmp.
-        s.mount("--bind", &s.scratch.clone(), &s.scratch.clone())?;
-        for variable in ["HOME", "TMPDIR", "TMP", "TEMP"] {
-            let value = if variable == "HOME" {
-                home.as_ref().unwrap_or(&s.scratch)
-            } else {
-                &s.scratch
-            };
-            s.args.extend([
-                OsString::from("--setenv"),
-                variable.into(),
-                value.as_os_str().into(),
-            ]);
-        }
-        if home.is_none() {
-            s.environment.insert(
-                "XDG_CACHE_HOME".into(),
-                s.scratch.join(".cache").into_os_string(),
-            );
-        }
-        if let Some(path) = command_path(&root, &s.environment) {
-            s.environment.insert("PATH".into(), path);
-        }
-        for name in [".venv", "venv"] {
-            let p = root.join(name);
-            if p.join("bin").is_dir() {
-                s.environment
-                    .insert("VIRTUAL_ENV".into(), p.into_os_string());
-                break;
-            }
-        }
-        s.environment
-            .insert("PYTHONDONTWRITEBYTECODE".into(), "1".into());
-        ssh::configure(&mut s, home.as_deref())?;
+        s.runtime_inputs(&root, &hidden)?;
+        let extra = s.extra_tools(&root, &hidden)?;
+        s.project_inputs(&root, &hidden, controls, timings)?;
+        s.environment = BTreeMap::from([
+            ("HOME".into(), runtime_files::HOME.into()),
+            ("CARGO_HOME".into(), format!("{}/.cargo", runtime_files::HOME).into()),
+            ("RUSTUP_HOME".into(), format!("{}/.rustup", runtime_files::HOME).into()),
+            ("PATH".into(), runtime_files::path(&root, extra).ok_or_else(|| unavailable("command_path_invalid"))?),
+            ("TMPDIR".into(), "/tmp".into()),
+            ("TMP".into(), "/tmp".into()),
+            ("TEMP".into(), "/tmp".into()),
+            ("XDG_CACHE_HOME".into(), format!("{}/cache", runtime_files::HOME).into()),
+            ("CARGO_TARGET_DIR".into(), format!("{}/target", runtime_files::HOME).into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+        ]);
+        s.git_config(&[
+            "core.hooksPath=/dev/null".into(),
+            "core.fsmonitor=false".into(),
+            format!("lfs.storage={}/git-lfs", runtime_files::HOME),
+        ]);
         s.args
-            .extend([OsString::from("--chdir"), root.into_os_string()]);
+            .extend(["--remount-ro".into(), "/".into(), "--chdir".into(), root.into_os_string()]);
         let probe = Instant::now();
         let probed = s.probe();
-        timings.insert("probe_ms", millis(probe));
+        timings.insert("probe_ms", probe.elapsed().as_millis() as u64);
         probed?;
         Ok(s)
     }
 
+    /// The read-only checkout with its audited Git inputs and private masks,
+    /// shared by every command view and by a confined engine's working directory.
+    fn project_inputs(
+        &mut self,
+        root: &Path,
+        hidden: &[PathBuf],
+        controls: Instant,
+        timings: &mut BTreeMap<&'static str, u64>,
+    ) -> io::Result<()> {
+        let checkout = std::sync::Arc::new(policy::pin(root)?);
+        let mut git = policy::git_inputs(root, &checkout)?;
+        self.git_context = git.first().zip(git.last()).map(|((dir, _), (common, _))| {
+            (dir.clone(), common.clone())
+        });
+        let mut registrations = Vec::new();
+        for (path, _) in &git {
+            if hidden.iter().any(|h| {
+                path.starts_with(h) || h.canonicalize().is_ok_and(|h| path.starts_with(h))
+            }) {
+                return Err(unavailable("unverified_git_input"));
+            }
+            let worktrees = path.join("worktrees");
+            if worktrees.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+                registrations.push(worktrees);
+            }
+        }
+        git.sort_by_key(|(path, _)| path.components().count());
+        timings.insert("controls_ms", controls.elapsed().as_millis() as u64);
+
+        // Keep the actual worktree read-only, including ignored paths. Tests
+        // and builds use separate per-run locations without changing their inputs.
+        let walked = Instant::now();
+        let tree = policy::scan(root, &checkout, hidden, &git, &registrations)?;
+        timings.insert("tree_walk_ms", walked.elapsed().as_millis() as u64);
+        timings.insert("tree_entries", tree.entries as u64);
+        cortex_engine::filesystem_view::bind_pinned(
+            &mut self.args, &mut self.pins, checkout, root, true,
+        )?;
+        // Bind the audited Git roots before masking: no later metadata bind
+        // may re-expose a private descendant. Only the current linked
+        // worktree's pinned directory is admitted through the registration mask.
+        for (path, pin) in &git {
+            cortex_engine::filesystem_view::bind_pinned(
+                &mut self.args, &mut self.pins, pin.clone(), path, true,
+            )?;
+            let worktrees = path.join("worktrees");
+            if registrations.contains(&worktrees) {
+                self.args.extend(["--tmpfs".into(), worktrees.into_os_string()]);
+            }
+        }
+        for path in &registrations {
+            self.args.extend(["--remount-ro".into(), path.as_os_str().into()]);
+        }
+        let containing_mount = |path: &Path| {
+            git.iter().rev().find_map(|(base, _)| path.starts_with(base).then_some(base.as_path()))
+                .or_else(|| path.starts_with(root).then_some(root))
+        };
+        let mut masks = std::collections::BTreeSet::new();
+        for path in tree.private.iter().chain(&tree.private_targets).chain(hidden) {
+            if let Ok(real) = path.canonicalize() {
+                if root.starts_with(&real) || git.iter().any(|(p, _)| p.starts_with(&real)) {
+                    return Err(unavailable("protected_project_mount"));
+                }
+                if let Some(base) = containing_mount(&real) {
+                    if !registrations.iter().any(|p| p.starts_with(base) && real.starts_with(p)) {
+                        masks.insert(real);
+                    }
+                }
+            }
+        }
+        let aliases = policy::external_link_paths(&tree, &masks);
+        masks.extend(aliases.into_iter().map(Path::to_path_buf));
+        let mut mounted: Vec<PathBuf> = Vec::new();
+        for path in masks {
+            if !mounted.iter().any(|p| path.starts_with(p)) {
+                let base = containing_mount(&path).ok_or_else(|| unavailable("unsafe_private_input"))?;
+                self.hide_project_input(base, &path)?;
+                mounted.push(path);
+            }
+        }
+        Ok(())
+    }
+
     fn mount(&mut self, kind: &str, source: &Path, target: &Path) -> io::Result<()> {
-        use std::os::fd::AsRawFd;
         let real = source.canonicalize()?;
-        let file = std::sync::Arc::new(policy::pin(&real)?);
-        let flag = match kind {
-            "--bind" => "--bind-fd",
-            "--ro-bind" => "--ro-bind-fd",
+        let read_only = match kind {
+            "--bind" => false,
+            "--ro-bind" => true,
             _ => return Err(unavailable("invalid_mount_kind")),
         };
-        self.args.extend([
-            flag.into(),
-            file.as_raw_fd().to_string().into(),
-            target.as_os_str().into(),
-        ]);
-        self.pins.push(file);
-        Ok(())
+        cortex_engine::filesystem_view::bind(&mut self.args, &mut self.pins, &real, target, read_only)
     }
     fn git_config(&mut self, values: &[String]) {
         let prior = self
@@ -410,107 +382,30 @@ impl Sandbox {
             (prior + values.len()).to_string().into(),
         );
     }
-    fn discard_project_writes(&mut self, at: usize, root: &Path) -> io::Result<()> {
-        let probe_root = self.scratch.join("overlay-probe");
-        let upper = self.scratch.join("overlay-upper");
-        let work = self.scratch.join("overlay-work");
-        for p in [&probe_root, &upper, &work] {
-            fs::create_dir(p)?;
-        }
-        let mut probe = Command::new(&self.binary);
-        probe
-            .args([
-                "--die-with-parent",
-                "--ro-bind",
-                "/",
-                "/",
-                "--dev",
-                "/dev",
-                "--overlay-src",
-            ])
-            .arg(&probe_root)
-            .arg("--overlay")
-            .arg(&upper)
-            .arg(&work)
-            .arg(&probe_root)
-            .args(["--", "/bin/true"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut child = probe.spawn()?;
-        // Generous for a loaded host: a probe that merely ran slowly must not leave a
-        // read-only command without its discarded project overlay.
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let supported = loop {
-            match child.try_wait()? {
-                Some(status) => break status.success(),
-                None if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break false;
-                }
-                None => std::thread::sleep(Duration::from_millis(10)),
-            }
+    fn hide_project_input(&mut self, root: &Path, path: &Path) -> io::Result<()> {
+        // A symlink outside the project has no target in this view; the scan
+        // separately identifies private alias targets that are in the project.
+        let meta = match path.symlink_metadata() {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
         };
-        if supported {
-            let fd = self.args[at + 1].clone();
-            let source = OsString::from(format!("/proc/self/fd/{}", fd.to_string_lossy()));
-            // The overlay source is a path operand, not a consumed --bind-fd.
-            // Keep its descriptor in bubblewrap\'s monitor, never the payload.
-            self.args.extend([OsString::from("--sync-fd"), fd]);
-            self.args.splice(
-                at..at + 3,
-                [
-                    OsString::from("--overlay-src"),
-                    source,
-                    "--overlay".into(),
-                    upper.into_os_string(),
-                    work.into_os_string(),
-                    root.as_os_str().into(),
-                ],
-            );
-            self.overlay = true;
-        }
-        Ok(())
-    }
-    pub(crate) fn finish(&mut self) -> Vec<String> {
-        self.guard.as_mut().map(|g| g.finish()).unwrap_or_default()
-    }
-
-    fn protect(&mut self, p: &Path) -> io::Result<()> {
-        if !p.try_exists()? {
+        if meta.is_symlink() {
             return Ok(());
         }
-        let real = p.canonicalize()?;
-        if real == Path::new("/") {
-            return Err(unavailable("control_path_overlaps_host"));
+        let path = path.canonicalize()?;
+        if !path.starts_with(root) || path == root {
+            return Err(unavailable("unsafe_private_input"));
         }
-        if p.file_name()
-            .is_some_and(|n| n == ".cortex" || n == ".cortex-dev")
-            && real.is_dir()
-        {
+        if meta.is_dir() {
             self.args.extend([
-                OsString::from("--tmpfs"),
-                real.as_os_str().into(),
+                "--tmpfs".into(),
+                path.as_os_str().into(),
                 "--remount-ro".into(),
-                real.as_os_str().into(),
+                path.as_os_str().into(),
             ]);
         } else {
-            self.mount("--ro-bind", &real, &real)?;
-        }
-        Ok(())
-    }
-
-    /// Hides every private-named entry the preparation scan found at any depth.
-    fn private_entries(&mut self, entries: &[PathBuf]) -> io::Result<()> {
-        for p in entries {
-            if p.file_name()
-                .is_some_and(|n| n == ".cortex-dev-owner.json" || n == ".cortex-workspace-dev.json")
-            {
-                self.mount("--ro-bind", Path::new("/dev/null"), p)?;
-            } else {
-                self.protect(p)?;
-            }
+            self.mount("--ro-bind", Path::new("/dev/null"), &path)?;
         }
         Ok(())
     }
@@ -558,6 +453,12 @@ impl Sandbox {
                 mapped = Path::new("/workspace").join(relative);
                 &mapped
             } else {
+                let root = Path::new(self.args.last().ok_or_else(|| unavailable("missing_cwd"))?);
+                if !cwd.starts_with(root)
+                    || cwd.components().any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err(unavailable("outside_cwd"));
+                }
                 cwd
             };
             command
@@ -590,52 +491,7 @@ impl Sandbox {
                 Ok(())
             });
         }
-        // Like the retained command boundary, credentials/channel secrets are not inherited.
-        let secret = |key: &str| {
-            let key = key.to_ascii_uppercase();
-            key.starts_with("CORTEX_")
-                // Any *KEY name (OLLAMA_CLOUD_BACKUP_KEY, GPG_KEY, X_KEY_ID ...) is treated as a credential.
-                || (!key.starts_with("GIT_CONFIG_")
-                    && (key.ends_with("KEY") || key.ends_with("KEYS") || key.contains("_KEY_")))
-                || [
-                    "TOKEN",
-                    "SECRET",
-                    "PASSW",
-                    "CREDENTIAL",
-                    "API_KEY",
-                    "APIKEY",
-                    "PRIVATE_KEY",
-                    "PRIVATEKEY",
-                    "COOKIE",
-                    "SESSION",
-                ]
-                .iter()
-                .any(|part| key.contains(part))
-        };
         for (key, value) in &self.environment {
-            let upper = key.to_string_lossy().to_ascii_uppercase();
-            let auth = upper.contains("AUTH")
-                && !["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE"]
-                    .contains(&upper.as_str());
-            use std::os::unix::fs::{FileTypeExt, MetadataExt};
-            unsafe extern "C" {
-                fn getuid() -> std::ffi::c_uint;
-            }
-            let ssh_agent = upper == "SSH_AUTH_SOCK"
-                && Path::new(value).is_absolute()
-                && !value.as_encoded_bytes().contains(&b'\n')
-                && fs::metadata(PathBuf::from(value))
-                    .is_ok_and(|m| m.file_type().is_socket() && m.uid() == unsafe { getuid() });
-            if !secret(&key.to_string_lossy())
-                && (!auth || ssh_agent)
-                && !["HOME", "TMPDIR", "TMP", "TEMP"]
-                    .iter()
-                    .any(|k| key == std::ffi::OsStr::new(k))
-            {
-                command.arg("--setenv").arg(key).arg(value);
-            }
-        }
-        for (key, value) in &self.ssh_environment {
             command.arg("--setenv").arg(key).arg(value);
         }
         command.arg("--").args(argv);
@@ -648,162 +504,42 @@ impl Sandbox {
     }
 }
 
-/// The search path every sandboxed command resolves a bare program name on: the
-/// project's own tool directories first, then the owner's inherited `PATH`. The
-/// verifier's availability probe uses this same list, so a program a worker command
-/// finds (for example a `/usr/local/bin` link into a version manager under the
-/// read-only home) is not reported missing to the coordinator.
-pub(crate) fn command_path(
+/// A confined engine's working directory: the same read-only checkout, Git
+/// inputs and private masks as a command view (`home` names the engine's own
+/// HOME so its controls are masked when they lie inside the checkout). The view
+/// arguments and pinned sources are appended to the caller's view.
+#[cfg(test)]
+pub(crate) fn engine_project_view(
     root: &Path,
-    environment: &BTreeMap<OsString, OsString>,
-) -> Option<OsString> {
-    let inherited = environment
-        .get(std::ffi::OsStr::new("PATH"))
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or("/usr/local/bin:/usr/bin:/bin".into());
-    let mut paths = Vec::new();
-    for name in [".venv/bin", "venv/bin", "node_modules/.bin"] {
-        let p = root.join(name);
-        if p.is_dir() {
-            paths.push(p);
-        }
+    home: &Path,
+    args: &mut Vec<OsString>,
+    pins: &mut Vec<std::sync::Arc<fs::File>>,
+) -> io::Result<()> {
+    let root = root.canonicalize()?;
+    if ["/", "/proc", "/dev", "/run", "/usr", "/etc"]
+        .iter()
+        .any(|p| root == Path::new(p) || (*p != "/" && root.starts_with(p)))
+    {
+        return Err(unavailable("invalid_project_mount"));
     }
-    // The owner's entries are validated again here: a project can never add a search
-    // directory of its own beyond the fixed tool directories above (its folder and
-    // its private `.cortex` state are refused), and neither can a world-writable,
-    // non-sticky or missing directory. The sandbox's read-only root mount already
-    // shows every remaining directory, so nothing extra is bound for them.
-    let real_root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
-    let mut kept = 0;
-    for p in std::env::split_paths(&inherited) {
-        match crate::tool_path::valid(&p, &[]) {
-            Ok(real) if !real.starts_with(&real_root) && !p.starts_with(root) => {
-                paths.push(p);
-                kept += 1;
-            }
-            _ => {}
-        }
-    }
-    if kept == 0 {
-        paths.extend(["/usr/local/bin", "/usr/bin", "/bin"].map(PathBuf::from));
-    }
-    std::env::join_paths(paths).ok()
-}
-
-/// Existing ignored directories only; never private paths or aliases. No hooks,
-/// filters or filesystem monitors run during this Git catalogue query.
-pub(crate) fn ignored_directories(root: &Path) -> io::Result<Vec<PathBuf>> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let temp = std::env::temp_dir().join(format!(
-        "cortex-ignored-{}",
-        crate::native_effects::identity().map_err(|_| unavailable("scratch_identity"))?
-    ));
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)?;
-    // Unlink only this owned spool; the open file remains private during the query.
-    fs::remove_file(&temp)?;
-    let mut child = Command::new("/usr/bin/git")
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "ls-files",
-            "-z",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--directory",
-            "--",
-            ".",
-        ])
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .stdout(file.try_clone()?)
-        .spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let status = loop {
-        match child.try_wait()? {
-            Some(status) => break status,
-            None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(unavailable("ignored_query_timeout"));
-            }
-            None => std::thread::sleep(Duration::from_millis(10)),
-        }
+    // No scratch: this view part never owns a private directory to clean up.
+    let mut view = Sandbox {
+        binary: PathBuf::new(),
+        args: Vec::new(),
+        scratch: PathBuf::new(),
+        environment: BTreeMap::from([(OsString::from("HOME"), home.as_os_str().to_owned())]),
+        pins: Vec::new(),
+        scoped_root: None,
+        git_context: None,
     };
-    let mut candidates = Vec::new();
-    if status.success() {
-        use std::io::{Read, Seek, SeekFrom};
-        file.seek(SeekFrom::Start(0))?;
-        let mut data = Vec::new();
-        file.take(8 * 1024 * 1024 + 1).read_to_end(&mut data)?;
-        if data.len() > 8 * 1024 * 1024 {
-            return Err(unavailable("ignored_catalogue_limit"));
-        }
-        for raw in data.split(|b| *b == 0) {
-            if raw.ends_with(b"/") {
-                if let Ok(s) = std::str::from_utf8(raw) {
-                    candidates.push(root.join(s.trim_end_matches('/')));
-                }
-            }
-        }
-    } else if !root.join(".git").exists() {
-        for entry in fs::read_dir(root)? {
-            let entry = entry?;
-            if [
-                "node_modules",
-                ".venv",
-                "venv",
-                "target",
-                "build",
-                "dist",
-                ".pytest_cache",
-                "__pycache__",
-            ]
-            .iter()
-            .any(|n| entry.file_name() == *n)
-            {
-                candidates.push(entry.path());
-            }
-        }
-    } else {
-        return Err(unavailable("ignored_query_failed"));
+    let hidden = policy::controls(&root, &view.environment)?;
+    if hidden.iter().any(|p| root.starts_with(p)) {
+        return Err(unavailable("protected_project_mount"));
     }
-    candidates.retain(|p| {
-        p.is_dir()
-            && p.strip_prefix(root).ok().is_some_and(|r| {
-                r.components().all(|c| {
-                    let name = c.as_os_str().to_string_lossy();
-                    ![
-                        ".git",
-                        ".cortex",
-                        ".cortex-dev",
-                        ".cortex-dev-owner.json",
-                        ".cortex-workspace-dev.json",
-                    ]
-                    .contains(&name.as_ref())
-                })
-            })
-            && p.canonicalize().is_ok_and(|real| real == *p)
-    });
-    candidates.sort();
-    candidates.dedup();
-    Ok(candidates)
-}
-fn overlaps(a: &Path, b: &Path) -> bool {
-    a.starts_with(b) || b.starts_with(a)
+    view.project_inputs(&root, &hidden, Instant::now(), &mut BTreeMap::new())?;
+    args.append(&mut view.args);
+    pins.append(&mut view.pins);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -853,18 +589,26 @@ mod tests {
         }
     }
     pub(super) fn capability() -> bool {
-        let available = Command::new("/usr/bin/bwrap")
-            .args([
-                "--die-with-parent",
-                "--unshare-pid",
-                "--ro-bind",
-                "/",
-                "/",
-                "--proc",
-                "/proc",
-                "--",
-                "/bin/true",
-            ])
+        // Probe namespaces independently of project grants, without giving
+        // even the probe a view of the host root or its environment.
+        let mut probe = Command::new("/usr/bin/bwrap");
+        probe.env_clear().args([
+            "--die-with-parent",
+            "--unshare-net",
+            "--unshare-pid",
+            "--proc",
+            "/proc",
+        ]);
+        for name in ["/usr/bin", "/usr/lib", "/usr/lib64", "/bin", "/lib", "/lib64"] {
+            let path = Path::new(name);
+            if let Ok(link) = path.read_link() {
+                probe.arg("--symlink").arg(link).arg(path);
+            } else if path.is_dir() {
+                probe.arg("--ro-bind").arg(path).arg(path);
+            }
+        }
+        let available = probe
+            .args(["--", "/usr/bin/true"])
             .stdin(Stdio::null())
             .output()
             .is_ok_and(|o| o.status.success());
@@ -882,7 +626,10 @@ mod tests {
             "-ec".into(),
             format!(
                 "denied() {{ if \"$@\"; then echo unexpected-success >&2; exit 97; fi; }}\n{}",
-                script.replace("! ", "denied ")
+                script.lines().map(|line| {
+                    line.trim_start().strip_prefix("! ")
+                        .map_or_else(|| line.to_owned(), |command| format!("denied {command}"))
+                }).collect::<Vec<_>>().join("\n")
             ),
             "fixture".into(),
         ];
@@ -900,279 +647,178 @@ mod tests {
     fn namespace_views_real_fixtures_or_explicit_fail_closed() {
         let f = Fixture::new();
         let root = f.root();
-        if !capability() {
-            for profile in [Profile::ReadOnly, Profile::Guarded, Profile::Development] {
-                let result = f.prepare(profile, &[root.clone()], &[]);
-                let e = match result {
-                    Err(e) => e,
-                    Ok(_) => panic!("unavailable mechanism accepted"),
-                };
-                assert!(
-                    e.to_string()
-                        .starts_with("native_command_sandbox_unavailable:"),
-                    "{e}"
-                );
-            }
-            assert_eq!(
-                fs::read_to_string(root.join("source")).unwrap(),
-                "unchanged"
-            );
-            eprintln!(
-                "namespace capability unavailable; all three profiles refused before payload launch"
-            );
-            return;
-        }
+        let home = f.0.join("home");
+        let db = home.join(".local/share/opencode/opencode.db");
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE credential (v TEXT); INSERT INTO credential VALUES ('fixture');
+             CREATE TABLE session_message (v TEXT); INSERT INTO session_message VALUES ('fixture');",
+        ).unwrap();
+        fs::copy(&db, root.join("opencode.db")).unwrap();
+        fs::hard_link(f.0.join("outside"), root.join("outside-alias")).unwrap();
         let marker = format!("private-{}", crate::native_effects::identity().unwrap());
-        let host_marker = PathBuf::from("/var/tmp").join(&marker);
-        assert!(!host_marker.exists());
-        let pid_ns = fs::read_link("/proc/self/ns/pid").unwrap();
-        let s = f.prepare(Profile::ReadOnly, &[], &[]).unwrap();
-        let scratch = s.scratch().to_owned();
-        let at = s
-            .command_at(&["/bin/pwd".into()], Some(&root))
-            .unwrap()
-            .output()
-            .unwrap();
-        assert!(
-            at.status.success(),
-            "explicit cwd failed: {}",
-            String::from_utf8_lossy(&at.stderr)
-        );
-        assert_eq!(
-            String::from_utf8(at.stdout).unwrap().trim(),
-            root.to_str().unwrap()
-        );
-        run(
-            &s,
-            r#"
-            test "$(cat source)" = unchanged
-            if test "$4" = overlay; then
-                chmod 0600 source; touch -m source; echo discarded > source; mv source renamed
-            else
-                ! chmod 0600 source; ! touch -m source
-                ! sh -c 'echo wrong > source'; ! mv source renamed
-            fi
-            ! cat .cortex-dev/private
-            ! touch .cortex-dev/new
-            test "$(readlink /proc/self/ns/pid)" != "$1"
-            ! test -r "/proc/$2/environ"
-            echo scratch > "$TMPDIR/file"
-            chmod 0600 "$TMPDIR/file"
-            touch -m "$TMPDIR/file"
-            echo cached > "$HOME/.cache/value"
-            chmod 0600 "$HOME/.cache/value"
-            ! touch "$HOME/.cargo/bin/injected"
-            echo private > "/var/tmp/$3"
-            chmod 0600 "/var/tmp/$3"
-        "#,
-            &[
-                &pid_ns,
-                Path::new(&std::process::id().to_string()),
-                Path::new(&marker),
-                Path::new(if s.overlay { "overlay" } else { "readonly" }),
-            ],
-        );
-        assert!(!host_marker.exists(), "literal /var/tmp leaked to host");
-        assert_eq!(
-            fs::read_to_string(scratch.join("var-tmp").join(&marker)).unwrap(),
-            "private\n"
-        );
-        assert_eq!(
-            fs::metadata(root.join("source"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o644
-        );
-        drop(s);
-        assert!(!scratch.exists());
-        let restarted = f.prepare(Profile::ReadOnly, &[], &[]).unwrap();
-        run(
-            &restarted,
-            r#"! test -e "/var/tmp/$1""#,
-            &[Path::new(&marker)],
-        );
-        drop(restarted);
-        for profile in [Profile::Guarded, Profile::Development] {
-            let s = f
-                .prepare(profile, &[root.clone()], &[f.0.join("outside")])
-                .unwrap();
-            run(
-                &s,
-                r#"
-                echo writable > output
-                chmod 0600 output
-                ! chmod 0600 "$1"
-                ! sh -c 'echo wrong > "$1"' fixture "$1"
-                ! cat .cortex-dev/private
+        let strong = capability();
+        for profile in [Profile::ReadOnly, Profile::Guarded, Profile::Development] {
+            let result = f.prepare(profile, &[], &[]);
+            if !strong {
+                let error = result.err().expect("unavailable mechanism accepted");
+                assert!(error.to_string().starts_with("native_command_sandbox_unavailable:"), "{error}");
+                assert_eq!(fs::read_to_string(root.join("source")).unwrap(), "unchanged");
+                eprintln!("{profile:?}: sandbox unavailable; verified only pre-launch refusal");
+                continue;
+            }
+            let s = result.unwrap();
+            let scratch = s.scratch().to_owned();
+            let outside = f.0.join("outside");
+            assert!(s.command_at(&["/bin/true".into()], Some(&f.0)).is_err());
+            run(&s, r#"
+                test "$(cat source)" = unchanged
+                ! test -r "$1"
+                ! test -r "$2"
+                test ! -s opencode.db
+                test ! -s outside-alias
+                ! test -r .cortex-dev/private
                 ! touch .cortex-dev/new
-                ! chmod 0700 .cortex-dev
-                mkdir -p "$TMPDIR/cache"
-                echo cache > "$TMPDIR/cache/value"
-                chmod 0600 "$TMPDIR/cache/value"
-            "#,
-                &[&f.0.join("outside")],
-            );
-            assert_eq!(
-                fs::read_to_string(root.join("output")).unwrap(),
-                "writable\n"
-            );
-            assert_eq!(
-                fs::read_to_string(f.0.join("outside")).unwrap(),
-                "protected-fixture"
-            );
+                test -z "${SSH_AUTH_SOCK:-}"
+                mkdir -p "$XDG_CACHE_HOME" "$CARGO_TARGET_DIR"
+                echo cache > "$XDG_CACHE_HOME/one"
+                echo build > "$CARGO_TARGET_DIR/one"
+                ! sh -c 'echo wrong > source'
+                ! touch created
+                echo tmp > "$TMPDIR/$3"
+                echo vartmp > "/var/tmp/$3"
+            "#, &[&outside, &db, Path::new(&marker)]);
+            assert!(!Path::new("/var/tmp").join(&marker).exists());
+            assert!(!Path::new("/tmp").join(&marker).exists());
+            assert_eq!(fs::read_to_string(root.join("source")).unwrap(), "unchanged");
+            assert!(!root.join("created").exists());
+            drop(s);
+            assert!(!scratch.exists());
         }
-        eprintln!(
-            "real namespace fixtures passed: scratch, metadata, protected descendants, process view, restart"
-        );
+        drop(conn);
     }
+
     #[test]
-    fn ignored_grants_relocated_caches_and_project_toolchain() {
+    fn a_checkout_cannot_grant_the_owner_home() {
         let f = Fixture::new();
         let root = f.root();
-        fs::create_dir(root.join("cache")).unwrap();
-        fs::create_dir(root.join("alias-target")).unwrap();
-        fs::create_dir_all(root.join(".venv/bin")).unwrap();
-        fs::write(root.join(".gitignore"), "cache/\nalias/\n").unwrap();
-        std::os::unix::fs::symlink(root.join("alias-target"), root.join("alias")).unwrap();
-        assert!(Command::new("/usr/bin/git")
-            .args(["init", "-q"])
-            .current_dir(&root)
-            .status()
-            .unwrap()
-            .success());
-        let grants = ignored_directories(&root).unwrap();
-        assert_eq!(grants, vec![root.join("cache")]);
-        fs::create_dir(f.0.join("relocated-cache")).unwrap();
-        let mut environment = BTreeMap::new();
-        environment.insert("HOME".into(), f.0.join("home").into_os_string());
-        environment.insert(
-            "UV_CACHE_DIR".into(),
-            f.0.join("relocated-cache").into_os_string(),
-        );
-        environment.insert("CORTEX_CHANNEL_SECRET".into(), "never-forward".into());
-        environment.insert("OLLAMA_CLOUD_BACKUP_KEY".into(), "never-forward".into());
-        let result =
-            Sandbox::with_environment(&root, Profile::ReadOnly, &grants, &[], false, environment);
+        let environment = BTreeMap::from([("HOME".into(), root.clone().into_os_string())]);
+        let error = Sandbox::with_binary(
+            "/bin/false".into(), &root, Profile::Guarded, &[], &[], false, environment,
+        ).err().expect("fixture HOME was accepted as a checkout");
+        assert!(error.to_string().ends_with("project_overlaps_owner_home"));
+    }
+
+    #[test]
+    fn explicit_tools_and_private_build_outputs() {
+        let f = Fixture::new();
+        let root = f.root();
+        let tool_dir = f.0.join("extra");
+        let ambient = f.0.join("ambient");
+        fs::create_dir(&tool_dir).unwrap();
+        fs::create_dir(&ambient).unwrap();
+        for (dir, file) in [(&tool_dir, "fixture-build"), (&ambient, "ambient-tool")] {
+            fs::write(dir.join(file), "#!/bin/sh\nprintf 'fixture-build\\n'\n").unwrap();
+            fs::set_permissions(dir.join(file), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(tool_dir.join("not-a-tool"), "not visible").unwrap();
+        let environment = BTreeMap::from([
+            ("HOME".into(), f.0.join("home").into_os_string()),
+            ("PATH".into(), ambient.into_os_string()),
+            (crate::tool_path::COMMAND_EXTRAS.into(), tool_dir.into_os_string()),
+            ("SSH_AUTH_SOCK".into(), "/not-forwarded".into()),
+        ]);
+        let result = Sandbox::with_environment(&root, Profile::ReadOnly, &[], &[], false, environment);
         if !capability() {
             assert!(result.is_err());
+            eprintln!("verifier tool-input fixture: refusal only");
             return;
         }
         let s = result.unwrap();
-        run(
-            &s,
-            r#"
-            touch cache/verification-output
-            touch "$UV_CACHE_DIR/metadata"
-            test "$VIRTUAL_ENV" = "$PWD/.venv"
-            case "$PATH" in "$PWD/.venv/bin:"*) ;; *) exit 3;; esac
-            test -z "${CORTEX_CHANNEL_SECRET:-}"
-            test -z "${OLLAMA_CLOUD_BACKUP_KEY:-}"
-            if test "$1" = overlay; then echo discarded > source; else ! touch source; fi
-            ! touch .git/config
-        "#,
-            &[Path::new(if s.overlay { "overlay" } else { "readonly" })],
-        );
-        assert_eq!(
-            fs::read_to_string(root.join("source")).unwrap(),
-            "unchanged"
-        );
-        assert!(root.join("cache/verification-output").is_file());
-        assert!(f.0.join("relocated-cache/metadata").is_file());
+        run(&s, r#"
+            test "$(fixture-build)" = fixture-build
+            ! command -v ambient-tool
+            ! test -e "$(dirname "$(command -v fixture-build)")/not-a-tool"
+            test -z "${SSH_AUTH_SOCK:-}"
+            mkdir -p "$CARGO_TARGET_DIR"
+            printf 'int main(void) { return 0; }\n' > "$TMPDIR/main.c"
+            cc -o "$CARGO_TARGET_DIR/program" "$TMPDIR/main.c"
+            "$CARGO_TARGET_DIR/program"
+        "#, &[]);
     }
-    /// A worker command (Guarded and Development views) runs a program found only in a
-    /// directory the owner's login shell adds, through a version-manager style link,
-    /// while a search entry inside the project is never honoured.
+
     #[test]
-    fn worker_commands_find_programs_on_the_owners_shell_path() {
-        let s = crate::tool_path::tests::Scratch::new("worker");
-        let lib = s.dir("home/.nvm/versions/node/v24.1.0/lib");
-        let bin = s.dir("home/.nvm/versions/node/v24.1.0/bin");
-        fs::write(lib.join("tool.js"), "#!/bin/sh\necho fixture-node-tool\n").unwrap();
-        fs::set_permissions(lib.join("tool.js"), fs::Permissions::from_mode(0o755)).unwrap();
-        std::os::unix::fs::symlink("../lib/tool.js", bin.join("cortex-fixture-node")).unwrap();
-        let shell = crate::tool_path::tests::login_shell(
-            &s,
-            &format!("echo noisy banner\nexport PATH={}:$PATH\n", bin.display()),
-        );
-        let home = s.0.join("home");
-        let detected = crate::tool_path::detect(
-            &shell,
-            &home,
-            std::ffi::OsStr::new("/usr/local/bin:/usr/bin:/bin"),
-            &[],
-            Duration::from_secs(5),
-        );
-        assert_eq!(detected.source, crate::tool_path::Source::Shell);
-        assert!(
-            detected.directories.contains(&bin),
-            "{:?}",
-            detected.directories
-        );
-        let root = s.dir("project");
-        let planted = s.dir("project/tools");
-        fs::write(
-            planted.join("cortex-project-tool"),
-            "#!/bin/sh\necho planted\n",
-        )
-        .unwrap();
-        fs::set_permissions(
-            planted.join("cortex-project-tool"),
-            fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
-        let mut entries = vec![planted.clone()];
-        entries.extend(detected.directories.clone());
-        let mut environment = BTreeMap::new();
-        environment.insert("HOME".into(), home.into_os_string());
-        environment.insert("PATH".into(), std::env::join_paths(entries).unwrap());
-        let path = command_path(&root, &environment).unwrap();
-        assert!(!std::env::split_paths(&path).any(|p| p == planted));
-        if !capability() {
-            eprintln!(
-                "skipped sandbox launch: bubblewrap cannot create user namespaces on this host"
-            );
-            return;
-        }
-        for profile in [Profile::Guarded, Profile::Development] {
-            let sandbox = Sandbox::with_environment(
-                &root,
-                profile,
-                &[root.clone()],
-                &[],
-                false,
-                environment.clone(),
+    fn pinned_rust_build_uses_private_tool_state_and_outputs() {
+        rust_build_uses_private_tool_state_and_outputs(true);
+    }
+
+    #[test]
+    fn unpinned_rust_build_uses_private_default_and_outputs() {
+        rust_build_uses_private_tool_state_and_outputs(false);
+    }
+
+    fn rust_build_uses_private_tool_state_and_outputs(pinned: bool) {
+        let f = Fixture::new();
+        let root = f.root();
+        let owner_home = std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.file_name().is_some_and(|name| name == ".cargo"))
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .expect("Rust fixture needs the provisioned toolchain owner home");
+        fs::create_dir(root.join("src")).unwrap();
+        if pinned {
+            fs::write(
+                root.join("rust-toolchain.toml"),
+                include_str!("../../../rust-toolchain.toml"),
             )
             .unwrap();
-            let out = sandbox
-                .command(&["cortex-fixture-node".into()])
-                .unwrap()
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "{profile:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            assert_eq!(String::from_utf8_lossy(&out.stdout), "fixture-node-tool\n");
-            run(&sandbox, "! command -v cortex-project-tool", &[]);
         }
-        // The verifier's read-only view runs it too, and cannot write the tool directory.
-        let sandbox =
-            Sandbox::with_environment(&root, Profile::ReadOnly, &[], &[], false, environment)
-                .unwrap();
-        run(
-            &sandbox,
-            r#"test "$(cortex-fixture-node)" = fixture-node-tool; ! touch "$1/injected""#,
-            &[&bin],
-        );
+        fs::write(root.join("Cargo.toml"),
+            "[package]\nname = \"sparse-rust-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+        fs::write(root.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"sparse-rust-fixture\"\nversion = \"0.1.0\"\n").unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let environment = BTreeMap::from([
+            ("HOME".into(), owner_home.into_os_string()),
+            ("CARGO_HOME".into(), "/unforwarded-fixture-cargo".into()),
+            ("RUSTUP_HOME".into(), "/unforwarded-fixture-rustup".into()),
+        ]);
+        let result = Sandbox::with_environment(&root, Profile::ReadOnly, &[], &[], false, environment);
+        if !capability() {
+            assert!(result.is_err());
+            eprintln!("Rust fixture (pinned={pinned}): namespace refusal only");
+            return;
+        }
+        let s = result.unwrap();
+        if !pinned {
+            run(
+                &s,
+                r#"
+                    test ! -e rust-toolchain
+                    test ! -e rust-toolchain.toml
+                    test -z "${RUSTUP_TOOLCHAIN:-}"
+                    test -s "$RUSTUP_HOME/settings.toml"
+                    case "$(rustup show active-toolchain)" in
+                        *" (default)") ;;
+                        *) exit 98 ;;
+                    esac
+                "#,
+                &[],
+            );
+        }
+        run(&s, r#"
+            test "$CARGO_HOME" = "$HOME/.cargo"
+            test "$RUSTUP_HOME" = "$HOME/.rustup"
+            test "$(command -v cargo)" = "$CARGO_HOME/bin/cargo"
+            test ! -r "$CARGO_HOME/credentials.toml"
+            HOME="$TMPDIR" cargo build --locked --offline
+            "$CARGO_TARGET_DIR/debug/sparse-rust-fixture"
+        "#, &[]);
+        assert!(!root.join("target").exists());
     }
-    /// Manual benchmark of command preparation on a real project, never run by default:
-    /// `CORTEX_PREPARATION_BENCH_ROOT=<project> cargo test -p workspace-service --lib
-    /// preparation_benchmark -- --ignored --nocapture`. It uses the read-only profile
-    /// with the whole project as its write set, so every regular file is inspected
-    /// for hard links, yet nothing in the project is ever written.
+
     #[test]
     #[ignore]
     fn preparation_benchmark() {
@@ -1233,7 +879,6 @@ mod tests {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
-        self.finish();
         // Only this launch's private, randomly named scratch; never a caller path.
         let _ = policy::cleanup_scratch(&self.scratch);
     }

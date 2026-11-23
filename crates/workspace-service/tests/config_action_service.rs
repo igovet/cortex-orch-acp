@@ -107,6 +107,10 @@ impl Fixture {
                 .env("XDG_STATE_HOME", self.root.join("state"))
                 .env("XDG_DATA_HOME", self.root.join("data"))
                 .env("XDG_RUNTIME_DIR", self.root.join("runtime"))
+                // Python-parity captures compare the whole state tree and the
+                // scripted peers report through fixture files outside any engine
+                // view; engine views have their own fixtures (debug builds only).
+                .env("CORTEX_TEST_UNCONFINED_ENGINES", "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())

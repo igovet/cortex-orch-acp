@@ -301,13 +301,13 @@ request does not widen an OS jail. Writer conflicts receive bounded delayed
 runtime rechecks before a grant or denial without a user question; policy, path
 and read-only refusals are immediate runtime decisions. Only a fresh runtime
 predicate can grant access, never a user answer. The worker question contract
-reserves questions for genuine user decisions, not missing tool access. Outside-project effects use `outside_write` or
-`outside_command` and, in Guarded mode, require the user's accepted permission
-card. In Development mode `outside_write` needs no card unless it targets
-protected control-plane state, while `outside_command` still requires one. Auto mode intentionally approves them without a per-action card, including
-when no client is connected; this is the owner's selected behavior. Guarded
-requires an accepted permission-card response and fails closed on no response,
-denial, cancellation or timeout. Read-only
+reserves questions for genuine user decisions, not missing tool access.
+Outside-project effects use `outside_write` or `outside_command`. In Guarded
+and Development, each eligible action requires owner approval through a
+permission card, including ordinary outside writes. Without approval, the
+action does not run. In Auto, the runtime approves eligible actions without
+a per-action card, even when no client is connected. Private Cortex paths
+are refused in all modes. Read-only
 roles and review stages have no project write grant. See
 [containment](../permissions-and-containment/index.md) and
 [verification status](../../project/verification.md). Prompts grant no authority.

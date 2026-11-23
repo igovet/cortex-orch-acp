@@ -54,6 +54,7 @@ fn session(root: &Path) -> SessionRoute {
             credential_directory: root.join(".cortex-audit-home"),
             base_environment: BTreeMap::new(),
             codex_launcher: None,
+            confinement: None,
         },
         relay: NO_ENGINE.into(),
         broker_parent: root.join(".cortex"),

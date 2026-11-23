@@ -53,7 +53,7 @@ the access mode, and no session gets `bypassPermissions` or `agent-full-access`:
 | Channel | Claude (claude-agent-acp) | Codex (codex-acp) | OpenCode |
 | --- | --- | --- | --- |
 | Coordinator, consultant, read-only profile, any review-stage session | `default` | `read-only` | `cortex` |
-| Writing worker (any access mode) | `default` | `read-only` (native writes refused; files change through the Cortex file tools) | `cortex` |
+| Writing worker (any access mode) | `default` | `workspace-write` | `cortex` |
 
 A read-only session whose adapter offers no such mode does not start; the
 `NATIVE_SESSION_START_FAILED` event records `restricted_mode_unavailable`. The
@@ -115,8 +115,9 @@ table (`classify` in `crates/cortex-engine/src/permission.rs`, path classes in
 Read-only roles and review-stage sessions get only the read rows and the web-fetch row:
 their native write, delete and execute requests are refused in every mode under the
 `read_only` rule, while a web fetch, which only reads, follows the web-fetch row like any
-other channel's. The table narrows native engine tools only; a `command_run`
-command can still read anywhere the owner can. "Ask the owner" opens a card on the
+other channel's. This table applies to native engine tools only. Cortex gateway
+commands follow a separate filesystem policy (see [the command backend](../../project/native-incoming-acp.md#brokered-command-namespace-backend)).
+"Ask the owner" opens a card on the
 connected owner client titled `Owner decision: <role> wants to <operation>
 <paths> because <reason>` with only Allow once and Deny; the engine's request
 waits until the owner answers, and a denial goes back as the engine's reject
@@ -219,59 +220,28 @@ work, and whether a deletion waits for the user.
 
 | Behavior | Guarded | Development (fresh-session default) | Auto |
 | --- | --- | --- | --- |
-| Where a writing worker works | the project | the whole computer | the whole computer |
-| Writing-worker `command_run` | restricted mounts; cwd inside the task tree | host-writable masks, any existing cwd, no card | same as Development |
-| `outside_write` | consent card | consent card | runtime answers the card itself (Cortex private state refused in every mode) |
-| `outside_command` (no sandbox) | consent card | consent card | runtime answers the card itself |
-| Writing-worker `command_run` that needs the host (`sudo`, sandbox unavailable, launcher failure proven before release) | rerun through `outside_command`: consent card | same: consent card | same: runtime answers the card itself |
+| Where a writing worker works | project writes; command cwd inside the task tree | host-visible session; eligible non-private host cwd | same as Development |
+| Writing-worker `command_run` | `restricted`, live project writes with protection masks | `development`, host-visible and live checkout writes with protection masks | same as Development |
+| `outside_write` | action-specific owner consent | action-specific owner consent | runtime decides automatically |
+| `outside_command` (no command sandbox) | action-specific owner consent | action-specific owner consent | runtime decides automatically |
+| Eligible writer command requests recognized privilege or has a proven pre-launch sandbox failure | routes through `outside_command`; owner consents | same as Guarded | routes through `outside_command`; Auto decides |
 | `sudo` in a host command | owner password prompt on the desktop or a paired phone | same | same |
 | Declared deletion (`project_delete`, `command_delete`, native delete) | consent card | consent card | runtime answers the card itself |
-| Reads by commands on the existing host routes | owner-readable resources exposed by the command profile, no card | same | same |
-| Read-only/reviewer `command_run` (every read-only role, every mode) | read-only profile (`read_only`); cwd inside the task tree | read-only profile (`read_only`); any existing cwd | same as Development |
-| Automatic runtime verification | read-only profile (`read_only`); git-ignored directories writable, other project writes discarded with the check | same read-only profile | same read-only profile |
+| Reads by ordinary brokered commands | owner-readable inputs exposed by the command profile, no per-read card | same | same |
+| Read-only/reviewer `command_run` | `read_only`; cwd inside the task tree | `read_only`; eligible non-private host cwd also allowed | same as Development |
+| Automatic runtime verification | host-visible `read_only`, network disabled, existing ignored-directory grants | same | same |
 | Engine session mode (see [Native engines](#native-engines)) | independent of access mode | independent of access mode | independent of access mode; no bypass or full access |
 | Channel, role, revocation, owner deny, review and completion gates | retained | retained | retained |
 
-Automatic runtime verification mounts the project as a private overlay (upper layer on disk in
-the command's own scratch directory, never RAM-backed, removed with it) over its
-pinned read-only source, with the git-ignored directories,
-private-name masks and git metadata guards bound on top as before. A check may therefore run a
-tool that rewrites a tracked file on every run (`next typegen` rewrites `next-env.d.ts`); the write
-lands in the overlay and is gone when the check ends, so the reviewed sources and revision never
-change. Observed on 2026-10-21: before this, such a check failed with `EROFS` in every access mode
-and after the user's consent. Support is probed once per process (bubblewrap 0.10+ with
-unprivileged overlayfs); without it the project mount stays plain read-only and the write is
-refused. No access mode, permission or user consent changes the verification profile, and the
-`verification_submit` contract tells the coordinator not to ask the user to authorize it.
-
-The read-only profile (receipts name it `read_only`; the Guarded writer profile is `restricted`
-and the host-writable Development/Auto profile is `development`) mounts the whole host read-only.
-HOME is read-only except an explicit allowlist of tool caches (for example `.cache`, `.npm`,
-and the Docker buildx activity records). Scratch is private, and the command runs in its own
-PID namespace. Through these mounts a read-only role's command cannot change the project tree,
-HOME startup files outside the cache allowlist, or other host files, in any access mode. Its
-project writes (vitest's `node_modules/.vite-temp`, Playwright results) land in a private
-disk-backed overlay discarded when the command ends (`discard_project_writes`; refused
-where the host cannot overlay), so a reviewer's suite runs and the project keeps nothing.
-AppArmor's world-writable query file `/sys/kernel/security/apparmor/.access` is bound
-writable so a private `dbus-daemon` (`dbus-run-session`, a nested desktop shell) can accept
-connections; read-only, it refused them and a desktop placement check failed only in
-verification (2026-10-22). The
-following paths are exceptions: they stay writable or reachable from a read-only command:
-
-- the host `/tmp`, bound writable, so files and sibling projects under `/tmp` can be written;
-- the session D-Bus and the systemd user manager under `/run/user` (audio, display and keyring
-  sockets too), so `systemd-run --user` and similar calls start processes outside the sandbox;
-- the host `/dev`, bound with its real devices;
-- a Docker socket, if the host has one: a read-only mount does not stop mutating Docker requests;
-- the owner's network, which the profile shares by owner decision.
-
-Cache writes remain possible, so a read-only command can still poison a cache that a later run
-reads. This narrows exposure; it is not hostile-code isolation. Automatic runtime verification
-uses this same profile in every access mode (see [the decisions log](../../project/decisions.md#read-only-roles-and-the-command-host-profile)),
-so its writes are limited to the git-ignored project directories, the tool-cache allowlist,
-scratch and the host `/tmp`, subject to the reachable paths above. The profile limits writes, not
-network access: as with every owner command, the owner's network is shared.
+Ordinary read-only worker and reviewer commands use `read_only` regardless
+of mode. This is a host-visible view with limited writes, private PID namespace
+and private `/var/tmp`; shared host `/tmp`, allowed caches and reachable host
+services are not private build outputs. Runtime verification and program preflight
+use that same host-visible read-only profile with networking disabled and the
+existing grants for eligible ignored checkout directories. Other checkout writes
+are discarded in a private overlay where supported, or refused. The owner tool
+path, including NVM if present, is visible under the existing read-only rules.
+A setup failure does not retry on the host. See [the tool search path boundary](../../../SECURITY.md#host-effects-and-tool-search-path).
 
 A missing, refused, cancelled or timed-out answer to a consent card blocks the
 effect. Protected control-plane paths for `outside_write` are the
@@ -583,7 +553,8 @@ area; reviewers and read-only roles receive no writable project paths. `.cortex`
 masked, including nested ones; `.codex` and `.claude` are ordinary project paths;
 the project's `.git` is visible
 (see below). A command runs until it exits unless it sets `timeout_seconds`, and
-is killed when authority is revoked. There is no unsandboxed fallback.
+is killed when authority is revoked. A started or uncertain payload is not
+replayed on the host.
 
 Sandbox preparation is bounded but tolerant of a busy host: the service waits up to 60
 seconds for each step reported by the per-command supervisor, the namespace and overlay
@@ -591,8 +562,9 @@ probes up to 20 seconds and the git ignored-path query up to 30 seconds (each st
 well under a second). Exceeding a bound still refuses before launch with
 `native_command_sandbox_unavailable`; the receipt is settled as never launched, and the
 tool's hint tells a read-only role that nothing ran and the identical command may be retried once.
-An eligible writing worker on the host route is instead rerouted
-([host rerouting](#host-rerouting-and-the-sudo-password-prompt)).
+Only the supervisor's trusted pre-launch failure evidence can trigger a writer's
+[host reroute](#host-rerouting-and-the-sudo-password-prompt); a timeout or missing
+status that leaves execution uncertain is not enough.
 Such a never-launched call does not keep an earlier failed check open (see
 [check history](../orchestration/index.md#check-history-and-current-outcome)).
 
@@ -605,7 +577,7 @@ shows one of these refusals, the settled receipt carries `nested_sandbox`
 (`code: nested_sandbox_denied`, the matched signature, and whether `outside_command` is
 offered to the command's profile). The sandboxed receipt's outcome, exit code and evidence
 are unchanged. The receipt carries only this advisory hint: nothing is rerun automatically
-on the host because of it ([host rerouting](#host-rerouting-and-the-sudo-password-prompt)).
+on the host because of it.
 The worker decides whether to ask for a host run, and a read-only role reports the check as
 not run with that blocker. The signatures are bubblewrap's, `unshare`'s, a rootless
 container runtime's `cannot clone` and Chromium's `No usable sandbox!` messages. A nested
@@ -614,33 +586,27 @@ Cortex reports its own `native_command_sandbox_unavailable` or
 middle of a larger output are not scanned (`nested_sandbox_hint` in
 `crates/workspace-service/src/native_command_handles.rs`).
 
-### Host rerouting and the sudo password prompt
+<a id="host-rerouting-and-the-sudo-password-prompt"></a>
 
-A writing worker's `command_run` that needs the host is rerouted in the cases below.
-The runtime reruns the identical argv, cwd and timeout through `outside_command`
-(request key `<key>.host`; Auto answers its consent card, Guarded and Development show
-it with the reason in its title) and returns that host receipt with `rerouted`
-(`from: command_run`, `reason` and the original request key) only when:
+### Outside commands and the sudo password prompt
 
-| Reason | When |
-|---|---|
-| `privilege` | `sudo`, `pkexec` or `doas` is at a command position of the argv: first, after wrappers such as `env`, `timeout` or `nice`, or in a `sh`/`bash`/`dash`/`zsh` script. Nothing runs in the sandbox first. |
-| `sandbox_unavailable` | The sandbox could not be prepared (`native_command_sandbox_unavailable`); nothing ran. |
-| Sandbox launcher failed before the payload was released | The private supervisor itself reports, over its control pipe before the final `go`, one of four sandbox-facility failures: Bubblewrap missing, launcher spawn failure, namespace or mount setup failure, or launcher probe timeout. The original row settles as not launched with dedicated supervisor evidence, and only then is the host rerun dispatched once. A supervisor timeout, a lost pipe, an authority failure or an unrelated preparation refusal is not such evidence. |
+An eligible writing worker’s recognized privilege request (`sudo`, `pkexec`, or
+`doas`) is routed through `outside_command` before a sandbox launch. The runtime
+can also route a sandbox failure to the host once if the supervisor proves that
+the payload never started. The pre-launch receipt links the derived `<key>.host`
+request, so replay returns the same host receipt without executing twice. Started
+or uncertain runs are not replayed. Read-only roles and the runtime verifier never
+use this reroute. Both direct and rerouted host commands ask in Guarded and
+Development; Auto decides automatically.
 
-Once the sandboxed payload has started, the command is never replayed on the host
-automatically, whatever its exit status or output. Output that looks like a refused nested
-sandbox or a refused root (`nested_sandbox`, `sandbox_privilege`) is child-controlled text,
-so it stays an advisory hint on the unchanged original receipt; the worker decides whether
-to ask for a host run. Output text never selects the host route.
-
-The sandboxed receipt is kept and records `rerouted_to` when a host rerun was dispatched, so the same request replayed
-answers the same host receipt and nothing runs twice. Read-only roles, reviewers and
-verification are never rerouted; their receipts carry the `sandbox_privilege` or
-`nested_sandbox` hint telling them to report the check as not run. A long command whose
-first reply is `running` is not rerouted when it later settles. A consent refusal on the
-host route is the outside route's own refusal (`outside_action_not_confirmed`) with
-`rerouted` attached; nothing ran.
+An eligible writing worker can use a separate `outside_command` when a
+verification needs the real host (for example nested Bubblewrap, namespaces,
+host services or temporary Dev package checks). Use disposable Dev state;
+do not touch the installed release, running sessions or owner accounts.
+This is not permission to bypass a refusal or protected target. Guarded and
+Development ask for that action; Auto settles it automatically. Read-only
+roles cannot use this route. If a check cannot run under the available policy,
+report it as not run.
 
 `sudo` on the host asks the owner. Each host command gets a private askpass route
 (`SUDO_ASKPASS`, a `sudo` shim first on `PATH` that adds `-A`, a per-command socket and
@@ -653,7 +619,7 @@ without an answer, or the command ending makes sudo fail normally, and the recei
 `sudo_prompts` lists each prompt's outcome. `sudo -n` never asks. A phone may send a
 password only while the owner's "Passwords and tokens from phones" setting (formerly
 "Sudo passwords from phones") is on (default on).
-See [SECURITY.md](../../../SECURITY.md#owner-password-for-sudo-askpass-and-host-rerouting)
+See [SECURITY.md](../../../SECURITY.md#owner-password-for-sudo-askpass-and-outside-commands)
 for the trust boundary (`native_askpass.rs`, `native_commands.rs`). When the task lacks
 access instead (a GitHub, Codex or Claude login, or sudo), the owner gets an owner action
 card (`native_owner_actions.rs`); see
@@ -694,10 +660,11 @@ listed there), then the system folders, validated as [SECURITY.md](../../../SECU
 describes. An incoming ACP agent, which never reads a shell, uses its client's `PATH`
 followed by the same usual and system folders. Any
 other search entry inside the project is dropped. No mount is added for these
-folders: every profile already shows the host filesystem (with private stores
+folders: ordinary command profiles already show the host filesystem (with private stores
 masked), so a tool folder and its symlink targets are readable with exactly the
-write access the profile already gives, read-only for the verifier and read-only
-roles. The final verifier and the program-availability check use the same list.
+write access the profile already gives, read-only for read-only roles. The final
+verifier and its program-availability check use this same search order and
+read-only host view, with networking disabled for both.
 
 An owner can also request stopping one exact running brokered worker command
 with a reason, through `/cortex-kill`, the Paseo worker-panel control, or the
@@ -717,19 +684,14 @@ retained output could not be written), or an unexpected runtime exception, is
 `storage_error` with `write_state: uncertain` and `field: cause` naming the
 exception class (plus an `OSError`'s reason); the traceback goes to the
 engine's stderr log, and the request key is fenced so it is never re-run.
-Automatic verification runs in the read-only profile in every mode, so it may write only
-the directories the project's git ignores (caches, builds, installed dependencies) inside
-the project; the project's `.git` is read-only there, and the rest of the host is read-only
-except the tool-cache allowlist, private scratch and the host `/tmp` (see the reachable paths
-above). Each check records its profile (`read_only`). A mode switch does not stop a running
-check: the check's profile does not depend on the mode, and a check cannot establish a pass if
-it fails, its output is incomplete or the project digest changes. A reviewer reuses a runtime
-check only when it ran in the `read_only` profile, which is the profile a reviewer's own command
-gets. A check recorded under the Guarded writer name (`restricted`) or the host-writable name
-(`development`) is never reused for a reviewer; it is run again instead. Gap closure accepts a
-pass in `read_only`, in the task mode's own writer profile, or in `restricted` (a Guarded writer's
-pass, which also covers read-only runs recorded before the read-only profile had its own name).
-A host-writable pass never closes a gap once the task is Guarded.
+Automatic verification uses the host-visible `read_only` profile in every mode,
+with networking disabled and private scratch at `/var/tmp`. Inside the checkout,
+only writes to existing Git-ignored directories (such as build and dependency
+directories) can persist; other checkout writes are discarded or refused. Git
+metadata stays read-only. A check cannot establish a pass if it fails, its output
+is incomplete or the project digest changes. Reviewers may reuse only eligible `read_only`
+checks, not a writing-worker profile. Profile eligibility and gap closure are
+described under [check history](../orchestration/index.md#check-history-and-current-outcome).
 
 ### Git and tool state
 

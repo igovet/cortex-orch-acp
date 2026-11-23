@@ -172,6 +172,7 @@ mod stop_continuation_tests {
                     credential_directory: root.into(),
                     base_environment: BTreeMap::new(),
                     codex_launcher: None,
+                    confinement: None,
                 },
                 relay: "/bin/false".into(),
                 broker_parent: root.join(if workspace_protocol::channel::current().is_dev() {
@@ -409,6 +410,7 @@ mod resume_tests {
                     credential_directory: root.into(),
                     base_environment: BTreeMap::new(),
                     codex_launcher: None,
+                    confinement: None,
                 },
                 relay: "/bin/false".into(),
                 broker_parent: root.join(if workspace_protocol::channel::current().is_dev() {

@@ -343,7 +343,12 @@ pub fn run(root: &Path, options: &Options) -> Res<i32> {
     }
     let scratch = TempDir::new("cortex-fast-")?;
     let account = account_environment(&scratch.0)?;
-    let target = root.join("target");
+    // Match the wrapper's Cargo output location. The read-only verifier
+    // supplies an absolute, per-run target directory outside the checkout.
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .filter(|path| !path.is_empty())
+        .map(|path| cwd.join(path))
+        .unwrap_or_else(|| root.join("target"));
     let cargo_dir = cargo
         .as_ref()
         .and_then(|c| c.parent().map(Path::to_path_buf));

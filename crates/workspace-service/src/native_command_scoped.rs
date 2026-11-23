@@ -39,10 +39,8 @@ impl Sandbox {
             scratch,
             environment: BTreeMap::new(),
             pins: Vec::new(),
-            guard: None,
-            overlay: false,
-            ssh_environment: BTreeMap::new(),
             scoped_root: Some(root.to_path_buf()),
+            git_context: None,
         };
         // Probe the actual view before doing bounded input staging. This does
         // not run the proposed command or any executable from the checkout.
@@ -168,9 +166,7 @@ fn copy_dir(
         let name = entry?.file_name();
         let relative = Path::new(&name);
         let source = from.join(relative);
-        if name == ".git"
-            || crate::native_engine_policy::project_private(relative)
-            || protected.iter().any(|p| source.starts_with(p))
+        if policy::private(&name) || protected.iter().any(|p| source.starts_with(p))
         {
             continue;
         }
@@ -239,9 +235,14 @@ mod tests {
         let input = root.join("src/normal");
         fs::write(&input, "ordinary").unwrap();
         fs::write(root.join(".git"), "gitdir: elsewhere").unwrap();
+        fs::create_dir(root.join("src/.git")).unwrap();
+        fs::write(root.join("src/.git/.env"), "private sentinel").unwrap();
+        fs::hard_link(root.join("src/.git/.env"), root.join("git-alias")).unwrap();
         fs::create_dir_all(root.join("src/.cortex-dev")).unwrap();
         fs::write(root.join("src/.cortex-dev/cortex.sqlite3"), "fixture").unwrap();
         fs::write(root.join(".cortex-dev-owner.json"), "fixture").unwrap();
+        fs::write(root.join("src/opencode.db"), "synthetic-login-history").unwrap();
+        fs::write(root.join("src/opencode.db-wal"), "synthetic-companion").unwrap();
         symlink(&input, root.join("alias")).unwrap();
         fs::hard_link(
             root.join("src/.cortex-dev/cortex.sqlite3"),
@@ -274,7 +275,11 @@ mod tests {
             "alias",
             "hard",
             "src/pipe",
+            "src/.git",
+            "git-alias",
             "src/.cortex-dev",
+            "src/opencode.db",
+            "src/opencode.db-wal",
             ".cortex-dev-owner.json",
         ] {
             assert!(!stage.join(name).exists(), "{name}");

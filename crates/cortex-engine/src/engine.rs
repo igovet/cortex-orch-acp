@@ -441,18 +441,50 @@ impl Engine {
     ) -> Result<Self> {
         policy.authority().await?;
         let mut env = spec.launch_environment()?;
-        if let Some(path) = instructions {
-            if spec.engine != crate::environment::EngineKind::Codex || !path.is_absolute() {
-                return Err(Error::Invalid);
+        if instructions.is_some_and(|path| {
+            spec.engine != crate::environment::EngineKind::Codex || !path.is_absolute()
+        }) {
+            return Err(Error::Invalid);
+        }
+        // The view is prepared after the launch environment, so it can show the
+        // Codex launcher just prepared and the session's instructions file. A view
+        // that cannot be prepared refuses before anything is spawned; there is no
+        // unconfined retry.
+        let confinement = match &spec.confinement {
+            Some(request) => {
+                let inputs: Vec<std::path::PathBuf> = instructions
+                    .map(std::path::Path::to_path_buf)
+                    .into_iter()
+                    .chain(env.get("CODEX_PATH").map(std::path::PathBuf::from))
+                    .collect();
+                let confinement = request
+                    .confiner
+                    .confine(&spec, &env, &inputs)
+                    .map_err(|_| Error::Forbidden)?;
+                env.extend(confinement.environment().clone());
+                Some(confinement)
             }
+            None => None,
+        };
+        if let Some(path) = instructions {
+            let path = confinement
+                .as_ref()
+                .map_or_else(|| path.to_path_buf(), |c| c.view_path(path));
             let mut config: Value =
                 serde_json::from_str(&crate::environment::codex_thread_config())
                     .map_err(|_| Error::Invalid)?;
             config["model_instructions_file"] = json!(path);
             env.insert(crate::environment::CODEX_CONFIG.into(), config.to_string());
         }
-        let mut child = Command::new(&spec.executable)
-            .args(&spec.args)
+        let mut command = Command::from(match &confinement {
+            Some(view) => view.command(&spec.executable, &spec.args),
+            None => {
+                let mut command = std::process::Command::new(&spec.executable);
+                command.args(&spec.args);
+                command
+            }
+        });
+        let mut child = command
             .current_dir(&spec.cwd)
             .env_clear()
             .envs(env)

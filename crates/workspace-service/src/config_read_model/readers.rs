@@ -157,7 +157,10 @@ impl ConfigurationReader {
                             json!({})
                         });
                         let windows =
-                            super::usage_refresh::newest_codex(&codex_quota(&home), &cache);
+                            super::usage_refresh::newest_codex(
+                                &codex_quota(&self.environment, id, &home),
+                                &cache,
+                            );
                         usage_windows(engine, &windows, now)
                     }
                     None => {

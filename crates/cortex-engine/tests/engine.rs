@@ -44,6 +44,7 @@ fn spec(mode: &str, engine: EngineKind) -> LaunchSpec {
         credential_directory: home,
         base_environment: BTreeMap::new(),
         codex_launcher: None,
+        confinement: None,
     }
 }
 async fn launch(mode: &str) -> Engine {
@@ -561,6 +562,7 @@ async fn real_claude_sessions_configure_concurrently_without_transport_loss() {
             ("LANG".to_owned(), "C.UTF-8".to_owned()),
         ]),
         codex_launcher: None,
+        confinement: None,
     };
     let deadline = Duration::from_secs(90);
     let mut summary = Vec::new();

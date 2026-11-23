@@ -1,6 +1,9 @@
 //! Private per-command supervisor. Only the inherited pipe can authorize launch;
 //! restart observers read its durable status; they never execute the payload.
-use crate::native_command_sandbox::{Profile, Sandbox, CODEX_SCRATCH};
+use crate::{
+    native_command_live::{Profile, Sandbox as LiveSandbox},
+    native_command_sandbox::{Sandbox, CODEX_SCRATCH},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -18,24 +21,42 @@ use std::{
 
 pub const MODE: &str = "--native-command-supervisor";
 pub(super) const AUTHORITY_HEARTBEAT: u8 = b'+';
+
+fn live_profile(name: &str) -> io::Result<Profile> {
+    match name {
+        "read_only" => Ok(Profile::ReadOnly),
+        "guarded" => Ok(Profile::Guarded),
+        "development" => Ok(Profile::Development),
+        _ => Err(io::Error::other("command_profile_invalid")),
+    }
+}
+
+enum Prepared {
+    Live(LiveSandbox),
+    Scoped(Sandbox),
+}
+
+impl Prepared {
+    fn command_at(&self, argv: &[String], cwd: &Path) -> io::Result<Command> {
+        match self {
+            Self::Live(sandbox) => sandbox.command_at(argv, Some(cwd)),
+            Self::Scoped(sandbox) => sandbox.command_at(argv, Some(cwd)),
+        }
+    }
+}
 const AUTHORITY_LEASE: Duration = Duration::from_secs(2);
 
 /// Probe the real command preparations from process-level integration fixtures
 /// without compiling a second copy of the authorization and sandbox modules.
 #[doc(hidden)]
 pub fn observe_command_view(root: &Path, profile: &str) -> io::Result<()> {
-    match profile {
-        "read_only" => Sandbox::prepare(root, Profile::ReadOnly, &[], &[], false)?,
-        "guarded" => Sandbox::prepare(root, Profile::Guarded, &[root.to_path_buf()], &[], false)?,
-        "development" => Sandbox::prepare(
-            root,
-            Profile::Development,
-            &[root.to_path_buf()],
-            &[],
-            false,
-        )?,
-        _ => return Err(io::Error::other("command_profile_invalid")),
+    let profile = live_profile(profile)?;
+    let writes = if profile == Profile::ReadOnly {
+        Vec::new()
+    } else {
+        vec![root.to_path_buf()]
     };
+    LiveSandbox::prepare(root, profile, &writes, &[], false)?;
     Ok(())
 }
 #[derive(Serialize, Deserialize)]
@@ -194,15 +215,10 @@ pub fn run() -> io::Result<()> {
             return Err(io::Error::other("invalid_scoped_command_spec"));
         }
         handshake(&mut input, json!({"authorize":true}))?;
-        Sandbox::prepare_scoped(&spec.root, &spec.protected)
+        Sandbox::prepare_scoped(&spec.root, &spec.protected).map(Prepared::Scoped)
     } else {
-        let profile = match spec.profile.as_str() {
-            "read_only" => Profile::ReadOnly,
-            "guarded" => Profile::Guarded,
-            "development" => Profile::Development,
-            _ => return Err(io::Error::other("command_profile_invalid")),
-        };
-        Sandbox::prepare_authorized(
+        let profile = live_profile(&spec.profile)?;
+        LiveSandbox::prepare_authorized(
             &spec.root,
             profile,
             &spec.writes,
@@ -210,6 +226,7 @@ pub fn run() -> io::Result<()> {
             &mut || handshake(&mut input, json!({"authorize":true})),
             &mut timings,
         )
+        .map(Prepared::Live)
     };
     let mut sandbox = match prepared {
         Ok(sandbox) => sandbox,
@@ -236,7 +253,7 @@ pub fn run() -> io::Result<()> {
     handshake(&mut input, json!({"ready":own,"timings":timings}))?;
     let launched_at = Instant::now();
     let output = Arc::new(Mutex::new(private(&spec.output)?));
-    let mut command: Command = sandbox.command_at(&spec.argv, Some(&spec.cwd))?;
+    let mut command: Command = sandbox.command_at(&spec.argv, &spec.cwd)?;
     command
         .current_dir(&spec.cwd)
         .stdin(Stdio::null())
@@ -337,11 +354,13 @@ pub fn run() -> io::Result<()> {
             }
         }
     }
-    if !sandbox.finish().is_empty() {
-        output
-            .lock()
-            .unwrap()
-            .write_all(b"\nCortex removed newly planted Git control paths.\n")?;
+    if let Prepared::Live(live) = &mut sandbox {
+        if !live.finish().is_empty() {
+            output
+                .lock()
+                .unwrap()
+                .write_all(b"\nCortex removed newly planted Git control paths.\n")?;
+        }
     }
     drop(sandbox);
     output.lock().unwrap().sync_all()?;

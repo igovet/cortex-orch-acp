@@ -391,7 +391,7 @@ of the current plan revision is neither closed under the
 nor listed in synthesis not_verified with its blocker. A worker command receipt
 closes a declared-command gap only with identical argv, the task working tree as
 its effective cwd, and a read-only, task-mode writer, or Guarded (`restricted`) profile; a
-host-writable receipt cannot close it once the task is Guarded.
+`development`-profile receipt cannot close it once the task is Guarded.
 Runtime final verification
 can close a declared-command gap only with identical argv, complete exit-0
 execution and untruncated runtime-owned evidence bound to both the gap author's

@@ -55,11 +55,11 @@ expected hash or absence and rejects private paths, symlinks and hardlinks.
 Direct private/Git/denied-path overlays are not a guarantee against arbitrary host
 code, outside aliases or Docker. A project digest does not cover outside resources.
 Writing-worker commands in Development and Auto use host-writable mounts through the
-broker; Guarded keeps them restricted. Read-only and reviewer commands and automatic
-verification use the read-only host profile in every mode. Their project is read-only, except
-that an automatic verification check may write the project's git-ignored directories in place,
-and its other project writes (a tracked file a tool regenerates) go to a private overlay
-discarded when the check ends (refused where the host cannot overlay). Command environments filter Cortex/credential variables but
+broker; Guarded keeps them restricted. Read-only and reviewer commands use the read-only host-visible profile in every
+mode. Automatic verification uses the same host-visible read-only profile with
+networking disabled, private scratch and the existing writable grants for eligible
+ignored checkout directories. Other checkout writes are discarded where supported
+or refused. Command environments filter Cortex/credential variables but
 use owner toolchains, validated SSH-agent access and shared network. `command_run`
 defaults to 1800 seconds (30 minutes; `timeout_seconds` sets more); outside commands
 default to 600 seconds. On a timeout, stop or authority loss the command and every

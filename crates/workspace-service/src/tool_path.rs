@@ -138,7 +138,20 @@ pub(crate) fn environment() -> BTreeMap<OsString, OsString> {
     if let Some(path) = for_commands() {
         environment.insert("PATH".into(), path);
     }
+    if started() {
+        environment.insert(COMMAND_EXTRAS.into(), command_extras());
+    }
     environment
+}
+
+pub(crate) const COMMAND_EXTRAS: &str = "CORTEX_COMMAND_EXTRA_TOOL_DIRS";
+
+/// Only owner-selected directories add general-purpose host executables to the sparse view.
+pub(crate) fn command_extras() -> OsString {
+    let extra = STATE.get().and_then(|state| state.read().ok()).map(|state| {
+        state.extra.iter().filter(|p| valid(p, &state.private).is_ok()).cloned().collect::<Vec<_>>()
+    }).unwrap_or_default();
+    std::env::join_paths(extra).unwrap_or_default()
 }
 
 /// Search-path directories with where each came from: `shell`, `fallback`, `extra`

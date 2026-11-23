@@ -1,6 +1,8 @@
 //! Custom harness: this executable is also the disposable ACP peer and relay.
 #[path = "support/hermetic.rs"]
 mod hermetic;
+#[path = "support/command_acceptance.rs"]
+mod command_acceptance;
 #[path = "../../cortex-engine/src/bin/fake-engine.rs"]
 mod peer;
 fn verification_available(root: &std::path::Path) -> bool {
@@ -29,9 +31,15 @@ use workspace_service::native_sessions::{NativeHost, SessionRole, SessionRoute};
 struct Project(PathBuf);
 impl Project {
     fn new() -> Self {
+        Self::new_at(
+            &std::env::temp_dir(),
+            "native-session-long-project-path-regression",
+        )
+    }
+    fn new_at(parent: &std::path::Path, prefix: &str) -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "native-session-long-project-path-regression-{}-{}",
+        let path = parent.join(format!(
+            "{prefix}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
@@ -80,6 +88,7 @@ impl Project {
                 credential_directory: self.0.clone(),
                 base_environment: BTreeMap::new(),
                 codex_launcher: None,
+                confinement: None,
             },
             relay: executable,
             broker_parent: self.0.join(".cortex-dev"),
@@ -603,11 +612,15 @@ async fn channel_source_project_and_commands() {
         a: Value,
         e: Value,
     ) {
+        let target = a["request_key"].as_str().or_else(|| a["path"].as_str()).unwrap_or("-");
         let prompt = format!(
             "call:{}",
             json!({"name":n,"arguments":a,"__fixture_expect":e})
         );
-        d.prompt(&prompt).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(15), d.prompt(&prompt))
+            .await
+            .unwrap_or_else(|_| panic!("{n} fixture action {target}: no reply"))
+            .unwrap_or_else(|e| panic!("{n} fixture action {target}: {e:?}"));
     }
     let d = h
         .dispatch("t".into(), o.clone(), SessionRole::Coordinator, p.route())
@@ -916,6 +929,46 @@ async fn channel_source_project_and_commands() {
     .await;
     let diff=s.read(|db|Ok(db.query_row("SELECT json_extract(result_json,'$.output') FROM runtime_requests WHERE request_key='git-diff'",[],|r|r.get::<_,String>(0))?)).unwrap();
     assert!(diff.contains("-one") && diff.contains("+written"));
+
+    // This filter exists only through an include. The required but inert
+    // false command would fail a worktree comparison if Git activated it.
+    std::fs::write(p.0.join(".gitattributes"), "src/value filter=synthetic\n").unwrap();
+    std::fs::write(
+        p.0.join(".git/filter-fixture.conf"),
+        "[filter \"synthetic\"]\n\tclean = /usr/bin/false\n\trequired = true\n",
+    ).unwrap();
+    use std::io::Write as _;
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(p.0.join(".git/config")).unwrap(),
+        "[include]\n\tpath = filter-fixture.conf"
+    ).unwrap();
+    // Verify the include is effective in the fixture without running the
+    // filter itself. The gateway disables the resolved filter drivers.
+    let included = std::process::Command::new("/usr/bin/git")
+        .args(["config", "--local", "--includes", "--get", "filter.synthetic.required"])
+        .current_dir(&p.0)
+        .env_clear()
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(included.status.success(), "fixture include was not loaded");
+    assert_eq!(included.stdout, b"true\n");
+    for (kind, expected) in [("status", " M src/value"), ("diff", "+written")] {
+        let key = format!("git-{kind}-included-filter");
+        check(
+            &w,
+            "project_git",
+            json!({"kind":kind,"request_key":key}),
+            json!({"/result/structuredContent/exit_code":0}),
+        ).await;
+        let output = s.read(|db| Ok(db.query_row(
+            "SELECT json_extract(result_json,'$.output') FROM runtime_requests WHERE request_key=?",
+            [&key],
+            |r| r.get::<_,String>(0),
+        )?)).unwrap();
+        assert!(output.contains(expected), "{kind}: {output}");
+    }
     std::fs::write(p.0.join("src/paged"), "a\nb\n").unwrap();
     check(
         &w,
@@ -1079,7 +1132,9 @@ async fn channel_source_project_and_commands() {
         json!({"/result/isError":false}),
     )
     .await;
-    if verification_available(&p.0) {
+    if workspace_service::native_command_supervisor::observe_command_view(&p.0, "development")
+        .is_ok()
+    {
         // Hold a real process until the same channel has read a file, replayed
         // its key and polled the command. A blocking MCP handler cannot pass.
         let args = json!({"argv":["/bin/sh","-c","while [ ! -f release-command ]; do sleep 0.1; done"],"timeout_seconds":20,"request_key":"background"});
@@ -1933,8 +1988,10 @@ async fn access_modes_and_outside_routes() {
                 "end_turn",
             )
             .await;
-            if path.exists() {
+            if mode == "auto" {
                 assert_eq!(std::fs::read_to_string(&path).unwrap(), "newer");
+            } else {
+                assert!(!path.exists());
             }
             checked(
                 &d,
@@ -4082,6 +4139,7 @@ async fn native_plan_review_verification_journey(
     failing: bool,
     fix: bool,
     truncated: bool,
+    verifier: Option<&command_acceptance::VerifierInputs>,
 ) {
     let p = Project::new();
     assert!(std::process::Command::new("/usr/bin/git")
@@ -4096,6 +4154,9 @@ async fn native_plan_review_verification_journey(
         .create("journey".into(), "Implement fixture".into(), "owner".into())
         .await
         .unwrap();
+    if let Some(inputs) = verifier {
+        inputs.prepare(&p.0);
+    }
     let coordinator = h
         .dispatch(
             "journey".into(),
@@ -4105,8 +4166,17 @@ async fn native_plan_review_verification_journey(
         )
         .await
         .unwrap();
+    let verification = if let Some(inputs) = verifier {
+        json!([inputs.argv()])
+    } else if truncated {
+        json!([["/usr/bin/dd", "if=/dev/zero", "bs=1048577", "count=1", "status=none"]])
+    } else if failing {
+        json!([["/bin/false"]])
+    } else {
+        json!([["/usr/bin/cmp", "/dev/null", "/dev/null"]])
+    };
     let plan = json!({"tasks":[{"id":"work","role":"backend-dev","objective":"Change work.txt","dependencies":[],"scope":["work.txt"],"model":"auto"}],
-        "verification":if truncated{json!([["/usr/bin/dd","if=/dev/zero","bs=1048577","count=1","status=none"]])}else if failing{json!([["/bin/false"]])}else{json!([["/usr/bin/cmp","/dev/null","/dev/null"]])}});
+        "verification":verification});
     // Invalid proposals cannot change the task, create nodes or consume the key; each is
     // a correctable content error (isError with its code), not an authority refusal.
     for bad in [
@@ -4162,6 +4232,10 @@ async fn native_plan_review_verification_journey(
         coordinator.shutdown().await.unwrap();
         close(h).await;
         println!("native verification unavailable: plan refused without acceptance");
+        assert!(
+            verifier.is_none(),
+            "required read-only verifier unavailable; no compiler payload was launched"
+        );
         return;
     }
     let proposal = call("plan_submit", json!({"plan":plan,"request_key":"plan"}));
@@ -4175,11 +4249,11 @@ async fn native_plan_review_verification_journey(
     );
     coordinator.shutdown().await.unwrap();
     let step = h.advance("journey".into(), o.clone()).await.unwrap();
+    assert_eq!(step["state"], "EXECUTING", "admitted verifier plan: {step}");
     let a = step["assignments"][0]["assignment_ref"]
         .as_str()
-        .unwrap()
+        .expect("worker assignment missing after plan admission")
         .to_owned();
-    assert_eq!(step["state"], "EXECUTING");
     let worker = h
         .dispatch(
             "journey".into(),
@@ -4456,11 +4530,18 @@ async fn native_plan_review_verification_journey(
         assert_eq!(output["observation"]["complete"],!truncated);
         assert_eq!(output["observation"]["output_truncated"],truncated);
         assert_eq!(output["observation"]["exit_code"],if failing{1}else{0});
+        if verifier.is_some() {
+            assert_eq!(output["observation"]["stdout"], command_acceptance::VERIFIER_OUTPUT);
+        }
         let event:String=db.query_row("SELECT type FROM runtime_events WHERE type IN ('VERIFICATION_FAILED','VERIFICATION_PASSED')",[],|r|r.get(0))?;
         assert_eq!(event,if failing||truncated{"VERIFICATION_FAILED"}else{"VERIFICATION_PASSED"});
         Ok(())
     }).unwrap();
     close(h).await;
+    if let Some(inputs) = verifier {
+        inputs.assert_effects(&p.0);
+        println!("verifier: host input visible, ignored build output retained, non-ignored write did not persist and private store input was masked");
+    }
 }
 
 /// A task in a plain project folder (no Git repository anywhere above it) runs its
@@ -6261,11 +6342,16 @@ async fn recovery_project_operations_and_structured_tool_errors() {
         expected: Value,
         stop: &str,
     ) {
+        let target = args["request_key"].as_str().or_else(|| args["path"].as_str()).unwrap_or("-");
         let prompt = format!(
             "call:{}",
             json!({"name":name,"arguments":args,"__fixture_expect":expected})
         );
-        assert_eq!(d.prompt(&prompt).await.unwrap().stop_reason, stop, "{name}");
+        let turn = tokio::time::timeout(Duration::from_secs(15), d.prompt(&prompt))
+            .await
+            .unwrap_or_else(|_| panic!("{name} fixture action {target}: no reply"))
+            .unwrap_or_else(|e| panic!("{name} fixture action {target}: {e:?}"));
+        assert_eq!(turn.stop_reason, stop, "{name}");
     }
     let p = Project::new();
     let h = p.host().await;
@@ -6321,6 +6407,8 @@ async fn recovery_project_operations_and_structured_tool_errors() {
         "end_turn",
     )
     .await;
+    // An absent bare name has no candidates to probe. It is reported missing
+    // even when the read-only sandbox cannot launch.
     checked(&d, "check_preflight", json!({"argv":["cortex-fixture-missing-program","--version"]}),
         json!({"/result/isError":false,"/result/structuredContent/available":false,
             "/result/structuredContent/reason":"program_missing","/result/structuredContent/evidence":false}),
@@ -6794,7 +6882,8 @@ async fn recovery_project_operations_and_structured_tool_errors() {
         &w,
         "check_preflight",
         json!({"argv":["cortex-fixture-missing-program"]}),
-        json!({"/result/structuredContent/reason":"program_missing"}),
+        json!({"/result/isError":false,"/result/structuredContent/available":false,
+            "/result/structuredContent/reason":"program_missing","/result/structuredContent/evidence":false}),
         "end_turn",
     )
     .await;
@@ -6913,7 +7002,61 @@ fn main() {
         peer::main();
         return;
     }
+    let containment = matches!(
+        mode.as_str(),
+        "broker-command-acceptance" | "managed-command-acceptance"
+    )
+    .then(command_acceptance::Inputs::new);
     tokio::runtime::Runtime::new().unwrap().block_on(async {
+        if mode == "verifier-command-acceptance" {
+            let inputs = command_acceptance::VerifierInputs::new();
+            tokio::time::timeout(
+                Duration::from_secs(120),
+                native_plan_review_verification_journey(false, false, false, false, Some(&inputs)),
+            )
+            .await
+            .expect("live verifier acceptance exceeded deadline");
+            return;
+        }
+        if let Some(inputs) = &containment {
+            tokio::time::timeout(Duration::from_secs(120), async {
+                match mode.as_str() {
+                    "broker-command-acceptance" => command_acceptance::contained(inputs, false).await,
+                    "managed-command-acceptance" => command_acceptance::contained(inputs, true).await,
+                    _ => unreachable!(),
+                }
+            })
+            .await
+            .expect("command containment acceptance exceeded deadline");
+            return;
+        }
+        if matches!(
+            mode.as_str(),
+            "command-role-live" | "command-role-denials"
+        ) {
+            tokio::time::timeout(
+                Duration::from_secs(120),
+                command_acceptance::role_mode_matrix(mode == "command-role-live"),
+            )
+            .await
+            .expect("command role/mode matrix exceeded deadline");
+            return;
+        }
+        if mode == "outside-auto-matrix" {
+            tokio::time::timeout(
+                Duration::from_secs(60),
+                command_acceptance::auto_outside_matrix(),
+            )
+            .await
+            .expect("Auto outside-action matrix exceeded deadline");
+            return;
+        }
+        if mode == "outside-command-consent" {
+            tokio::time::timeout(Duration::from_secs(30), command_acceptance::consent())
+                .await
+                .expect("outside command consent acceptance exceeded deadline");
+            return;
+        }
         if mode == "recovery-project-operations" {
             recovery_project_operations_and_structured_tool_errors().await;
             println!("recovery project operations, including batch read coverage, passed");
@@ -6991,6 +7134,13 @@ fn main() {
             println!("engine mode and native permission scenarios passed");
             return;
         }
+        if mode == "project-command-tools" {
+            tokio::time::timeout(Duration::from_secs(90), channel_source_project_and_commands())
+                .await
+                .expect("project and command tool scenarios exceeded deadline");
+            println!("project and command tool scenarios passed");
+            return;
+        }
         // This executable serially exercises all scenarios, including full
         // before/after project observations for evidence-bearing commands.
         tokio::time::timeout(Duration::from_secs(90), async {
@@ -7025,11 +7175,11 @@ fn main() {
             repeated_configure_transport_loss_stops_with_the_roles_blocker().await;
             inline_result_is_published_once_bound_to_attempt_and_reconciled_after_restart().await;
             result_failure_and_review_refusal_are_not_acceptance().await;
-            native_plan_review_verification_journey(false, false, false, false).await;
-            native_plan_review_verification_journey(true, false, false, false).await;
-            native_plan_review_verification_journey(false, true, false, false).await;
-            native_plan_review_verification_journey(false, false, true, false).await;
-            native_plan_review_verification_journey(false, false, false, true).await;
+            native_plan_review_verification_journey(false, false, false, false, None).await;
+            native_plan_review_verification_journey(true, false, false, false, None).await;
+            native_plan_review_verification_journey(false, true, false, false, None).await;
+            native_plan_review_verification_journey(false, false, true, false, None).await;
+            native_plan_review_verification_journey(false, false, false, true, None).await;
             plain_folder_task_runs_its_whole_lifecycle().await;
             shared_checkout_writer_waits_until_review_and_both_verify().await;
             verification_drift_blocks_the_pass().await;
@@ -7047,6 +7197,11 @@ fn main() {
         "plain-folder",
         "external-worker-grants",
         "sudo-host-route",
+        "project-command-tools",
+        "outside-command-consent",
+        "broker-command-acceptance",
+        "managed-command-acceptance",
+        "verifier-command-acceptance",
     ]
     .contains(&mode.as_str())
     {

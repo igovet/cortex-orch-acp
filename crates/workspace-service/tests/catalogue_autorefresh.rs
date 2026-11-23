@@ -114,6 +114,9 @@ impl Fixture {
             .env("XDG_STATE_HOME", self.root.join("state"))
             .env("XDG_RUNTIME_DIR", self.root.join("runtime"))
             .env("PATH", self.root.join("bin"))
+            // The scripted peer counts its calls in a fixture file outside any
+            // engine view; engine views have their own fixtures (debug builds only).
+            .env("CORTEX_TEST_UNCONFINED_ENGINES", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

@@ -815,6 +815,11 @@ impl Attachment {
     pub fn entry(&self) -> RelayEntry {
         self.entry.as_ref().unwrap().clone()
     }
+    /// The private directory of this server's relay broker, which a confined
+    /// engine's view must show for the relay to reach it.
+    pub fn broker_directory(&self) -> Option<PathBuf> {
+        self.broker.as_ref().map(|b| b.directory().to_path_buf())
+    }
     /// Observed exit of the contained server before or during this session.
     pub fn exited(&self) -> bool {
         self.proxy.as_ref().is_some_and(|p| p.exited())

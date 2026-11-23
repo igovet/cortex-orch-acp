@@ -18,6 +18,16 @@ The product contains no Python. The Python runtime (`src/`), its tests, `.venv` 
 
 ## Native host
 
+Ordinary worker commands use host-visible, mode-specific mounts. The automatic
+verifier uses the same host-visible read-only profile as read-only workers,
+with networking disabled. Neither is a general jail for native engine processes.
+A writing worker can request a host command directly. The runtime can also route an eligible
+privilege request before sandbox launch, or reroute once when the command
+supervisor proves the payload never started. Both routes use `outside_command`
+consent: Guarded and Development ask the owner; Auto decides automatically.
+Started runs and runs whose launch is uncertain are not replayed on the host.
+See [the command backend](native-incoming-acp.md#brokered-command-namespace-backend).
+
 Workspace sprint planning is a read-only Core task execution bound to the
 sprint planning policy; its plan arrives through the runtime-validated
 `sprint_plan_submit` tool and an independent review. See [Sprint planning limits](../cortex-workspace/local-task-execution.md#sprint-planning-limits).
@@ -46,10 +56,11 @@ Complete report/tool coverage, production route/instruction qualification, permi
 
 Fresh ACP sessions durably initialize Development in the project store. The
 host-side MCP broker gives a writing worker's brokered `command_run` in a Development or
-Auto task host-writable mounts, with retained cwd/profile/policy receipts. Read-only roles and
-automatic verification always get the read-only host profile, so their project stays read-only
-(verification writes git-ignored directories in place and discards its other project writes). Engine
-processes keep their existing jails. This is a
+Auto task host-writable mounts, with retained cwd/profile/policy receipts. Read-only roles
+and automatic verification use the host-visible read-only profile in every
+mode. Verification disables networking. Only existing Git-ignored directories
+can retain writes inside the checkout; other checkout writes are discarded or
+refused. Neither route is a general jail for native engine processes. This is a
 trusted-local-development boundary, not adversarial containment from Docker or
 arbitrary owner code. Legacy/missing/unreadable state stays Guarded; explicit
 client choices are preserved. See [access modes](../features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).

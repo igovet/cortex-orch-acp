@@ -380,9 +380,11 @@ continuation, without a user access question. Policy, path and role refusals
 are immediate runtime decisions; retained old access cards are retired. A request itself performs no write and
 user text does not override policy. After denial the worker can use an allowed
 alternative or request a replacement decomposition through the existing
-scope/replan flow. This does not dynamically widen the operating-system jail:
-ordinary writers already have whole-project write authority in the current
-launch boundary, while the runtime's declared reservations coordinate writers.
+scope/replan flow. Declared paths and granted requests reserve work for
+coordination; they do not limit an ordinary writing worker's project writes.
+Request a reservation before changing additional project paths. The gateway still
+enforces private-path restrictions and owner write protections. A grant does not
+override those protections or change command mounts or outside-action consent.
 See [orchestration](../orchestration/index.md#worker-questions-and-additional-access).
 
 ### Project rule files are write-protected by default

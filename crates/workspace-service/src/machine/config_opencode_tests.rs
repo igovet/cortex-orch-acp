@@ -4,7 +4,10 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("cw-opencode-engine-{}", unique()));
+        Self::new_at(&std::env::temp_dir())
+    }
+    fn new_at(parent: &Path) -> Self {
+        let root = parent.join(format!("cw-opencode-engine-{}", unique()));
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         Self(root.canonicalize().unwrap())
@@ -186,13 +189,21 @@ fn discovery_reads_the_version_inside_the_sandbox_and_skips_untrusted_candidates
     assert_eq!(found.version, "2.0.19");
     assert_eq!(found.binary, fake.canonicalize().unwrap());
     assert!(qualified(&found.version));
-    // The probe runs without network, the owner's HOME or its environment.
+    // /tmp is shared by the existing probe; /var/tmp is private to it.
+    let host = Temp::new_at(Path::new("/var/tmp"));
+    let sentinel = host.0.join("owner-sentinel");
+    fs::write(&sentinel, "owner").unwrap();
     fs::write(
         &fake,
-        "#!/bin/sh\n[ \"$HOME\" != \"$OWNER_HOME\" ] || exit 7\n[ -z \"$SECRET\" ] || exit 8\necho 3.1.4\n",
+        format!(
+            "#!/bin/sh\n[ \"$HOME\" != \"$OWNER_HOME\" ] || exit 7\n[ -z \"$SECRET\" ] || exit 8\n\
+             ! (echo changed > '{}') 2>/dev/null || exit 9\necho 3.1.4\n",
+            sentinel.display(),
+        ),
     )
     .unwrap();
     assert_eq!(probe_version(&fake, Some(&path)).as_deref(), Some("3.1.4"));
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "owner");
     // A failing or silent binary reports no version; an unqualified one is named.
     fs::write(&fake, "#!/bin/sh\nexit 1\n").unwrap();
     assert!(probe_version(&fake, Some(&path)).is_none());

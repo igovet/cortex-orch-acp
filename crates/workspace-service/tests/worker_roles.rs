@@ -353,6 +353,7 @@ impl Project {
                     credential_directory: home.clone(),
                     base_environment: BTreeMap::new(),
                     codex_launcher: None,
+                    confinement: None,
                 },
                 relay: executable,
                 broker_parent: self.root.join(".cortex-dev"),

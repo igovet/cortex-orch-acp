@@ -427,6 +427,18 @@ fn start_peer(
         deadline: tokio::time::Instant::now() + budget,
     })
 }
+#[cfg(test)]
+pub(crate) async fn fixture_catalogue(
+    env: &RouteEnvironment,
+    record: &Value,
+) -> std::result::Result<(), String> {
+    let observed = observe_with(env, record, Duration::from_secs(25)).await?;
+    if observed.models.is_empty() {
+        return Err("fixture_catalogue_has_no_models".into());
+    }
+    Ok(())
+}
+
 async fn observe_with(
     env: &RouteEnvironment,
     r: &Value,
@@ -583,6 +595,9 @@ async fn observe_with(
     {
         return Err("engine_unreachable:PortableError".into());
     }
+    #[cfg(test)]
+    crate::native_account_fixture::on_exec(c.as_std_mut(), "catalogue", &env.home)
+        .map_err(|_| "fixture_profile_unavailable".to_owned())?;
     let mut peer = start_peer(c, logs, secret, budget)?;
     let result = async {
         peer.call(

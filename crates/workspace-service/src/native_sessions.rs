@@ -662,6 +662,12 @@ impl NativeHost {
                     }
                     None => false,
                 };
+                // A confined engine reaches its relays' brokers only through these
+                // directories, shown read-only in its view; nothing else of the store.
+                launch.expose(
+                    std::iter::once(broker.as_ref().unwrap().directory().to_path_buf())
+                        .chain(external.iter().filter_map(|a| a.broker_directory())),
+                );
                 let instruction_file = (engine_kind == cortex_engine::environment::EngineKind::Codex)
                     .then(|| broker.as_ref().unwrap().write_model_instructions(&instructions)).transpose()?;
                 engine = Some(Engine::launch_with_model_instructions(launch, policy.clone(), instruction_file.as_deref()).await?);

@@ -228,10 +228,9 @@ They create no engine logs, jail, provider files or snapshots and read no binary
 or credential contents. A newly launchable install after admission refuses
 without switching providers.
 
-**All potentially usable OpenCode installs still select Python before effects.**
-Native OpenCode version probing, successful verified launch, process-isolated
-jail, owner-provider/config import and Cortex-mode/per-model observations have
-not been implemented or qualified. No fake jail substitutes for that boundary.
+The preceding admission description is historical. The current Rust version
+probe and catalogue use separate Bubblewrap launch paths; neither is a sparse
+filesystem jail for task engines. See [current OpenCode launch boundaries](features/opencode-engine/index.md#current-rust-launch-boundaries).
 
 #### Native launch-capable catalog producer
 
@@ -850,7 +849,7 @@ The optional `ceiling` object may only narrow permissions and route access. Its 
 
 The accepted ceiling model is `PolicyCeiling`; serialization/loading is `configuration.store.serialize_ceiling/deserialize_ceiling/read_user_defaults`. A project ceiling is stored in the project's SQLite configuration table and may further restrict the user ceiling. There is no second project JSON file for defaults. Task and assignment configuration can narrow the effective ceiling but cannot grant more.
 
-Access mode is a separate client-owned choice, not a user-default JSON option: fresh ACP sessions durably start Development, with host-writable brokered commands for writing workers. Guarded keeps workers inside the project with consent for every outside action; Auto uses the same host-writable commands as Development and answers every permission card itself. Existing sessions/tasks without initialization and unknown/unreadable state remain Guarded. Pre-task choices persist per session and win at atomic task binding; reconnect/load preserves them without rewriting owner settings. The additive session record and task events live in the project database. See [permissions and limits](features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
+Access mode is a separate client-owned choice, not a user-default JSON option: fresh ACP sessions durably start Development. Eligible Development and Auto writer commands have host visibility and can write the live checkout; Guarded writer commands use the task's working tree. Eligible explicit outside actions ask in Guarded and Development, while Auto answers automatically. Existing sessions/tasks without initialization and unknown/unreadable state remain Guarded. Pre-task choices persist per session and win at atomic task binding; reconnect/load preserves them without rewriting owner settings. See [permissions and limits](features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
 
 ACP's first pending/saved-default selection and later route/effort selections
 read the owner defaults/ceiling and project SQLite layer. Only parameter maps

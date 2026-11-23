@@ -822,6 +822,7 @@ done
                     credential_directory: root.into(),
                     base_environment: BTreeMap::new(),
                     codex_launcher: None,
+                    confinement: None,
                 },
                 relay: "/bin/false".into(),
                 broker_parent: root.join(if workspace_protocol::channel::current().is_dev() {

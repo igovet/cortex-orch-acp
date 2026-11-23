@@ -34,6 +34,7 @@ fn launch(engine: EngineKind, home: &std::path::Path) -> LaunchSpec {
         credential_directory: home.to_owned(),
         base_environment: BTreeMap::new(),
         codex_launcher: None,
+        confinement: None,
     }
 }
 /// Children of this process that are still alive or unreaped.

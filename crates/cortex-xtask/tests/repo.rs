@@ -111,7 +111,7 @@ fn generated_drift_is_detected_in_a_scratch_tree() {
 }
 
 #[test]
-fn test_fast_preserves_the_invokers_tmpdir_for_steps() {
+fn test_fast_preserves_the_invokers_tmpdir_and_target_dir_for_steps() {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
@@ -127,7 +127,7 @@ fn test_fast_preserves_the_invokers_tmpdir_for_steps() {
     let cargo = bin.join("cargo");
     fs::write(
         &cargo,
-        "#!/bin/sh\n[ \"${TMPDIR:-}\" = \"$EXPECTED_TMPDIR\" ] || { echo \"Unexpected TMPDIR: $TMPDIR\" >&2; exit 73; }\n",
+        "#!/bin/sh\n[ \"${TMPDIR:-}\" = \"$EXPECTED_TMPDIR\" ] || { echo \"Unexpected TMPDIR: $TMPDIR\" >&2; exit 73; }\n[ \"$CARGO_TARGET_DIR\" = \"$EXPECTED_TARGET_DIR\" ] || { echo \"Unexpected CARGO_TARGET_DIR: $CARGO_TARGET_DIR\" >&2; exit 74; }\nmkdir -p \"$CARGO_TARGET_DIR\" && touch \"$CARGO_TARGET_DIR/build-finished\"\n",
     )
     .unwrap();
     fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700)).unwrap();
@@ -135,15 +135,30 @@ fn test_fast_preserves_the_invokers_tmpdir_for_steps() {
         std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
     .unwrap();
+    // Use a relative path like Cargo accepts, but invoke the runner from a
+    // different directory than the fixture checkout.
+    let checkout = scratch.join("checkout");
+    fs::rename(scratch.join("integrations"), {
+        fs::create_dir(&checkout).unwrap();
+        checkout.join("integrations")
+    })
+    .unwrap();
+    let target = scratch.join("private-build");
     let out = Command::new(env!("CARGO_BIN_EXE_cortex-xtask"))
+        .current_dir(&scratch)
         .args(["test-fast", "--only", "build", "--root"])
-        .arg(&scratch)
+        .arg(&checkout)
         .env("TMPDIR", &scratch)
         .env("EXPECTED_TMPDIR", &scratch)
+        .env("CARGO_TARGET_DIR", "private-build")
+        .env("EXPECTED_TARGET_DIR", &target)
         .env("PATH", path)
         .output();
+    let built_privately = target.join("build-finished").is_file();
+    let checkout_untouched = !checkout.join("target").exists();
     fs::remove_dir_all(&scratch).unwrap();
     let out = out.unwrap();
+    assert!(built_privately && checkout_untouched, "{out:?}");
     assert!(
         out.status.success(),
         "{}{}",
