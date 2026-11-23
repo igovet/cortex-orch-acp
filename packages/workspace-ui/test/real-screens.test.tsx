@@ -129,6 +129,33 @@ describe("machine overview, read when a screen shows it", () => {
     expect(ops(s).filter(op => op === "overview")).toHaveLength(1);
   });
 
+  it("saves the background purge and attachment age together with the archive rules", async () => {
+    const s = machine();
+    const original = s.answers["machine.call"]!;
+    let rules = {retentionDays: 30, autoArchiveDays: 7, automaticArchivePurge: true, unreferencedAttachmentRetentionDays: 1};
+    s.answers["machine.call"] = async message => {
+      const {op, params} = message as {op: string; params: {patch: typeof rules}};
+      const reply = await original(message);
+      if (op === "machine.update") rules = { ...rules, ...params.patch };
+      if (op === "overview") return {ok: true, result: { ...(reply as {result: object}).result, ...rules }};
+      return reply;
+    };
+    await open(s, `/settings/machine/${LOCAL_MACHINE_ID}/storage`);
+    const purge = $<HTMLInputElement>('input[aria-label="Delete expired archives automatically"]')!;
+    expect(purge.checked).toBe(true);
+    expect(stepper("Unreferenced attachments")).toBe("1 day");
+    purge.click();
+    button("More: Unreferenced attachments")!.click();
+    button("Save")!.click();
+    await settled();
+    expect(s.calls.find(c => c.operation === "machine.call" && (c.message as {op: string}).op === "machine.update")?.message)
+      .toMatchObject({params: {patch: {
+        retentionDays: 30, autoArchiveDays: 7, automaticArchivePurge: false, unreferencedAttachmentRetentionDays: 2,
+      }}});
+    expect(purge.checked).toBe(false);
+    expect(stepper("Unreferenced attachments")).toBe("2 days");
+  });
+
   it("reads the overview for a shown inspector Machine panel, and not for a hidden one", async () => {
     localStorage.setItem("cw.ws.inspectorHidden", "true");
     const hidden = machine();
@@ -522,7 +549,7 @@ describe("task session on real data", () => {
     expect($(".livepane")?.textContent).toContain("No findings");
   });
 
-  it("keeps Follow off until the owner returns and folds a failing step", async () => {
+  it("keeps following off until the owner returns and folds a failing step", async () => {
     const activity: Worker["activity"] = [
       {sequence:1,kind:"note",text:"Worker prose",at:null},
       {sequence:2,kind:"tool",text:"Read failed",error:true,at:null},
@@ -538,16 +565,18 @@ describe("task session on real data", () => {
     expect($(".stream")?.textContent).toContain("Read failed");
     const stream = $(".stream")!;
     stream.scrollTop = -100; stream.dispatchEvent(new Event("scroll")); await settled();
-    expect(document.body.dataset.follow).toBe("off");
+    // Opening the block stopped following: Latest is the feed's one follow control.
+    expect($(".dock-w .new-pill")).not.toBeNull();
+    expect($('[aria-label="Follow new activity"]')).toBeNull();
     workers[0] = worker({activity:[activity[1],activity[2],{sequence:4,kind:"note",text:"New arrival",at:null}]});
     s.send({type:"refresh"}); await settled();
-    expect(document.body.dataset.follow).toBe("off");
+    expect($(".dock-w .new-pill")).not.toBeNull();
     expect(stream.scrollTop).toBe(-100);
     expect($(".new-pill")?.textContent).toContain("1 new");
     s.send({type:"refresh"}); await settled();
     expect($(".new-pill")?.textContent).toContain("1 new");
     $(".new-pill")!.click(); await settled();
-    expect(document.body.dataset.follow).toBe("on");
+    expect($(".dock-w .new-pill")).toBeNull();
     expect(stream.scrollTop).toBe(0);
   });
 
@@ -860,7 +889,9 @@ describe("messages on real data", () => {
   it("confirms a stop for one worker without stopping the whole task", async () => {
     const s = machine(undefined, [worker({})]);
     await open(s, `${TASK}/workers/w1`);
-    const stop = all(".livepane button").find(b => b.textContent?.startsWith("Stop"))!;
+    // The worker is stopped from its composer's action button, as a task is from its own; the header has no Stop of its own.
+    expect(all(".livepane .d-h button").some(b => b.textContent?.startsWith("Stop"))).toBe(false);
+    const stop = $<HTMLElement>('.livepane [aria-label="Worker composer"] .c-send[aria-label="Stop worker…"]')!;
     expect(stop.getAttribute("aria-disabled")).not.toBe("true");
     stop.click();
     await settled();
@@ -874,9 +905,10 @@ describe("messages on real data", () => {
     const attach = $<HTMLElement>('dialog[open] [aria-label="Attach files"]')!;
     expect(attach.getAttribute("data-why")).toBe("A stop reason is text only. Files cannot be sent with it.");
     expect($("dialog[open] .c-bar .l-reason")).toBeNull();
+    type("Reason, optional", "Wrong approach");
     all("dialog[open] button").find(b => b.textContent?.trim() === "Stop worker")!.click();
     await settled();
-    expect(s.calls.find(c => c.operation === "executions.control")?.message).toMatchObject({action:"worker_stop",workerId:"w1"});
+    expect(s.calls.find(c => c.operation === "executions.control")?.message).toMatchObject({action:"worker_stop",workerId:"w1",reason:"Wrong approach"});
   });
 });
 

@@ -4,6 +4,8 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Changed: a running worker is stopped from its composer, as a task is from its own. With the field empty, the worker composer's action button is Stop ("Stop worker…", the same slot, size and stop icon as the task composer's), which opens the existing Stop <role>? dialog with its optional reason; typing turns it back into Send. The separate "Stop worker…" button in the worker's header is gone. The strip above a worker's activity with Find in this activity is removed too: there is no search there, and following resumes on its own when the owner scrolls back to the last row (Latest or "N new" still brings the end back).
+
 - Changed (owner decision): project rule files (`AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`, `.agents/`, `.claude/`, `docs/project/verification.md`) are no longer write-protected by default. When the work needs a change to one of them, the runtime approves it like any other project file and the owner is not asked; only an explicit owner `deny-write:` protects one.
 
 - Fixed: an owner answer to a question that contains `allow-write: <path>` lifts that write protection (for example a protected rule file) like the Remove control, instead of being ignored and asked again.

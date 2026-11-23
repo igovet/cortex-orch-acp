@@ -125,8 +125,10 @@ it("keeps history rows and the reader's position through a live tail update", as
   const port=await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/w`,structuredClone(state));
   const rows=[...document.querySelectorAll(".ev-note")];
   const scroller=document.querySelector<HTMLElement>(".stream")!;
+  // jsdom has no layout: the feed is 400 px high over 4000 px of rows, and the reader scrolls up into it.
+  Object.defineProperties(scroller,{clientHeight:{get:()=>400},scrollHeight:{get:()=>4000}});
   scroller.dispatchEvent(new WheelEvent("wheel",{deltaY:-100}));
-  scroller.scrollTop=-100;
+  scroller.scrollTop=1000;
   scroller.dispatchEvent(new Event("scroll"));
   state.workers[0].activity.at(-1)!.text="Live tail changed";
   port.emit(projection("2",structuredClone(state))); await settle();
@@ -135,7 +137,7 @@ it("keeps history rows and the reader's position through a live tail update", as
   expect(document.querySelectorAll(".ev-note")[219]).toBe(rows[219]);
   expect(rows[0].textContent).toBe("Observation 0");
   expect(rows[219].textContent).toBe("Live tail changed");
-  expect(scroller.scrollTop).toBe(-100);
+  expect(scroller.scrollTop).toBe(1000);
 });
 
 const feedWorker = (patch: Partial<Worker> = {}): Worker => ({id:"w",taskId:"t",executionId:"e",role:"frontend-dev",status:"completed",lane:"execution",goal:"Build the page",now:null,waitsFor:null,scope:[],route:{model:"opus-5.5",effort:"high"},attempt:null,elapsedMs:null,runningSince:null,context:null,usage:null,
@@ -206,7 +208,9 @@ it("automatically reads every history page and retains live arrivals",async()=>{
   expect(cursors).toEqual(["page2","page1"]);
   expect(document.querySelector(".stream")?.textContent).toMatch(/First page.*Middle page.*Latest page/);
   expect(document.querySelector(".stream")?.textContent).not.toContain("Load older");
-  expect(document.querySelector<HTMLInputElement>('[aria-label="Follow new activity"]')?.checked).toBe(true);
+  // Following: Latest does not stand in the dock, and there is no other follow control.
+  expect(document.querySelector(".dock-w .new-pill")).toBeNull();
+  expect(document.querySelector('[aria-label="Follow new activity"]')).toBeNull();
   state.workers[0].activity=[{sequence:4,kind:"note",text:"Live arrival",at:null}];
   port.emit(projection("2",structuredClone(state))); await settle();
   expect(document.querySelector(".stream")?.textContent).toMatch(/First page.*Middle page.*Latest page.*Live arrival/);
@@ -237,6 +241,8 @@ it("restores the saved worker scroll offset after a failed history read is retri
     await settle();
   };
   const original = stream();
+  // jsdom has no layout: the feed is 400 px high over 1400 px of rows, and the reader scrolls up into it.
+  Object.defineProperties(original, { clientHeight: { get: () => 400 }, scrollHeight: { get: () => 1400 } });
   original.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
   original.scrollTop = 700;
   original.dispatchEvent(new Event("scroll"));
@@ -263,7 +269,7 @@ it("restores the saved worker scroll offset after a failed history read is retri
   expect(returned.querySelector('[role="alert"]')).toBeNull();
   expect(returned.textContent).toContain("Earlier observation");
   expect(returned.scrollTop).toBe(700);
-  expect(document.querySelector<HTMLInputElement>('[aria-label="Follow new activity"]')?.checked).toBe(false);
+  expect(document.querySelector(".dock-w .new-pill")).not.toBeNull();
 });
 
 it("opens the worker result on a card with its report, without a disclosure triangle",async()=>{
@@ -325,7 +331,9 @@ it("shows the coordinator's recorded feed instead of an empty note",async()=>{
   expect(ids).toContain("t:coordinator:t");
   const pane=document.querySelector(".livepane")!;
   expect(pane.getAttribute("aria-label")).toBe("Coordinator activity");
-  expect(pane.querySelector('[aria-label="Find in this activity"]')).not.toBeNull();
+  // The full stream, with no search or follow strip above it.
+  expect(pane.querySelector(".stream")).not.toBeNull();
+  expect(pane.querySelector('[aria-label="Find in this activity"]')).toBeNull();
   expect(pane.textContent).toContain("Planning the work.");
   expect(pane.textContent).not.toContain("Nothing to report");
   expect(pane.textContent).not.toContain("Submit plan");

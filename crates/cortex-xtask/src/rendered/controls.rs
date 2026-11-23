@@ -190,7 +190,9 @@ impl J {
         let stop_url = self.start_task(project, "Exercise worker stop", "stop-siblings")?;
         self.wait("sibling_finished_and_worker_held", 90, |j| Ok(j.store_count(project, "SELECT EXISTS(SELECT 1 FROM runtime_nodes WHERE node_id='second' AND status='completed') AND EXISTS(SELECT 1 FROM runtime_nodes WHERE node_id='work' AND status='running')")? == 1))?;
         self.open_worker(&stop_url, "Change work.txt")?;
-        self.press("Stop worker…")?;
+        // The worker composer's action button is Stop while the worker runs and its field is empty; it has no
+        // visible text, so it is found by its accessible name, as Send is.
+        self.click("Stop worker…")?;
         // Retained input diagnostic: where the real pointer events land, against the button's own box.
         let _ = self.js("window.__cwEvents = []; for (const t of ['pointerdown', 'pointerup', 'click']) document.addEventListener(t, e => { const el = e.target; window.__cwEvents.push({t, x: Math.round(e.clientX), y: Math.round(e.clientY), at: (el.getAttribute?.('aria-label') || el.textContent || el.tagName || '').trim().slice(0, 30), tag: el.tagName}); }, true); return 'armed';");
         self.click_pointer("Stop worker")?;

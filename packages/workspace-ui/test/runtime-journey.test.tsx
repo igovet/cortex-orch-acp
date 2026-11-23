@@ -291,7 +291,8 @@ it.skipIf(!socket || !project)("owner screens survive window detach through the 
     reason.value="Owner requested a focused stop"; reason.dispatchEvent(new Event("input",{bubbles:true}));
     all("dialog button").find(b=>b.textContent?.trim()==="Stop command")!.click();
     await until(()=>existsSync(project!+"/worker-command-stopped"));
-    button("Stop worker…").click();
+    // The worker composer's action button is Stop while the worker runs and its field is empty.
+    document.querySelector<HTMLElement>('[aria-label="Worker composer"] .c-send[aria-label="Stop worker…"]')!.click();
     all("dialog button").find(b=>b.textContent?.trim()==="Stop worker")!.click();
     await until(()=>text().includes("Cancelled"));
     list=await workers();

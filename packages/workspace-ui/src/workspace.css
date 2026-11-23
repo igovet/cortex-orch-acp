@@ -160,7 +160,6 @@ dialog.ws-picker { height: min(460px, 64vh); border: 1px solid var(--line-strong
 .ws-wrow-sum { min-height: 34px; }
 .ws-wins { color: inherit; }
 .ws-wins:hover { background: var(--bg-hover); }
-.ws-find { width: 150px; height: 24px; font-size: var(--t-cap); }
 
 /* The mockups use .chk for a check row and for a checkbox. Each keeps only its own half, so a row is never a 14px box and a box is never a row. */
 .chk:not(input) { appearance: auto; width: auto; height: auto; border: 0; border-radius: 0; background: none; }
@@ -215,15 +214,19 @@ input.chk { display: inline-block; min-height: 0; }
 
 .ws-pill { display: inline-flex; }
 .dock > .ws-pill, .dock-w > .ws-pill, .d-dock > .ws-pill { display: flex; }
-/* The follow pill and the folded "Send a separate message" stand in an opaque band of the timeline's own surface: content
-   scrolls behind the band as it does behind the composer, and is never under a floating control. The band is a little wider
-   than the content column so no card edge shows past it. The pill's band lies over the feed's bottom edge just above the dock,
-   out of flow: it shows only while the reader is away from the end, and taking room in the dock it would resize the feed and
-   move the end each time it came or went. It stops short of the feed's right edge so the feed's scrollbar stays whole. */
-.pill-band, .mc-fold { margin: 0 -12px; background: var(--bg-canvas); }
-.pill-band { display: flex; justify-content: center; padding: 4px 0 8px; }
+/* The folded "Send a separate message" stands in an opaque band of the timeline's own surface inside the dock: content
+   scrolls behind the band as it does behind the composer. The band is a little wider than the content column so no card edge
+   shows past it. */
+.mc-fold { margin: 0 -12px; background: var(--bg-canvas); }
+/* The follow pill (Latest, or "N new") floats in the air over the feed's bottom edge just above the dock: its band has no surface
+   of its own and takes no pointer, so the feed shows around the pill and still scrolls and takes clicks under the band; only
+   the opaque pill itself is a control. The band lies out of the dock's flow: it shows only while the reader is away from the
+   end, and taking room in the dock it would resize the feed and move the end each time it came or went. It stops short of the
+   feed's right edge so the feed's scrollbar stays whole. Its box (and so the room an opened row keeps clear of the pill) is
+   unchanged. */
+.pill-band { display: flex; justify-content: center; margin: 0 -12px; padding: 4px 0 8px; pointer-events: none; }
 .dock > .pill-band, .dock-w > .pill-band { position: absolute; bottom: 100%; left: calc(11px + var(--ws-edge)); right: calc(11px + var(--ws-edge)); margin: 0; }
-.pill-band > .new-pill { margin: 0; }
+.pill-band > .new-pill { margin: 0; pointer-events: auto; }
 /* The team bar: one opaque strip pinned in the dock directly above the composer, never part of the scrolling feed. The worker at
    work leads it; the whole list opens as a top-layer menu, so opening it moves neither the feed nor the composer. */
 .ws-team { container: team / inline-size; display: flex; align-items: center; gap: 8px; min-width: 0; height: 36px; margin-bottom: 6px; padding: 0 4px 0 6px;
@@ -873,7 +876,7 @@ html[data-hidden] *, html[data-hidden] *::after { animation-play-state: paused !
    bottom edge stop short of it, so a scrollbar is always grabbed and an edge always resizes. The desktop bridge widens the
    inset on a scaled display. */
 :root { --ws-edge: 6px; }
-.d-scroll, .feed, .sp-scroll, .cf-scroll, .ws-read-b, .inspector, .ebody, .dview, .hist, .cdetail, .terminal-screen { margin-right: var(--ws-edge); }
+.d-scroll, .sp-scroll, .cf-scroll, .ws-read-b, .inspector, .ebody, .dview, .hist, .cdetail, .terminal-screen { margin-right: var(--ws-edge); }
 .board-wrap { margin-right: var(--ws-edge); }
 .board-wrap, .ebody, .dview { margin-bottom: var(--ws-edge); }
 .ws-list, .ws-pal-b, .term-body { margin-bottom: 0; }

@@ -20,7 +20,7 @@ const toggle = () => document.querySelector<HTMLButtonElement>(".ws-goal-toggle"
 
 it("keeps a worker's expanded goal open when a background refresh replaces its record, and folds it for another worker", async () => {
   const [w, setW] = createSignal(worker());
-  mount(() => <Head w={w()} now={0} onStop={() => undefined} />);
+  mount(() => <Head w={w()} now={0} />);
   expect(toggle().getAttribute("aria-expanded")).toBe("false");
   toggle().click();
   await flush();

@@ -3,9 +3,9 @@ import { createOpenState, DiffBox, Fold, OutputBox, StepRow, type OpenState } fr
 import { FEATURES, type Activity, type Check, type Message, type Worker } from "@cortex/workspace-domain";
 import { AttachChips, createAttachments, createDictation, MessageComposer } from "./composer";
 import { useWs } from "./ctx";
-import { createBodyMark, createTicker, createUnsent } from "./freshness";
+import { createTicker, createUnsent } from "./freshness";
 import { A, Count, createFollow, I, Loading, MenuItem, Modal, Pop } from "./kit";
-import { ActionBar, Toolbar } from "./layout";
+import { ActionBar } from "./layout";
 import type { Route } from "./router";
 import { clock, refusalLine, refusalReason } from "./selectors";
 import { displayStep, feedOf, isHiddenActivity, oneRowPerCall, stepFailed, viewOfActivity, type FeedItem, type FeedRun } from "./tool-names";
@@ -149,11 +149,11 @@ function ActivityStep(props: { a: Activity; w: Worker; state: OpenState; onStopC
 }
 
 /** Consecutive tool steps as one block, collapsed until the owner opens it. */
-function Run(props: { run: FeedRun<Activity>; runKey: string; state: OpenState; w: Worker; forceOpen: boolean; onStopCommand: (a: Activity) => void }) {
+function Run(props: { run: FeedRun<Activity>; runKey: string; state: OpenState; w: Worker; onStopCommand: (a: Activity) => void }) {
   const ws = useWs();
   const items = createMemo(() => new Map(props.run.items.map(a => [a.sequence, a])));
   const running = () => props.w.status === "working" ? props.run.items.find(a => a.command?.state === "running") : undefined;
-  return <Fold text={props.run.text} open={props.state.is(props.runKey) || props.forceOpen} loading={props.run.loading} onToggle={() => props.state.toggle(props.runKey)}
+  return <Fold text={props.run.text} open={props.state.is(props.runKey)} loading={props.run.loading} onToggle={() => props.state.toggle(props.runKey)}
     right={<Show when={running()}>{c => <button class="btn btn-sm" {...ws.needs("stop_command")} onClick={() => { if (!ws.gate("stop_command")) props.onStopCommand(c()); }}>Stop command…</button>}</Show>}>
     {() => <For each={props.run.items.map(a => a.sequence)}>{sequence => <ActivityStep a={items().get(sequence)!} w={props.w} state={props.state} onStopCommand={props.onStopCommand} />}</For>}
   </Fold>;
@@ -172,8 +172,10 @@ function Row(props: { item: Activity; w: Worker; message: (id: string) => Messag
   </Switch>;
 }
 
-/** Sending stays with the worker's current attempt, and it can never widen the worker's scope or access. */
-function WorkerComposer(props: { model: Accessor<SessionModel>; w: Worker }) {
+/** Sending stays with the worker's current attempt, and it can never widen the worker's scope or access. While the worker
+ *  runs and the field is empty, the action button is Stop, as in the task's own composer: it opens the stop dialog, where
+ *  the owner may say why. Typing turns it back into Send. */
+function WorkerComposer(props: { model: Accessor<SessionModel>; w: Worker; onSend?: () => void; onStop?: () => void }) {
   const ws = useWs();
   const key = () => `${props.model().view.id}/${props.w.id}`;
   const [text, setText] = createSignal(ws.drafts.get(key()) ?? "");
@@ -196,6 +198,8 @@ function WorkerComposer(props: { model: Accessor<SessionModel>; w: Worker }) {
     // keeps it until the machine has it.
     if (direct()) { const attachments = files.files(); write(""); files.clear(); void ws.run({ type: "send_message", taskId, workerId: props.w.id, text: value, mode: "send_now", now, attachments }); return; }
     ws.ok({ type: "send_message", taskId, text: `For ${props.w.role}: ${value}`, mode: "send_now", now, attachments:files.files() }, () => { write(""); files.clear(); });
+    // Sent from this feed, it brings this feed's end back as a direct message does, though it reads in the conversation.
+    props.onSend?.();
   };
   createEffect(() => {
     const back = ws.store.sends.returned({ kind: "worker", taskId: props.model().view.id, workerId: props.w.id });
@@ -206,10 +210,14 @@ function WorkerComposer(props: { model: Accessor<SessionModel>; w: Worker }) {
   createEffect(() => { if (closed()) mic.stop(); });
   // The worker's recorded model and effort: read-only, because a message never changes a worker's route.
   const route = () => ws.route(props.w.route);
-  return <MessageComposer label={`Message ${props.w.role}`} placeholder={direct() ? `Message ${props.w.role} directly, tag @files…` : `Message ${props.w.role}, tag @files…`} text={text()} onText={write} files={files} mic={mic} off={closed()}
+  const live = () => props.w.status === "working" || props.w.status === "waiting_you";
+  const stop = () => !!props.onStop && live() && empty() && files.files().length === 0;
+  const stopEffect = () => props.w.status === "working" ? `Stop ends only ${props.w.role}; the task keeps running. Write a message to send it instead.`
+    : `Stop ends only ${props.w.role}; the task keeps running.`;
+  return <MessageComposer group="Worker composer" label={`Message ${props.w.role}`} placeholder={direct() ? `Message ${props.w.role} directly, tag @files…` : `Message ${props.w.role}, tag @files…`} text={text()} onText={write} files={files} mic={mic} off={closed()}
     suggest={{ projectId: props.model().view.project.id, taskId: props.model().view.id }}
     attachOff={direct() && !ws.can(FEATURES.workerAttachments) ? "Files can't be sent to one worker. Attach them to a message about the task instead." : undefined}
-    effect={direct() ? `To ${props.w.role}, this attempt only. It does not widen scope or access.` : `To the coordinator about ${props.w.role}. It decides how to pass it on and does not widen scope or access.`}
+    effect={stop() ? stopEffect() : direct() ? `To ${props.w.role}, this attempt only. It does not widen scope or access.` : `To the coordinator about ${props.w.role}. It decides how to pass it on and does not widen scope or access.`}
     route={<div class="c-route"><Show when={route()}>{r => <span class="sel mc-fixed" role="note" aria-label={`Recorded model: ${r()}`}><I n="cpu" s={14} /><span class="sel-t">{r()}</span></span>}</Show></div>}
     delivery={<Show when={direct()}>
       <button type="button" class="sel" popovertarget={`m-delivery-${idBase()}`} aria-label="Delivery: Next step"><I n="clock" s={14} /><span class="sel-t">Next step</span><I n="chevron-down" s={12} /></button>
@@ -219,7 +227,8 @@ function WorkerComposer(props: { model: Accessor<SessionModel>; w: Worker }) {
         <MenuItem label="Interrupt now" disabled="Unavailable: not qualified for this engine" />
       </Pop>
     </Show>}
-    send={{ label: `Send to ${props.w.role}`, needs: "send_message", why: files.busy() ? "Attachments are still loading" : empty() ? "Write a message first" : undefined, go: () => send(text()), insertAndSend: send }} />;
+    send={stop() ? { label: "Stop worker…", needs: "stop_worker", go: () => props.onStop?.(), run: { icon: "stop" } }
+      : { label: `Send to ${props.w.role}`, needs: "send_message", why: files.busy() ? "Attachments are still loading" : empty() ? "Write a message first" : undefined, go: () => send(text()), insertAndSend: send }} />;
 }
 
 /** A reason for a stop: the shared writing surface with dictation. The stop itself is the dialog's own confirmation. */
@@ -288,11 +297,10 @@ function joinStreamedText(list: Activity[], showPlumbing: boolean): Activity[] {
   return out;
 }
 
-/** Everything a worker did, newest at the bottom. New events never move the reader; Follow and the pill bring them back. */
-function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: boolean; onAsk?: () => void; position?: FollowPosition }) {
+/** Everything a worker did, newest at the bottom. New events never move a reader away from the end; scrolling back to the
+ *  end follows again, and Latest brings it back. */
+function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: boolean; onAsk?: () => void; onStop?: () => void; position?: FollowPosition }) {
   const ws = useWs();
-  const [finding, setFinding] = createSignal(false);
-  const [needle, setNeedle] = createSignal("");
   const [command, setCommand] = createSignal<{ worker: Worker; item: Activity } | null>(null);
   let scroller: HTMLDivElement | undefined;
   const [older, setOlder] = createSignal<Activity[]>([]);
@@ -335,19 +343,10 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
   // A failed page leaves its cursor available for Retry; the partial feed still cannot restore the saved offset.
   const follow = createFollow(() => scroller, () => observed() + ws.store.sends.shown(sentHere()).length,
     position && { position, ready: () => !loadingOlder() && !nextCursor() });
-  // What the owner just sent comes into view above the composer, even from a reader who had scrolled up.
-  let sentSeen = ws.store.sends.shown(sentHere()).length;
-  createEffect(() => { const n = ws.store.sends.shown(sentHere()).length; if (n > sentSeen) follow.jump(); sentSeen = n; });
-  let dock!: HTMLDivElement;
-  // A row or block the reader opens stays in view: following the end would otherwise scroll it up and away as it grows.
-  // A plain listener, not a click target of its own: it only watches the rows' own toggles, after they have run.
-  const keepOpenedInView = (e: MouseEvent) => {
-    const toggle = (e.target as Element | null)?.closest?.("button[aria-expanded]");
-    if (!toggle || !scroller?.contains(toggle)) return;
-    queueMicrotask(() => {
-      if (toggle.isConnected && toggle.getAttribute("aria-expanded") === "true") follow.reveal(toggle.closest(".step, .fold-block") ?? toggle, () => dock.querySelector(".pill-band")?.getBoundingClientRect().height ?? 0);
-    });
-  };
+  // What the owner just sent here comes into view above the composer and following turns on, even for a reader who had
+  // scrolled up. A row the reader opens stays in view: the follow controller watches the feed's own toggles.
+  let pressedSeen = ws.store.sends.pressed(sentHere());
+  createEffect(() => { const n = ws.store.sends.pressed(sentHere()); if (n > pressedSeen) follow.jump(); pressedSeen = n; });
   const loadOlder = async () => {
     const next = nextCursor();
     if (!next || loadingOlder()) return;
@@ -371,9 +370,7 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
   let runIdsOf = "", lastShown = new Map<string, FeedItem<Activity>>();
   const shown = createMemo(() => {
     if (runIdsOf !== identity()) { runIdsOf = identity(); runIds.clear(); lastShown = new Map(); }
-    const q = needle().trim().toLowerCase();
-    // A search shows parts of blocks; it must not teach them new identities.
-    const out = feedOf(all().filter(a => !q || `${a.text} ${a.code ?? ""}`.toLowerCase().includes(q)), q ? undefined : runIds, lastShown, ws.panels.showAllTools());
+    const out = feedOf(all(), runIds, lastShown, ws.panels.showAllTools());
     lastShown = new Map(out.map(x => [x.key, x]));
     return out;
   });
@@ -389,7 +386,6 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
   };
   createComputed(() => { for (const entry of shown()) slots.get(entry.key)?.set(() => entry); });
   const message = (id: string) => props.model().messages.find(m => m.id === id) ?? olderMessages().find(m => m.id === id);
-  createBodyMark("follow", () => follow.following() ? "on" : "off");
   const running = () => props.w.status === "working";
   const typing = () => <Show when={running()}><WorkingIndicator activity={all()} showAllTools={ws.panels.showAllTools()} /></Show>;
   const rows = () => <>
@@ -400,31 +396,26 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
       const entry = slot(key).get;
       onCleanup(() => slots.delete(key));
       const stop = (a: Activity) => setCommand({ worker: props.w, item: a });
-      return <Show when={entry()}>{e => "run" in e() ? <Run run={(e() as { run: FeedRun<Activity> }).run} runKey={key} state={opened} w={props.w} forceOpen={needle().trim() !== ""} onStopCommand={stop} />
+      return <Show when={entry()}>{e => "run" in e() ? <Run run={(e() as { run: FeedRun<Activity> }).run} runKey={key} state={opened} w={props.w} onStopCommand={stop} />
         : <Row item={(e() as { item: Activity }).item} w={props.w} message={message} />}</Show>;
     }}</For>
-    <Show when={!needle().trim()}><SentMessages place={sentHere()} worker /></Show>
-    <Show when={keys().length === 0}><div class="cap faint">{needle().trim() ? "No activity matches this search." : "No activity recorded yet."}</div></Show>
+    <SentMessages place={sentHere()} worker />
+    <Show when={keys().length === 0}><div class="cap faint">No activity recorded yet.</div></Show>
     {typing()}
   </>;
   return <>
-    <Toolbar small class="d-tools live-tools" label="Activity" end={<>
-      <Show when={finding()}><input class="inp ws-find" aria-label="Find in this activity" placeholder="Find" value={needle()} onInput={e => setNeedle(e.currentTarget.value)} ref={el => queueMicrotask(() => el.focus())}
-        onKeyDown={e => { if (e.key === "Escape") { e.stopPropagation(); setNeedle(""); setFinding(false); } }} /></Show>
-      <button class="ib" aria-label="Find in this activity" aria-pressed={finding()} onClick={() => { if (finding()) setNeedle(""); setFinding(!finding()); }}><I n="search" s={14} /></button>
-      <Show when={!isFinished(props.w)}><label class="sw-l"><span class="sw"><input type="checkbox" aria-label="Follow new activity" checked={follow.following()} onChange={e => follow.set(e.currentTarget.checked)} /><i></i></span>Follow</label></Show>
-    </>} />
-    <div class="stream" ref={el => { scroller = el; el.addEventListener("click", keepOpenedInView); }} onScroll={follow.onScroll}><div class="stream-in">
+    <div class="stream" ref={scroller} onScroll={follow.onScroll}><div class="stream-in">
       {rows()}
       <Show when={isFinished(props.w) && !props.readOnly}><Finished w={props.w} onAsk={props.onAsk} /></Show>
     </div></div>
-    <div class="dock-w" ref={dock}><Pill follow={follow} /><Show when={!isFinished(props.w) && !props.readOnly}><WorkerComposer model={props.model} w={props.w} /></Show></div>
+    <div class="dock-w"><Pill follow={follow} /><Show when={!isFinished(props.w) && !props.readOnly}><WorkerComposer model={props.model} w={props.w} onSend={() => follow.jump()} onStop={props.onStop} /></Show></div>
     <StopCommand target={command()} onClose={() => setCommand(null)} />
   </>;
 }
-/** The follow pill stands in its own opaque band just above the dock, over the feed's bottom edge and out of the dock's flow,
- *  so showing it never resizes the feed or moves the end. Content scrolls behind the band; the band shows only while the reader
- *  is away from the end. */
+/** The one follow control of every feed: Latest, or "N new" when something arrived while the reader was away from the end.
+ *  It floats just above the dock, over the feed's bottom edge and out of the dock's flow, so showing it never resizes the feed
+ *  or moves the end. Its band has no surface of its own and takes no pointer: the feed shows and scrolls around the opaque
+ *  pill. It shows only while the reader is away from the end. */
 export const Pill = (props: { follow: ReturnType<typeof createFollow> }) => <Show when={!props.follow.following()}>
   <div class="pill-band"><button class="new-pill ws-pill" onClick={() => props.follow.jump()}><I n="arrow-down" s={12} />{props.follow.missed() ? `${props.follow.missed()} new` : "Latest"}</button></div>
 </Show>;
@@ -432,18 +423,14 @@ export const Pill = (props: { follow: ReturnType<typeof createFollow> }) => <Sho
 /** A goal longer than this shows its first lines with a way to read the rest, so the activity below keeps its room. */
 const GOAL_FOLD_CHARS = 280, GOAL_FOLD_LINES = 4;
 export const longGoal = (goal: string) => goal.length > GOAL_FOLD_CHARS || goal.split("\n").length > GOAL_FOLD_LINES;
-export function Head(props: { w: Worker; now: number; onStop: () => void }) {
-  const ws = useWs();
+export function Head(props: { w: Worker; now: number }) {
   const [goalOpen, setGoalOpen] = createSignal(false);
   // A memo, so a refreshed worker record with the same id does not fold a goal the owner opened; only another worker does.
   const workerId = createMemo(() => props.w.id);
   createEffect(on(workerId, () => setGoalOpen(false), { defer: true }));
   const folds = () => longGoal(props.w.goal);
   return <div class="d-h">
-    <div class="d-title">{props.w.role}<Face w={props.w} />
-      <span class="act">
-        <Show when={props.w.status === "working" || props.w.status === "waiting_you"}><button class="btn btn-line btn-sm" {...ws.needs("stop_worker")} onClick={() => { if (!ws.gate("stop_worker")) props.onStop(); }}>Stop worker…</button></Show>
-      </span></div>
+    <div class="d-title">{props.w.role}<Face w={props.w} /></div>
     <div class={`d-goal${folds() ? goalOpen() ? " ws-goal-open" : " ws-goal-folded" : ""}`} id={`goal-${props.w.id}`}><ResultText breaks text={props.w.goal} /></div>
     <Show when={folds()}><button class="lnk ws-goal-toggle" aria-expanded={goalOpen() ? "true" : "false"} aria-controls={`goal-${props.w.id}`} onClick={() => setGoalOpen(!goalOpen())}>{goalOpen() ? "Show less of the goal" : "Show the whole goal"}</button></Show>
     <Grid w={props.w} now={props.now} />
@@ -606,7 +593,7 @@ export function WorkerPane(props: { model: Accessor<SessionModel>; pick: string;
     if (!worker()) return <div class="note-panel"><span>This worker is not part of the task.</span></div>;
 
     if (w().status === "pending" || w().status === "not_started") return <>
-      <Head w={w()} now={props.now} onStop={() => undefined} />
+      <Head w={w()} now={props.now} />
       <div class="d-scroll"><div class="res-sec"><div class="res-h">{w().waitsFor ? "Waits for" : "Starts when"}</div>{w().waitsFor ? `${w().waitsFor}. It starts on its own when that node is done.` : "All execution nodes are done. The review starts on its own."}</div></div>
     </>;
     // The keyed pane owns only the selected worker's DOM; keep positions above it.
@@ -614,9 +601,9 @@ export function WorkerPane(props: { model: Accessor<SessionModel>; pick: string;
     let position = positions.get(id);
     if (!position) positions.set(id, position = {});
     return <>
-      <Head w={w()} now={props.now} onStop={() => setStopping(w())} />
+      <Head w={w()} now={props.now} />
       <Show when={w().status === "waiting_you"}><div class="res-sec">Answer the open question in Conversation.</div></Show>
-      <Stream model={props.model} w={w()} onAsk={() => ask(w())} position={position} />
+      <Stream model={props.model} w={w()} onAsk={() => ask(w())} onStop={() => setStopping(w())} position={position} />
     </>;
   };
   // A pane rebuilds only when it shows a different worker or kind of worker: the composer and scroll position must survive new events.

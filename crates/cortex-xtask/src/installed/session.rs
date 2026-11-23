@@ -46,9 +46,10 @@ fn require_full_worker(input: &Input) -> Res<()> {
         input.has("backend-dev activity", &["landmark"])?,
         "worker activity pane missing",
     )?;
+    // The worker stream has no search or Follow strip: following resumes at the end on its own.
     require(
-        input.has("Find in this activity", &[])?,
-        "full worker stream controls missing",
+        !input.has("Find in this activity", &[])?,
+        "removed worker search strip returned",
     )?;
     require(
         !input.has("Show full history", &[])?,
@@ -805,11 +806,11 @@ fn journey_phase(
     emit("fixture_worker_ready", vec![("backend", s(backend))]);
     click("Work details", "backend-dev", &["link"], true)?;
     input.click("Coordinator", &["page tab"], true)?;
-    // The native coordinator feed offers no find box; the worker stream below must.
+    // The coordinator feed is selected first; the worker's full activity stream follows.
     wait("coordinator feed selected", || {
         input.has("Coordinator activity", &["landmark"])
     })?;
-    click("backend-dev", "Find in this activity", &["page tab"], true)?;
+    click("backend-dev", "backend-dev activity", &["page tab"], true)?;
     require_full_worker(input)?;
     input.click("Conversation", &["link"], false)?;
     // Stop/Resume exactness and runtime-certified completion are asserted by the native journey

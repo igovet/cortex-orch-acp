@@ -74,7 +74,7 @@ Attach and Voice keep their positions in every mode. A control that cannot be us
 
 The send control is a paper-plane icon named for its real consequence: "Send message", "Send answer", "Send to <role>", "Send and reopen", "Save comment", "Save draft" or "Start planning". No generic "Send" may hide starting work or clearing an acceptance. The plane is the standard control in the row, not a round exception.
 
-Start, Resume and Stop are the task composer's one action button while its field is empty, and entries of the task menu; with text or files the button is the plane. They are not in the title band, which shows no state chip. Enter never presses them.
+Start, Resume and Stop are the task composer's one action button while its field is empty, and entries of the task menu; with text or files the button is the plane. They are not in the title band, which shows no state chip. Enter never presses them. A running worker's composer follows the same rule: with its field empty its action button is Stop (named "Stop worker…"), which opens the worker's stop dialog; the worker's header has no Stop of its own.
 
 Where delivery is a choice (task messages), it sits beside the plane as one Queue toggle: off, the message is sent now; on, it waits in the queue. With a pointer resting on it, or keyboard focus, a small label reads what it does. A queued item is one line above the composer, with Edit, Send now, remove and reorder. Its files do not appear in the queue row; they return in Edit and in the sent conversation. Worker messages show their own delivery state and offer no interruption.
 
