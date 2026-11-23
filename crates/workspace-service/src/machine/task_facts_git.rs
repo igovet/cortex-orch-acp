@@ -12,6 +12,23 @@ fn recorded_content(
     db: &rusqlite::Connection,
     task: &str,
 ) -> cortex_core::CoreResult<Option<RecordedContent>> {
+    recorded_writes(db, task, false)
+}
+
+/// The task's recorded content for its own commit: also takes the bytes its final
+/// approved and verified review read (`reviewed_content`).
+fn landing_content(
+    db: &rusqlite::Connection,
+    task: &str,
+) -> cortex_core::CoreResult<Option<RecordedContent>> {
+    recorded_writes(db, task, true)
+}
+
+fn recorded_writes(
+    db: &rusqlite::Connection,
+    task: &str,
+    reviewed: bool,
+) -> cortex_core::CoreResult<Option<RecordedContent>> {
     let runtime: Option<String> = db
         .query_row(
             "SELECT e.runtime_task_id FROM workspace_tasks t JOIN workspace_executions e
@@ -25,11 +42,11 @@ fn recorded_content(
     };
     // Gateway tool receipts name their channel as the actor; the native runtime's own
     // file tools record NATIVE_PROJECT_WRITTEN with the channel in the payload.
-    let rows=db.prepare("SELECT e.type,e.payload_json,cast(strftime('%s',e.created_at) as integer) FROM runtime_events e
+    let rows=db.prepare("SELECT e.type,e.payload_json,cast(strftime('%s',e.created_at) as integer),e.id FROM runtime_events e
             JOIN trusted_channels c ON c.task_id=e.task_id AND c.channel_id=CASE e.type WHEN 'TOOL_COMPLETED' THEN e.actor
                 ELSE json_extract(e.payload_json,'$.channel_id') END
             WHERE e.task_id=? AND e.type IN ('TOOL_COMPLETED','NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED') ORDER BY e.id LIMIT 1001")?
-            .query_map([&runtime],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<i64>>(2)?)))?
+            .query_map([&runtime],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<i64>>(2)?,r.get::<_,i64>(3)?)))?
             .collect::<std::result::Result<Vec<_>,_>>()?;
     if rows.len() > 1000 {
         return Ok(None);
@@ -43,8 +60,13 @@ fn recorded_content(
     // The n-th write of one content to one path by one channel is that channel's
     // n-th completed write request recording it (both commit together).
     let mut seen = std::collections::HashMap::<(String, String, String), i64>::new();
-    for (kind, raw, at) in rows {
+    // The event id of each path's latest recorded write.
+    let mut written = std::collections::HashMap::<String, i64>::new();
+    for (kind, raw, at, id) in rows {
         let v: Value = serde_json::from_str(&raw)?;
+        if let Some(name) = v["path"].as_str() {
+            written.insert(name.to_owned(), id);
+        }
         // A deletion through the native project_delete tool is the path's latest
         // recorded content: absent. Confirmed only by its completed receipt.
         if kind == "NATIVE_PROJECT_CHANGED" {
@@ -116,11 +138,68 @@ fn recorded_content(
             .map(str::to_owned);
         content.insert(name.to_owned(), (sha, at));
     }
+    if reviewed {
+        reviewed_content(db, &runtime, &written, &mut content)?;
+    }
     Ok(if content.len() > 100 {
         None
     } else {
         Some(content)
     })
+}
+
+/// Bytes the task's final approved review read and its verification then passed
+/// on are the task's content, even when someone else changed the file after the
+/// task wrote it: the task's own review and checks accepted exactly those bytes
+/// (owner store 2026-11-23: an owner merge into task files made every acceptance
+/// ask to reconcile again). A path the task wrote again after that review keeps
+/// its later write; any change after the review produces other bytes, which stay
+/// unknown.
+fn reviewed_content(
+    db: &rusqlite::Connection,
+    runtime: &str,
+    written: &std::collections::HashMap<String, i64>,
+    content: &mut RecordedContent,
+) -> cortex_core::CoreResult<()> {
+    let packet: Option<(i64, String)> = db
+        .query_row(
+            "SELECT p.id,p.payload_json FROM runtime_events p
+             JOIN runtime_tasks t ON t.task_id=p.task_id
+             JOIN runtime_nodes n ON n.task_id=p.task_id AND n.revision=t.revision
+               AND n.assignment_ref=json_extract(p.payload_json,'$.assignment_ref')
+             WHERE p.task_id=? AND p.type='REVIEW_PACKET' AND t.state='COMPLETED'
+               AND n.stage='review' AND n.status='completed'
+               AND upper(coalesce(json_extract(n.result_json,'$.verdict'),''))='APPROVE'
+               AND EXISTS(SELECT 1 FROM runtime_events v WHERE v.task_id=p.task_id
+                 AND v.type='VERIFICATION_PASSED' AND v.id>p.id
+                 AND json_extract(v.payload_json,'$.revision')=t.revision)
+             ORDER BY p.id DESC LIMIT 1",
+            [runtime],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, raw)) = packet else {
+        return Ok(());
+    };
+    let packet: Value = serde_json::from_str(&raw)?;
+    for file in packet["packet"]["changed_files"]["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let (Some(name), Some(sha)) = (file["path"].as_str(), file["current_sha256"].as_str())
+        else {
+            continue;
+        };
+        if written.get(name).is_some_and(|w| *w < id) {
+            if let Some(entry) = content.get_mut(name) {
+                if entry.0.as_deref() != Some(sha) {
+                    entry.0 = Some(sha.to_owned());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Compare only the final content covered by this task’s attributable receipts.
@@ -480,7 +559,7 @@ async fn same_branch(
         return Ok(());
     };
     let content = store
-        .read(|db| recorded_content(db, task))
+        .read(|db| landing_content(db, task))
         .map_err(context::core)?;
     let Some(content) = content else {
         return Ok(());
@@ -826,5 +905,77 @@ mod sprint_availability_tests {
             "unknown"
         );
         let _ = fs::remove_dir_all(std::path::Path::new(&source).parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod reviewed_content_tests {
+    use super::*;
+
+    fn db() -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE runtime_tasks(task_id TEXT, state TEXT, revision INTEGER);
+             CREATE TABLE runtime_nodes(task_id TEXT, revision INTEGER, node_id TEXT, stage TEXT,
+               status TEXT, assignment_ref TEXT, result_json TEXT);
+             CREATE TABLE runtime_events(id INTEGER PRIMARY KEY, task_id TEXT, type TEXT, payload_json TEXT);
+             INSERT INTO runtime_tasks VALUES ('t','COMPLETED',2);
+             INSERT INTO runtime_nodes VALUES ('t',2,'_review_1','review','completed','ar','{\"verdict\":\"APPROVE\"}');",
+        )
+        .unwrap();
+        db
+    }
+    fn packet(db: &rusqlite::Connection, id: i64, files: Value) {
+        db.execute(
+            "INSERT INTO runtime_events VALUES (?,'t','REVIEW_PACKET',?)",
+            rusqlite::params![id, json!({"assignment_ref":"ar","packet":{"changed_files":{"files":files}}}).to_string()],
+        )
+        .unwrap();
+    }
+    fn verified(db: &rusqlite::Connection, id: i64) {
+        db.execute(
+            "INSERT INTO runtime_events VALUES (?,'t','VERIFICATION_PASSED','{\"revision\":2}')",
+            [id],
+        )
+        .unwrap();
+    }
+
+    /// An owner change merged into a task file after the task wrote it is taken as
+    /// the task's content once the task's final approved review read exactly those
+    /// bytes and its verification passed; nothing else is adopted.
+    #[test]
+    fn the_final_approved_reviewed_bytes_are_the_tasks_content() {
+        let (a, b, reviewed) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        let mut content: RecordedContent = BTreeMap::from([
+            ("merged.rs".to_owned(), (Some(a.clone()), None)),
+            ("later.rs".to_owned(), (Some(b.clone()), None)),
+            ("unlisted.rs".to_owned(), (Some(a.clone()), None)),
+        ]);
+        let written = std::collections::HashMap::from([
+            ("merged.rs".to_owned(), 5),
+            ("later.rs".to_owned(), 20),
+            ("unlisted.rs".to_owned(), 5),
+        ]);
+        let db = db();
+        packet(&db, 10, json!([{"path":"merged.rs","current_sha256":reviewed},
+            {"path":"later.rs","current_sha256":reviewed}]));
+        // Without a passed verification after the review nothing changes.
+        reviewed_content(&db, "t", &written, &mut content).unwrap();
+        assert_eq!(content["merged.rs"].0.as_deref(), Some(a.as_str()));
+        verified(&db, 11);
+        reviewed_content(&db, "t", &written, &mut content).unwrap();
+        assert_eq!(content["merged.rs"].0.as_deref(), Some(reviewed.as_str()));
+        // A write after the review keeps the later write; an unlisted path is untouched.
+        assert_eq!(content["later.rs"].0.as_deref(), Some(b.as_str()));
+        assert_eq!(content["unlisted.rs"].0.as_deref(), Some(a.as_str()));
+        // A review that requested changes is never adopted.
+        let db = self::db();
+        db.execute("UPDATE runtime_nodes SET result_json='{\"verdict\":\"REQUEST_CHANGES\"}'", []).unwrap();
+        packet(&db, 10, json!([{"path":"merged.rs","current_sha256":reviewed}]));
+        verified(&db, 11);
+        let mut fresh: RecordedContent =
+            BTreeMap::from([("merged.rs".to_owned(), (Some(a.clone()), None))]);
+        reviewed_content(&db, "t", &written, &mut fresh).unwrap();
+        assert_eq!(fresh["merged.rs"].0.as_deref(), Some(a.as_str()));
     }
 }
