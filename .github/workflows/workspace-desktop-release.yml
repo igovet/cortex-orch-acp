@@ -48,6 +48,14 @@
           "id": "release"
         },
         {
+          "name": "Sign and verify the release desktop update (main only)",
+          "if": "github.ref == 'refs/heads/main'",
+          "env": {
+            "UPDATE_SIGNING_KEY_BASE64": "${{ secrets.UPDATE_SIGNING_KEY_BASE64 }}"
+          },
+          "run": "set -euo pipefail\n[ -n \"$UPDATE_SIGNING_KEY_BASE64\" ] || { echo 'UPDATE_SIGNING_KEY_BASE64 is not set' >&2; exit 1; }\numask 077\nkey_dir=\"$(mktemp -d \"$RUNNER_TEMP/workspace-update-signing.XXXXXXXX\")\"\nexport CORTEX_UPDATE_SIGNING_KEY=\"$key_dir/release-ed25519.key\"\ntrap 'rm -f -- \"$CORTEX_UPDATE_SIGNING_KEY\"; rmdir -- \"$key_dir\"' EXIT\nprintf '%s' \"$UPDATE_SIGNING_KEY_BASE64\" | base64 --decode > \"$CORTEX_UPDATE_SIGNING_KEY\"\nunset UPDATE_SIGNING_KEY_BASE64\numask 022\nset -- release-artifacts/*.deb\n[ \"$#\" -eq 1 ] && [ -f \"$1\" ] || { echo 'Expected one desktop archive' >&2; exit 1; }\ncargo run --locked --quiet -p cortex-xtask -- update-sign \"$1\"\ncargo run --locked --quiet -p cortex-xtask -- update-verify \"$1\""
+        },
+        {
           "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
           "with": {
             "name": "workspace-desktop-release",
@@ -165,7 +173,7 @@
             "VERSION": "${{ needs.build.outputs.version }}",
             "GH_REPO": "${{ github.repository }}"
           },
-          "run": "case \"$GITHUB_REF\" in\n  refs/heads/main)\n    title=\"Cortex Workspace $VERSION\"\n    notes=\"Ubuntu desktop package and Android APK. Installation and service activation are explicit owner actions. The phone app connects only to machines paired from the desktop.\"\n    flags=(--latest)\n    ;;\n  refs/heads/dev)\n    title=\"Cortex Workspace Dev $VERSION\"\n    notes=\"Development build. Install the dev .deb and the dev APK manually; dev has no in-app updates.\"\n    flags=(--prerelease --latest=false)\n    ;;\n  *) exit 1 ;;\nesac\ngh release create \"$TAG_PREFIX$VERSION\" release-artifacts/*.deb release-artifacts/*.deb.sha256 \\\n  android-artifacts/*.apk android-artifacts/*.apk.sha256 \\\n  --target \"$GITHUB_SHA\" --title \"$title\" --notes \"$notes\" \"${flags[@]}\""
+          "run": "case \"$GITHUB_REF\" in\n  refs/heads/main)\n    title=\"Cortex Workspace $VERSION\"\n    notes=\"Ubuntu desktop package and Android APK. Installation and service activation are explicit owner actions. The phone app connects only to machines paired from the desktop.\"\n    flags=(--latest)\n    set -- release-artifacts/*.deb.sha256.sig\n    [ \"$#\" -eq 1 ] && [ -f \"$1\" ] || { echo 'Expected one desktop signature sidecar' >&2; exit 1; }\n    signatures=(\"$1\")\n    ;;\n  refs/heads/dev)\n    title=\"Cortex Workspace Dev $VERSION\"\n    notes=\"Development build. Install the dev .deb and the dev APK manually; dev has no in-app updates.\"\n    flags=(--prerelease --latest=false)\n    signatures=()\n    ;;\n  *) exit 1 ;;\nesac\ngh release create \"$TAG_PREFIX$VERSION\" release-artifacts/*.deb release-artifacts/*.deb.sha256 \"${signatures[@]}\" \\\n  android-artifacts/*.apk android-artifacts/*.apk.sha256 \\\n  --target \"$GITHUB_SHA\" --title \"$title\" --notes \"$notes\" \"${flags[@]}\""
         }
       ],
       "env": {

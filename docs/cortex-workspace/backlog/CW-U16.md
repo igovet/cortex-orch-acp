@@ -1,12 +1,11 @@
 # CW-U16: Desktop application self-update from GitHub releases
 
-**Status:** Partly implemented: update page with release detection, SHA-256 check, downgrade refusal and rollback states ([maintenance and controls](../maintenance-and-controls.md)); no signature verification; no release is published; privileged install is not verified on a real host · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: release detection, Ed25519 signature and SHA-256 verification, downgrade refusal and rollback states ([maintenance and controls](../maintenance-and-controls.md)); no release is published and privileged install is not qualified · **Phase:** 3+ · **Size:** L
 
-The built Updates page and checksum-only release workflow are described in
-[desktop maintenance and controls](../maintenance-and-controls.md). The proposed
-independent signature, root-owned staging policy, automatic health/restart and
-schema-compatible rollback qualification below remain open; fixture results do
-not close those requirements.
+The signed update path is described in
+[desktop maintenance and controls](../maintenance-and-controls.md). Root-owned
+staging, automatic health/restart and schema-compatible rollback qualification
+remain open; fixture results do not close those requirements.
 
 ## Goal
 
@@ -25,22 +24,22 @@ See [requirements](../requirements.md).
 ## Inputs
 
 - [Platform policy](../platforms.md): the first release targets the Ubuntu machine and the desktop client.
-- [Risks and open decisions](../risks-and-open-decisions.md): release distribution and upgrades need owner decisions before operation. This item records the options and recommendations; it does not record the decision.
+- [Risks and open decisions](../risks-and-open-decisions.md): release distribution and upgrades need owner decisions before operation. The signature scheme below is implemented; other proposed policies remain separately tracked.
 - [Migration and rollback](../migration-and-rollback.md): the rules for stored data. A version rollback is offered only after those rules confirm that the stored data is compatible with the older version.
 - [CW-F01](CW-F01.md): produces the `tauri build` package and fixes the toolchain. Its package output is the input to this item.
 - [CW-Q04a](CW-Q04a.md): clean Ubuntu installer checks. Update-path checks are added there.
-- [Packaging](../../project/packaging.md): packaging of the current Cortex runtime. It does not describe the desktop app and is not changed by this item.
+- [Packaging](../../project/packaging.md): desktop packaging, release signing and owner key handling.
 - Tauri updater: the Tauri 2 updater plugin is a candidate for the download and signature step. Whether it can install a Linux `.deb` must be verified against the version pinned in CW-F01 before it is chosen. This item does not assume it.
 - Owner input (2026-11-05): the app is built as a `.deb` package and must notice a new GitHub release and update itself.
 - Channel rule (owner decision of 2026-11-05, [CW-S12](CW-S12.md)): the dev and release channels are isolated. A local build is the dev channel. The release feed carries only packages that the release workflow builds from a manual workflow on `main`, so a dev build neither checks that feed nor installs from it, and the release channel does not update from a dev package.
 
 ## Open decisions and recommendations
 
-Recommended options are marked ★. The owner decides each one.
+Recommended options are marked ★. The signature scheme is implemented as noted below.
 
 1. **Distribution.** (a) ★ Direct download of the signed `.deb` from the GitHub release, installed with `apt-get` so dependencies resolve. One signed artifact per release, and no repository to host. (b) A signed apt repository published on GitHub Pages. It gives native apt upgrades but needs repository key management and a publish step for every release. Recommendation: (a) for version 1; revisit (b) when several machines need it.
 2. **Privilege elevation.** (a) ★ A polkit action run through `pkexec`, which calls one fixed helper. The helper installs one verified `.deb` from a root-owned staging folder with `apt-get install`. The package ships the polkit policy. (b) A terminal `sudo` prompt, which the desktop app cannot drive. (c) A resident root service installed with the package, which widens the attack surface. Note: `apt-get install ./file.deb` resolves dependencies; `dpkg -i` does not.
-3. **Signature scheme.** (a) ★ A detached Ed25519 signature over the `.deb` checksum file, with the public key embedded in the app and the private key kept offline by the owner. (b) A GPG-signed checksum file. (c) GitHub artifact attestations, which need a separate verifier. Recommendation: (a), which needs no external tool at install time.
+3. **Signature scheme (implemented).** A detached Ed25519 signature over the exact bytes of the `.deb.sha256` sidecar, with the public key embedded in the app. The private key is held by the owner outside the checkout; production CI uses a temporary copy. No external signature verifier runs at install time.
 4. **Consent.** (a) ★ The owner confirms each install. The privilege prompt already requires a user action, so the confirmation adds no new step. (b) Background download with install at owner confirmation. (c) Silent install, which is not recommended for version 1. Recommendation (a) departs from a fully automatic reading of the owner's request; the owner decides, and (b) can follow.
 5. **Rollback.** (a) ★ Keep the previously installed `.deb` in the app data folder until the new version passes its start check. If the new version fails that check, offer "Reinstall previous version". (b) No in-app rollback; a manual apt downgrade. Recommendation (a), subject to the stored-data rule in Inputs.
 6. **Release channel.** (a) ★ Stable releases only in version 1. (b) Pre-releases, opt-in per machine.
@@ -48,8 +47,8 @@ Recommended options are marked ★. The owner decides each one.
 ## Deliverables
 
 - Release check: queries the GitHub release feed of the owner-configured repository at start, on "Check now", and otherwise no more than once a day (proposed default). It compares the published version with the installed one, reads the release notes as plain text and records the time of the check.
-- Download: fetches the `.deb`, its signature and its checksum file into a folder in the app data directory, with progress and cancel.
-- Verification: checks the signature with the embedded public key, then the SHA-256 of the `.deb`. Before the install step, the privileged helper copies the verified package into its root-owned staging folder, and it re-checks the staged file, so the file cannot change between verification and install.
+- Download: stages the `.deb` in the app data directory, with progress and cancel. The bounded signature and checksum are authenticated at discovery and kept with the candidate for re-verification.
+- Verification: checks the signature with the embedded public key, then the SHA-256 of the `.deb`. The worker rechecks the signature and digest before requesting privilege. A proposed root-owned staging helper would close the remaining verification-to-install file replacement window; that helper is not implemented.
 - Install: requests privilege through polkit, runs `apt-get install` on the staged file and maps apt's exit status to a typed outcome. Success is reported only when the installed version has changed.
 - Restart: after a successful install, the app restarts into the new version. The machine service reconciles through [CW-H04](CW-H04.md) without replaying prompts.
 - Rollback: keeps the previous `.deb` as described in open decision 5 and offers "Reinstall previous version" when the new version fails its start check.

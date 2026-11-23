@@ -685,9 +685,11 @@ dependencies = [
 name = "cortex-xtask"
 version = "1.0.6"
 dependencies = [
+ "ed25519-dalek",
  "libc",
  "regex",
  "sha2 0.10.9",
+ "zeroize",
 ]
 
 [[package]]
@@ -7264,6 +7266,7 @@ dependencies = [
  "base64 0.22.1",
  "cortex-core",
  "cortex-engine",
+ "ed25519-dalek",
  "futures",
  "icu_normalizer",
  "icu_properties",

@@ -4,7 +4,7 @@
 
 This bundle describes a standalone task-first ACP workspace: the desktop application is built, remote access and the Android app are built but not qualified, and push is a plan. No release is published. Start with [product](PRODUCT.md), [requirements](requirements.md), [architecture](architecture.md), [roadmap](roadmap.md) and [backlog](backlog/index.md).
 
-- Maintenance, engine onboarding and the command map: [desktop controls](maintenance-and-controls.md).
+- Signed desktop updates, maintenance, engine onboarding and the command map: [desktop controls](maintenance-and-controls.md).
 - Current local behavior and limits: [task execution](local-task-execution.md).
 - Design: [direction](DESIGN.md), [screens](SCREENS.md), [desktop concepts](design/desktop-concepts.md), [mobile concepts](design/mobile-concepts.md).
 - Contracts: [domain](domain-model.md), [protocol](protocol.md), [recovery](consistency-and-recovery.md), [security](security.md), [remote and push](remote-access.md), [self-hosted services](self-hosted-services.md), [IDE and Git](ide-and-git.md).

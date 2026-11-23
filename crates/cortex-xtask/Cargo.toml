@@ -14,6 +14,8 @@ path = "src/main.rs"
 # generators need Python-compatible key order and formatting, which serde_json's
 # feature-unified Map cannot provide without changing every other workspace member.
 [dependencies]
+ed25519-dalek = "=3.0.0"
+zeroize = "=1.9.2"
 sha2 = "=0.10.9"
 regex = "=1.13.1"
 libc = "=0.2.191"

@@ -121,6 +121,7 @@ button. Pushes never publish automatically. The workflow has three jobs: `build`
 2. Choose branch `main` for production or `dev` for development, then start.
    Other branches and tags are refused; there is no independent channel input.
 3. Download the package, the APK and their SHA-256 sidecars from the resulting release.
+   Production releases must also include the desktop `.deb.sha256.sig`.
    Main publishes `cortex-workspace_<version>_<arch>.deb` and the release-channel APK
    under `v<debian-version>`, explicitly Latest. Dev publishes
    `cortex-workspace-dev_<version>_<arch>.deb` and the dev APK under
@@ -137,6 +138,61 @@ Existing tags are not overwritten; lookup failures other than HTTP 404 stop
 publication. Runs of the same branch are serialized without cancellation.
 Publication grants contents-write only to the publish job through GitHub's token.
 The `android` job runs `scripts/build-android-apk.sh` (`--release` on `main`, the dev channel on `dev`) on an Ubuntu runner with JDK 17 and the Android NDK of the runner image. It needs repository secrets `ANDROID_KEYSTORE_BASE64` (the keystore, base64) and `ANDROID_KEYSTORE_PASSWORD`, and optionally `ANDROID_KEY_ALIAS` (default `cortex-workspace`); without the first two it fails closed before building, so no release is published. Create the keystore once with `scripts/build-android-apk.sh --init-signing`, which prints these names; an app update installs over an existing one only when signed with the same key. The keystore is removed from the runner after the build, and the job checks the APK against its SHA-256 file. The workflow has not yet been exercised on GitHub, and the Android job has never run.
+
+### Desktop update signing
+
+Before the first production release, initialize the owner key from the checkout:
+
+```sh
+public_key=$(scripts/cortex-xtask.sh update-key init) &&
+  printf '%s\n' "$public_key" > packaging/update-signing/release-ed25519.pub
+scripts/cortex-xtask.sh package stamp
+scripts/cortex-xtask.sh package check
+```
+
+The command prints only the public key. Commit only that public key and the
+refreshed package identity. The private Ed25519 seed is generated once, never
+overwritten, and stored at
+`~/.config/cortex-workspace/update-signing/release-ed25519.key` (0600, in a 0700
+directory). An absolute override via `CORTEX_UPDATE_SIGNING_KEY` must point
+outside the checkout with the same permissions. Keep a protected offline backup;
+never copy the private file into Git or print it.
+
+To sign and verify a local desktop archive without publishing anything:
+
+```sh
+scripts/cortex-xtask.sh update-sign /absolute/path/to/cortex-workspace_VERSION_ARCH.deb
+scripts/cortex-xtask.sh update-verify /absolute/path/to/cortex-workspace_VERSION_ARCH.deb
+```
+
+Signing creates the standard `.deb.sha256` if absent, checks it against the
+exact filename and archive, then writes a raw 64-byte detached signature to
+`.deb.sha256.sig`. Verification uses the embedded public key by default. The
+optional `--public-key FILE` is for separately trusted keys (for example,
+disposable signing fixtures); it cannot change what the application trusts.
+
+For the production workflow, set the repository's Actions secret
+`UPDATE_SIGNING_KEY_BASE64` before a future manual `main` run. Feed the raw seed
+through stdin rather than pasting or logging it:
+
+```sh
+base64 -w0 "${CORTEX_UPDATE_SIGNING_KEY:-$HOME/.config/cortex-workspace/update-signing/release-ed25519.key}" |
+  gh secret set UPDATE_SIGNING_KEY_BASE64
+```
+
+Grant workflow-write access only to trusted maintainers; control of the signing
+secret permits signing arbitrary updates. The signing step runs only on
+`main`, decodes the secret under `umask 077` in a private runner-temp directory,
+removes it on step exit, and stops before publication if the secret is absent,
+invalid or does not match the embedded key. Dev remains manual and does not
+require this signing secret. No release has been published to qualify this path.
+
+A missing public key prevents in-app release updates. To rotate a key after
+loss or compromise, create a new key at a separate private path, replace the
+public key, restamp and rebuild, and replace the CI secret. Installed builds
+trust only their original key; distribute the new build by an independently
+trusted manual channel rather than expecting those installations to accept a
+signature from the new key.
 
 ### Local builds of both installables
 
@@ -304,6 +360,8 @@ scripts/cortex-paseo-tools.sh acp-smoke               # startup smoke in disposa
 The paid probes (`probe-codex`, `probe-claude`) stay entirely separate: they refuse to run at all without both `--i-authorize-paid-call` and `--approval-ref`, and none of the commands above reaches them.
 
 ## Retention maintenance
+
+The packaged Workspace service also runs automatic retention without any command: on project activation and then hourly it archives old Done tasks and, unless `automaticArchivePurge` is switched off in Storage, deletes expired closed archives. It touches no active or unclosed task, dirty or unmerged worktree, migration backup or qualification evidence. Settings and defaults: [configuration](../configuration.md#workspace-storage-retention); rules: [storage](storage.md#automatic-workspace-retention). The `/cortex-clear` text below is the separate ACP chat route.
 
 Use `/cortex-clear` in an idle ACP session to preview old task deletion from
 this project. The native host does not yet delete: a confirmed `/cortex-clear` that would delete something refuses and writes nothing (see [known limits](native-incoming-acp.md#known-limits)); the confirmed-deletion behavior below is the contract carried from the former implementation. It is advertised in the ACP command picker and handled by the

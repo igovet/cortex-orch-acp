@@ -4,6 +4,8 @@ use super::{
     native::*,
     settings::{self, Lock},
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use ed25519_dalek::VerifyingKey;
 use serde_json::{json, Value};
 use std::{
     fs::{self, OpenOptions},
@@ -14,6 +16,9 @@ use std::{
     time::Duration,
 };
 use tokio::{io::AsyncReadExt, process::Command};
+
+#[path = "../../../../packaging/update-signing/wire.rs"]
+mod update_wire;
 
 pub const MODE: &str = "--native-maintenance-worker";
 const RELEASES: &str = "https://api.github.com/repos/igovet/cortex-orch-acp/releases/latest";
@@ -192,7 +197,42 @@ async fn fetch(url: &str, limit: u64) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-fn candidate(release: &Value, current: &str, arch: &str, checksum: &str) -> Result<Value> {
+fn signature_error() -> Refused {
+    refuse(
+        "update_verification_failed",
+        "Update verification failed. Nothing installed. A trusted signature for the exact release checksum is required.",
+    )
+}
+
+fn trusted_update_key() -> Result<VerifyingKey> {
+    update_wire::public_key(update_wire::TRUSTED_KEY).ok_or_else(signature_error)
+}
+
+fn verified_checksum<'a>(key: &VerifyingKey, data: &'a Value) -> Result<&'a str> {
+    let version = string(data, "version").map_err(|_| signature_error())?;
+    let arch = string(data, "arch").map_err(|_| signature_error())?;
+    let name = format!("cortex-workspace_{version}_{arch}.deb");
+    let checksum = data["checksum"]
+        .as_str()
+        .filter(|s| s.len() <= update_wire::CHECKSUM_LIMIT)
+        .ok_or_else(signature_error)?;
+    let signature = data["signature"]
+        .as_str()
+        .filter(|s| s.len() == update_wire::SIGNATURE_LEN.div_ceil(3) * 4)
+        .and_then(|s| STANDARD.decode(s).ok())
+        .ok_or_else(signature_error)?;
+    update_wire::authenticate(key, checksum.as_bytes(), &signature, &name)
+        .ok_or_else(signature_error)
+}
+
+fn candidate(
+    release: &Value,
+    current: &str,
+    arch: &str,
+    checksum: &[u8],
+    signature: &[u8],
+    key: &VerifyingKey,
+) -> Result<Value> {
     let tag = release["tag_name"].as_str().unwrap_or("");
     let version = tag.strip_prefix('v').unwrap_or(tag);
     if !regex::Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[+~.-][A-Za-z0-9.+~-]+)?$")
@@ -207,24 +247,14 @@ fn candidate(release: &Value, current: &str, arch: &str, checksum: &str) -> Resu
     let name = format!("cortex-workspace_{version}_{arch}.deb");
     let url = asset(release, &name)?;
     release_url(&url, true)?;
-    let sha = checksum
-        .trim()
-        .strip_suffix(&format!("  {name}"))
-        .unwrap_or("");
-    if sha.len() != 64
-        || !sha
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        return Err(refuse(
-            "invalid_checksum",
-            "The release checksum file is invalid.",
-        ));
-    }
+    let sha =
+        update_wire::authenticate(key, checksum, signature, &name).ok_or_else(signature_error)?;
+    let checksum = std::str::from_utf8(checksum).map_err(|_| signature_error())?;
     Ok(
-        json!({"phase":"available","current":current,"version":version,"name":name,"url":url,"sha256":sha,
+        json!({"phase":"available","current":current,"version":version,"arch":arch,"name":name,"url":url,"sha256":sha,
+        "checksum":checksum,"signature":STANDARD.encode(signature),
         "notes":release["body"].as_str().unwrap_or("").chars().take(8000).collect::<String>(),
-        "message":"SHA-256 is published by the release over HTTPS; this workflow does not publish a signature."}),
+        "message":"Release checksum signature verified."}),
     )
 }
 fn asset(release: &Value, name: &str) -> Result<String> {
@@ -238,10 +268,15 @@ fn asset(release: &Value, name: &str) -> Result<String> {
     if urls.len() != 1 {
         return Err(refuse(
             "release_incomplete",
-            "The release is missing its exact archive or SHA-256 sidecar.",
+            "The release is missing a required asset or the asset is ambiguous.",
         ));
     }
     Ok(urls[0].to_owned())
+}
+fn signed_assets(release: &Value, name: &str) -> Result<(String, String)> {
+    let checksum = asset(release, &format!("{name}.sha256")).map_err(|_| signature_error())?;
+    let signature = asset(release, &format!("{name}.sha256.sig")).map_err(|_| signature_error())?;
+    Ok((checksum, signature))
 }
 async fn check(state: &Path) -> Result<Value> {
     let current = version("cortex-workspace").await?.ok_or_else(|| {
@@ -265,17 +300,18 @@ async fn check(state: &Path) -> Result<Value> {
             json!({"phase":"current","current":current,"message":"No newer stable release. Downgrades are refused."}),
         );
     }
+    let key = trusted_update_key()?;
     let arch = output("/usr/bin/dpkg", &["--print-architecture"])
         .await?
         .ok_or_else(|| refuse("invalid_release", "Unknown machine architecture."))?;
-    let checksum = fetch(
-        &asset(&release, &format!("cortex-workspace_{v}_{arch}.deb.sha256"))?,
-        1024,
+    let (checksum_url, signature_url) =
+        signed_assets(&release, &format!("cortex-workspace_{v}_{arch}.deb"))?;
+    let (checksum, signature) = tokio::try_join!(
+        fetch(&checksum_url, update_wire::CHECKSUM_LIMIT as u64),
+        fetch(&signature_url, update_wire::SIGNATURE_LEN as u64)
     )
-    .await?;
-    let checksum = std::str::from_utf8(&checksum)
-        .map_err(|_| refuse("invalid_checksum", "Invalid checksum encoding."))?;
-    let value = candidate(&release, &current, &arch, checksum)?;
+    .map_err(|_| signature_error())?;
+    let value = candidate(&release, &current, &arch, &checksum, &signature, &key)?;
     let _lock = Lock::new(state, "machine.lock")?;
     settings::write_json(&state.join("maintenance/candidate.json"), &value)?;
     Ok(value)
@@ -463,6 +499,7 @@ async fn start(state: &Path, p: &Value, projects: &Value, spawn: bool) -> Result
             if data.is_null() || !newer(data["version"].as_str().unwrap_or(""), &current).await? {
                 return Err(refuse("stale_release", "Check for a newer release again."));
             }
+            verified_checksum(&trusted_update_key()?, &data)?;
             data
         } else {
             if p["confirmed"] != true {
@@ -479,6 +516,9 @@ async fn start(state: &Path, p: &Value, projects: &Value, spawn: bool) -> Result
                     "not_ready",
                     "Download and verify the release first.",
                 ));
+            }
+            if kind == "install" {
+                verified_checksum(&trusted_update_key()?, &data)?;
             }
             let archive = source.join(if kind == "rollback" {
                 "previous.deb"
@@ -662,7 +702,14 @@ async fn deb_fields(archive: &Path) -> Result<String> {
 async fn download(path: &Path, data: &Value) -> Result<Value> {
     let url = string(data, "url")?;
     release_url(url, true)?;
-    download_with(path, data, curl(url, MAX_DOWNLOAD), true).await
+    download_with(
+        path,
+        data,
+        curl(url, MAX_DOWNLOAD),
+        true,
+        &trusted_update_key()?,
+    )
+    .await
 }
 // Trusted internal fixture seam; neither command nor rollback lookup can be selected by JSON.
 async fn download_with(
@@ -670,6 +717,7 @@ async fn download_with(
     data: &Value,
     mut cmd: Command,
     retain_rollback: bool,
+    key: &VerifyingKey,
 ) -> Result<Value> {
     if path.join("cancel").exists() {
         return Err(refuse(
@@ -677,6 +725,7 @@ async fn download_with(
             "Download cancelled before dispatch. Nothing installed.",
         ));
     }
+    let expected_digest = verified_checksum(key, data)?;
     let archive = path.join("update.deb");
     let file = OpenOptions::new()
         .write(true)
@@ -718,7 +767,7 @@ async fn download_with(
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    if digest(&archive)? != string(data, "sha256")? {
+    if digest(&archive)? != expected_digest {
         fs::remove_file(&archive)?;
         return Err(refuse(
             "bad_checksum",
@@ -729,8 +778,9 @@ async fn download_with(
         .await?
         .unwrap_or_default();
     let version = string(data, "version")?;
-    if deb_fields(&archive).await?
-        != format!("Package: cortex-workspace\nVersion: {version}\nArchitecture: {arch}")
+    if data["arch"].as_str() != Some(arch.as_str())
+        || deb_fields(&archive).await?
+            != format!("Package: cortex-workspace\nVersion: {version}\nArchitecture: {arch}")
     {
         return Err(refuse(
             "wrong_package",
@@ -752,8 +802,91 @@ async fn download_with(
     };
     save(
         path,
-        json!({"phase":"ready","message":"Checksum verified. Ready for your installation consent.","version":version,"current":current,
-        "rollback":rollback,"sha256":data["sha256"],"previousSha256":previous}),
+        json!({"phase":"ready","message":"Signature and checksum verified. Ready for your installation consent.","version":version,"current":current,
+        "rollback":rollback,"sha256":expected_digest,"previousSha256":previous,
+        "arch":arch,"checksum":data["checksum"],"signature":data["signature"]}),
+    )
+}
+async fn install_with(
+    state: &Path,
+    path: &Path,
+    data: &Value,
+    rollback: bool,
+    key: Option<&VerifyingKey>,
+    run_installer: impl AsyncFnOnce(Command) -> Result<()>,
+) -> Result<Value> {
+    // A legacy or changed approval cannot reach even the privilege prompt.
+    let expected_digest = if rollback {
+        data["previousSha256"].as_str().ok_or_else(|| {
+            refuse(
+                "rollback_integrity",
+                "The retained previous package changed. Rollback refused.",
+            )
+        })?
+    } else {
+        verified_checksum(key.ok_or_else(signature_error)?, data)?
+    };
+    let archive = Path::new(string(data, "archive")?);
+    let installed = version("cortex-workspace").await?.unwrap_or_default();
+    if rollback {
+        if installed != data["version"] {
+            return Err(refuse(
+                "rollback_integrity",
+                "The retained previous package changed. Rollback refused.",
+            ));
+        }
+    } else if installed != data["current"]
+        || !newer(string(data, "version")?, string(data, "current")?).await?
+    {
+        return Err(refuse(
+            "stale_release",
+            "The installed version or archive changed. Check again.",
+        ));
+    }
+    // The privilege prompt and package manager can take minutes: anything waiting
+    // for admission is told at once instead of stalling.
+    let _admission = Lock::long(
+        state,
+        "maintenance.lock",
+        "maintenance_in_progress",
+        "A Cortex Workspace update is being installed. Try again when it finishes.",
+    )?;
+    ensure_quiet(&data["projects"])?;
+    if digest(archive)? != expected_digest {
+        return Err(if rollback {
+            refuse(
+                "rollback_integrity",
+                "The retained previous package changed. Rollback refused.",
+            )
+        } else {
+            refuse(
+                "stale_release",
+                "The installed version or archive changed. Check again.",
+            )
+        });
+    }
+    save(
+        path,
+        json!({"phase":"installing","message":"Approve the system privilege prompt. Installing…"}),
+    )?;
+    let mut cmd = Command::new("/usr/bin/pkexec");
+    cmd.args(["/usr/bin/apt-get", "install", "--no-remove", "-y"]);
+    if rollback {
+        cmd.arg("--allow-downgrades");
+    }
+    cmd.arg(archive);
+    run_installer(cmd).await?;
+    let expected = if rollback {
+        &data["current"]
+    } else {
+        &data["version"]
+    };
+    if version("cortex-workspace").await?.as_deref() != expected.as_str() {
+        return Err(refuse("install_unconfirmed","The package manager ended but the installed version is unconfirmed. Check before retrying."));
+    }
+    save(
+        path,
+        json!({"phase":"done","message":"Installed. Restart Cortex Workspace.","version":expected}),
     )
 }
 pub async fn worker(state: &Path, id: &str) -> Result<()> {
@@ -788,31 +921,10 @@ pub async fn worker(state: &Path, id: &str) -> Result<()> {
             }
             "download"=>download(&path,&data).await,
             "install"|"rollback"=>{
-                let archive=Path::new(string(&data,"archive")?);
-                let actual=digest(archive)?;
-                let installed=version("cortex-workspace").await?.unwrap_or_default();
-                if kind=="rollback" {
-                    if installed!=data["version"] || data["previousSha256"].as_str()!=Some(&actual) {
-                        return Err(refuse("rollback_integrity","The retained previous package changed. Rollback refused."));
-                    }
-                } else if installed!=data["current"] || data["sha256"].as_str()!=Some(&actual)
-                    || !newer(string(&data,"version")?,string(&data,"current")?).await? {
-                    return Err(refuse("stale_release","The installed version or archive changed. Check again."));
-                }
-                // The privilege prompt and package manager can take minutes: anything waiting
-                // for admission is told at once instead of stalling.
-                let _admission=Lock::long(state,"maintenance.lock","maintenance_in_progress",
-                    "A Cortex Workspace update is being installed. Try again when it finishes.")?;
-                ensure_quiet(&data["projects"])?;
-                save(&path,json!({"phase":"installing","message":"Approve the system privilege prompt. Installing…"}))?;
-                let mut cmd=Command::new("/usr/bin/pkexec");cmd.args(["/usr/bin/apt-get","install","--no-remove","-y"]);
-                if kind=="rollback" {cmd.arg("--allow-downgrades");}
-                cmd.arg(archive);process(&path,cmd,true).await?;
-                let expected=if kind=="install" {&data["version"]} else {&data["current"]};
-                if version("cortex-workspace").await?.as_deref()!=expected.as_str() {
-                    return Err(refuse("install_unconfirmed","The package manager ended but the installed version is unconfirmed. Check before retrying."));
-                }
-                save(&path,json!({"phase":"done","message":"Installed. Restart Cortex Workspace.","version":expected}))
+                let rollback = kind == "rollback";
+                let key = if rollback { None } else { Some(trusted_update_key()?) };
+                install_with(state, &path, &data, rollback, key.as_ref(),
+                    async |cmd| process(&path, cmd, true).await).await
             }
             _=>Err(refuse("invalid_job","Unsupported maintenance job.")),
         }
@@ -828,6 +940,7 @@ pub async fn worker(state: &Path, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
     use std::os::unix::fs::{symlink, PermissionsExt};
     struct Temp(PathBuf);
     impl Temp {
@@ -842,6 +955,21 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+    fn fixture_key() -> SigningKey {
+        let mut seed = [0; 32];
+        fs::File::open("/dev/urandom")
+            .unwrap()
+            .read_exact(&mut seed)
+            .unwrap();
+        SigningKey::from_bytes(&seed)
+    }
+    fn sign_fixture(data: &mut Value, signing: &SigningKey, digest: &str) {
+        let version = data["version"].as_str().unwrap();
+        let arch = data["arch"].as_str().unwrap();
+        let checksum = format!("{digest}  cortex-workspace_{version}_{arch}.deb\n");
+        data["signature"] = json!(STANDARD.encode(signing.sign(checksum.as_bytes()).to_bytes()));
+        data["checksum"] = json!(checksum);
     }
     #[tokio::test]
     async fn real_archive_bytes_must_match_checksum_and_exact_debian_identity() {
@@ -876,7 +1004,10 @@ mod tests {
             .await
             .unwrap()
             .success());
-        let data = json!({"version":"1.0.7","current":"1.0.6","sha256":digest(&source).unwrap()});
+        let signing = fixture_key();
+        let key = signing.verifying_key();
+        let mut data = json!({"version":"1.0.7","current":"1.0.6","arch":arch});
+        sign_fixture(&mut data, &signing, &digest(&source).unwrap());
         let transfer = || {
             let mut c = Command::new("/usr/bin/cat");
             c.arg(&source)
@@ -887,7 +1018,7 @@ mod tests {
         };
         let path = t.0.join("good");
         crate::local::private_tree(&path).unwrap();
-        let good = download_with(&path, &data, transfer(), false)
+        let good = download_with(&path, &data, transfer(), false, &key)
             .await
             .unwrap();
         assert_eq!(good["phase"], "ready");
@@ -895,9 +1026,9 @@ mod tests {
         let path = t.0.join("corrupt");
         crate::local::private_tree(&path).unwrap();
         let mut bad = data.clone();
-        bad["sha256"] = json!("0".repeat(64));
+        sign_fixture(&mut bad, &signing, &"0".repeat(64));
         assert_eq!(
-            download_with(&path, &bad, transfer(), false)
+            download_with(&path, &bad, transfer(), false, &key)
                 .await
                 .unwrap_err()
                 .code,
@@ -908,8 +1039,9 @@ mod tests {
         crate::local::private_tree(&path).unwrap();
         let mut wrong = data.clone();
         wrong["version"] = json!("9.9.9");
+        sign_fixture(&mut wrong, &signing, &digest(&source).unwrap());
         assert_eq!(
-            download_with(&path, &wrong, transfer(), false)
+            download_with(&path, &wrong, transfer(), false, &key)
                 .await
                 .unwrap_err()
                 .code,
@@ -919,7 +1051,7 @@ mod tests {
         crate::local::private_tree(&path).unwrap();
         fs::write(path.join("cancel"), "").unwrap();
         assert_eq!(
-            download_with(&path, &data, transfer(), false)
+            download_with(&path, &data, transfer(), false, &key)
                 .await
                 .unwrap_err()
                 .code,
@@ -1017,32 +1149,53 @@ mod tests {
         assert!(digest(&path.join("status-link")).is_err());
     }
     #[test]
-    fn exact_release_identity_and_checksum_refuse_ambiguous_or_foreign_assets() {
-        let release = json!({"tag_name":"v1.0.7","body":"notes","assets":[{"name":"cortex-workspace_1.0.7_amd64.deb",
-            "browser_download_url":"https://github.com/igovet/cortex-orch-acp/releases/download/v1.0.7/archive.deb"}]});
-        let checksum = format!("{}  cortex-workspace_1.0.7_amd64.deb\n", "a".repeat(64));
+    fn signed_release_requires_exact_assets_and_identity() {
+        let name = "cortex-workspace_1.0.7_amd64.deb";
+        let url = "https://github.com/igovet/cortex-orch-acp/releases/download/v1.0.7/";
+        let mut release = json!({"tag_name":"v1.0.7","body":"notes","assets":[
+            {"name":name,"browser_download_url":format!("{url}{name}")},
+            {"name":format!("{name}.sha256"),"browser_download_url":format!("{url}{name}.sha256")},
+        ]});
         assert_eq!(
-            candidate(&release, "1.0.6", "amd64", &checksum).unwrap()["version"],
-            "1.0.7"
+            signed_assets(&release, name).unwrap_err().code,
+            "update_verification_failed",
         );
+        release["assets"].as_array_mut().unwrap().push(json!({
+            "name":format!("{name}.sha256.sig"),"browser_download_url":format!("{url}{name}.sha256.sig")
+        }));
+        assert!(signed_assets(&release, name).is_ok());
+        let signing = fixture_key();
+        let key = signing.verifying_key();
+        let checksum = format!("{}  {name}\n", "a".repeat(64));
+        let signature = signing.sign(checksum.as_bytes()).to_bytes();
+        let build = |release, arch, checksum: &str| {
+            candidate(
+                release,
+                "1.0.6",
+                arch,
+                checksum.as_bytes(),
+                &signature,
+                &key,
+            )
+        };
+        let good = build(&release, "amd64", &checksum).unwrap();
+        assert_eq!(good["version"], "1.0.7");
+        assert_eq!(verified_checksum(&key, &good).unwrap(), "a".repeat(64));
         assert_eq!(
-            candidate(&release, "1.0.6", "arm64", &checksum)
-                .unwrap_err()
-                .code,
+            build(&release, "arm64", &checksum).unwrap_err().code,
             "release_incomplete"
         );
+        // Even an edit with the same parsed digest and archive name breaks the signature.
         assert_eq!(
-            candidate(&release, "1.0.6", "amd64", "bad")
+            build(&release, "amd64", checksum.trim_end())
                 .unwrap_err()
                 .code,
-            "invalid_checksum"
+            "update_verification_failed",
         );
         let mut foreign = release.clone();
         foreign["assets"][0]["browser_download_url"] = json!("https://example.invalid/archive");
         assert_eq!(
-            candidate(&foreign, "1.0.6", "amd64", &checksum)
-                .unwrap_err()
-                .code,
+            build(&foreign, "amd64", &checksum).unwrap_err().code,
             "release_url_refused"
         );
         let mut duplicated = release.clone();
@@ -1051,11 +1204,46 @@ mod tests {
             .unwrap()
             .push(release["assets"][0].clone());
         assert_eq!(
-            candidate(&duplicated, "1.0.6", "amd64", &checksum)
-                .unwrap_err()
-                .code,
+            build(&duplicated, "amd64", &checksum).unwrap_err().code,
             "release_incomplete"
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_signed_metadata_never_invokes_installer() {
+        use std::cell::Cell;
+        let t = Temp::new();
+        let signing = fixture_key();
+        let trusted = signing.verifying_key();
+        let mut good = json!({"version":"1.0.7","arch":"amd64"});
+        sign_fixture(&mut good, &signing, &"a".repeat(64));
+        let mut wrong_key = good.clone();
+        sign_fixture(&mut wrong_key, &fixture_key(), &"a".repeat(64));
+        let mut tampered = good.clone();
+        tampered["checksum"] = json!(good["checksum"].as_str().unwrap().trim_end());
+        let mut missing = good.clone();
+        missing.as_object_mut().unwrap().remove("signature");
+        let mut malformed = good.clone();
+        malformed["signature"] = json!("nonsense");
+        let calls = Cell::new(0);
+        for (candidate, key) in [
+            (&wrong_key, Some(&trusted)),
+            (&tampered, Some(&trusted)),
+            (&missing, Some(&trusted)),
+            (&malformed, Some(&trusted)),
+            (&good, None),
+        ] {
+            let error = install_with(&t.0, &t.0, candidate, false, key, async |_| {
+                calls.set(calls.get() + 1);
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, "update_verification_failed");
+            assert!(error.message.contains("Nothing installed"));
+            assert_eq!(calls.get(), 0);
+        }
+        assert!(!t.0.join("status.json").exists());
     }
 }
 

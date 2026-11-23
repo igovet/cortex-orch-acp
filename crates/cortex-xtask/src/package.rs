@@ -31,6 +31,7 @@ pub const PAYLOAD_ENTRIES: &[&str] = &[
     "runtime-payload.json",
     "packaging/engines",
     "packaging/voice",
+    "packaging/update-signing/release-ed25519.pub",
 ];
 
 const PAYLOAD_EXCLUDED_DIRS: &[&str] = &[

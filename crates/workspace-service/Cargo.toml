@@ -30,6 +30,7 @@ name = "worker_roles"
 harness = false
 
 [dependencies]
+ed25519-dalek = "=3.0.0"
 cortex-core = { path = "../cortex-core" }
 cortex-engine = { path = "../cortex-engine" }
 workspace-protocol = { path = "../workspace-protocol" }

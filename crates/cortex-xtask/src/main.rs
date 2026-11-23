@@ -1,7 +1,7 @@
 //! `cortex-xtask`: the Python-free build, generation and packaging toolchain.
 //!
-//! Every subcommand reads its inputs below `--root` (default: the nearest ancestor of the
-//! working directory holding `package-identity.json`) and exits non-zero with a diagnostic on
+//! Build and generation commands resolve `--root` (default: the nearest ancestor of the
+//! working directory holding `package-identity.json`) and exit non-zero with a diagnostic on
 //! stderr when an input is stale or inconsistent.
 
 mod builds;
@@ -22,6 +22,7 @@ mod rendered;
 mod testrun;
 mod toml;
 mod tools;
+mod update_signing;
 
 use json::Res;
 use std::path::PathBuf;
@@ -41,6 +42,10 @@ verification:
 package identity:
   package               stamp|check   content hash stamp / validation
   runtime-payload       list          the exact shipped runtime file set
+desktop update signing:
+  update-key init                     create a private key outside the checkout; print only the public key
+  update-sign <deb> [--public-key F]   sign the exact SHA-256 sidecar for an archive
+  update-verify <deb> [--public-key F] verify the signature and the archive digest
 build helpers:
   package-channel       overlay|package <dev|release> [--target D --output D --depends-file F --engines D --build-stamp S]
   bundle-engines        --output D
@@ -202,6 +207,7 @@ fn run(raw: &[String]) -> Res<i32> {
             args.action(&["list"])?;
             package::run_payload_list(&args.root()?)?
         }
+        "update-key" | "update-sign" | "update-verify" => update_signing::run(&args)?,
         "package-channel" => package_channel(&args)?,
         "bundle-engines" => engines::build_engines(
             &args.root()?,

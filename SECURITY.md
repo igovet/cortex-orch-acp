@@ -2343,6 +2343,13 @@ The Cortex Workspace desktop slice has a user-level machine service that owns th
   registries from the persistent installation, not authority from the same OS user. Use a separate
   disposable project: the Dev project-store name and the native account HOME do not change.
   See [configuration](docs/configuration.md#workspace-dev-extracted-package).
+- **Stopped source merges.** Detection does not dispatch Cortex. Only an explicit owner handoff
+  binds the continuation to the saved source and target commits. The service supplies a bounded,
+  JSON-quoted Git path manifest with completeness and truncation flags, not file contents;
+  paths are data, not instructions. Unconfirmed writers or Git outcomes block manual merge
+  mutations; inspection does not replay the prompt. A resolved revision requires fresh
+  independent review and runtime verification. Neither handoff nor a check request authorizes
+  integration or push. See [Integration and conflicts](docs/cortex-workspace/local-task-execution.md#integration-and-conflicts).
 - **Opening a pull request in the browser.** **View PR** (on the merge card and in the Git menu) is the
   only action that opens a pull request address. The UI displays the recorded address as text and sends
   only the project and task identifiers; it never passes the displayed URL to the opener. The service

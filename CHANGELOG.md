@@ -4,6 +4,10 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Fixed: Workspace hands a stopped source merge to Cortex only on owner confirmation, with a bounded Git conflict-path list. A confirmed stop or failure returns control for the saved merge; an unclear outcome can be inspected without resending. After Finish, request fresh independent review and verification for the resolved revision. Final integration still needs separate confirmation.
+
+- Changed: Workspace sprint planning handles large plans and failures more clearly. The planning request directs the coordinator to submit large plans in small ordered parts with compact items. A terminal planning failure is classified from recorded evidence as owner stop, evidenced limit or unknown cause, and the sprint explains what Retry will do. Retry after a limit plans in smaller parts from the start; if that hits the same limit, Change request is offered instead of Retry. A refused Resume no longer flips the sprint back to planning. Unfinished plan parts are not carried into a replacement planning task (not implemented). Verified by focused no-paid tests only; not live-qualified.
+
 - Added: Workspace release updates require a detached Ed25519 signature over the exact desktop `.deb.sha256` sidecar before download and again before install. Missing or invalid signatures never reach the privilege prompt. Offline key initialization, signing and verification commands and the manual production workflow are ready for local verification; Dev updates remain manual. No release was published.
 
 - Fixed: Workspace generates commit, squash, Push summary and pull-request drafts from English templates without a model. Automatic close and branch-update messages no longer copy task titles or ref names. Owner-entered text and task titles keep their original language.
