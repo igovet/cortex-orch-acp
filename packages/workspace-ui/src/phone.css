@@ -14,7 +14,7 @@ html[data-shell="phone"], html[data-shell="phone"] * { scrollbar-width: none; sc
 html[data-shell="phone"] ::-webkit-scrollbar { display: none; width: 0; height: 0; }
 html[data-shell="phone"] :is(.sb-scroll, .col-b, .wlist, .flist, .tree, .gscroll) { padding-right: 8px !important; }
 html[data-shell="phone"] :is(.home, .page, .create, .ready, .set-main, .launch) { padding-inline: 16px; margin-right: 0; }
-html[data-shell="phone"] :is(.feed, .d-scroll, .sp-scroll, .cf-scroll) { padding-right: 11px; }
+html[data-shell="phone"] :is(.d-scroll, .sp-scroll, .cf-scroll) { padding-right: 11px; }
 
 /* Title band: menu or Back, the title, one primary action. No tabs, window buttons or drag region. */
 html[data-shell="phone"] .ws-phonebar { gap: 4px; padding: 0 8px 0 4px; -webkit-app-region: no-drag; }
@@ -43,6 +43,7 @@ html[data-shell="phone"] .ib { width: 44px; height: 44px; }
 html[data-shell="phone"] .ib .i { width: 20px; height: 20px; }
 html[data-shell="phone"] .nav, html[data-shell="phone"] .snav { height: 44px; font-size: 15px; gap: 12px; }
 html[data-shell="phone"] .proj { height: 44px; font-size: 15px; }
+html[data-shell="phone"] .proj-wrap { grid-template-columns: minmax(0, 1fr) 44px; }
 html[data-shell="phone"] .proj-x { width: 44px; height: 44px; }
 html[data-shell="phone"] .task-row { height: 40px; font-size: 14px; }
 html[data-shell="phone"] .inp, html[data-shell="phone"] select { height: 44px; font-size: 15px; }

@@ -12,7 +12,7 @@ import { revealCutIn, Strip, Whole } from "./layout";
 import { SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN } from "./prefs";
 import { APP_SECTIONS, MACHINE_SECTIONS, ORCHESTRATION_LABELS, ORCHESTRATION_SECTIONS, orchestrationSection, type OrchestrationSection, type Route, type SettingsSection } from "./router";
 import { defaultCheckout, repoOf } from "./review-model";
-import { asOf, awaitsOwner, humanStatus, checkCounts, clock, dayClock, engineLimits, limitsText, newestObserved, homeView, inboxItems, planningNeedsOwner, projectsOn, rowIcon, sameBranch, sideRows, sideWord, sprintModeLabel, sprintRoute, sprintView, type EngineLimit, type LimitWindow, type ProjectSummary, type SideRow, type TaskView } from "./selectors";
+import { asOf, awaitsOwner, humanStatus, checkCounts, clock, dayClock, engineLimits, limitsText, newestObserved, homeView, inboxItems, planningNeedsOwner, projectsOn, rowIcon, sameBranch, sideRows, sideWord, sprintModeLabel, sprintRoute, sprintView, topWorkRows, type EngineLimit, type LimitWindow, type ProjectSummary, type SideRow, type TaskView } from "./selectors";
 import { workerFace } from "./session-model";
 import { same } from "./stable";
 import { SprintActions, SprintCrumb } from "./sprint";
@@ -162,7 +162,7 @@ function ProjectRow(props: { summary: ProjectSummary; n: number; openByDefault: 
   const ws = useWs();
   const id = () => props.summary.project.id;
   const route = () => ws.router.route();
-  const current = () => { const r = route(); return r.name === "project" && r.project === id(); };
+  const current = () => { const r = route(); return r.name === "project" && r.machine === props.summary.machine.id && r.project === id() && r.scope.kind !== "sprint"; };
   const hasLive = () => sideRows(ws.store.index(), props.summary).length > 0;
   // Never tied to the route: opening a project must not push the rows below it, or they would move under the pointer.
   const open = () => ws.panels.expanded()[id()] ?? props.openByDefault;
@@ -179,27 +179,52 @@ function ProjectRow(props: { summary: ProjectSummary; n: number; openByDefault: 
     </div>
     <Show when={open() && hasLive()}>
       <div class="tasks">
-        <Keyed each={sideRows(ws.store.index(), props.summary)} by={r => r.kind === "task" ? r.view.id : `s:${r.sprint.id}`}>{r => {
-          const sprint = () => r() as Extract<SideRow, { kind: "sprint" }>;
-          // A question or permission of the sprint's planning task is the sprint's: the task has no row of its own.
-          const asks = () => planningNeedsOwner(ws.store.state(), sprint().sprint);
-          return r().kind === "task" ? <TaskRow view={(r() as Extract<SideRow, { kind: "task" }>).view} />
-            : <A class="task-row" to={sprintRoute(props.summary.machine.id, sprint().sprint)}>
-              <I n="layers" s={14} class="faint" /><span class="trunc">Sprint: {sprintView(ws.store.index(), sprint().sprint).title}</span><span class={`sig tnum${sprint().sprint.deletion || asks() ? " st-warn" : ""}`}>{sprint().sprint.deletion ? "Deleting" : sprint().sprint.planning === "created" ? sprint().sprint.queueState === "complete" ? "Done" : `${sprint().started}/${sprint().total}` : asks() ? "Needs you" : "Planning"}</span>
-            </A>;
-        }}</Keyed>
+        <SideRows rows={sideRows(ws.store.index(), props.summary)} machine={props.summary.machine.id} />
         <Show when={props.summary.views.length > 0}><A class="task-row all" to={project(props.summary.machine.id, id())}>All {props.summary.views.length}</A></Show>
       </div>
     </Show>
   </>;
 }
 
-function TaskRow(props: { view: TaskView }) {
+function SideRows(props: { rows: (SideRow & { projectName?: string })[]; machine: string }) {
+  return <Keyed each={props.rows} by={r => r.kind === "task" ? `t:${r.view.id}` : `s:${r.sprint.id}`}>{row => {
+    const task = () => row() as Extract<SideRow, { kind: "task" }>;
+    const sprint = () => row() as Extract<SideRow, { kind: "sprint" }>;
+    return row().kind === "task" ? <TaskRow view={task().view} nested={task().nested} projectName={row().projectName} />
+      : <SprintSideRow row={sprint()} machine={props.machine} projectName={row().projectName} />;
+  }}</Keyed>;
+}
+
+function SideTitle(props: { title: string; projectName?: string }) {
+  return <Show when={props.projectName} fallback={<span class="trunc">{props.title}</span>}>{name =>
+    <span class="sb-row-title"><span class="trunc">{props.title}</span><span class="trunc sb-row-project">{name()}</span></span>
+  }</Show>;
+}
+
+function SprintSideRow(props: { row: Extract<SideRow, { kind: "sprint" }>; machine: string; projectName?: string }) {
   const ws = useWs();
-  const route = () => ws.router.route();
+  const sprint = () => props.row.sprint;
+  const current = () => { const r = ws.router.route();
+    return (r.name === "sprint" || r.name === "project") && r.machine === props.machine && r.project === sprint().projectId
+      && (r.name === "sprint" ? r.sprint === sprint().id : r.scope.kind === "sprint" && r.scope.id === sprint().id);
+  };
+  // The sprint owns its planning task's questions and permissions.
+  const asks = () => planningNeedsOwner(ws.store.state(), sprint());
+  const word = () => sprint().deletion ? "Deleting" : sprint().planning === "created"
+    ? sprint().queueState === "complete" ? "Done" : `${props.row.started}/${props.row.total}` : asks() ? "Needs you" : "Planning";
+  return <A class="task-row" to={sprintRoute(props.machine, sprint())} aria-current={current() ? "page" : undefined}>
+    <I n="layers" s={14} class="faint" /><SideTitle title={`Sprint: ${sprintView(ws.store.index(), sprint()).title}`} projectName={props.projectName} />
+    <span class={`sig tnum${sprint().deletion || asks() ? " st-warn" : ""}`}>{word()}</span>
+  </A>;
+}
+
+function TaskRow(props: { view: TaskView; nested?: boolean; projectName?: string }) {
+  const ws = useWs();
+  const current = () => { const r = ws.router.route(); return r.name === "task" && r.machine === props.view.machine.id && r.task === props.view.id; };
   const word = () => sideWord(props.view);
-  return <A class="task-row" aria-label={`${taskTitle(props.view.task)} — ${word()}`} to={{ name: "task", machine: props.view.machine.id, task: props.view.id }} aria-current={(() => { const r = route(); return r.name === "task" && r.task === props.view.id ? "page" : undefined; })()}>
-    <I n={rowIcon(props.view)} s={14} class={awaitsOwner(props.view) ? "st-warn" : props.view.fact.tone} /><span class="trunc">{taskTitle(props.view.task)}</span><span class={`sig${awaitsOwner(props.view) ? " st-warn" : ""}`}>{word()}</span>
+  const label = () => [taskTitle(props.view.task), props.projectName, word()].filter(Boolean).join(" — ");
+  return <A class={`task-row${props.nested ? " in-sprint" : ""}`} aria-label={label()} to={{ name: "task", machine: props.view.machine.id, task: props.view.id }} aria-current={current() ? "page" : undefined}>
+    <I n={rowIcon(props.view)} s={14} class={awaitsOwner(props.view) ? "st-warn" : props.view.fact.tone} /><SideTitle title={taskTitle(props.view.task)} projectName={props.projectName} /><span class={`sig${awaitsOwner(props.view) ? " st-warn" : ""}`}>{word()}</span>
   </A>;
 }
 
@@ -269,6 +294,7 @@ function Sidebar() {
     if (mode === "activity") return [...list].sort((a, b) => (b.at ?? -1) - (a.at ?? -1));
     return list;
   });
+  const work = createMemo(() => topWorkRows(index(), m()));
   const firstLive = createMemo(() => projects().find(s => sideRows(index(), s).length > 0)?.project.id);
   const pinned = createMemo(() => ws.panels.pins().flatMap(id => { const v = index().byId.get(id); return v && v.machine.id === m() ? [v] : []; }));
   let dragging = false;
@@ -282,6 +308,15 @@ function Sidebar() {
       <A class="nav" to={{ name: "archive", machine: m() }} aria-current={route().name === "archive" ? "page" : undefined}><I n="archive" />Archive<Show when={index().archive.length > 0}><span class="count">{index().archive.length}</span></Show></A>
     </div>
     <div class="sb-scroll">
+      <Show when={work().length}>
+        <section class="sb-work" aria-label="Active work">
+          <h2 class="sb-h">Active work</h2>
+          <Keyed each={work()} by={group => group.id}>{group => <>
+            <h3 class="sb-work-group">{group().label}</h3>
+            <SideRows rows={group().rows} machine={m()} />
+          </>}</Keyed>
+        </section>
+      </Show>
       <Show when={pinned().length > 0}>
         <div class="sb-h"><span>Pinned</span></div>
         <Keyed each={pinned()} by={v => v.id}>{v => <A class="task-row" style={{ "padding-left": "8px" }} to={{ name: "task", machine: v().machine.id, task: v().id }}><I n="pin" s={14} class="faint" /><span class="trunc">{v().task.title}</span></A>}</Keyed>
@@ -437,12 +472,12 @@ export function Inspector() {
     <Switch fallback={<MachinePanel />}>
       <Match when={ctx.view() && route().name === "task"}><TaskInspector id={ctx.view()!.id} pick={(route() as { worker?: string }).worker ?? null} /></Match>
       <Match when={selected()}>{v => <><TaskPanel view={v()} heading="Selected task" /><Open v={v()} /></>}</Match>
-      <Match when={scopeSprint()}>{id => <SprintPanel sprintId={id()} />}</Match>
       <Match when={repoArea() && ctx.summary()}>{s => {
         const repo = () => repoOf(ws.store.state(), s().project.id)!;
         const r = () => route() as Extract<Route, { name: "project" }>;
         return <Show when={r().view === "code"} fallback={<GitPanel summary={s()} repo={repo()} checkout={defaultCheckout(repo(), r().checkout)} />}><CodePanel repo={repo()} checkout={defaultCheckout(repo(), r().checkout)} file={r().file} /></Show>;
       }}</Match>
+      <Match when={scopeSprint()}>{id => <SprintPanel sprintId={id()} />}</Match>
       <Match when={route().name === "project" && ctx.summary()}>{s => <ProjectPanel summary={s()} />}</Match>
       <Match when={route().name === "home" && firstNeed()}>{v => <><TaskPanel view={v()} heading="First decision" /><Open v={v()} /></>}</Match>
     </Switch>

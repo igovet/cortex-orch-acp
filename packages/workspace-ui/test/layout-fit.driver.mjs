@@ -136,8 +136,12 @@ const QUEUED_ROW = on(".queue .qrow .qrow-end");
 SCREENS.push(["task-queued", task_at("r-now") + "&queued=r-now", QUEUED_ROW, FULL], ["task-queued-dark", task_at("r-now") + "&queued=r-now&dark=1", QUEUED_ROW, [[1280, 800]]]);
 // Two real sidebar task rows with long automatic reasons. Their visible labels must retain width,
 // keep the owner status on the same row, avoid protocol underscores, and link to distinct tasks.
-const SIDEBAR_REASONS = "(()=>{const rows=[...document.querySelectorAll('.sidebar .task-row')].filter(r=>/\\/t\\/(auto-cont|auto-files)$/.test(r.getAttribute('href')||''));const data=rows.map(r=>{const title=r.querySelector('.trunc'),sig=r.querySelector('.sig'),rr=r.getBoundingClientRect(),tr=title?.getBoundingClientRect(),sr=sig?.getBoundingClientRect();return {href:r.getAttribute('href'),title:title?.textContent||'',sig:sig?.textContent||'',row:[rr.left,rr.right,rr.top,rr.bottom],titleBox:tr&&[tr.left,tr.right,tr.width],sigBox:sr&&[sr.left,sr.right,sr.width]}});const sb=document.querySelector('.sidebar .sb-scroll'),sideways=sb?sb.scrollWidth-sb.clientWidth:-1;return {data,sideways,ok:sideways===0&&data.length===2&&new Set(data.map(x=>x.href)).size===2&&data.every(x=>x.title.length>10&&x.titleBox&&x.titleBox[2]>20&&!x.sig.includes('_')&&x.sigBox&&x.sigBox[2]>20&&x.titleBox[1]<=x.sigBox[0]+1)}})()";
-SCREENS.push(["sidebar-automatic-reasons", at("/m/<M>/p/p/board") + "&sidebarRows=1", "document.querySelector('.sidebar .task-row a,.sidebar .task-row')", [[1280, 800], [960, 540]]]);
+const SIDEBAR_REASONS = "(()=>{const rows=[...document.querySelectorAll('.sidebar .task-row')].filter(r=>/\\/t\\/(auto-cont|auto-files)$/.test(r.getAttribute('href')||''));const data=rows.map(r=>{const title=r.querySelector('.trunc'),sig=r.querySelector('.sig'),rr=r.getBoundingClientRect(),tr=title?.getBoundingClientRect(),sr=sig?.getBoundingClientRect();return {location:r.closest('.sb-work')?'work':'project',project:r.querySelector('.sb-row-project')?.textContent||'',href:r.getAttribute('href'),title:title?.textContent||'',sig:sig?.textContent||'',row:[rr.left,rr.right,rr.top,rr.bottom],titleBox:tr&&[tr.left,tr.right,tr.width],sigBox:sr&&[sr.left,sr.right,sr.width]}});const sb=document.querySelector('.sidebar .sb-scroll'),sideways=sb?sb.scrollWidth-sb.clientWidth:-1;return {data,sideways,ok:sideways===0&&data.length===4&&['work','project'].every(loc=>new Set(data.filter(x=>x.location===loc).map(x=>x.href)).size===2)&&data.filter(x=>x.location==='work').every(x=>x.project.length>10)&&data.every(x=>x.title.length>10&&x.titleBox&&x.titleBox[2]>20&&!x.sig.includes('_')&&x.sigBox&&x.sigBox[2]>20&&x.titleBox[1]<=x.sigBox[0]+1)}})()";
+SCREENS.push(["sidebar-automatic-reasons", at("/m/<M>/p/p/board") + "&sidebarRows=1", "document.querySelector('.sidebar .task-row a,.sidebar .task-row')", [[1280, 800], [1024, 768], [960, 540]]]);
+SCREENS.push(["sidebar-phone-drawer", at("/m/<M>/p/p/board") + "&phoneapp&menu&sidebarRows=1",
+  "document.querySelector('.ws-drawer .sb-work .sb-row-project')", [[390, 844]]]);
+SCREENS.push(["sidebar-sprint", board_at("b-run") + "&sidebar=260",
+  "document.querySelector('.sb-work .in-sprint') && document.querySelector('.sb-work [aria-current=page]')", [[1280, 800]]]);
 // A working task's steps that recorded output far wider than any column, in Workers and in Conversation; OUTPUT_FLOWS opens them.
 const OUTPUT_SCREENS = [["task-output-workers", review_at("out/workers/w-out"), "document.querySelector('.stream button.fold')"], ["task-output-conversation", review_at("out"), "document.querySelector('.timeline button.fold')"]];
 for (const [name, query, ready] of OUTPUT_SCREENS) SCREENS.push([name, query, ready, [[1280, 800]]]);
@@ -632,7 +636,7 @@ return {label:(el.getAttribute('aria-label')||el.textContent).trim().slice(0,32)
   }
 
   // The full rules on the title band alone.
-  const TITLE_STRICT = STRICT.replace("const scope = document.querySelector('dialog[open]') || document.body;", "const scope = document.querySelector('.titlebar');");
+  const TITLE_STRICT = STRICT.replace(/^const scope = .+;$/m, "const scope = document.querySelector('.titlebar');");
   if (TITLE_STRICT === STRICT) throw Error("AssertionError: the title band scope was not found in the strict probe");
 
   // The pinned owner card above the message box: what the owner sees for each kind of hold, at the usual and the smallest window.

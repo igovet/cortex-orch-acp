@@ -1,6 +1,7 @@
 const V = {w: innerWidth, h: innerHeight};
 const problems = [];
-const scope = document.querySelector('dialog[open]') || document.body;
+// The full-screen phone drawer covers the workspace; measure the foreground, as with a native dialog.
+const scope = document.querySelector('dialog[open]') || document.querySelector('.ws-drawer[role="dialog"]') || document.body;
 const css = (el, pseudo) => getComputedStyle(el, pseudo);
 // A screen reader's polite region is clipped to nothing on purpose.
 const SKIP = '.ws-live';
@@ -146,13 +147,21 @@ for (const s of scope.querySelectorAll('.l-sect')) { if (!seen(s)) continue; con
 const stable = {};
 for (const b of barEls) for (const c of b.querySelectorAll('.btn, .ib, .chip, .sel, .seg, .tab')) if (seen(c)) { const r = c.getBoundingClientRect(); stable[b.dataset.bar + ':' + label(c)] = [R(r.left), R(r.top), R(r.width), R(r.height)]; }
 const slots = [...scope.querySelectorAll('.l-reason')].filter(el => seen(el)).map(s => s.textContent.trim().slice(0, 60));
-// Controls keep the desktop's compact size at every width: nothing in a row is enlarged for touch (owner, 2026-11-10).
-const MAX_CTL = 32.5;
+// A narrow desktop keeps its compact controls; only the actual phone shell uses touch sizes.
+const phone = doc.dataset.shell === 'phone';
+const MAX_CTL = phone ? 44.5 : 32.5;
+if (phone && scope.matches('.ws-drawer')) {
+  for (const el of scope.querySelectorAll('.task-row, .proj-x, [aria-label="Close menu"]')) {
+    if (!seen(el)) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 40 || r.height < 40) problems.push(`drawer touch target is too small: ${name(el)} "${label(el)}" ${R(r.width)}x${R(r.height)}`);
+  }
+}
 // An answer choice may wrap a long answer; one that holds a single line is held to the same size as a button.
 const lines = el => { const g = document.createRange(); g.selectNodeContents(el); return new Set([...g.getClientRects()].filter(x => x.width > 1 && x.height > 1).map(x => Math.round(x.top))).size; };
 for (const el of scope.querySelectorAll(CTL + ', .ws-hint, .opt')) { if (!seen(el) || el.closest('.gsv')) continue; const r = el.getBoundingClientRect();
   const tall = el.matches('.opt') ? r.height > MAX_CTL + 2 && lines(el) <= 1 : r.height > MAX_CTL;
-  if (tall || (el.matches('.ib') && r.width > MAX_CTL)) problems.push(`control larger than the desktop size: ${name(el)} "${label(el)}" ${R(r.width)}x${R(r.height)}`); }
+  if (tall || (el.matches('.ib') && r.width > MAX_CTL)) problems.push(`control larger than the ${phone ? 'phone' : 'desktop'} size: ${name(el)} "${label(el)}" ${R(r.width)}x${R(r.height)}`); }
 // A help button is a control like its neighbours: a bare "?" glyph with no fill and no edge reads as a stray character.
 for (const el of scope.querySelectorAll('button')) { if (!seen(el) || el.textContent.trim() !== '?') continue; const s = css(el);
   const fill = s.backgroundColor !== 'rgba(0, 0, 0, 0)' && s.backgroundColor !== 'transparent', edge = s.boxShadow !== 'none' || (parseFloat(s.borderTopWidth) > 0 && s.borderTopStyle !== 'none' && s.borderTopColor !== 'rgba(0, 0, 0, 0)');

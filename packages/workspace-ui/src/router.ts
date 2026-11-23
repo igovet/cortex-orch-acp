@@ -93,15 +93,16 @@ export function parseRoute(pathname: string, search = ""): Route {
   if (rest[0] === "p" && rest[1]) {
     const project = rest[1], tail = rest.slice(2);
     if (tail[0] === "s" && tail[1] && tail[2] === "workers" && tail[3] && tail.length === 4) return { name: "sprint", machine, project, sprint: tail[1], tab: "workers", worker: tail[3] };
+    const checkout = query.get("checkout") ?? undefined;
+    const place = (view: ProjectView) => ({ ...(checkout ? { checkout } : {}), ...(view === "code" ? spot : {}) });
     if (tail[0] === "s" && tail[1] && tail.length <= 3) {
       const view = tail[2] ?? "board";
       if (has(SPRINT_TABS, view)) return { name: "sprint", machine, project, sprint: tail[1], tab: view };
-      return view === "board" || view === "list" ? { name: "project", machine, project, view, scope: { kind: "sprint", id: tail[1] } } : notFound;
+      return has(PROJECT_VIEWS, view) ? { name: "project", machine, project, view, scope: { kind: "sprint", id: tail[1] }, ...place(view) } : notFound;
     }
     const scope: Scope = query.get("scope") === "standalone" ? { kind: "standalone" } : { kind: "all" };
     if (tail.length === 0) return { name: "project", machine, project, view: null, scope };
-    const checkout = query.get("checkout") ?? undefined;
-    if (tail.length === 1 && has(PROJECT_VIEWS, tail[0])) return { name: "project", machine, project, view: tail[0], scope, ...(checkout ? { checkout } : {}), ...(tail[0] === "code" ? spot : {}) };
+    if (tail.length === 1 && has(PROJECT_VIEWS, tail[0])) return { name: "project", machine, project, view: tail[0], scope, ...place(tail[0]) };
   }
   return notFound;
 }
@@ -133,11 +134,12 @@ export function hrefOf(route: Route): string {
     }
     case "project": {
       const base = `/m/${e(route.machine)}/p/${e(route.project)}`;
-      if (route.scope.kind === "sprint") return `${base}/s/${e(route.scope.id)}/${route.view ?? "board"}`;
+
       const q = new URLSearchParams();
       if (route.scope.kind === "standalone") q.set("scope", "standalone");
       if (route.checkout) q.set("checkout", route.checkout);
-      return `${base}${route.view ? `/${route.view}` : ""}${spotQuery(route, q)}`;
+      const path = route.scope.kind === "sprint" ? `${base}/s/${e(route.scope.id)}/${route.view ?? "board"}` : `${base}${route.view ? `/${route.view}` : ""}`;
+      return `${path}${spotQuery(route, q)}`;
     }
     case "sprint": return `/m/${e(route.machine)}/p/${e(route.project)}/s/${e(route.sprint)}/${route.tab}${route.tab === "workers" && route.worker ? `/${e(route.worker)}` : ""}`;
     case "settings": return route.machine ? `/settings/machine/${e(route.machine)}/${route.section}${route.page ? `/${route.page}` : ""}${route.server ? `/${e(route.server)}` : ""}${route.tab ? `?tab=${e(route.tab)}` : ""}` : `/settings/app/${route.section}`;

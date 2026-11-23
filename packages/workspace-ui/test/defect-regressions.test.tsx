@@ -2,6 +2,7 @@ import { render } from "solid-js/web";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { emptyWorkspace, LOCAL_MACHINE_ID, type Sprint, type Worker } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
+import { hrefOf, parseRoute, PROJECT_VIEWS, type Route } from "../src/router";
 import { buildIndex, inScope, sprintView } from "../src/selectors";
 import { capabilitiesWire, flush, projection, scriptedPort, scriptedTransport, withTask, wireTask } from "./support";
 import { createRealPort } from "../src/port/real";
@@ -97,6 +98,119 @@ it("shows a worker's role and actual state without claiming it is unassigned", a
   expect(document.body.textContent).not.toMatch(/not assigned/i);
 });
 
+const sprintPath = `/m/${LOCAL_MACHINE_ID}/p/p/s/running`;
+const sidebarSprint = (id: string, queueState: Sprint["queueState"], taskIds: string[] = []): Sprint =>
+  ({ id, projectId: "p", title: `${id} sprint`, description: "", runMode: "manual", targetBranch: null, planning: "created", conversation: [],
+    plan: null, materializedVersion: 1, taskIds, queueState, pauseReason: null });
+const workBlock = () => document.querySelector<HTMLElement>(".sb-work");
+const sideLinks = (parent: ParentNode, selector = ".task-row") => [...parent.querySelectorAll<HTMLAnchorElement>(selector)];
+
+it("lists uncapped work across projects with project names and separate status words", async () => {
+  const s = world(), base = s.tasks[0];
+  s.projects[0].name = "First project";
+  s.projects.push({ ...s.projects[0], id: "other", name: "Other project" });
+  s.machines.push({ ...s.machines[0], id: "remote" });
+  s.projects.push({ ...s.projects[0], id: "remote-project", machineId: "remote", name: "Remote project" });
+  s.tasks = [
+    ...Array.from({ length: 6 }, (_, i) => ({ ...base, id: `work-${i}`, title: `Working ${i}`, status: "working" as const })),
+    { ...base, id: "review", title: "Review the change", projectId: "other", status: "review" },
+    { ...base, id: "merge", title: "Land the change", projectId: "other", status: "ready_to_merge" },
+    { ...base, id: "remote-task", title: "Remote task", projectId: "remote-project", status: "working" },
+    { ...base, id: "needs", title: "Needs an answer", status: "needs_you" },
+  ];
+  await mount(s, `/m/${LOCAL_MACHINE_ID}`);
+  const block = workBlock()!;
+  expect(block.nextElementSibling?.textContent).toBe("Projects");
+  expect([...block.querySelectorAll("h3")].map(h => h.textContent)).toEqual(["Working", "Review", "Ready to merge"]);
+  expect(sideLinks(block)).toHaveLength(8);
+  const links = sideLinks(block);
+  expect(links.filter(r => r.querySelector(".sb-row-project")?.textContent === "First project")).toHaveLength(6);
+  expect(links.filter(r => r.querySelector(".sb-row-project")?.textContent === "Other project")).toHaveLength(2);
+  const merge = links.find(r => r.getAttribute("href")?.endsWith("/t/merge"))!;
+  expect(merge.querySelector(".sig")?.textContent).toMatch(/^(Finish|Merge)$/);
+  expect(merge.getAttribute("aria-label")).toBe(`Land the change — Other project — ${merge.querySelector(".sig")?.textContent}`);
+});
+
+it("omits the active work block when there are no matching rows", async () => {
+  const s = world();
+  s.tasks[0].status = "needs_you";
+  s.sprints = [sidebarSprint("idle", "idle"), sidebarSprint("complete", "complete")];
+  await mount(s, `/m/${LOCAL_MACHINE_ID}`);
+  expect(workBlock()).toBeNull();
+});
+
+it("shows running and paused sprint trees without repeating their tasks within Active work", async () => {
+  const s = world(), base = s.tasks[0];
+  s.tasks = [
+    { ...base, id: "t", title: "Sprint child", status: "working", sprintId: "running" },
+    { ...base, id: "r", title: "Paused sprint child", status: "review", sprintId: "paused" },
+  ];
+  s.sprints = [sidebarSprint("running", "running", ["t"]), sidebarSprint("paused", "paused", ["r"]), sidebarSprint("idle", "idle"), sidebarSprint("complete", "complete")];
+  await mount(s, sprintPath + "/board");
+  const block = workBlock()!;
+  expect(sideLinks(block).map(row => row.getAttribute("href"))).toEqual([
+    sprintPath + "/board", taskPath, sprintPath.replace("running", "paused") + "/board", taskPath.replace(/t$/, "r"),
+  ]);
+  expect(sideLinks(block, ".in-sprint").map(row => row.querySelector(".trunc")?.textContent)).toEqual(["Sprint child", "Paused sprint child"]);
+  const projectRows = sideLinks(document, ".sidebar .tasks .task-row:not(.all)");
+  expect(projectRows).toHaveLength(5);
+  const child = projectRows.find(row => row.getAttribute("href") === taskPath)!;
+  expect(child.classList.contains("in-sprint")).toBe(true);
+  expect(child.previousElementSibling?.getAttribute("href")).toBe(sprintPath + "/board");
+  expect(block.querySelector(".task-row .sb-row-project")?.textContent).toBe(s.projects[0].name);
+  const current = () => sideLinks(document, '.sidebar a[aria-current="page"]').map(a => a.getAttribute("href"));
+  expect(current()).toEqual([sprintPath + "/board", sprintPath + "/board"]);
+
+  document.querySelector<HTMLAnchorElement>('[role="tab"][href$="/code"]')!.click();
+  await settle();
+  expect(location.pathname).toBe(sprintPath + "/code");
+  expect(current()).toEqual([sprintPath + "/board", sprintPath + "/board"]);
+  sideLinks(block, ".in-sprint")[0].click();
+  await settle();
+  expect(current()).toEqual([taskPath, taskPath]);
+});
+
+it("highlights the sprint on a dedicated sprint route instead of its project", async () => {
+  const s = world();
+  s.sprints = [{ ...sidebarSprint("running", "idle"), planning: "planning" }];
+  await mount(s, sprintPath + "/planning");
+  expect(sideLinks(document, '.sidebar a[aria-current="page"]').map(a => a.getAttribute("href"))).toEqual([sprintPath + "/planning"]);
+});
+
+it.each([
+  ["code?file=README.md", ["File", "Checkout"]],
+  ["git", ["Repository", "This checkout"]],
+  ["worktrees", ["Repository", "This checkout"]],
+  ["board", ["Sprint", "Run"]],
+] as const)("shows the right Inspector for the sprint-scoped %s view", async (view, headings) => {
+  const s = world();
+  s.sprints = [sidebarSprint("running", "running")];
+  s.projects[0].hasGit = true;
+  s.repos = [{
+    projectId: "p", hasGit: true, remote: "git@example.invalid:o/p.git", tree: ["README.md"],
+    sources: {}, commits: [], branches: [], fetchedAt: null,
+    checkouts: [{ id: "main", projectId: "p", kind: "main", path: "/fixture", branch: "main",
+      files: [], sources: {}, taskId: null, label: null, base: "main", ahead: 0, behind: 0,
+      behindOf: {}, draft: "", updateConflict: null }],
+  }];
+  await mount(s, sprintPath + "/" + view);
+  const inspector = document.querySelector('aside[aria-label="Inspector"]');
+  expect(inspector).not.toBeNull();
+  expect([...inspector!.querySelectorAll(".ins-h")].map(h => h.textContent?.trim())).toEqual(headings);
+});
+
+it("round-trips project views in a sprint, including checkout, file and line on Code", () => {
+  for (const view of PROJECT_VIEWS) {
+    const route: Route = { name: "project", machine: LOCAL_MACHINE_ID, project: "p", scope: { kind: "sprint", id: "s/ 1" }, view,
+      ...(view === "code" ? { checkout: "main tree", file: "src/a b.ts", line: 7 } : {}) };
+    const url = new URL(hrefOf(route), "https://workspace.invalid");
+    expect(url.pathname).toContain("/s/s%2F%201/");
+    expect(parseRoute(url.pathname, url.search)).toEqual(route);
+  }
+  expect(parseRoute(sprintPath + "/workers/w")).toMatchObject({ name: "sprint", tab: "workers", worker: "w" });
+  expect(parseRoute(`/m/${LOCAL_MACHINE_ID}/p/p/code`, "?file=a.ts&line=2")).toMatchObject({ name: "project", scope: { kind: "all" }, file: "a.ts", line: 2 });
+});
+
 it("keeps a sprint whose queue is complete in the sidebar, as Done, until it is closed into the Archive", async () => {
   const s = world();
   // Four tasks ready to finish, as in the live run: the sprint row must not be the one pushed out of the five.
@@ -122,7 +236,7 @@ it("keeps two automatic task titles in the sidebar while showing continuation as
     { ...s.tasks[0], id: "u", title: "Verify_api gateway", status: "working", process: "live", automaticContinuation: { policy: "automatic_continuation", continuationCount: 2, lastContinuationReason: "review_incomplete", pause: null } },
   ];
   await mount(s, `/m/${LOCAL_MACHINE_ID}`);
-  const rows = [...document.querySelectorAll<HTMLElement>(".sidebar .task-row")].filter(r => r.querySelector(".sig") && !r.textContent?.startsWith("Sprint:"));
+  const rows = [...document.querySelectorAll<HTMLElement>(".sidebar .tasks .task-row")].filter(r => r.querySelector(".sig") && !r.textContent?.startsWith("Sprint:"));
   expect(rows.map(r => r.querySelector(".trunc")?.textContent)).toEqual(["Deploy_api gateway", "Verify_api gateway"]);
   expect(rows.every(r => !r.querySelector(".sig")?.textContent?.includes("_"))).toBe(true);
   expect(rows.every(r => r.querySelector(".sig")?.textContent === "Working")).toBe(true);
