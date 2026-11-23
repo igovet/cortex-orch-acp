@@ -69,7 +69,27 @@ describe("real port", () => {
 
   it("refuses a peer on another protocol major instead of guessing", async () => {
     const s = scriptedTransport({ "capabilities.get": () => ({ ...capabilitiesWire(ALL), protocol: { major: 2, minor: 0 } }) });
-    await expect(port(s as ReturnType<typeof service>).query("capabilities.get", {})).rejects.toThrow(/version_mismatch/);
+    await expect(port(s as ReturnType<typeof service>).query("capabilities.get", {})).rejects.toThrow("This app and the machine service are different versions. Reinstall the package so both are the same version.");
+  });
+
+  it.each(["version_mismatch", "service_protocol_mismatch", "bridge_invalid_capabilities", "unsupported_protocol"])(
+    "explains %s on capability reads and reports a definite refusal on commands", async code => {
+      const message = "This app and the machine service are different versions. Reinstall the package so both are the same version.";
+      const s = service();
+      s.answers["capabilities.get"] = () => { throw new Error(code); };
+      await expect(port(s).query("capabilities.get", {})).rejects.toThrow(message);
+      const healthy = service();
+      const p = await loaded(healthy);
+      healthy.answers["tasks.start"] = () => { throw new Error(code); };
+      expect(await p.command(envelope({ type: "start_task", taskId: "task-1" }))).toMatchObject({ ok: false, outcome: "refused", message });
+    },
+  );
+
+  it("removes the bridge refusal marker on compatibility reads", async () => {
+    const message = "The computer and this app are different versions. Update the app or the computer so both match.";
+    const s = service();
+    s.answers["capabilities.get"] = () => { throw new Error(`refused:${message}`); };
+    await expect(port(s).query("capabilities.get", {})).rejects.toEqual(new Error(message));
   });
 
   it("maps each registered project's snapshot, with its version", async () => {
@@ -292,7 +312,7 @@ describe("real port", () => {
         if (call.op === "repo.snapshot") return { ok: true, result: repo };
         if (call.op === "product.read") return { ok: true, result: { tasks: {}, sprints: [], ...product } };
         if (call.op === "workers") return { ok: true, result: [] };
-        if (call.op === "overview") return { ok: true, result: { name: "Desk", retentionDays: 9, autoArchiveDays: 3, worktreeRoot: "~/t", version: "1", diskMb: 2, storage: [], cleanup: null, diagnostics: null } };
+        if (call.op === "overview") return { ok: true, result: { name: "Desk", retentionDays: 9, autoArchiveDays: 3, automaticArchivePurge: false, unreferencedAttachmentRetentionDays: 5, worktreeRoot: "~/t", version: "1", diskMb: 2, storage: [], cleanup: null, diagnostics: null } };
         if (call.op === "project.config.read") return {ok:true,result:{value:{},tokens:{routing:"absent",project_ceiling:"absent"}}};
         if (call.op === "config.read") return { ok: true, result: { config: { active: "default", projects: {}, revisions: {routing:1} }, connections: [], tokens: { routing: "sha256:a", routing_profiles: "sha256:b", profile_sections: { routing: "x" } }, usage: [{ engine: "codex", connected: true, usedPercent: 40, resetAt: null, observedAt: null, window: "weekly" }] } };
         return { ok: true, result: { done: true } };
@@ -330,7 +350,7 @@ describe("real port", () => {
           if (action === "generate_title") return {ok:true,result:{jobId:"st_1"}};
           if (action === "draft_integration_text") return {ok:true,result:{jobId:"st_2"}};
           if (action === "short_text_poll" && call.params?.jobId === "st_1") return {ok:true,result:++titlePolls < 2 ? {state:"running"} : {state:"done",source:"model",route:{model:"haiku"}}};
-          if (action === "short_text_poll") return {ok:true,result:{state:"done",source:"model",text:{message:"Retry uploads\n\nThree attempts."},route:{model:"haiku"}}};
+          if (action === "short_text_poll") return {ok:true,result:{state:"done",source:"template",text:{message:"Update 1 file"},route:null}};
           return answer(message);
         };
         // The command returns at once; the refresh follows when the job is written.
@@ -341,7 +361,7 @@ describe("real port", () => {
         expect(updates.some(u => u.kind === "refresh")).toBe(true);
         const text = p.draftIntegrationText!({taskId:"task-1",method:"squash",targetBranch:"main"});
         await vi.advanceTimersByTimeAsync(1500);
-        expect(await text).toEqual({source:"model",message:"Retry uploads\n\nThree attempts.",title:undefined,body:undefined,model:"haiku"});
+        expect(await text).toEqual({source:"template",message:"Update 1 file",title:undefined,body:undefined,model:undefined});
         // A machine that cannot start a job gives no text, never an error.
         s.answers["machine.call"] = message => (message as {op:string}).op === "product.task" ? {ok:false,code:"unsupported_action",message:"no"} : answer(message);
         expect(await p.draftIntegrationText!({taskId:"task-1",method:"pr",targetBranch:"main"})).toBeNull();
@@ -526,7 +546,7 @@ describe("real port", () => {
       expect(asked.map(a => a.op)).not.toContain("overview");
       const configReads = asked.filter(a => a.op === "config.read").length;
       const [overview] = await p.query("machine.overview", {});
-      expect(overview.patch).toEqual({ name: "Desk", retentionDays: 9, autoArchiveDays: 3, worktreeRoot: "~/t", version: "1", diskMb: 2, storage: [], cleanup: null, diagnostics: null, ghAvailable: undefined, reclamationFailures: undefined, defaultWorktreeRoot: undefined });
+      expect(overview.patch).toEqual({ name: "Desk", retentionDays: 9, autoArchiveDays: 3, automaticArchivePurge: false, unreferencedAttachmentRetentionDays: 5, worktreeRoot: "~/t", version: "1", diskMb: 2, storage: [], cleanup: null, diagnostics: null, ghAvailable: undefined, reclamationFailures: undefined, defaultWorktreeRoot: undefined });
       // An overview-only update leaves the engine usage and the composer's options as they were.
       expect(overview).not.toHaveProperty("engineUsage");
       expect(overview).not.toHaveProperty("options");
@@ -777,6 +797,29 @@ describe("real port", () => {
       expect(facts.sprints[0].attachments).toEqual(refs);
     });
 
+    it("uses the saved merge identity and never replays a prompt on refusal, inspection, Finish or check request", async () => {
+      const {s,p,asked,ready} = helper();
+      await ready();
+      s.calls.length = 0;
+      const updates: PortUpdate[] = [];
+      const stop = p.subscribe(u => updates.push(u));
+      s.answers["executions.control"] = () => ({outcome:"unknown_outcome"});
+      expect(await p.command(envelope({type:"resolve_with_cortex",taskId:"task-1",conflictId:"mc_1"},"handoff-1"))).toMatchObject({ok:false,outcome:"unknown_outcome"});
+      expect(updates.some(u => u.kind === "refresh")).toBe(true);
+      s.answers["executions.control"] = () => ({done:true,merge:{conflictId:"mc_1"}});
+      expect(await p.command(envelope({type:"inspect_merge",taskId:"task-1",conflictId:"mc_1"},"inspect-1"))).toMatchObject({ok:true});
+      expect(await p.command(envelope({type:"finish_merge",taskId:"task-1"},"finish-1"))).toMatchObject({ok:true});
+      expect(await p.command(envelope({type:"request_merge_checks",taskId:"task-1",conflictId:"mc_1"},"checks-1"))).toMatchObject({ok:true});
+      expect(asked.filter(c => c.op === "product.task").map(c => c.params?.action)).toEqual(["finish_merge"]);
+      expect(s.calls.filter(c => c.operation === "executions.prompt")).toEqual([]);
+      expect(s.calls.filter(c => c.operation === "executions.control").map(c => c.message)).toEqual([
+        {projectId:"p",executionId:"e",requestId:"handoff-1",action:"handoff_merge",conflictId:"mc_1"},
+        {projectId:"p",executionId:"e",requestId:"inspect-1",action:"inspect_merge",conflictId:"mc_1"},
+        {projectId:"p",executionId:"e",requestId:"checks-1",action:"request_merge_checks",conflictId:"mc_1"},
+      ]);
+      stop();
+    });
+
     it("carries review comments, edits, queue edits and resolution guidance without losing bytes", async () => {
       const attachments = [{name:"screen.png",mimeType:"image/png",data:btoa("fixture")}];
       const refs = attachments.map(refOf);
@@ -789,12 +832,16 @@ describe("real port", () => {
         {type:"edit_comment",taskId:"task-1",commentId:"c",text:"Changed",attachments},
         {type:"edit_queued",messageId:"q",text:"Changed",attachments},
         {type:"send_comments",taskId:"task-1"},
-        {type:"resolve_with_cortex",taskId:"task-1",guidance:"Keep this",attachments},
+        {type:"resolve_with_cortex",taskId:"task-1",conflictId:"mc_1",guidance:"Keep this",attachments},
       ] as WorkspaceCommand[]) expect(await p.command(envelope(payload))).toMatchObject({ok:true});
       expect(asked.find(c => c.op === "product.comment" && c.params?.action === "add")?.params).toMatchObject({comment:{attachments:refs}});
       expect(asked.find(c => c.op === "product.comment" && c.params?.action === "edit")?.params).toMatchObject({attachments:refs});
       expect(asked.find(c => c.op === "product.message" && c.params?.action === "edit")?.params).toMatchObject({attachments:refs});
       expect(s.calls.filter(c => c.operation === "executions.prompt").every(c => JSON.stringify((c.message as {attachments?:unknown}).attachments) === JSON.stringify(refs))).toBe(true);
+      expect(s.calls.filter(c => c.operation === "executions.control")).toEqual([
+        { operation: "executions.control", message: expect.objectContaining({ action:"handoff_merge", conflictId:"mc_1", executionId:"e", text:"Keep this", attachments:refs }) },
+      ]);
+      expect(asked.some(c => c.params?.action === "resolution_started")).toBe(false);
       const before = s.calls.length;
       for (const payload of [
         {type:"add_comment",taskId:"task-1",path:"a.txt",line:1,text:"Invalid"},
@@ -829,6 +876,29 @@ describe("real port", () => {
       expect(await p.command(envelope({type:"resume_planning",sprintId:"sp"},"resume"))).toMatchObject({ok:true});
       expect(s.calls.filter(c => c.operation === "executions.control").at(-1)?.message).toMatchObject({action:"resume"});
       expect(asked.filter(c => c.op === "product.sprint" && c.params?.action === "patch").at(-1)?.params).toMatchObject({patch:{planning:"planning"}});
+    });
+
+    it("keeps a stopped sprint cancelled when execution Resume is refused", async () => {
+      const sprint = {id:"sp",projectId:"p",planningTaskId:"task-1",planning:"cancelled",conversation:[]};
+      const {s,p,asked,ready} = helper({sprints:[sprint]});
+      await ready();
+      s.answers["executions.control"] = () => ({outcome:"refused",message:"Resume was refused."});
+      expect(await p.command(envelope({type:"resume_planning",sprintId:"sp"},"refused-resume"))).toMatchObject({ok:false,outcome:"refused"});
+      expect(s.calls.filter(c => c.operation === "executions.control").at(-1)?.message).toMatchObject({action:"resume"});
+      expect(asked.some(c => c.op === "product.sprint" && c.params?.action === "patch")).toBe(false);
+    });
+
+    it("routes terminal Retry and amendments through the sprint service, not the ended execution", async () => {
+      const failure = {kind:"limit",code:"plan_part_too_large",text:"Plan part too large.",step:"run",at:1,recommendedAction:"retry"};
+      const sprint = {id:"sp",projectId:"p",planningTaskId:"task-1",planning:"cancelled",conversation:[],planningFailure:failure};
+      const {s,p,asked,ready} = helper({sprints:[sprint]});
+      await ready();
+      expect(await p.command(envelope({type:"resume_planning",sprintId:"sp"},"terminal-retry"))).toMatchObject({ok:true});
+      expect(asked.filter(c => c.op === "product.sprint").at(-1)?.params).toMatchObject({action:"patch",patch:{planning:"planning"}});
+      failure.recommendedAction = "change_request";
+      expect(await p.command(envelope({type:"plan_message",sprintId:"sp",text:"Plan the first phase only"},"amend"))).toMatchObject({ok:true});
+      expect(asked.filter(c => c.op === "product.sprint").at(-1)?.params).toMatchObject({action:"recover_planning_message",text:"Plan the first phase only"});
+      expect(s.calls.some(c => c.operation === "executions.control" || c.operation === "executions.prompt")).toBe(false);
     });
 
     it("does not silently turn a stale attached planning answer into plain steering", async () => {
@@ -955,11 +1025,11 @@ describe("real port", () => {
       const { p, asked, ready } = helper();
       await ready();
       const remote = "git@github.com:igovet/cortex-orch-acp.git";
-      expect(await p.command(envelope({type:"git_push",checkoutId:"p:main",remote,branch:"dev",confirmed:true}))).toMatchObject({ok:true});
+      expect(await p.command(envelope({type:"git_push",checkoutId:"p:main",remote,branch:"dev",confirmed:true,summary:"Owner reviewed\n\n- Keep the paragraphs."}))).toMatchObject({ok:true});
       await p.command(envelope({type:"git_fetch",projectId:"p",now:1}));
       await p.command(envelope({type:"git_pull",checkoutId:"p:main",now:1}));
       expect(asked.filter(a => a.op === "git")).toEqual([
-        {op:"git",projectId:"p",params:{requestId:"req-1",action:"push",checkoutId:"p:main",remote,branch:"dev",confirmed:true}},
+        {op:"git",projectId:"p",params:{requestId:"req-1",action:"push",checkoutId:"p:main",remote,branch:"dev",confirmed:true,summary:"Owner reviewed\n\n- Keep the paragraphs."}},
         {op:"git",projectId:"p",params:{requestId:"req-1",action:"fetch"}},
         {op:"git",projectId:"p",params:{requestId:"req-1",action:"pull",checkoutId:"p:main"}},
       ]);

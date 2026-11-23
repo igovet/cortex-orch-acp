@@ -101,8 +101,9 @@ export interface WorkspacePort {
   /** Reads one task's retained conversation again now, after a read that did not complete. The result arrives as an update. */
   retryHistory?(taskId: string): void;
   /** Reads the next older part of a task's conversation, when only its latest part is held (`historyEarlier`). The rows
-   *  arrive as an update and are put before the ones held; a failed read says so on `historyEarlier`. */
-  loadEarlierHistory?(taskId: string): void;
+   *  arrive as an update and are put before the ones held; a failed read says so on `historyEarlier`. The optional
+   *  tool view tells the reader whether a fold of only runtime steps will be shown. */
+  loadEarlierHistory?(taskId: string, showAllTools?: () => boolean): void;
   /**
    * A screen on view shows one project's facts (`facts`: workers, reviews, queued messages) or its Git data (`git`: the
    * repository snapshot, task diffs, branches). The port reads only what some screen holds interest in; the returned
@@ -146,6 +147,10 @@ export interface WorkspacePort {
   readFile?(checkoutId: string, file: string): Promise<FileRead>;
   /** A commit message or pull request text the machine wrote from the task's real changes. Null when none could be had; the caller keeps its own text. */
   draftIntegrationText?(request: IntegrationTextRequest): Promise<IntegrationText | null>;
+  /** Read-only draft from staged changes, or all changes when nothing is staged. */
+  draftCheckoutCommit?(request: { checkoutId: string }): Promise<IntegrationText | null>;
+  /** Read-only draft from local commits absent from the selected destination's tracking information. */
+  draftPushSummary?(request: { checkoutId: string; remote: string; branch: string }): Promise<IntegrationText | null>;
   /** One picture, video or sound of a checkout as bytes, for viewing only. Its type comes from its name. */
   readMedia?(checkoutId: string, file: string): Promise<FileRead>;
   /**
@@ -176,8 +181,8 @@ export type FolderRead = { dir: string; entries: FolderEntry[]; more: number; ex
 export type FolderOverview = { truncated: boolean; entries: { path: string; dir: boolean; ignored: boolean }[] };
 export type FolderListing = { overview: FolderOverview | null; folders: FolderRead[] };
 export type IntegrationTextRequest = { taskId: string; method: "commit" | "squash" | "pr"; targetBranch: string; paths?: string[]; summary?: string };
-/** `model` names the model that wrote it; `fallback` text is built from the changed files alone. */
-export type IntegrationText = { source: "model" | "fallback"; message?: string; title?: string; body?: string; model?: string };
+/** Draft origin; a saved Push body is marked separately from its suggested PR title. */
+export type IntegrationText = { source: "model" | "template" | "fallback"; message?: string; title?: string; body?: string; model?: string; reason?: string; bodySource?: "saved_push_summary" };
 /** Base64 bytes and the MIME type the machine chose from the file name. */
 export type FileMedia = { mime: string; data: string };
 /** `unknown` means the reply was lost, which says nothing about the write. */

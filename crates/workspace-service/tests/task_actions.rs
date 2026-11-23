@@ -375,6 +375,83 @@ async fn owner_lifecycle_matches_without_an_engine() {
     check_actions(&fixture).await;
 }
 #[tokio::test]
+async fn close_commit_and_task_draft_do_not_copy_french_task_prose() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new().await;
+    let store = f.store();
+    seed(&f, &store);
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&f.root)
+            .env("HOME", &f.base)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Fixture"]);
+    git(&["config", "user.email", "fixture@example.invalid"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    fs::write(f.root.join("upload.txt"), "before\n").unwrap();
+    git(&["add", "upload.txt"]);
+    git(&["commit", "-qm", "Initialize fixture"]);
+    fs::write(f.root.join("upload.txt"), "after\n").unwrap();
+
+    store.write(|db| {
+        db.execute("UPDATE workspace_tasks SET description='Corriger le chargement' WHERE task_id='t1'", [])?;
+        Ok(())
+    }).unwrap();
+    let path = f.path();
+    let parent = path.parent().unwrap();
+    fs::create_dir_all(parent).unwrap();
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(&path, json!({
+        "tasks":{"t1":{"sprintId":"s1","title":"Réparer le chargement","checkout":{"kind":"main"}}},
+        "sprints":[{"id":"s1","runMode":"automatic"}],
+        "sprintRunModeVersion":1
+    }).to_string()).unwrap();
+
+    let started = f.call(json!({"action":"draft_integration_text","taskId":"t1","method":"commit",
+        "targetBranch":"main","paths":["upload.txt"],"summary":"Le chargement est réparé."})).await;
+    assert_eq!(started["ok"], true, "{started}");
+    let draft = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let reply = f.call(json!({"action":"short_text_poll","taskId":"t1",
+                "jobId":started["result"]["jobId"]})).await;
+            assert_eq!(reply["ok"], true, "{reply}");
+            if reply["result"]["state"] == "done" {
+                break reply["result"].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(draft["source"], "template");
+    assert!(draft["route"].is_null());
+    assert_eq!(draft["text"]["message"], "Update 1 file\n\nChanged files:\n- `upload.txt` (+1 -1)");
+
+    store.write(|db| {
+        db.execute("INSERT INTO tasks VALUES ('r1',?,'now')", [f.root.to_str()])?;
+        db.execute("INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES ('r1','COMPLETED','Fixture','now','now')", [])?;
+        db.execute("INSERT INTO task_owners VALUES ('r1','owner',1,'now')", [])?;
+        db.execute("INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)", [f.root.to_str()])?;
+        db.execute("INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',1,1,'now')", [])?;
+        db.execute("UPDATE workspace_tasks SET execution_id='e1' WHERE task_id='t1'", [])?;
+        db.execute("INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1','NATIVE_PROJECT_WRITTEN',?,'runtime','now')",
+            [json!({"path":"upload.txt"}).to_string()])?;
+        Ok(())
+    }).unwrap();
+
+    let closed = f.call(json!({"action":"close","taskId":"t1","choice":"as_is","confirmed":true})).await;
+    assert_eq!(closed["result"]["asIsCommit"]["committed"], true, "{closed}");
+    assert_eq!(git(&["log", "-1", "--format=%s"]).trim(), "Close task as is (not verified)");
+}
+
+#[tokio::test]
 async fn as_is_close_reports_a_commit_outcome_only_for_eligible_automatic_tasks() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -490,6 +567,124 @@ async fn owner_deletion_keeps_live_worker_and_exclusive_owner_fences() {
         }
     }
 }
+fn worktree_git(root: &Path, argv: &[&str]) -> String {
+    let done = std::process::Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["-c", "core.hooksPath=/dev/null", "-c", "user.name=Test",
+               "-c", "user.email=test@example.invalid"])
+        .current_dir(root)
+        .args(argv)
+        .output().unwrap();
+    assert!(done.status.success(), "{argv:?}: {}", String::from_utf8_lossy(&done.stderr));
+    String::from_utf8(done.stdout).unwrap().trim().into()
+}
+
+#[tokio::test]
+async fn worktree_cleanup_requires_a_settled_owned_tree_and_preserves_the_branch() {
+    use cortex_core::workspace::{self, worktrees::{self, Cleanup}};
+    for (kind, expected, reason) in [
+        ("clean-close", "removed", Value::Null),
+        ("dirty-close", "retained", json!("worktree_dirty")),
+        ("locked-close", "retained", json!("worktree_occupied")),
+        ("missing-close", "retained", json!("worktree_missing")),
+        ("clean-purge", "removed", Value::Null),
+        ("dirty-purge", "retained", json!("worktree_dirty")),
+        ("main", "refused", Value::Null),
+    ] {
+        let f = Fixture::new().await;
+        let store = f.store();
+        seed(&f, &store);
+        worktree_git(&f.root, &["init"]);
+        fs::write(f.root.join("tracked"), "committed").unwrap();
+        fs::write(f.root.join(".gitignore"), "local-ignore\n").unwrap();
+        worktree_git(&f.root, &["add", "tracked", ".gitignore"]);
+        worktree_git(&f.root, &["commit", "-m", "base"]);
+        let command = |operation, target, request, expected, payload| json!({
+            "protocol":{"major":1,"minor":8},"requestId":request,"projectId":f.id,
+            "actorId":"fixture","operation":operation,"target":target,
+            "ownerEpoch":null,"expectedVersion":expected,"payload":payload,
+        });
+        let checkout_kind = if kind == "main" { "main" } else { "worktree" };
+        let draft = workspace::create_draft(&store, &f.id, "fixture", &command(
+            "tasks.create", &f.id, "draft", "0",
+            json!({"description":"Task to keep or delete","checkout":{"kind":checkout_kind}}),
+        )).unwrap().receipt["target"].as_str().unwrap().to_owned();
+        let start = command("tasks.start", &draft, "start", "1", json!({}));
+        let admitted = if kind == "main" {
+            workspace::start_native(&store, &f.id, "fixture", &start)
+        } else {
+            workspace::start_native_worktree(&store, &f.id, "fixture", &start, &f.base.join("trees"))
+        }.unwrap();
+        let binding = worktrees::owned(&store, &f.id, &draft).unwrap();
+        let task = admitted["task"].as_str().unwrap();
+        let close = json!({"action":"close_remove_worktree","taskId":draft,"confirmed":true});
+        if binding.is_some() {
+            let active = f.call(close.clone()).await;
+            assert_eq!(active["code"], "stop_required", "{kind}: {active}");
+        }
+        store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='CANCELLED' WHERE task_id=?", [task])?;
+            Ok(())
+        }).unwrap();
+        if let Some(binding) = &binding {
+            let close_as_is = f.call(json!({"action":"close","choice":"as_is","taskId":draft,"confirmed":true})).await;
+            assert_eq!(close_as_is["ok"], true, "{kind}: {close_as_is}");
+            assert!(binding.path.is_dir(), "ordinary close keeps the folder");
+            if kind == "dirty-close" {
+                // Even ignored artifacts are retained.
+                fs::write(binding.path.join("local-ignore"), "keep").unwrap();
+            } else if kind == "locked-close" {
+                worktree_git(&f.root, &["worktree", "lock", binding.path.to_str().unwrap()]);
+            } else if kind == "missing-close" {
+                worktree_git(&f.root, &["worktree", "remove", binding.path.to_str().unwrap()]);
+            }
+        }
+        let purge = kind.ends_with("-purge");
+        let reply = if purge {
+            let path = &binding.as_ref().unwrap().path;
+            if kind == "clean-purge" {
+                let merge = f.call(json!({"action":"merged","taskId":draft,"integration":null})).await;
+                assert_eq!(merge["ok"], true, "{merge}");
+            } else {
+                fs::write(path.join("tracked"), "keep dirty work").unwrap();
+            }
+            let archived = f.call(json!({"action":"archive","taskId":draft})).await;
+            assert_eq!(archived["ok"], true, "{archived}");
+            assert!(path.is_dir(), "archive keeps the folder");
+            if kind == "dirty-purge" {
+                let confirmed = f.call(json!({"action":"confirm_discard","taskId":draft})).await;
+                assert_eq!(confirmed["ok"], true, "{confirmed}");
+            }
+            f.call(json!({"action":"purge","taskId":draft,"confirmed":true})).await
+        } else {
+            f.call(close).await
+        };
+        if let Some(binding) = binding {
+            assert_eq!(reply["ok"], true, "{kind}: {reply}");
+            let cleanup = &reply["result"]["worktreeCleanup"];
+            assert_eq!(cleanup["status"], expected, "{kind}: {reply}");
+            assert_eq!(cleanup["reason"], reason, "{kind}: {reply}");
+            let disposition = if purge { Cleanup::Purge } else { Cleanup::Close };
+            if kind == "dirty-purge" {
+                assert_eq!(fs::read_to_string(binding.path.join("tracked")).unwrap(), "keep dirty work");
+                let count: i64 = store.read(|db| Ok(db.query_row(
+                    "SELECT count(*) FROM workspace_tasks WHERE task_id=?", [&draft], |r| r.get(0),
+                )?)).unwrap();
+                assert_eq!(count, 0, "cleanup retention never undoes committed purge");
+            }
+            assert_eq!(worktrees::cleanup_outcome(&store, &f.id, &draft, disposition).unwrap().as_ref(), Some(cleanup));
+            assert_eq!(binding.path.exists(), expected == "retained" && kind != "missing-close");
+            worktree_git(&f.root, &["show-ref", "--verify", &format!("refs/heads/{}", binding.branch)]);
+        } else {
+            assert_eq!(reply["code"], "worktree_not_owned", "{reply}");
+            assert_eq!(worktrees::cleanup_outcome(&store, &f.id, &draft, Cleanup::Close).unwrap(), None);
+        }
+        assert_eq!(fs::read_to_string(f.root.join("tracked")).unwrap(), "committed");
+        f.service.stop().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn owner_deletion_retains_dirty_or_unowned_worktrees() {
     let fixture: Value =
@@ -978,7 +1173,17 @@ async fn check_actions(fixture: &Value) {
         // Deliberately contradictory bindings now fail at shared task admission,
         // before the action-specific fences exercised by the historical oracle.
         // Keep every case's persisted-state and effect assertions below.
-        let expected = match case["name"].as_str().unwrap() {
+        // Historical fixtures called an overlay flag ownership; it cannot
+        // authorize removal. Actual native provision is exercised separately.
+        let legacy_unowned = matches!(case["name"].as_str(),
+            Some("purge-owned-worktree" | "clear_old-owned-worktree"));
+        let retained_path = f.base.join("worktree");
+        let unbound_handoff = matches!(case["name"].as_str(), Some("resolution-plain" | "resolution-repeat"));
+        let mut expected = match case["name"].as_str().unwrap() {
+            "resolution-plain" | "resolution-repeat" => json!({
+                "ok":false,"code":"handoff_required",
+                "message":"Use the owning execution's handoff_merge action."
+            }),
             "external-foreign-owner"
             | "external-missing-session"
             | "external-foreign-session"
@@ -1004,6 +1209,10 @@ async fn check_actions(fixture: &Value) {
             }),
             _ => case["expected"].clone(),
         };
+        if legacy_unowned {
+            expected["result"]["worktreeCleanup"] =
+                json!({"status":"retained","path":retained_path,"reason":"worktree_not_owned"});
+        }
         assert_eq!(reply, expected, "{} reply", case["name"]);
         if fixture["clock"].is_number() {
             assert_eq!(
@@ -1050,7 +1259,7 @@ async fn check_actions(fixture: &Value) {
                 after["tasks"]["t1"]["archiveAskAfter"] =
                     case["after"]["tasks"]["t1"]["archiveAskAfter"].clone();
             }
-            let mut expected = case["after"].clone();
+            let mut expected = if unbound_handoff { case["saved"].clone() } else { case["after"].clone() };
             if case.get("delayMs").is_some() {
                 expected["tasks"]["t1"]["archiveAskAfter"] = Value::Null;
             }
@@ -1070,17 +1279,28 @@ async fn check_actions(fixture: &Value) {
             );
             assert_eq!(
                 f.base.join("worktree").exists(),
-                case["worktreeExists"] == true,
+                legacy_unowned || case["worktreeExists"] == true,
                 "{} worktree cleanup",
                 case["name"]
             );
         }
-        assert_eq!(
-            after,
-            f.replace(&case["after"]),
-            "{} persisted JSON",
-            case["name"]
-        );
+        let mut expected_state = f.replace(&case["after"]);
+        if unbound_handoff {
+            assert_eq!(fs::read(f.path()).unwrap(), f.replace(&case["saved"]).to_string().as_bytes());
+            expected_state = f.replace(&case["saved"]);
+            for (key, default) in [
+                ("tasks", json!({})), ("sprints", json!([])), ("drafts", json!({})),
+                ("messages", json!([])), ("comments", json!({})),
+            ] {
+                if expected_state.get(key).is_none() { expected_state[key] = default; }
+            }
+        }
+        if legacy_unowned {
+            expected_state["tasks"]["t1"]["retainedWorktree"] = json!(retained_path);
+            expected_state["tasks"]["t1"]["worktreeCleanup"] = expected["result"]["worktreeCleanup"].clone();
+            assert_eq!(fs::read(retained_path.join("a.txt")).ok(), worktree_before);
+        }
+        assert_eq!(after, expected_state, "{} persisted JSON", case["name"]);
         let store = store.or_else(|| {
             (!case["observed"].is_null()).then(|| {
                 assert!(

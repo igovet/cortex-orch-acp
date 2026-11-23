@@ -133,12 +133,10 @@ async fn run(
     {
         return skipped("nothing_to_commit");
     }
-    let title = record["title"].as_str().unwrap_or(task).trim();
-    let message = format!("Close task as is (not verified): {title}");
     let mut add = vec!["add", "-A", "--"];
     add.extend(literal.iter().map(String::as_str));
     git.out(root, &add).await?;
-    let mut commit = vec!["commit", "--only", "-m", &message, "--"];
+    let mut commit = vec!["commit", "--only", "-m", "Close task as is (not verified)", "--"];
     commit.extend(literal.iter().map(String::as_str));
     if let Err(error) = git.out(root, &commit).await {
         // Leave the index as it was for these paths: nothing is half-committed.

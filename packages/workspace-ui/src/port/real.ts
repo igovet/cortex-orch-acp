@@ -6,11 +6,12 @@ import { nativeDelta, nativeVersion } from "./native";
 import { readOwnerActionReply, readOwnerActions, type OwnerActionRequests } from "@cortex/workspace-domain";
 import { applyNativeTaskDelta, weeklyUsage } from "@cortex/workspace-domain";
 import type { NativeTaskDelta, NativeTaskSnapshot } from "@cortex/workspace-domain";
-import { conversationOf } from "./history";
+import { conversationOf, shownFold } from "./history";
 import { same } from "../stable";
+import { classifiedPlanningFailure } from "../selectors";
 import { readBoards, writeBoards, type BoardStorage, type CachedBoard } from "./board-cache";
 import { liveMembers, presentSprint, unreadMembers, type SavedSprint } from "./sprint-members";
-import type { Attachment, AttachmentRef, CatalogueState, CommandEnvelope, CommandReceipt, DirectorySearch, GitInterest, EngineConnection, EngineWeeklyUsage, FileDiff, FileRead, FileSaveResult, FolderListing, Machine, MachineConfig, MachineFacts, Message, PlanItem, PortCapabilities, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectRepo, ProjectSkills, ProjectSlice, QueryOperation, QueryParameters, QueryResults, SessionOptions, Sprint, TaskChanges, TaskOverlay, Worker, WorkspaceCommand, WorkspacePort } from "@cortex/workspace-domain";
+import type { Attachment, AttachmentRef, CatalogueState, CommandEnvelope, CommandReceipt, DirectorySearch, GitInterest, EngineConnection, EngineWeeklyUsage, FileDiff, FileRead, FileSaveResult, FolderListing, IntegrationText, Machine, MachineConfig, MachineFacts, Message, PlanItem, PortCapabilities, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectRepo, ProjectSkills, ProjectSlice, QueryOperation, QueryParameters, QueryResults, SessionOptions, Sprint, TaskChanges, TaskOverlay, Worker, WorkspaceCommand, WorkspacePort } from "@cortex/workspace-domain";
 
 /** Whether two facts reads say the same thing: their place in the read order is not part of what they say. */
 const sameFacts = (a: ProjectFacts | undefined, b: ProjectFacts) => !!a && same({ ...a, readOrder: undefined }, { ...b, readOrder: undefined });
@@ -40,7 +41,7 @@ export function unavailableTransport(): RealTransport {
  * in apps/cortex-workspace-desktop/src-tauri/tests/policy.rs) reads both lists and checks that the bridge accepts each one
  * with a representative message, so a request the bridge would refuse fails a test instead of the owner's click.
  */
-export const CONTROL_ACTIONS = ["pause", "resume", "retry", "worker_message", "worker_stop", "allow_write", "command_stop", "rerun_check", "task_settings", "close_task"] as const;
+export const CONTROL_ACTIONS = ["pause", "resume", "retry", "worker_message", "worker_stop", "allow_write", "command_stop", "rerun_check", "task_settings", "close_task", "handoff_merge", "inspect_merge", "request_merge_checks"] as const;
 export const MACHINE_OPS = ["overview", "logs.folder", "maintenance", "workflow.describe", "engine.connection", "machine.update", "diagnostics.run", "cleanup.run", "config.read", "config.save", "config.action", "config.mcp.discover",
   "project.config.read", "project.config.save", "repo.snapshot", "repo.file", "repo.file.save", "repo.list", "repo.skills", "git", "workers",
   "product.read", "product.board", "product.facts", "product.task", "product.integrate", "product.sprint", "product.message", "product.comment", "product.attachment"] as const;
@@ -52,9 +53,44 @@ const PAGE_LIMIT = 200;
  *  rereads of a conversation that keeps changing. */
 const HISTORY_PAGE_MS = 60_000, HISTORY_RETRY_MS = 3_000, HISTORY_AGAIN_MS = 120;
 /** A conversation opens on its latest part: read from its end backwards, at most `HISTORY_FIRST_PAGES` pages or until
- *  `HISTORY_FIRST_ROWS` rows are held. Each further part the reader asks for is at most `HISTORY_EARLIER_PAGES` pages or
- *  `HISTORY_EARLIER_ROWS` rows. */
-const HISTORY_FIRST_PAGES = 4, HISTORY_FIRST_ROWS = 150, HISTORY_EARLIER_PAGES = 3, HISTORY_EARLIER_ROWS = 150;
+ *  `HISTORY_FIRST_ROWS` rows are held. Earlier reads check for visible progress after each page. */
+const HISTORY_FIRST_PAGES = 4, HISTORY_FIRST_ROWS = 150;
+/** Use the same conversation and decision projection for display and for measuring prepend progress. */
+function projectedConversation(rows: HistoryRow[], description: string, decisions: WireDecision[], partial: boolean) {
+  const first = partial ? Date.parse(rows.find(r => typeof r.recordedAt === "string")?.recordedAt ?? "") : NaN;
+  const since = Number.isFinite(first) ? first : null;
+  // Settled questions before the held rows belong to the missing history. An open question always shows, and an
+  // answer from before the held rows must not hide a later owner message of the same words.
+  const before = (at: unknown) => since !== null && typeof at === "string" && Date.parse(at) < since;
+  const dated = [
+    ...conversationOf(rows, { description, partial, answers: decisions.flatMap(d => typeof d.answerText === "string" && !before(d.answeredAt ?? d.createdAt) ? [d.answerText.trim()] : []) }),
+    ...decisions.filter(d => d.status === "pending" || !before(d.createdAt)).map(d => ({at:typeof d.createdAt === "string" ? d.createdAt : "",entry:{id:`decision:${d.decisionId}`,kind:"decision" as const,decisionId:d.decisionId}})),
+  ];
+  return { dated, since };
+}
+
+/** New visible text, a settled decision, or a visible tool turn. A split call can change a fold's ID without changing
+ *  its headline; count like headlines with multiplicity so that alone cannot end a read. */
+function addsVisibleHistory(held: HistoryRow[], candidate: HistoryRow[], description: string, decisions: WireDecision[], showAllTools: boolean) {
+  const keys = (rows: HistoryRow[]) => projectedConversation(rows, description, decisions, true).dated.flatMap(({entry}) => {
+    if (entry.kind === "fold") {
+      const title = shownFold(entry, showAllTools).text;
+      return title ? [`fold:${title}`] : [];
+    }
+    // Pending decisions already show independently of their timeline position.
+    if (entry.kind === "decision" && decisions.some(d => d.decisionId === entry.decisionId && d.status === "pending")) return [];
+    return ["text" in entry ? `${entry.id}:${entry.text}` : entry.id];
+  });
+  const seen = new Map<string, number>();
+  for (const key of keys(held)) seen.set(key, (seen.get(key) ?? 0) + 1);
+  return keys(candidate).some(key => {
+    const count = seen.get(key) ?? 0;
+    if (!count) return true;
+    seen.set(key, count - 1);
+    return false;
+  });
+}
+
 const request = (projectId: string, operation: string, extra: Record<string, unknown> = {}) => validate("Query", { protocol: { ...PROTOCOL }, requestId: `read-${operation}-${projectId}`, projectId, operation, ...extra });
 const OUTCOME_WORDS: Record<string, string> = {
   recorded: "Recorded", already_resolved: "Already recorded", stale_version: "This changed on the machine. Look again and retry.", stale_epoch: "Another owner took over this task.",
@@ -80,10 +116,21 @@ const PROJECT_ISSUES: Record<string, string> = {
   acp_request_refused: "This project refused to start.",
   unknown_outcome: "This project did not answer in time. It is being started again.",
 };
+const PROTOCOL_REFUSALS = new Set(["version_mismatch", "service_protocol_mismatch", "bridge_invalid_capabilities", "unsupported_protocol"]);
+const PROTOCOL_REFUSAL = "This app and the machine service are different versions. Reinstall the package so both are the same version.";
+const UPDATE_NEEDED = "The computer and this app are different versions. Update the app or the computer so both match.";
+const compatibilityRefusal = (text: string) => {
+  const code = text.startsWith(REFUSED) ? text.slice(REFUSED.length) : text;
+  if (PROTOCOL_REFUSALS.has(code) || code === PROTOCOL_REFUSAL) return PROTOCOL_REFUSAL;
+  if (code === "remote_incompatible_version" || code === UPDATE_NEEDED) return UPDATE_NEEDED;
+  return undefined;
+};
 const refusalOf = (requestId: string, error: unknown): CommandReceipt => {
   const text = error instanceof Error ? error.message : String(error);
   if (text === FOLDER_MISSING) return { requestId, ok: false, outcome: FOLDER_MISSING, message: "This folder does not exist yet." };
   if (text === "service_request_failed" || text === "bridge_request_refused") return { requestId, ok: false, outcome: "refused", message: "The machine refused this request. Nothing changed." };
+  const compatibility = compatibilityRefusal(text);
+  if (compatibility) return { requestId, ok: false, outcome: "refused", message: compatibility };
   if (text.startsWith(REFUSED)) return { requestId, ok: false, outcome: "refused", message: text.slice(REFUSED.length) };
   return { requestId, ok: false, outcome: "unknown_outcome", message: OUTCOME_WORDS.unknown_outcome };
 };
@@ -274,21 +321,34 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
    * One short model text on the machine: the job is started, then read until it is written or a minute has passed.
    * It changes no repository, so it does not drop the repository cache, and a lost reply is just no text.
    */
-  async function shortText(projectId: string, params: { action: string; taskId: string } & Record<string, unknown>): Promise<Record<string, unknown> | null> {
+  async function shortText(projectId: string, params: { action: string; taskId?: string } & Record<string, unknown>): Promise<Record<string, unknown> | null> {
     const call = async (p: Record<string, unknown>) => {
-      const reply = await transport.request("machine.call", { op: "product.task", projectId, params: p }) as { ok?: boolean; result?: Record<string, unknown> };
-      return reply?.ok === true ? reply.result ?? null : null;
+      const reply = await transport.request("machine.call", { op: "product.task", projectId, params: p }) as { ok?: boolean; result?: Record<string, unknown>; code?: string };
+      if (reply?.ok === true) return reply.result ?? null;
+      return params.taskId ? null : { state: "done", source: "fallback", reason: reply?.code ?? "draft_unavailable" };
     };
     const started = await call(params).catch(() => null);
     const jobId = typeof started?.jobId === "string" ? started.jobId : null;
-    if (!jobId) return null;
+    if (!jobId) return started?.state === "done" ? started : null;
     for (const until = Date.now() + 60_000; Date.now() < until;) {
       await new Promise(resolve => setTimeout(resolve, 1200));
-      const read = await call({ action: "short_text_poll", taskId: params.taskId, jobId }).catch(() => null);
+      const read = await call({ action: "short_text_poll", ...(params.taskId ? { taskId: params.taskId } : {}), jobId }).catch(() => null);
       if (!read) return null;
       if (read.state === "done") return read;
     }
     return null;
+  }
+  function integrationText(written: Record<string, unknown> | null): IntegrationText | null {
+    if (!written) return null;
+    const text = written.text as Record<string, unknown> | undefined;
+    const str = (v: unknown) => typeof v === "string" && v.trim() ? v : undefined;
+    const route = written.route as { model?: unknown } | null | undefined;
+    return {
+      source: written.source === "model" || written.source === "template" ? written.source : "fallback",
+      message: str(text?.message), title: str(text?.title), body: str(text?.body), model: str(route?.model),
+      ...(typeof written.reason === "string" ? { reason: written.reason } : {}),
+      ...(written.source === "saved" ? { bodySource: "saved_push_summary" } : {}),
+    };
   }
   const projectOfSprint = async (sprintId: string) => {
     const id = sprintProjects.get(sprintId);
@@ -468,8 +528,8 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   /** Read when a screen that shows storage, retention, worktrees, the version or GitHub CLI opens. While one is on view
    *  (`watchOverview`), the machine poll keeps it current; with none on view it is not read again. */
   async function machineOverview(): Promise<MachineFacts> {
-    const { name, retentionDays, autoArchiveDays, worktreeRoot, defaultWorktreeRoot, version, diskMb, storage, cleanup, diagnostics, ghAvailable, reclamationFailures } = await machine<MachineRead>("overview");
-    return { machineId: LOCAL_MACHINE_ID, patch: { ghAvailable, reclamationFailures, name, retentionDays, autoArchiveDays, worktreeRoot, defaultWorktreeRoot, version, diskMb, storage, cleanup, diagnostics } };
+    const { name, retentionDays, autoArchiveDays, automaticArchivePurge, unreferencedAttachmentRetentionDays, worktreeRoot, defaultWorktreeRoot, version, diskMb, storage, cleanup, diagnostics, ghAvailable, reclamationFailures } = await machine<MachineRead>("overview");
+    return { machineId: LOCAL_MACHINE_ID, patch: { ghAvailable, reclamationFailures, name, retentionDays, autoArchiveDays, automaticArchivePurge, unreferencedAttachmentRetentionDays, worktreeRoot, defaultWorktreeRoot, version, diskMb, storage, cleanup, diagnostics } };
   }
 
   async function nativeRead(projectId: string, operation: string, payload: unknown) {
@@ -489,6 +549,16 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   };
 
   async function capabilitiesGet(): Promise<PortCapabilities> {
+    try {
+      return await negotiateCapabilities();
+    } catch (error) {
+      const message = compatibilityRefusal(error instanceof Error ? error.message : String(error));
+      if (message) throw new Error(message);
+      throw error;
+    }
+  }
+
+  async function negotiateCapabilities(): Promise<PortCapabilities> {
     if (options.registry) {
       const service = await transport.request("service.capabilities", {}) as { methods?: unknown };
       if (!Array.isArray(service.methods) || !service.methods.every(m => typeof m === "string")) throw new Error("Invalid service capabilities");
@@ -628,33 +698,35 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   /** Whether conversations are read from their end (`history.earlier`): a native service that refuses the operation does not. */
   let readsBack = true;
   const backward = () => readsBack && serviceMethods.includes("native.query");
-  /** One task's conversation read from its end backwards: from `from` (a backward cursor; null: its newest rows) until
-   *  `enough` rows are held, `pages` pages were read or its beginning is reached. `tail` is the forward cursor the newest
-   *  page names (null after `from`), `earlier` where the rows before these are read (null: these start at the beginning). */
-  async function readBack(projectId: string, taskId: string, from: string | null, pages: number, enough: number) {
-    const rows: HistoryRow[] = [];
-    let cursor: string | null = from, tail: string | null = null;
-    for (let page = 0; page < pages; page++) {
-      const asked = cursor;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("The conversation read did not answer within a minute")), HISTORY_PAGE_MS); });
-      try {
-        const reply = await Promise.race([nativeRead(projectId, "history.earlier", {target:taskId, cursor, limit:100}), late]);
-        if (reply.data.type !== "history") throw new Error("Native read type mismatch");
-        const next = decodeResponse("HistoryPage", reply.data.value).value as WireTypes["HistoryPage"] & { tailCursor?: unknown; prevCursor?: unknown };
-        rows.unshift(...next.items);
-        if (page === 0 && from === null) tail = typeof next.tailCursor === "string" ? next.tailCursor : null;
-        cursor = typeof next.prevCursor === "string" ? next.prevCursor : null;
-      } finally { clearTimeout(timer); }
-      if (cursor === null || rows.length >= enough) break;
-      if (cursor === asked) throw new Error("The conversation read stopped moving back");
-    }
-    return { rows, tail, earlier: cursor };
+  /** Read one bounded wire page backwards. A page can be empty even when its cursor continues. */
+  async function readBackPage(projectId: string, taskId: string, cursor: string | null, seen: Set<string>) {
+    if (cursor !== null) seen.add(cursor);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("The conversation read did not answer within a minute")), HISTORY_PAGE_MS); });
+    try {
+      const reply = await Promise.race([nativeRead(projectId, "history.earlier", {target:taskId, cursor, limit:100}), late]);
+      if (reply.data.type !== "history") throw new Error("Native read type mismatch");
+      const next = decodeResponse("HistoryPage", reply.data.value).value as WireTypes["HistoryPage"] & { tailCursor?: unknown; prevCursor?: unknown };
+      const earlier = typeof next.prevCursor === "string" ? next.prevCursor : null;
+      if (earlier !== null && seen.has(earlier)) throw new Error("The conversation read stopped moving back");
+      return { rows: next.items, earlier, tail: typeof next.tailCursor === "string" ? next.tailCursor : null };
+    } finally { clearTimeout(timer); }
   }
   /** A conversation read afresh: its latest part from a service that reads backwards, else all of it. */
   async function readLatest(projectId: string, taskId: string): Promise<{ rows: HistoryRow[]; tail: string | null; earlier: string | null }> {
     if (backward()) {
-      try { return await readBack(projectId, taskId, null, HISTORY_FIRST_PAGES, HISTORY_FIRST_ROWS); }
+      try {
+        const rows: HistoryRow[] = [], seen = new Set<string>();
+        let earlier: string | null = null, tail: string | null = null;
+        for (let page = 0; page < HISTORY_FIRST_PAGES; page++) {
+          const next: Awaited<ReturnType<typeof readBackPage>> = await readBackPage(projectId, taskId, earlier, seen);
+          rows.unshift(...next.rows);
+          if (page === 0) tail = next.tail;
+          earlier = next.earlier;
+          if (earlier === null || rows.length >= HISTORY_FIRST_ROWS) break;
+        }
+        return { rows, tail, earlier };
+      }
       catch (error) {
         // An older service does not know the operation: it is read forward from the beginning, as before.
         if (!(error instanceof Error && /invalid_request|unsupported_operation/.test(error.message))) throw error;
@@ -677,11 +749,11 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     if (held?.tail && held.executionId === task.executionId && held.projectId === projectId) {
       try {
         const { rows, tail } = await readHistory(projectId, task.taskId, held.tail);
-        // A whole read that replaced the held rows meanwhile already holds these. Older rows read meanwhile are on `held`.
-        if (historyReads.get(task.taskId) === held) return {rows:appended(held.rows, rows), tail, earlier:held.earlier ?? null};
+        // Merge into the held object when applying the reply, not now: an earlier read may still prepend to it.
+        return {rows, tail, earlier:null, continued:held};
       } catch (error) { if (!historyMoved(error)) throw error; }
     }
-    return readLatest(projectId, task.taskId);
+    return { ...await readLatest(projectId, task.taskId), continued:null };
   }
   /** Whether a conversation is read in the background: its task is on view (`interest`). With no screen declaring what it
    *  shows (a headless store), every conversation is. Another conversation is read when it is opened, from where it was. */
@@ -720,10 +792,16 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
           const due = historyDue.get(task.taskId);
           try {
             const before = historyReads.get(task.taskId)?.rows;
-            const { rows, tail, earlier } = await updateHistory(project.projectId, task);
-            // A fresh read starts from another position: a failed read of the older part before it no longer applies.
-            if (historyReads.get(task.taskId)?.earlier !== earlier && earlierReads.get(task.taskId)?.state === "failed") earlierReads.delete(task.taskId);
-            historyReads.set(task.taskId, {projectId:project.projectId, version:task.version, executionId:task.executionId!, rows, tail, earlier});
+            const { rows: readRows, tail, earlier, continued } = await updateHistory(project.projectId, task);
+            const current = historyReads.get(task.taskId);
+            if (continued && current !== continued) { historyAgain.add(project.projectId); continue; }
+            const rows = continued ? appended(continued.rows, readRows) : readRows;
+            // Keep the older boundary through a forward read. A fresh position doesn't inherit the previous failure.
+            if (continued) Object.assign(continued, {version:task.version, rows, tail});
+            else {
+              if ((current?.earlier !== earlier || current?.executionId !== task.executionId) && earlierReads.get(task.taskId)?.state === "failed") earlierReads.delete(task.taskId);
+              historyReads.set(task.taskId, {projectId:project.projectId, version:task.version, executionId:task.executionId!, rows, tail, earlier});
+            }
             if (historyDue.get(task.taskId) === due) historyDue.delete(task.taskId);
             const failed = historyIssues.delete(task.taskId); historyFailures.delete(task.taskId);
             // Nothing new on a forward read (a worker's rows, a hidden update): the page on screen stays as it is.
@@ -752,35 +830,55 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     const update = await snapshotOf(project, new Set()).catch(() => null);
     if (update && observers.size) for (const notify of observers) notify({kind:"enrichment", update});
   }
-  /** The reading of a conversation's older part the reader asked for: under way, or failed with its reason. */
+  /** One earlier read per conversation. Keep the starting cursor until the whole prepend can be published. */
   const earlierReads = new Map<string, { state: "loading" } | { state: "failed"; reason: string }>();
-  /** Reads the part of a conversation before the rows held and puts it before them. Only one such read per conversation
-   *  runs; one that finds the held rows replaced meanwhile (another execution, a fresh read) is dropped. A position the
-   *  service no longer continues from (`history_reset`) has the conversation read afresh. */
-  function loadEarlierHistory(taskId: string) {
+  function loadEarlierHistory(taskId: string, showAllTools = () => false) {
     const held = historyReads.get(taskId), project = projects.find(p => p.projectId === held?.projectId);
     if (!held || !project || typeof held.earlier !== "string" || earlierReads.get(taskId)?.state === "loading") return;
-    const from = held.earlier, executionId = held.executionId;
-    earlierReads.set(taskId, {state:"loading"});
+    const from = held.earlier;
+    const active = {state:"loading"} as const;
+    earlierReads.set(taskId, active);
+    const currentTask = () => {
+      const task = nativeSnapshots.get(project.projectId)?.items.find(t => t.taskId === taskId);
+      return earlierReads.get(taskId) === active && historyReads.get(taskId) === held &&
+        task?.executionId === held.executionId ? task : undefined;
+    };
     void (async () => {
       await publishHistory(project);
       try {
-        const { rows, earlier } = await readBack(project.projectId, taskId, from, HISTORY_EARLIER_PAGES, HISTORY_EARLIER_ROWS);
-        const current = historyReads.get(taskId);
-        if (current && current.executionId === executionId && current.earlier === from) {
-          const seen = new Set(current.rows.map(r => r.historyId));
-          current.rows = [...rows.filter(r => !seen.has(r.historyId)), ...current.rows];
-          current.earlier = earlier;
+        const batches: HistoryRow[][] = [], cursors = new Set<string>();
+        let cursor: string | null = from;
+        while (cursor !== null && observers.size && currentTask()) {
+          const { rows, earlier }: Awaited<ReturnType<typeof readBackPage>> = await readBackPage(project.projectId, taskId, cursor, cursors);
+          const task = currentTask();
+          if (!task || !observers.size) break;
+          if (rows.length) batches.push(rows);
+          cursor = earlier;
+          if (!rows.length && cursor !== null) continue;
+
+          // Compare against the same current tail both times. Rows streamed during this read are not prepend progress.
+          const seen = new Set(held.rows.map(r => r.historyId));
+          const older = batches.slice().reverse().flat().filter(r => {
+            if (seen.has(r.historyId)) return false;
+            seen.add(r.historyId); return true;
+          });
+          const candidate = older.length ? [...older, ...held.rows] : held.rows;
+          const decisions = (wireDecisions.get(project.projectId) ?? []).filter(d => d.executionId === held.executionId);
+          if (cursor !== null && (!older.length || !addsVisibleHistory(held.rows, candidate, task.description, decisions, showAllTools()))) continue;
+          held.rows = candidate;
+          held.earlier = cursor;
+          break;
         }
-        earlierReads.delete(taskId);
       } catch (error) {
-        if (historyMoved(error)) {
-          earlierReads.delete(taskId);
-          const current = historyReads.get(taskId);
-          if (current?.executionId === executionId) { current.tail = null; historyChanged(taskId); queueHistories(project); }
-        } else earlierReads.set(taskId, {state:"failed", reason:readCause(error)});
+        if (currentTask()) {
+          earlierReads.set(taskId, {state:"failed", reason:readCause(error)});
+          // Refresh a lost position. If the refresh returns the same unusable cursor, it still waits for Retry.
+          if (historyMoved(error)) { held.tail = null; historyChanged(taskId); queueHistories(project); }
+        }
+      } finally {
+        if (earlierReads.get(taskId) === active) earlierReads.delete(taskId);
+        if (observers.size) await publishHistory(project);
       }
-      if (observers.size) await publishHistory(project);
     })();
   }
   function retryHistory(taskId: string) {
@@ -860,17 +958,9 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       let session = slice.sessions.find(s => s.taskId === task.taskId);
       if (!session) { session = emptySession(task.taskId); slice.sessions.push(session); }
       const own = asked.filter(d => d.executionId === task.executionId);
-      // Only the latest part of the conversation is held: `since` is when its first row was recorded. A question asked before
-      // it, already settled, reads among the rows not read yet, not at the top of these; an answer given before it is not
-      // looked for among these rows (it would hide a later message of the same words). An open question always reads.
       const held = historyReads.get(task.taskId), rows = histories.get(task.taskId) ?? [];
       const partial = held?.executionId === task.executionId && typeof held.earlier === "string";
-      const first = partial ? Date.parse(rows.find(r => typeof r.recordedAt === "string")?.recordedAt ?? "") : NaN, since = Number.isFinite(first) ? first : null;
-      const before = (at: unknown) => since !== null && typeof at === "string" && Date.parse(at) < since;
-      const dated = [
-        ...conversationOf(rows, { description: task.description, partial, answers: own.flatMap(d => typeof d.answerText === "string" && !before(d.answeredAt ?? d.createdAt) ? [d.answerText.trim()] : []) }),
-        ...own.filter(d => d.status === "pending" || !before(d.createdAt)).map(d => ({at:typeof d.createdAt === "string" ? d.createdAt : "",entry:{id:`decision:${d.decisionId}`,kind:"decision" as const,decisionId:d.decisionId}})),
-      ];
+      const { dated, since } = projectedConversation(rows, task.description, own, partial);
       session.timeline = dated.sort((a,b) => a.at.localeCompare(b.at)).map(d => d.entry);
       if (task.executionId !== null && perTaskHistory()) {
         const issue = historyIssues.get(task.taskId);
@@ -1292,14 +1382,22 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       case "resolve_block": await taskCall(task(command.taskId), {action:"resolve_block",taskId:command.taskId,path:command.path,blockId:command.blockId,choice:command.choice}); return ok();
       case "finish_merge":
         await taskCall(task(command.taskId), {action:"finish_merge",taskId:command.taskId});
-        return say(command.taskId, "I resolved the conflict in the task checkout. Rerun the required checks and return a fresh result for review. Do not merge or push the target branch.");
+        return ok();
       // Bound to the result the owner reviewed; the machine merges the target into the task branch, never the other way.
       case "update_from_target": await machine("product.integrate", task(command.taskId), { requestId, taskId: command.taskId, method: "update", confirmed: command.confirmed, digest: command.digest }); return ok();
       case "abort_merge": await taskCall(task(command.taskId), {action:"abort_merge",taskId:command.taskId}); return ok();
       case "resolve_with_cortex":
-        await say(command.taskId, "Resolve the retained Git merge conflict in this task's own checkout. Preserve both intended changes, run the required checks, and return a fresh result for my review. Do not merge or push the target branch. Owner guidance: " + (command.guidance ?? ""), command.attachments);
-        await taskCall(task(command.taskId), {action:"resolution_started",taskId:command.taskId,guidance:command.guidance});
-        return ok();
+      case "inspect_merge":
+      case "request_merge_checks": {
+        const action = command.type === "resolve_with_cortex" ? "handoff_merge" : command.type;
+        // Keep the envelope identity. The service owns the manifest, dispatch and any retained outcome.
+        const conflictId = command.conflictId;
+        if (!conflictId && action !== "inspect_merge") throw new Refusal("stale_conflict", "This merge has no current conflict identity. Inspect merge state.");
+        return control(command.taskId, {action, conflictId: conflictId ?? null, ...(command.type === "resolve_with_cortex" ? {
+          ...(command.guidance !== undefined ? {text:command.guidance} : {}),
+          ...(command.attachments?.length ? {attachments:wireAttachments(command.attachments)} : {}),
+        } : {})});
+      }
       case "stop_resolution": await transport.request("executions.cancel", {projectId:task(command.taskId),executionId:execution(command.taskId)}); return ok();
       case "set_task_settings": {
         const id = task(command.taskId), current = (await machine<Product>("product.read", id)).tasks[command.taskId]?.settings;
@@ -1419,13 +1517,17 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       case "git_pull": return git(command.checkoutId, { action: "pull", ...(command.mode ? { mode: command.mode } : {}) });
       case "git_pull_continue": return git(command.checkoutId, { action: "pull_continue" });
       case "git_pull_abort": return git(command.checkoutId, { action: "pull_abort", confirmed: command.confirmed });
-      case "git_push": return git(command.checkoutId, { action: "push", remote: command.remote, branch: command.branch, confirmed: command.confirmed });
+      case "git_push": return git(command.checkoutId, { action: "push", remote: command.remote, branch: command.branch, confirmed: command.confirmed, ...(command.summary !== undefined ? { summary: command.summary } : {}) });
       case "create_branch": await machine("git", command.projectId, { requestId, action: "branch", name: command.name, at: command.at }); return ok();
       case "revert_commit": return git(command.checkoutId, { action: "revert_commit", sha: command.sha, confirmed: command.confirmed });
       case "delete_worktree": return git(command.checkoutId, { action: "delete_worktree", confirmed: command.confirmed, discard: command.discard });
       case "rename_machine": return local({ name: command.name });
       case "set_retention": return local({ retentionDays: command.days });
-      case "save_storage": return local({ retentionDays: command.retentionDays, autoArchiveDays: command.autoArchiveDays });
+      case "save_storage": return local({
+        retentionDays: command.retentionDays, autoArchiveDays: command.autoArchiveDays,
+        automaticArchivePurge: command.automaticArchivePurge,
+        unreferencedAttachmentRetentionDays: command.unreferencedAttachmentRetentionDays,
+      });
       case "set_worktree_root": return local({ worktreeRoot: command.path });
       case "open_logs": await transport.request("native.open_logs", {}); return ok();
       case "open_pull_request": await transport.request("native.open_pull_request", { projectId: command.projectId, taskId: command.taskId }); return ok();
@@ -1494,8 +1596,9 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       }
       case "resume_planning": {
         const id = await projectOfSprint(command.sprintId), sprint = (await machine<Product>("product.read", id)).sprints.find(s => s.id === command.sprintId)!;
-        // Stop paused the planning task; Resume continues that same task. A task that is not paused refuses, and the service decides.
-        if (sprint.planningTaskId && tasks.get(sprint.planningTaskId)?.executionId) await control(sprint.planningTaskId, {action:"resume",expectedVersion:tasks.get(sprint.planningTaskId)?.version}).catch(() => undefined);
+        // Saved failures (including completed without a plan) are recovered by the sprint service.
+        // With no diagnostic, Stop paused the execution: do not change the sprint if its Resume is refused.
+        if (!sprint.planningFailure && sprint.planningTaskId && tasks.get(sprint.planningTaskId)?.executionId) await control(sprint.planningTaskId, {action:"resume",expectedVersion:tasks.get(sprint.planningTaskId)?.version});
         await sprintPatch(id, command.sprintId, { planning: "planning" }); return ok();
       }
       case "edit_plan": {
@@ -1520,6 +1623,10 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       case "answer_planning": case "plan_message": {
         const id = await projectOfSprint(command.sprintId), sprint = (await machine<Product>("product.read", id)).sprints.find(s => s.id === command.sprintId)!;
         const taskId = sprint.planningTaskId, text = command.type === "answer_planning" ? command.answer : command.text;
+        if (command.type === "plan_message" && sprint.planning === "cancelled" && classifiedPlanningFailure(sprint)) {
+          await machine("product.sprint", id, {action:"recover_planning_message",sprintId:command.sprintId,text,attachments:wireAttachments(command.attachments)});
+          return ok();
+        }
         if (!taskId) {
           await machine("product.sprint", id, {action:"note",sprintId:command.sprintId,kind:command.type === "answer_planning" ? "answer" : "message",text,attachments:wireAttachments(command.attachments)});
           await sprintPatch(id, command.sprintId, {planning:"planning"});
@@ -1714,6 +1821,10 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
           // A refusal is the machine's answer. A lost reply says nothing about what happened, so it stays unknown.
           if (error instanceof Refusal) return { requestId: envelope.requestId, ok: false, outcome: error.code, message: error.message };
           return refusalOf(envelope.requestId, error);
+        } finally {
+          if (["resolve_with_cortex", "inspect_merge", "request_merge_checks", "finish_merge", "abort_merge", "stop_resolution"].includes(command.type)) {
+            for (const notify of observers) notify({kind:"refresh"});
+          }
         }
       }
       return send(envelope);
@@ -1727,11 +1838,17 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       if (!id) return null;
       const written = await shortText(id, { action: "draft_integration_text", taskId: request.taskId, method: request.method, targetBranch: request.targetBranch,
         ...(request.paths ? { paths: request.paths } : {}), ...(request.summary ? { summary: request.summary } : {}) });
-      const text = written?.text as { message?: unknown; title?: unknown; body?: unknown } | undefined;
-      if (!written || !text || typeof text !== "object") return null;
-      const str = (v: unknown) => typeof v === "string" && v.trim() ? v : undefined;
-      const route = written.route as { model?: unknown } | null | undefined;
-      return { source: written.source === "model" ? "model" : "fallback", message: str(text.message), title: str(text.title), body: str(text.body), model: str(route?.model) };
+      return integrationText(written);
+    },
+    async draftCheckoutCommit({ checkoutId }) {
+      if (!machineOn) return null;
+      const id = projectOfCheckout(checkoutId);
+      return integrationText(await shortText(id, { action: "draft_checkout_commit", checkoutId }));
+    },
+    async draftPushSummary({ checkoutId, remote, branch }) {
+      if (!machineOn) return null;
+      const id = projectOfCheckout(checkoutId);
+      return integrationText(await shortText(id, { action: "draft_push_summary", checkoutId, remote, branch }));
     },
     async takeDroppedFiles() {
       if (!serviceMethods.includes("native.take_dropped_files")) return [];

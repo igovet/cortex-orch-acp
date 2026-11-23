@@ -59,6 +59,15 @@ evidence boundaries are in [native incoming ACP](../../project/native-incoming-a
 the Python-specific check-assessment and runtime-composition details below are
 not a claim that every native domain is complete.
 
+## Generated Git text in Workspace
+
+Commit, squash, outgoing Push-summary and pull-request drafts use fixed English
+templates and Git metadata, without calling a model or copying task prose.
+Automatic close and branch-update commit messages omit task titles and branch
+names. Owner-entered text is not translated.
+This does not change the task title, lifecycle, or owner confirmation for Git
+operations.
+
 ## Omitted worker checks
 
 Plan submission and verification repair probe check-program availability in the real read-only verification sandbox before recording commands. Workers and coordinators can declare a check early through the availability preflight; this lookup never executes the proposed check and cannot count as passing evidence. It uses verification's final launch preparation and working directory; an incomplete sandbox/launch probe reports `check_preflight_unavailable`, not a missing executable. A wrapper without an inner program is refused as an incomplete command. Missing programs require isolated project-private tools or another executable approach, never sudo or system changes. If neither is possible, the responsible model must ask the owner immediately through its existing question route, not defer that decision to publication. New executable gap declarations with absent programs are refused while the worker channel remains active. Human-only judgements have no command and appear separately as **Check manually**, never as a pass or failure or an owner-acceptance blocker. Policy-prohibited checks stay explicitly not run. A skipped paid qualification outside the runtime verification plan, reported as unrequested with no attempt, can remain an informational note after current work is verified. When automatic acceptance is blocked, **Needs you** links to review actions and explicit closure in the task.

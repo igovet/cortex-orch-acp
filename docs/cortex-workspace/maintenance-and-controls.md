@@ -1,9 +1,8 @@
 # Desktop maintenance and command controls
 
 **Status: implemented local source, not installed-release qualification.**
-The release update path has fixture evidence, not a real release or privileged
-installation result. The broader signed-update requirement in CW-R38 remains
-open: the current workflow publishes SHA-256 sidecars, not signatures.
+The signed release update path has local fixture evidence, not a published
+release or privileged installation result.
 
 ## Updates
 
@@ -14,13 +13,17 @@ updates**. It compares the tag's Debian version with `dpkg-query`, using
 `dpkg --compare-versions`; equal/older versions and prereleases are not offered.
 Release notes are bounded plain text, never rendered HTML.
 
-Download and verify fetches the exact architecture-specific release package and
-its `.deb.sha256` sidecar. The checksum must name exactly that archive. Download
-is bounded to 1 GiB, reports bytes received, supports cancellation and verifies
-the digest plus the archive's Package, Version and Architecture before offering
-installation. A corrupt archive is never handed to the package manager.
-Transport trusts GitHub HTTPS and the repository's release publisher; a checksum
-from that same publisher is **not** an independent signature or attestation.
+A newer release must supply the exact architecture-specific `.deb`,
+`.deb.sha256` and `.deb.sha256.sig`. Before offering the release, Workspace
+verifies the detached Ed25519 signature over the exact checksum bytes with the
+public key embedded at build time. The signed checksum must name exactly that
+archive. An unsigned build (no embedded key), missing signature or any mismatch
+fails closed: verification failed, nothing installed.
+
+**Download and verify** retrieves the archive (up to 1 GiB, with progress and
+cancellation), uses the authenticated digest, and checks its Debian Package,
+Version and Architecture before offering installation. GitHub HTTPS still
+delivers the feed and assets, but cannot substitute for the signing key.
 
 The release workflow starts only through GitHub Actions → Workspace desktop
 release → Run workflow. The selected branch determines the channel: `main`
@@ -30,16 +33,17 @@ explicitly excluded from Latest. Other refs are refused. Both appear in the same
 repository release list, not separate branch lists. Dev installs manually from
 the `.deb` and has no in-app updates.
 
-Both publish the archive and its SHA-256 sidecar together, named
-`<package>_<version>_<arch>.deb` and `.deb.sha256`. Tags use the **actual Debian
-archive version**, including the ordered build stamp, not the shorter runtime
-content id. Older releases lacking the sidecar fail closed. No release is created
-by the app. See [owner release steps](../project/packaging.md#manual-workspace-releases).
+Both channels attach the archive and its SHA-256 sidecar. Only `main` also
+attaches the `.deb.sha256.sig` required for in-app updates. Tags use the **actual
+Debian archive version**, including the ordered build stamp, not the shorter
+runtime content ID. Older unsigned releases fail closed in the release updater.
+No release is created by the app. See [owner release steps](../project/packaging.md#manual-workspace-releases).
 
 Installation needs a separate consent checkbox and a system privilege prompt.
 The fixed command is `/usr/bin/pkexec /usr/bin/apt-get install --no-remove -y
 <verified-archive>`, never sudo, a shell or a supplied executable. The installed
-version and digest are checked again before invocation. Activity is read from
+version, signature and archive digest are checked again before invocation.
+Activity is read from
 each registered project's runtime store before starting and immediately before
 the prompt: active or unconfirmed work refuses the operation. New task starts
 are blocked while an installer is running or unconfirmed. Stop work before
@@ -138,6 +142,8 @@ TitleJobs pool to the configured real engine route. No engine, invalid output,
 error or deadline leaves the description fallback with a failed naming state;
 hovering the title explains the fallback. Owner renames win. Naming never starts
 the saved task. No paid engine generation is established by fixture tests.
+
+Commit, squash, Push and PR drafts use [English templates](local-task-execution.md#short-model-texts), not a model route. Commit drafts list changed files; Push summarizes the number of outgoing commits from local tracking information. If the service cannot read the needed Git facts, it reports why and leaves the text editable. A confirmed Push summary can prefill the PR description.
 
 ## Command-to-control map
 

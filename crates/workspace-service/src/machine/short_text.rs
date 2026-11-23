@@ -1,22 +1,9 @@
-//! Short owner-facing texts written by a model: task titles, commit messages and
-//! pull request texts.
+//! Background drafts for task titles and Git text. Task titles may use a
+//! hardened, read-only ACP model session; Git drafts use only English
+//! templates and Git metadata. Neither blocks the caller or changes Git.
 //!
-//! One mechanism serves every text. The route is the cheapest model of the
-//! connection whose plan limit is the least used
-//! ([`crate::native_routes::short_text`]). The completion is one prompt in a
-//! minimal ACP engine session on that route, launched with the same hardened
-//! launch every engine session uses ([`crate::short_text_engine`]): no tools or
-//! MCP servers, an empty private working directory, the engine's read-only mode,
-//! every permission request denied, a fixed budget, and the engine shut down
-//! and reaped afterwards. It has no runtime task, writes no project store and
-//! never appears in a task's history.
-//!
-//! Nothing waits for a model: an action starts a background job and returns its
-//! id at once, and `short_text_poll` reads the job. A job that cannot get a
-//! route, a hardened launch, an answer in time or a usable answer ends with a
-//! deterministic fallback text instead. A title is saved only under a free
-//! `machine.lock` taken without waiting (retried in the background for a
-//! bounded time), and never over a title the owner wrote.
+//! A title is saved only under a free `machine.lock`, retried for a bounded
+//! time, and never over a title the owner wrote.
 //!
 //! The private `short-text.log` in the service log folder records which route
 //! was chosen and why, and how each job ended: event names, engine, model,
@@ -43,15 +30,14 @@ const SAVE_BUDGET: Duration = Duration::from_secs(20);
 /// Model runs at once on this machine; a job over it uses its fallback text.
 const MAX_RUNNING: usize = if cfg!(test) { 64 } else { 2 };
 const MAX_DESCRIPTION: usize = 6000;
-const MAX_EXCERPT: usize = 12_000;
-const MAX_FILE_EXCERPT: usize = 2_000;
 const MAX_LISTED: usize = 200;
+pub(super) const MAX_PUSH_SUMMARY: usize = 8000;
 
 /// Whether `p` is one of this module's `product.task` actions.
 pub(super) fn handles(p: &Value) -> bool {
     matches!(
         p["action"].as_str(),
-        Some("generate_title" | "draft_integration_text" | "short_text_poll")
+        Some("generate_title" | "draft_integration_text" | "draft_checkout_commit" | "draft_push_summary" | "short_text_poll")
     )
 }
 
@@ -531,7 +517,6 @@ pub(super) struct Changes {
     /// `(path, added, deleted)`; `None` counts are binary files.
     pub files: Vec<(String, Option<u64>, Option<u64>)>,
     pub untracked: Vec<String>,
-    pub excerpt: String,
 }
 /// Whether a changed file is listed by name only and never read for the excerpt:
 /// environment files, SSH keys, certificates and key stores, package-registry
@@ -588,10 +573,9 @@ fn valid_path(p: &str) -> bool {
         && !p.split('/').any(|s| s == "..")
         && !p.chars().any(char::is_control)
 }
-/// Changed files, counts and a bounded excerpt of the diff. For `commit` the
-/// owner's pending paths against `HEAD`; otherwise the checkout against its
-/// merge base with `target`. Untracked files are listed by name only, and files
-/// whose names look private never contribute content.
+/// Changed files and line counts. Git drafts do not read diff excerpts.
+/// Task commits use the pending paths against `HEAD`; other task drafts use
+/// the checkout against its merge base with `target`.
 pub(super) async fn changes(
     path: &Path,
     method: &str,
@@ -599,7 +583,11 @@ pub(super) async fn changes(
     pending: &[String],
     git: &mut Git,
 ) -> Result<Changes> {
-    let base = if method == "commit" {
+    let checkout = method == "checkout_commit";
+    let commit = checkout || method == "commit";
+    let staged = checkout && !git.out(path, &["diff", "--cached", "--name-only", "-z", "--"]).await?.is_empty();
+    let unborn = checkout && !staged && !git.success(path, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).await?;
+    let base = if commit {
         "HEAD".to_owned()
     } else {
         if target.starts_with('-') || target.is_empty() {
@@ -611,11 +599,13 @@ pub(super) async fn changes(
             .to_owned()
     };
     let literal: Vec<String> = pending.iter().map(|p| format!(":(literal){p}")).collect();
-    let mut numstat = vec!["diff", "--numstat", "--no-renames", base.as_str(), "--"];
+    let against = if staged { "--cached" } else { base.as_str() };
+    let mut numstat = vec!["diff", "--numstat", "--no-renames", "-z", against, "--"];
     numstat.extend(literal.iter().map(String::as_str));
     let mut changes = Changes::default();
-    if method != "commit" || !pending.is_empty() {
-        for line in git.out(path, &numstat).await?.lines().take(MAX_LISTED) {
+    if !unborn && (method != "commit" || !pending.is_empty()) {
+        let stats = git.out(path, &numstat).await?;
+        for line in stats.split_terminator('\0').take(MAX_LISTED) {
             let mut parts = line.splitn(3, '\t');
             let (Some(a), Some(d), Some(p)) = (parts.next(), parts.next(), parts.next()) else {
                 continue;
@@ -633,11 +623,11 @@ pub(super) async fn changes(
             .take(MAX_LISTED)
             .cloned()
             .collect();
-    } else {
+    } else if !staged {
         let others = git
             .out(path, &["ls-files", "--others", "--exclude-standard", "-z"])
-            .await
-            .unwrap_or_default();
+            .await?;
+
         changes.untracked = others
             .split('\0')
             .filter(|p| !p.is_empty())
@@ -645,219 +635,135 @@ pub(super) async fn changes(
             .map(str::to_owned)
             .collect();
     }
-    // Smallest edits first, so more files fit in the excerpt.
-    let mut order: Vec<_> = changes
-        .files
-        .iter()
-        .filter(|(p, a, d)| a.is_some() && d.is_some() && !private_name(p))
-        .collect();
-    order.sort_by_key(|(_, a, d)| a.unwrap_or(0) + d.unwrap_or(0));
-    for (file, _, _) in order.into_iter().take(15) {
-        if changes.excerpt.len() >= MAX_EXCERPT {
-            break;
-        }
-        let spec = format!(":(literal){file}");
-        let Ok(diff) = git
-            .out(
-                path,
-                &[
-                    "diff",
-                    "--unified=2",
-                    "--no-renames",
-                    base.as_str(),
-                    "--",
-                    &spec,
-                ],
-            )
-            .await
-        else {
-            continue;
-        };
-        let room = (MAX_EXCERPT - changes.excerpt.len()).min(MAX_FILE_EXCERPT);
-        changes.excerpt.push_str(&bounded(diff.trim_end(), room));
-        changes.excerpt.push('\n');
-    }
     Ok(changes)
 }
 fn file_lines(changes: &Changes, max: usize) -> Vec<String> {
+    let total = changes.files.len() + changes.untracked.len();
     let mut lines: Vec<String> = changes
         .files
         .iter()
         .map(|(p, a, d)| match (a, d) {
-            (Some(a), Some(d)) => format!("{} (+{a} -{d})", visible(p)),
-            _ => format!("{} (binary)", visible(p)),
+            (Some(a), Some(d)) => format!("- `{}` (+{a} -{d})", git_path_text(p)),
+            _ => format!("- `{}` (binary)", git_path_text(p)),
         })
-        .chain(
-            changes
-                .untracked
-                .iter()
-                .map(|p| format!("{} (new)", visible(p))),
-        )
+        .chain(changes.untracked.iter().map(|p| format!("- `{}` (new)", git_path_text(p))))
+        .take(max)
         .collect();
-    let total = lines.len();
     if total > max {
-        lines.truncate(max);
-        lines.push(format!("and {} more", total - max));
+        lines.push(format!("- and {} more", total - max));
     }
     lines
 }
-fn areas(changes: &Changes) -> Vec<String> {
-    let mut seen: Vec<String> = Vec::new();
-    for p in changes
-        .files
-        .iter()
-        .map(|f| &f.0)
-        .chain(changes.untracked.iter())
-    {
-        let parts: Vec<&str> = p.split('/').collect();
-        let area = if parts.len() > 2 {
-            format!("{}/{}", parts[0], parts[1])
-        } else if parts.len() == 2 {
-            parts[0].to_owned()
-        } else {
-            p.clone()
-        };
-        if !seen.contains(&area) {
-            seen.push(area);
-        }
-    }
-    seen
+// Paths are Git identifiers, not prose. Keep them on a single line and
+// escape non-ASCII and Markdown delimiters without interpreting their text.
+fn git_path_text(path: &str) -> String {
+    path.chars()
+        .map(|c| match c {
+            '\\' => "\\\\".to_owned(),
+            '`' => "\\u{60}".to_owned(),
+            c if c.is_ascii_graphic() || c == ' ' => c.to_string(),
+            c => c.escape_unicode().to_string(),
+        })
+        .collect::<Vec<_>>()
+        .concat()
 }
 
-/// A deterministic text from the real changes, used when no model text exists.
-pub(super) fn fallback_integration(
-    method: &str,
-    changes: &Changes,
-    description: &str,
-    summary: &str,
-) -> Value {
-    let count = changes.files.len() + changes.untracked.len();
-    let areas = areas(changes);
-    let subject = match count {
-        0 => format!("Apply task: {}", fallback_title(description)),
-        _ => {
-            let shown: Vec<_> = areas.iter().take(3).cloned().collect();
-            let more = if areas.len() > 3 { " and more" } else { "" };
-            format!(
-                "Update {count} file{} in {}{more}",
-                if count == 1 { "" } else { "s" },
-                shown.join(", ")
-            )
-        }
+fn integration_text(method: &str, changes: &Changes) -> Value {
+    let subject = match changes.files.len() + changes.untracked.len() {
+        0 => "Apply task changes".to_owned(),
+        1 => "Update 1 file".to_owned(),
+        count => format!("Update {count} files"),
     };
-    let subject = cut(&subject, 72);
-    let mut body = Vec::new();
-    if !summary.trim().is_empty() {
-        body.push(bounded(visible(summary).trim(), 2000));
-    } else if count > 0 && !description.trim().is_empty() {
-        body.push(fallback_title(description));
-    }
     let files = file_lines(changes, 20);
-    if !files.is_empty() {
-        body.push(format!(
-            "Changed files:\n{}",
-            files
-                .iter()
-                .map(|l| format!("- {l}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-    let body = body.join("\n\n");
+    let body = if files.is_empty() {
+        String::new()
+    } else {
+        format!("Changed files:\n{}", files.join("\n"))
+    };
     if method == "pr" {
         json!({"title":subject,"body":body})
     } else {
         json!({"message":if body.is_empty(){subject}else{format!("{subject}\n\n{body}")}})
     }
 }
-fn integration_prompt(method: &str, changes: &Changes, description: &str, summary: &str) -> String {
-    let what = if method == "pr" {
-        "a pull request title and description. First line: the title (at most 72 characters, imperative mood, no prefix). \
-         Then one empty line, then a short Markdown description: what changed and why, then a bullet list of the main changes"
-    } else {
-        "a Git commit message. First line: a summary of at most 72 characters in imperative mood, no prefix, no trailing period. \
-         Then one empty line, then a short body: what changed and why, wrapped at 72 characters, bullet points allowed"
-    };
-    let files = file_lines(changes, 60).join("\n");
-    format!(
-        "Write {what}.\nDescribe the actual changes shown below; do not invent changes, do not mention tools, models or reviews. \
-         Write in English. Reply with the text only, no code fences.\n\n<task>\n{}\n</task>\n\n<result_summary>\n{}\n</result_summary>\n\n\
-         <changed_files>\n{}\n</changed_files>\n\n<diff_excerpt>\n{}\n</diff_excerpt>\n",
-        bounded(description, MAX_DESCRIPTION),
-        bounded(summary, 2000),
-        files,
-        changes.excerpt
-    )
-}
-/// A usable integration text from a model answer.
-pub(super) fn integration_of(method: &str, answer: &str) -> Option<Value> {
-    let text = clean(answer);
-    let mut lines = text.lines();
-    let first = lines.by_ref().find(|l| !l.trim().is_empty())?;
-    let subject = one_line(&strip_label(
-        first,
-        &["title:", "subject:", "commit message:"],
-    ));
-    let subject = cut(subject.trim_end_matches('.'), 100);
-    if subject.is_empty() {
-        return None;
+
+fn clip_utf8(text: &str, max: usize) -> &str {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
     }
-    let body: String = lines.collect::<Vec<_>>().join("\n").trim().to_owned();
-    let body = bounded(
-        &strip_body_label(&body),
-        if method == "pr" { 8000 } else { 4000 },
-    );
-    Some(if method == "pr" {
-        json!({"title":subject,"body":body})
-    } else {
-        json!({"message":if body.is_empty(){subject}else{format!("{subject}\n\n{body}")}})
-    })
-}
-fn strip_body_label(body: &str) -> String {
-    for label in ["Description:", "Body:"] {
-        if let Some(rest) = body.strip_prefix(label) {
-            return rest.trim().to_owned();
-        }
-    }
-    body.to_owned()
+    &text[..end]
 }
 
-/// The integration text job: changes from Git, then the model text or the fallback.
-pub(super) fn integration_job(
-    state: &Path,
-    method: &str,
-    changes: Result<Changes>,
-    description: &str,
-    summary: &str,
-    chosen: std::result::Result<Chosen, &'static str>,
-    budget: Duration,
-) -> Value {
-    let purpose = if method == "pr" {
-        "pull_request"
-    } else {
-        "commit"
-    };
-    let (changes, read) = match changes {
-        Ok(c) => (c, None),
-        Err(e) => (Changes::default(), Some(e.code)),
-    };
-    let fallback = || fallback_integration(method, &changes, description, summary);
-    if let Some(code) = read {
-        log(
-            state,
-            "short_text_fallback",
-            json!({"purpose":purpose,"outcome":"changes_unreadable","code":code}),
-        );
-        return json!({"state":"done","source":"fallback","reason":"changes_unreadable","text":fallback(),"route":null});
-    }
-    let prompt = integration_prompt(method, &changes, description, summary);
-    let (answer, route) = generate(state, purpose, &prompt, chosen, budget);
-    match answer.map(|a| integration_of(method, &a).ok_or("unusable_answer")) {
-        Ok(Ok(text)) => {
-            json!({"state":"done","source":"model","reason":null,"text":text,"route":route})
+/// Limit an owner-approved body without changing its Markdown or line breaks.
+pub(super) fn push_body(text: &str) -> String {
+    clip_utf8(&visible(text), MAX_PUSH_SUMMARY).to_owned()
+}
+
+fn integration_job(state: &Path, method: &str, changes: Result<Changes>) -> Value {
+    match changes {
+        Ok(changes) => json!({"state":"done","source":"template","reason":null,
+            "text":integration_text(method, &changes),"route":null}),
+        Err(error) => {
+            let purpose = if method == "pr" { "pull_request" } else { "commit" };
+            log(state, "short_text_fallback",
+                json!({"purpose":purpose,"outcome":"changes_unreadable","code":error.code}));
+            json!({"state":"done","source":"fallback","reason":"changes_unreadable",
+                "text":integration_text(method, &Changes::default()),"route":null})
         }
-        Ok(Err(reason)) | Err(reason) => {
-            json!({"state":"done","source":"fallback","reason":reason,"text":fallback(),"route":route})
+    }
+}
+
+fn saved_pr(changes: Option<&Changes>, body: String) -> Value {
+    let mut text = integration_text("pr", changes.unwrap_or(&Changes::default()));
+    text["body"] = json!(body);
+    json!({"state":"done","source":"saved","reason":null,"text":text,"route":null})
+}
+
+// ---------------------------------------------------------------- outgoing commits
+
+/// Inspect only local refs. A new destination branch uses the known remote refs;
+/// without any local baseline, do not present the entire repository as outgoing.
+async fn outgoing(git: &mut Git, path: &Path, remote: &str, branch: &str) -> Result<usize> {
+    let remote = git.configured_remote(path, remote).await?;
+    let head = format!("refs/heads/{branch}");
+    let tracking = format!("refs/remotes/{remote}/{branch}");
+    let namespace = format!("refs/remotes/{remote}/");
+    let remote_exclusion = format!("--remotes={remote}");
+    let mut range = vec![head.as_str(), "--not"];
+    if git.success(path, &["rev-parse", "--verify", "--quiet", &format!("{tracking}^{{commit}}")]).await? {
+        range.push(tracking.as_str());
+    } else if git.out(path, &["for-each-ref", "--count=1", "--format=%(objectname)", &namespace]).await?.trim().is_empty() {
+        return Err(refuse("push_baseline_unavailable", "Fetch the selected remote to establish which commits are outgoing."));
+    } else {
+        range.push(remote_exclusion.as_str());
+    }
+    let mut count = vec!["rev-list", "--count"];
+    count.extend(range);
+    count.push("--");
+    match git.out(path, &count).await?.trim().parse::<usize>() {
+        Ok(0) => Err(refuse("no_outgoing_commits", "There are no outgoing commits in the local tracking information.")),
+        Ok(count) => Ok(count),
+        Err(_) => Err(refuse("commits_unreadable", "Git did not return an outgoing commit count.")),
+    }
+}
+
+fn push_job(state: &Path, outgoing: Result<usize>) -> Value {
+    match outgoing {
+        Ok(count) => {
+            let noun = if count == 1 { "commit" } else { "commits" };
+            json!({"state":"done","source":"template","reason":null,"route":null,
+                "text":{"title":format!("Push {count} outgoing {noun}"),
+                    "body":format!("This push includes {count} outgoing {noun}.")}})
+        }
+        Err(error) => {
+            let reason = match error.code {
+                "no_outgoing_commits" => "no_outgoing_commits",
+                "push_baseline_unavailable" => "push_baseline_unavailable",
+                _ => "commits_unreadable",
+            };
+            log(state, "short_text_fallback", json!({"purpose":"push","outcome":reason}));
+            json!({"state":"done","source":"fallback","reason":reason,"text":{},"route":null})
         }
     }
 }
@@ -865,16 +771,16 @@ pub(super) fn integration_job(
 // ---------------------------------------------------------------- actions
 
 /// A draft job's identity: everything its text depends on. Two requests share a
-/// running job only when they ask for the same method, target, pending paths and
-/// summary; the paths and summary are kept as a digest.
+/// running job only when they ask for the same method, target and pending paths
+/// (or the same checkout, remote and branch for a push summary).
 pub(super) fn integration_key(
     method: &str,
     target: &str,
     pending: &[String],
-    summary: &str,
+    remote: &str,
 ) -> String {
     let inputs =
-        serde_json::to_vec(&json!({"paths":pending,"summary":summary})).unwrap_or_default();
+        serde_json::to_vec(&json!({"paths":pending,"remote":remote})).unwrap_or_default();
     format!(
         "integration:{method}:{}:{}",
         super::files::revision(target.as_bytes()),
@@ -903,8 +809,49 @@ pub(super) async fn run(
     config: &crate::Config,
 ) -> Result<Value> {
     object_params(p)?;
-    let task = task_id(p)?.to_owned();
-    match p["action"].as_str().unwrap_or("") {
+    let action = p["action"].as_str().unwrap_or("");
+    if matches!(action, "draft_checkout_commit" | "draft_push_summary") {
+        let checkout = string(p, "checkoutId")?;
+        let remote = p["remote"].as_str().unwrap_or("");
+        let branch = p["branch"].as_str().unwrap_or("");
+        if action == "draft_push_summary" && (!super::git::valid_branch(branch) || remote.is_empty() || remote.len() > 4096) {
+            return Err(refuse("invalid_request", "Choose the remote and branch to summarize."));
+        }
+        let mut git = Git::for_service(config);
+        let path = git.resolve(root, project, checkout).await?;
+        let key = integration_key(action, branch, &[checkout.to_owned()], remote);
+        let (id, fresh) = begin(project, "", &key);
+        if fresh {
+            let (state, action, remote, branch) = (
+                state.to_path_buf(), action.to_owned(), remote.to_owned(), branch.to_owned(),
+            );
+            spawn(id.clone(), move || {
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+                if action == "draft_checkout_commit" {
+                    let read = runtime.map_err(Refused::from).and_then(|rt| {
+                        rt.block_on(changes(&path, "checkout_commit", "", &[], &mut git))
+                    });
+                    if read.as_ref().is_ok_and(|c| c.files.is_empty() && c.untracked.is_empty()) {
+                        log(&state, "short_text_fallback", json!({"purpose":"commit","outcome":"no_changes"}));
+                        return json!({"state":"done","source":"fallback","reason":"no_changes","text":{},"route":null});
+                    }
+                    integration_job(&state, "commit", read)
+                } else {
+                    let read = runtime.map_err(Refused::from).and_then(|rt| {
+                        rt.block_on(outgoing(&mut git, &path, &remote, &branch))
+                    });
+                    push_job(&state, read)
+                }
+            })?;
+        }
+        return Ok(json!({"jobId":id}));
+    }
+    let task = if action == "short_text_poll" && p["taskId"].is_null() {
+        String::new()
+    } else {
+        task_id(p)?.to_owned()
+    };
+    match action {
         "short_text_poll" => {
             let id = p["jobId"].as_str().unwrap_or("");
             let table = jobs();
@@ -976,15 +923,7 @@ pub(super) async fn run(
                     .ok_or_else(|| refuse("invalid_request", "Invalid file list."))?,
                 _ => return Err(refuse("invalid_request", "Invalid file list.")),
             };
-            let summary = p["summary"]
-                .as_str()
-                .map(|s| bounded(s, 4000))
-                .unwrap_or_default();
-            let (id, fresh) = begin(
-                project,
-                &task,
-                &integration_key(&method, &target, &pending, &summary),
-            );
+            let (id, fresh) = begin(project, &task, &integration_key(&method, &target, &pending, ""));
             if fresh {
                 let (root, project, state, config) = (
                     root.to_owned(),
@@ -994,10 +933,7 @@ pub(super) async fn run(
                 );
                 let task_for_job = task.clone();
                 spawn(id.clone(), move || {
-                    let description = description(&root, &project, &task_for_job)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_default();
+                    let mut saved_body = None;
                     let read = (|| -> Result<Changes> {
                         let runtime = tokio::runtime::Builder::new_current_thread()
                             .enable_all()
@@ -1012,19 +948,17 @@ pub(super) async fn run(
                                 .filter(|_| checkout["kind"] == "worktree")
                                 .map(PathBuf::from)
                                 .unwrap_or_else(|| root.clone());
+                            if method == "pr" {
+                                saved_body = git.saved_push_summary(&path, &state, &project).await.ok().flatten();
+                            }
                             changes(&path, &method, &target, &pending, &mut git).await
                         })
                     })();
-                    let chosen = choose(&config, &root);
-                    integration_job(
-                        &state,
-                        &method,
-                        read,
-                        &description,
-                        &summary,
-                        chosen,
-                        RUN_BUDGET,
-                    )
+                    if let Some(body) = saved_body {
+                        log(&state, "short_text_saved_push", json!({"purpose":"pull_request"}));
+                        return saved_pr(read.as_ref().ok(), body);
+                    }
+                    integration_job(&state, &method, read)
                 })?;
             }
             Ok(json!({"jobId":id}))

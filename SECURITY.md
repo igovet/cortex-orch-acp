@@ -6,11 +6,15 @@ Execution baselines record the project checkout’s resolved Git HEAD, or null f
 
 Updating a task from its target advances only the Changes comparison baseline, not the task’s original integration base. If a retained update is committed outside Workspace, Finish merge verifies that HEAD has the saved task and target commits as its two parents before advancing the comparison base. This check does not modify Git. The updated tree still needs a fresh result and review before integration.
 
-Ordinary Workspace Git Commit does not rerun or replace verification. For an accepted native result in the project folder, the service can retain the original result identity only when the commit is a direct child on the accepted branch, its full Git tree matches the accepted deliverable paths, bytes and Git file modes, and the resulting index and checkout are still current. The proof compares raw file bytes rather than relying on Git status or running filters. Incomplete observations, changed files and every unproven checkout keep the existing stale-result checks. Creating a pull request still needs owner confirmation and a separate push.
+Ordinary Workspace Git Commit does not rerun or replace verification. For an accepted native result in the project folder, the service can retain the original result identity only when the commit is a direct child on the accepted branch, its full Git tree matches the accepted deliverable paths, bytes and Git file modes, and the resulting index and checkout are still current. The proof compares raw file bytes rather than relying on Git status or running filters. Incomplete observations, changed files and every unproven checkout keep the existing stale-result checks. Creating a pull request still needs owner confirmation and a separate push. Git draft generation uses fixed English templates and local Git metadata. It does not send task prose, diff excerpts or commit messages to a model. Owner-entered text is not translated, and the confirmation boundary is unchanged.
 
 The extracted Workspace Dev `smoke` and `drive` launchers check only the active GitHub CLI account on `github.com`, under a timeout. They retain the exit code, not authentication output. Broader host diagnostics, including other provider, Docker and sudo checks, run only when `probe` is explicitly invoked.
 
 A skipped check in Workspace result facts records its reason in `detail`, including when paid qualification was not requested. The row is not execution evidence and grants no permission to rerun a prohibited command.
+
+Automatic prefetch of earlier Workspace conversation uses the same authorized history read as **Show
+earlier**. The task, session and page-size cursor bindings, service display filters and remote
+operation allowlist are unchanged. Paging does not send messages or start an engine.
 
 Conversation fallback text grants no decision authority. Answers still require the existing decision identity, capability and runtime validation. A draft kept visible in a read-only composer remains unsent; its explanation does not enable message delivery or change the capability check. For route consent, an option plus a comment must match exactly one recorded option in the stored answer format. The comment cannot grant another route or set effort, but recognized refusals still apply.
 
@@ -1063,6 +1067,8 @@ Workspace's Re-check state control rereads existing projections. Machine connect
 
 Workspace CPU reduction does not bypass history validation or weaken the public display boundary. Complete history pages are validated before returning; the window reuses them only for the same project, task version and execution identity. History writes/deletes still invalidate transactionally. Working status remains visible without continuous animation. See [performance measurements](docs/cortex-workspace/performance.md).
 
+Workspace's sidebar unseen-change marks are client-local display state, not runtime facts. The app keeps them in its own local storage (`cw.seen-sidebar-changes`) as task, sprint and project ids with fixed-size 64-bit state codes; no question wording, failure text, title or other task content is stored, and an earlier record that kept readable text is ignored. At most 1000 rows are kept. A record is removed when its task or sprint is gone from a project whose read confirmed what it holds. A mark grants, answers or accepts nothing, and a missing or dropped record is treated as already seen rather than as a change. See [Unseen changes](docs/cortex-workspace/SCREENS.md#responsive-layout).
+
 Workspace start admission is task-local, not a project-wide writer lock or filesystem isolation boundary. Other active, waiting, recovering or unknown tasks do not refuse a new task's start. Pending, unknown or running Workspace starts likewise do not reserve the project against ordinary ACP first prompts. Each execution has its own ACP session and cancellation target; duplicate prevention, claim-before-dispatch and crash non-replay remain task-bound. Shared-checkout file/scope and owner-action safeguards are unchanged. Sprint queues check dependency order, but manual `tasks.start` has no server-side dependency check. See [the start contract](docs/cortex-workspace/protocol.md).
 
 Workspace Git cache invalidation retains the last confirmed checkout for display; only helper-reported
@@ -1100,10 +1106,16 @@ identities and can replace production if installed: use disposable environments.
 See [local Debian builds](docs/project/packaging.md#local-desktop-debian-builds). Native allocator/crash diagnostics block installed qualification even when the input driver returns zero; disappearance of the window is not proof of a clean process exit. The Linux task window does not disable compositing. Title-bar and window-manager closure pass through the unsaved-file guard and an outstanding-service-request barrier; new requests and user input are fenced while closing. Only then does the native bridge terminate this view’s web process through WebKit’s public API and wait for TerminatedByApi before destroying the window. The raw frontend destroy capability is not exposed. This avoids the affected child’s EGL/Skia exit-handler path without disabling WebKit sandboxing, stopping the independent service or filtering native diagnostics. It is not a general repair for WebKit crashes/recycling outside approved closure, a browser-storage durability guarantee, or real-GPU qualification.
 
 Workspace maintenance uses explicit consent and a fixed pkexec/apt command in a
-separate transient user unit. Release SHA-256 sidecars are checked, but the current
-workflow has no independent signature: GitHub HTTPS and its publisher remain the
-trust basis. Publication is manual, limited to `main` (Latest) and `dev`
-(prerelease, never Latest); dev cannot query or install the production update feed.
+separate transient user unit. The release updater authenticates the exact SHA-256
+sidecar bytes with a detached Ed25519 signature from the build-embedded public key.
+Missing or invalid signatures or a missing key refuse the update before privilege
+is requested. The updater rechecks the signature and archive digest before apt.
+This does not add a root-owned staging helper or change cached-package rollback.
+The signing seed stays outside the checkout in a 0600 file in a 0700 directory;
+production CI uses a private temporary copy from its Actions secret.
+See [key storage and rotation](docs/project/packaging.md#desktop-update-signing).
+Publication is manual, limited to `main` (Latest) and `dev` (prerelease, never
+Latest); Dev cannot query or install the production update feed.
 The [2026-11-06 distribution-risk decision](docs/project/bundled-engine-licenses.md)
 keeps native Claude login unchanged by owner choice, not Anthropic permission. API keys use the existing canonical private secret store through
 helper stdin, never command history or logs; native login stays in the original
@@ -1492,6 +1504,7 @@ answers, whose file references come from Core's exact record and are released wi
 the task's deletion or purge;
 task creation retains bytes in private SQLite options until Start; prompt, answer and direct-worker resources use the existing private source-block store.
 Sprint creation and planning notes retain references in atomically replaced private product state; their bodies are read when the planning task is created and become that task's own draft attachments, never base64 inside prompt text. A sprint's cumulative planning resources share the eight-file/4-MiB budget. Product-state writes refuse before exceeding the bounded response budget; local frames are capped at 8 MiB. This is a bounded transport, not an unbounded upload service.
+Sprint planning diagnostics are written by the service to private product state; owner-facing sprint patches cannot set them. The Workspace displays their text from live data and does not copy it into the offline board cache.
 Question answers and their resource references commit together. The Linux bridge
 reads clipboard image bytes (PNG, or another image GTK can decode, re-encoded as PNG)
 only on an owner paste with no plain text, and reads no clipboard text or file path.
@@ -2473,16 +2486,9 @@ The Cortex Workspace desktop slice has a user-level machine service that owns th
   only against the same saved hold under the existing Git and machine
   admission checks; no dispatched or unknown effect is replayed. Cancellation and archival never certify unfinished prerequisites or authorize discarding existing changes. A continuation resumes only once every owned session is confirmed gone; an effect with an unknown outcome is then settled as `unknown` (`settled_by: runtime_reverify`, `RUNTIME_UNCERTAINTY_RECORDED`) for the coordinator to re-verify from files, Git state and receipts, never replayed and never certified, and a command that may still run is waited for until the host settles it with process evidence. Neither the policy nor a continuation grants permission or changes review, verification or access rules. See [sprint run modes](docs/cortex-workspace/local-task-execution.md#sprint-run-modes).
 - Post-merge cleanup uses Git without force only after the integration is recorded. A retained dirty/failed cleanup never masquerades as a failed merge. Source updates retain the previous result identity/version and require different, passing runtime evidence before renewed acceptance. Large and non-text conflicts retain bounded metadata and explicit manual Git instructions rather than writing placeholder text into a file.
-- Task titles, commit messages and pull request texts are written by a model, so their inputs leave the
-  machine for the chosen connection's provider (Anthropic for Claude, OpenAI for Codex), under the owner's
-  existing native account: a task's description for its title; for a commit or pull request text the task
-  description, the result summary, changed file names with line counts and a diff excerpt of at most
-  12,000 bytes. New files are sent by name only, and a file whose name looks private never contributes
-  content: `.env*`, SSH keys (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`), `*.pem`, `*.key`, `*.p12`,
-  `*.pfx`, `*.keystore`, `*.jks`, `*.kdbx`, `.netrc`, `.npmrc`, `.pypirc`, `.htpasswd`, `*.tfvars`,
-  `*.tfstate`, `kubeconfig*`, `.kube/config`, `credentials`, `credentials.json`, `service-account*`, and
-  names containing secret, credential, password or token. This is a name check, so a secret inside an
-  ordinary source file that changed can still be in the excerpt. The text is written in a minimal ACP
+- Task titles may be written by a model. The task description leaves the machine for the chosen
+  connection's provider (Anthropic for Claude, OpenAI for Codex) under the owner's native account.
+  The title is written in a minimal ACP
   engine session started with the route's ordinary engine-session launch (cleared environment, real `HOME`
   and the connection's native directory; for Codex the native launcher that turns the owner's Codex MCP
   servers off and verifies that and the disabled shell, plugin, hook and app features before App Server
@@ -2497,29 +2503,43 @@ The Cortex Workspace desktop slice has a user-level machine service that owns th
   task, writes no project store and is not shown in any history; it ends after 25 seconds at most and its
   process group is reaped. Unicode format characters (bidirectional controls, zero-width characters, the
   byte order mark) are removed from every generated text. The answer is shown to the owner as editable
-  text and is never committed, merged or pushed without the owner's confirmation. `short-text.log` (file
+  title. Git drafts do not use this session: they use fixed English templates and local Git metadata,
+  without including commit prose or diff excerpts. Nothing is committed, merged or pushed without the
+  owner's confirmation. A confirmed Push summary is stored privately after a successful Push
+  and is not sent to the remote by Git. It can prefill the editable PR body and never authorizes PR
+  creation or bypasses the push witness. Checkout-level drafts are not exposed to paired phones.
+  `short-text.log` (file
   0600 in the private log folder) records route identity, reason and outcome codes only, never prompts,
   descriptions, diffs or answers. See
   [short model texts](docs/cortex-workspace/local-task-execution.md#short-model-texts).
 - Remote access (built, no-paid tests only, not qualified; nothing verified on a physical Android device
-  or through a relay): when the owner turns it on, the service binds an iroh UDP endpoint that uses no n0
-  public relay and no n0 address lookup, with either no relay or exactly one configured relay. The machine
-  identity is a 32-byte key in a 0600 file (`remote-host.key`) in the service's private state directory,
-  and a phone's key is a 0600 file in the app's private data with Android backup off; neither is wrapped
-  by an OS keyring or the Android Keystore. Pairing uses a single-use link (QR code or copied text; 5
-  minutes; the fifth wrong secret cancels it) followed by a fingerprint on both sides and an explicit
-  Allow on the computer; there is no short pairing code, and only Allow stores the device. Revoking a
-  device closes its connections at once. Each remote stream goes to a fresh local-socket connection, and
-  every request first passes a closed, fail-closed allowlist
+  or through a relay): off by default; when the owner turns it on, the service binds an iroh UDP endpoint
+  that uses no n0 public relay and no n0 address lookup. Each remote stream goes to a fresh local-socket
+  connection, and every request first passes a closed, fail-closed allowlist
   (`crates/workspace-service/src/remote_policy.rs`): every `remote.*` method, `service.stop`,
   `terminal.*`, `voice.*`, file saves, all Git write actions, native login, package install and rollback,
   and unknown methods are refused. A paired phone can still start and steer work and change machine and
-  project settings, which is command execution authority on the machine. A relay sees endpoint identities,
-  timing, volume and client IP addresses, not content. See
+  project settings, which is command execution authority on the machine. Identity, pairing, device
+  registry, revocation, version model and relay limits are in
+  [Remote access and device authorization](#remote-access-and-device-authorization); more detail is in
   [remote access security](docs/cortex-workspace/security.md#remote-access-built-not-qualified).
 - The same OS user is local trust, not isolation from hostile code running as that user. The different-OS-user peer check is not yet verified.
 
 Automatic result repair uses the assigned task and its existing access. A repair request grants no additional permission. Review and verification apply to the new result. Closing after workspace drift keeps the original acceptance attached to its earlier result version.
+
+### Remote access and device authorization
+
+Remote access is built and checked only by no-paid automated tests (loopback endpoints, no relay). It is not qualified: nothing was verified on a physical phone or through a relay.
+
+- **Identity keys.** The machine has one 32-byte key in a 0600 file (`remote-host.key`) in the service's private state directory; each phone has its own key in a 0600 file in the app's private data with Android backup off. Private files are opened without following links and refused if owned by another user or readable by group or others. They are not wrapped by an OS keyring or the Android Keystore, so code running as the same user, or a rooted phone, can read them. Peers authenticate each other by endpoint identity in the iroh handshake, independently of any relay.
+- **Pairing.** One offer is open at a time. The link (QR code or copied text) carries the machine identity, a 32-byte single-use secret, the machine name, the relay if any and direct addresses, and expires after 5 minutes. The secret is compared in constant time and consumed on use; the fifth wrong secret cancels the offer. After a correct secret both screens show a fingerprint derived from both identities and the secret, and the owner must press Allow on the computer. Before Allow the machine reveals nothing but the pairing status. There is no short pairing code. The link holds the secret while valid, so share it only with the phone being paired.
+- **Device registry and failure behavior.** Allow stores the device in the registry file, and the phone is told `allowed` only after the save succeeded. If the save fails, nothing is added in memory, the owner's decision returns the error (`remote_state_unavailable`), the phone is told `cancelled` and the device cannot connect. Before the device is written to the registry, the host records a private grant-intent file (`remote-grant.json`, 0600) naming the provisional device, and removes it once the registry save is confirmed. If the save is uncertain (for example the rename or the directory sync fails after the new registry may already be on disk), the phone is told `cancelled`; on the next start the host removes that provisional device from the registry before binding any endpoint. If that rollback also fails, remote access stays off, with no endpoint bound, until storage is repaired. A decision after the offer expired grants nothing. A registry or key file that cannot be parsed (damaged JSON, wrong key length) is reported as damaged (`remote_state_corrupt`), not as a permissions problem: remote access stays off with the reason "Remote access could not start: its saved state is damaged. It stays off until the file is fixed.", no endpoint is bound and the file is not overwritten.
+- **Accept-time rejection.** A connection from an identity that is not in the registry is refused with a device-rejected answer and carries no application data. Pairing is the only exchange open to an unlisted identity.
+- **Revoke and its limits.** Revoking removes the device from memory and closes all of its connections first, then rewrites the registry. If the write fails, the error is returned and access is not restored: the device cannot reconnect during this session, and it stays visible to the owner as a disconnected row that grants no access. Repair storage (for example the file permissions) and press Revoke again for the same device: that persists the removal and clears the row. Until a retry succeeds the registry file may still list the device, so restarting first can lose the revocation and the device can reconnect after the restart. Requests already handed to the local service are not rolled back or replayed, so an in-flight request of a revoked phone has an unknown outcome; frames buffered or sent after the revoke are not forwarded. Turning remote access off closes every connection and cancels pairing.
+- **Version model.** The endpoint serves three ALPNs: `cortex-workspace/pair/1`, `cortex-workspace/rpc/1` and the version probe `cortex-workspace/version/1`. Over rpc the client and service negotiate the workspace wire version (currently 1.8): the major must match and the minor is the intersection of the two sides. `service.status` reports the real wire major and minor. The probe is not an authorization: one request byte is answered with one bounded JSON reply of protocol constants only (the supported ALPNs and the wire string, for example `{"supported":[...],"wire":"1.8"}`) and the stream closes. It reveals no machine name, identity-derived data, device list, pairing state or relay address; it holds one of the 32 handshake slots and obeys the 10-second handshake and exchange limits. A client uses it only after a failed pairing or rpc dial: if the probe answers and does not list the ALPN the client asked for, the client reports `remote_incompatible_version`; if the probe fails or still lists the ALPN, the machine is reported unreachable. A pairing link in an unknown format is refused locally as `unsupported_pairing_link_version`, distinct from `invalid_pairing_link`. The phone shows "update needed" for the first, "This pairing link is from another Cortex version" for the second and "no longer paired" (`device_rejected`) for a revoked phone; the desktop bridge shows reinstall guidance for `version_mismatch`, `service_protocol_mismatch`, `bridge_invalid_capabilities` and `unsupported_protocol`.
+- **Relay.** There is either no relay or exactly one configured relay, never an n0 relay. Traffic is end-to-end encrypted between the two devices. A relay sees endpoint identities, timing, volume and client IP addresses; it cannot read content, impersonate a device or decide which device may control a machine. Device authorization rests on the computer's registry only. Anyone who can send UDP to the bound port can reach the handshake, the probe and pairing; these are bounded (32 handshakes, 4 pairing connections, 8 connected devices, 2 connections and 16 streams per device).
+
+See [remote access security](docs/cortex-workspace/security.md#remote-access-built-not-qualified) for the allowlist and the honest limits.
 
 ## Tool access and containment
 
@@ -2900,6 +2920,8 @@ claim protection against a separate hostile process running as the same OS user 
 racing filesystem changes.
 
 ### Destructive local retention maintenance
+
+**Automatic Workspace retention.** The Workspace service archives Done tasks after `autoArchiveDays` (default 7) and, with `automaticArchivePurge` **on by default**, deletes archives older than `retentionDays` (default 30, from archive time) on project activation and then hourly. Deleted: eligible archived task records and their task-owned journal, report, evidence, output and snapshot data, a clean Workspace-created task worktree (non-forcing), and attachment files unreferenced for `unreferencedAttachmentRetentionDays` (default 1). Never touched: active, paused, blocked, awaiting-decision or unclosed tasks; tasks without a confirmed closure or without a verified linked execution in a terminal runtime state; dirty or unmerged worktrees (unmerged needs the existing exact discard authorization); branches and the root checkout; migration backups; qualification evidence; loaded sessions and busy stores. Eligibility, age and identity are rechecked at the deletion fence, the scheduled pass never forces, and the owner can switch background deletion off in Storage. The timer starts no task and calls no model. This does not change the ACP chat command below, which stays preview-only.
 
 `/cortex-clear` is an explicit owner ACP chat command, not a model tool.
 The runtime previews counts/cutoff unless the owner supplies trailing `confirm`;

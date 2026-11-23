@@ -48,7 +48,8 @@ pub(super) async fn run(
             "This task has a conflict in progress. Finish or abort it first.",
         ));
     }
-    if record["checkout"]["kind"] != "worktree" {
+    let bound = super::context::owned_checkout(root, project, task)?;
+    if bound.is_none() && record["checkout"]["kind"] != "worktree" {
         return Err(refuse("same_branch", "This task works in the project folder, which other work shares, so it has no branch of its own to update."));
     }
     // A worker still running, a paused or failed run, or a result that changed since
@@ -63,7 +64,13 @@ pub(super) async fn run(
         false,
     )
     .await?;
-    let path = crate::machine::retention::task_path(root, &record, git).await?;
+    let mut inspected = record.clone();
+    let path = if let Some(w) = bound {
+        super::context::set_worktree(&mut inspected, &w);
+        w.path
+    } else {
+        crate::machine::retention::task_path(root, &record, git).await?
+    };
     let source = git
         .out(&path, &["branch", "--show-current"])
         .await?
@@ -75,7 +82,7 @@ pub(super) async fn run(
             "The task's worktree is not on a branch (detached HEAD). Check out its branch first.",
         ));
     }
-    let facts = task_facts_git::read(root, &record, task, git).await?;
+    let facts = task_facts_git::read(root, &inspected, task, git).await?;
     let target = facts["targetBranch"]
         .as_str()
         .ok_or_else(malformed)?
@@ -156,7 +163,7 @@ pub(super) async fn run(
     };
     drop(lock);
     let outcome = merge(
-        state, project, task, &path, &source, &target, record, &verified, git,
+        state, project, task, &path, &source, &target, inspected, &verified, git,
     )
     .await;
     let reply = envelope(outcome);
@@ -204,7 +211,7 @@ async fn merge(
     let head = git.out(path, &["rev-parse", "HEAD"]).await?;
     let fresh = json!({"resultId":verified["resultId"],"version":verified["version"]});
     let target_revision = target_revision(path, target, git).await?;
-    let message = format!("Merge {target} into {source}");
+    let before = super::super::task_merge::abort_snapshot(path, git).await?;
     let merged = git
         .success(
             path,
@@ -213,25 +220,24 @@ async fn merge(
                 "--no-autostash",
                 "--no-edit",
                 "-m",
-                &message,
+                "Update task branch from target",
                 "--",
                 &target_revision,
             ],
         )
         .await?;
-    let stopped = git.operation(path).await?;
-    if !merged && !stopped.is_null() {
-        let mut merge = conflicts::build(path, source, target, &record, git).await?;
-        // What Abort merge puts back: the tree is then exactly the reviewed one again.
-        merge["kind"] = json!("update");
-        merge["targetRevision"] = json!(target_revision);
-        merge["sourceRevision"] = json!(head.trim());
-        merge["before"]["requiresFreshResult"] = record["requiresFreshResult"].clone();
+    let stopped = if !merged {
+        let (marker, other) = git.merge_marker(path).await?;
+        !other && marker.try_exists()?
+    } else { false };
+    if stopped {
+        let merge = conflicts::retain(path, source, target, &record, head.trim(), &target_revision, before, git).await?;
         let n = merge["files"].as_array().map_or(0, Vec::len);
         record["requiresFreshResult"] = fresh;
         record["conflict"] = json!("conflict");
         record["merge"] = merge;
         record["acceptance"] = Value::Null;
+        record["automaticReady"] = json!(false);
         save(state, project, task, &record)?;
         return Err(refuse(
             "merge_conflict",

@@ -42,7 +42,7 @@ export const COPY = {
   terminalBody: "No terminal is connected.",
   terminalNote: "No terminal is connected.",
   noWorktreeRecord: "There is no Git record for this worktree",
-  generateCommit: "Wording from the staged files",
+  generateCommit: "Draft from staged changes, or all changes if nothing is staged",
   noGitFacts: "No Git record is connected for this project.",
   addProjectNote: "",
   prNote: "It is not merged, so this task stays here.",
@@ -75,3 +75,31 @@ export const COPY = {
   disconnected: "Not connected to the service. Nothing shown here is current.",
 } as const;
 export type CopyKey = keyof typeof COPY;
+
+export const WRITING_CHANGES = "Writing from the changes…";
+
+const draftReasons: Readonly<Record<string, string>> = {
+  no_changes: "There are no changes to commit.",
+  changes_unreadable: "Git couldn’t read the changes.",
+  no_outgoing_commits: "No outgoing commits were found in the last fetched state.",
+  push_baseline_unavailable: "Fetch the selected remote to establish which commits are outgoing.",
+  commits_unreadable: "Git couldn’t read the outgoing commits.",
+  timeout: "The model took too long.",
+  no_settings: "Model settings are unavailable.",
+  no_project_store: "The project’s model settings couldn’t be read.",
+  no_routing: "Model routing is unavailable.",
+  no_route: "No model route is configured.",
+  engine_unavailable: "The model engine is unavailable.",
+  too_many_running: "Too many drafts are being written. Try again later.",
+  model_refused: "The model declined to write a draft.",
+  permission_requested: "The model asked for permission instead of writing a draft.",
+  tool_call: "The model tried to use a tool instead of writing a draft.",
+  no_answer: "The model returned no text.",
+  unusable_answer: "The model didn’t return a usable draft.",
+};
+
+export function draftNotice(text: { source: "model" | "template" | "fallback"; reason?: string } | null, hasText: boolean, written: string): string {
+  if (hasText && (text?.source === "model" || text?.source === "template")) return written;
+  const reason = (text?.reason && Object.hasOwn(draftReasons, text.reason) ? draftReasons[text.reason] : undefined) ?? "Couldn’t generate a draft.";
+  return `${reason} ${hasText ? "You can edit the fallback draft." : "You can enter the text manually."}`;
+}

@@ -1271,16 +1271,11 @@ Machine configuration is reread after activation and on machine-fact refreshes, 
 Git commit-message drafts update reactive checkout state synchronously, survive fact refreshes, and clear only after a successful matching commit. A newer draft entered while Commit is in
 flight is kept. Empty messages remain refused. Commit is local and requires no remote: an existing staged selection is kept, or, when the index is empty, the listed non-helper changes are
 staged and committed. Amend uses the same visible message and explicit confirmation. The Finish dialog's commit message (Commit to this branch and squash merge) and its pull request title
-and description are written in English by a model from the task's real changes, with the [short model texts](#short-model-texts) mechanism (`product.task` `draft_integration_text` with
-`method` `commit`, `squash` or `pr`, `targetBranch`, and for `commit` the pending `paths`). The machine reads the changed files with their added and deleted line counts (for `commit` the
-pending paths against `HEAD`, otherwise the checkout against its merge base with the target), new files by name only, and a diff excerpt of at most 12,000 bytes (2,000 per file, smallest
-edits first, at most 15 files); a file whose name looks private is listed by name and never read: `.env*`; SSH keys (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`); `*.pem`, `*.key`, `*.p12`,
-`*.pfx`, `*.keystore`, `*.jks`, `*.kdbx`; `.netrc`, `.npmrc`, `.pypirc`, `.htpasswd`; `*.tfvars`, `*.tfstate`; `kubeconfig*` and `.kube/config`; `credentials`, `credentials.json` and
-`service-account*`; and any name containing secret, credential, password or token. Unicode format characters (bidirectional controls, zero-width characters, the byte order mark and the like)
-are removed from every title, commit message and pull request text. The prompt also carries the task description and the result summary. While the text is being written the dialog keeps its
-own text and says so; a text the owner already edited is never replaced. Without a model text the machine returns a fallback built from the same changed files (for example "Update 3 files in
-src, docs" with the file list). Nothing is committed, merged or pushed until the owner confirms, and the commit itself never waits for a model. Automatic merge updates, conflict completion
-and revert commits keep their English templates, regardless of task language. Owner-written messages remain editable and are not translated. Revert requires an empty index before applying
+and description use [English templates](#short-model-texts) filled with Git metadata, not model prose (`product.task` `draft_integration_text` with
+`method` `commit`, `squash` or `pr`, `targetBranch`, and for `commit` the pending `paths`). The machine reads changed paths and added and deleted line counts
+(for `commit` the pending paths against `HEAD`; otherwise against the merge base with the target). New files are listed by name only. Task descriptions,
+result summaries, commit prose and diff excerpts are not inputs. The dialog never replaces an owner edit. Nothing is committed, merged or pushed until
+the owner confirms. Automatic close, branch updates, conflict completion and revert use fixed English messages. Owner-written messages are not translated. Revert requires an empty index before applying
 its inverse and making the English-message commit; a failure leaves Git’s visible pending work for manual recovery. Push accepts a configured remote name or the confirmed
 credential-redacted display URL and resolves it against current Git configuration before one non-forcing push. Unknown, stale or ambiguous URLs are refused; an unclear push result is never
 retried automatically. While a fetch, pull, push or commit of a project runs, another Git action on that project is refused at once with `git_in_progress` and a message naming the running
@@ -1805,9 +1800,12 @@ No storage migration or wire-version change is required.
 
 ## Short model texts
 
-Task titles, commit messages, outgoing Push summaries and pull request texts use one mechanism
-(`crates/workspace-service/src/machine/short_text.rs`, route choice in
-`crates/workspace-service/src/native_routes/short_text.rs`).
+Task titles can use a model (`crates/workspace-service/src/machine/short_text.rs`,
+route choice in `crates/workspace-service/src/native_routes/short_text.rs`).
+Git drafts share the poll mechanism but not the model route: they use fixed
+English templates. Commit, squash and PR drafts list changed paths and counts;
+Push drafts count outgoing commits from local refs. A matching, previously
+confirmed Push summary is reused as owner-confirmed text, not regenerated.
 
 - Route: among the routes the owner allows for automatic choice (enabled, not
   denied, listed in `auto`, placed in a tier) on Claude or Codex native
@@ -1844,10 +1842,11 @@ Task titles, commit messages, outgoing Push summaries and pull request texts use
 - Jobs: `generate_title`, `draft_integration_text`, `draft_checkout_commit` and
   `draft_push_summary` return `{"jobId"}`. `short_text_poll` takes the job ID and,
   for task-bound jobs only, the task ID. A finished job reports `source`
-  (`model`, `fallback`, or `saved` for a PR body from Push), `reason` and `route`
-  (engine, model, connection id, tier, plan reading and choice reason). None of
-  them takes `machine.lock` or waits for a model. Jobs live in the service's
-  memory for ten minutes; after a restart a poll is refused as `unknown_job`.
+  (`model` for titles, `template` for generated Git drafts, `fallback`, or `saved`
+  for a PR body from Push), `reason` and `route` (null for Git drafts). Git
+  routing and task-title routing are independent. Draft actions return immediately;
+  title persistence can take `machine.lock` in the background. Jobs live in
+    memory for ten minutes; after a restart a poll is refused as `unknown_job`.
 - Diagnostics: `short-text.log` in the service log folder records
   `short_text_selected`, `short_text_generated`, `short_text_fallback` and `short_text_saved_push` with
   purpose, engine, model, connection id, tier, plan reading, choice reason,

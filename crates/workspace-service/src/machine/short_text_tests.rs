@@ -225,27 +225,6 @@ fn answers_are_shaped_and_unusable_ones_rejected() {
     assert!(title_of(&"word ".repeat(60)).unwrap().chars().count() <= 80);
     assert_eq!(fallback_title(""), "Untitled task");
     assert!(fallback_title(&"a".repeat(100)).ends_with('…'));
-    let pr = integration_of(
-        "pr",
-        "Title: Add retries\n\nDescription: Uploads retry.\n- one",
-    )
-    .unwrap();
-    assert_eq!(pr["title"], "Add retries");
-    assert_eq!(pr["body"], "Uploads retry.\n- one");
-    let commit = integration_of("commit", "Add retries.\n\nBody text").unwrap();
-    assert_eq!(commit["message"], "Add retries\n\nBody text");
-    // Format characters (category Cf) are dropped from drafts too.
-    let commit = integration_of(
-        "commit",
-        "Fix\u{202E}txt.exe\u{202C} parsing\u{2067}\n\nBody\u{200D} \u{E0041}text\u{FEFF}",
-    )
-    .unwrap();
-    assert_eq!(commit["message"], "Fixtxt.exe parsing\n\nBody text");
-    let pr = integration_of("pr", "\u{2066}Title\u{2069}\n\nA\u{00AD}B").unwrap();
-    assert_eq!(
-        (pr["title"].as_str(), pr["body"].as_str()),
-        (Some("Title"), Some("AB"))
-    );
     for c in [
         '\u{202A}',
         '\u{202E}',
@@ -262,6 +241,24 @@ fn answers_are_shaped_and_unusable_ones_rejected() {
     for c in ['a', 'é', 'Ж', '…', ' ', '\u{00A0}'] {
         assert!(!is_format(c), "{c:?}");
     }
+}
+
+#[test]
+fn integration_templates_use_git_identifiers_not_prose() {
+    let changes = Changes {
+        untracked: vec!["src/échantillon`\nя.rs".into()],
+        ..Changes::default()
+    };
+    let draft = integration_text("pr", &changes);
+    assert_eq!(draft["title"], "Update 1 file");
+    assert_eq!(
+        draft["body"],
+        "Changed files:\n- `src/\\u{e9}chantillon\\u{60}\\u{a}\\u{44f}.rs` (new)"
+    );
+    let saved = saved_pr(None, "Texte saisi par le propriétaire".into());
+    assert_eq!(saved["text"]["title"], "Apply task changes");
+    assert_eq!(saved["text"]["body"], "Texte saisi par le propriétaire");
+    assert_eq!(saved["source"], "saved");
 }
 
 #[test]
@@ -380,38 +377,19 @@ async fn an_integration_text_is_written_from_the_real_changes() {
     let names: Vec<_> = changes.files.iter().map(|f| f.0.as_str()).collect();
     assert_eq!(names, [".env.local", "README.md", "src/upload.rs"]);
     assert_eq!(changes.untracked, ["notes.txt"]);
-    assert!(changes.excerpt.contains("retry(3)") && changes.excerpt.contains("Retries uploads."));
-    // A file that looks private is listed by name, never by content.
-    assert!(!changes.excerpt.contains("do-not-send"));
-    // The model sees the changes; its answer becomes the text.
-    let (model, seen) = answering(Ok("Retry failed uploads\n\nUploads now retry three times."));
-    let reply = integration_job(
-        &state,
-        "squash",
-        Ok(changes),
-        "Make uploads retry",
-        "",
-        Ok(model),
-        Duration::from_secs(10),
-    );
-    assert_eq!(reply["source"], "model");
-    assert_eq!(
-        reply["text"]["message"],
-        "Retry failed uploads\n\nUploads now retry three times."
-    );
-    let prompt = seen.lock().unwrap().clone();
-    assert!(
-        prompt.contains("src/upload.rs (+2 -1)")
-            && prompt.contains("notes.txt (new)")
-            && prompt.contains("retry(3)")
-    );
-    assert!(prompt.contains("Make uploads retry") && !prompt.contains("do-not-send"));
-    assert!(!log_text(&state).contains("retry(3)"));
+    let reply = integration_job(&state, "squash", Ok(changes));
+    assert_eq!(reply["source"], "template");
+    assert!(reply["route"].is_null() && reply["reason"].is_null());
+    let message = reply["text"]["message"].as_str().unwrap();
+    assert!(message.starts_with("Update 4 files\n\nChanged files:"));
+    assert!(message.contains("- `src/upload.rs` (+2 -1)"));
+    assert!(message.contains("- `notes.txt` (new)"));
+    assert!(!message.contains("retry(3)") && !message.contains("do-not-send"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[tokio::test]
-async fn without_a_model_the_integration_text_still_comes_from_the_changes() {
+async fn integration_templates_use_pending_paths_and_keep_an_unreadable_fallback() {
     let dir = temp("integration-fallback");
     let state = dir.join("state");
     std::fs::DirBuilder::new()
@@ -427,61 +405,93 @@ async fn without_a_model_the_integration_text_still_comes_from_the_changes() {
         .unwrap();
     assert_eq!(changes.files.len(), 1);
     assert_eq!(changes.untracked, ["notes.txt"]);
-    let reply = integration_job(
-        &state,
-        "commit",
-        Ok(changes),
-        "Document retries",
-        "",
-        Err("no_route"),
-        Duration::from_secs(1),
-    );
-    assert_eq!(reply["source"], "fallback");
+    let reply = integration_job(&state, "commit", Ok(changes));
+    assert_eq!(reply["source"], "template");
     let message = reply["text"]["message"].as_str().unwrap();
-    assert!(
-        message.starts_with("Update 2 files in README.md, notes.txt"),
-        "{message}"
-    );
-    assert!(message.contains("- README.md (+1 -0)") && message.contains("- notes.txt (new)"));
-    // A pull request falls back to a title and a body from the same facts.
+    assert_eq!(message, "Update 2 files\n\nChanged files:\n- `README.md` (+1 -0)\n- `notes.txt` (new)");
     let changes = super::changes(&repo, "pr", "main", &[], &mut git)
         .await
         .unwrap();
-    let (failing, _) = answering(Err("engine_failed"));
-    let reply = integration_job(
-        &state,
-        "pr",
-        Ok(changes),
-        "Document retries",
-        "Uploads retry now.",
-        Ok(failing),
-        Duration::from_secs(5),
-    );
-    assert_eq!(
-        (reply["source"].as_str(), reply["reason"].as_str()),
-        (Some("fallback"), Some("engine_failed"))
-    );
-    assert!(reply["text"]["title"]
-        .as_str()
-        .unwrap()
-        .starts_with("Update 4 files"));
-    assert!(reply["text"]["body"]
-        .as_str()
-        .unwrap()
-        .starts_with("Uploads retry now."));
-    // Unreadable changes still give a text, never an error.
-    let reply = integration_job(
-        &state,
-        "commit",
-        Err(refuse("git_failed", "x")),
-        "Document retries",
-        "",
-        Err("no_route"),
-        Duration::from_secs(1),
-    );
+    let reply = integration_job(&state, "pr", Ok(changes));
+    assert_eq!(reply["source"], "template");
+    assert_eq!(reply["text"]["title"], "Update 4 files");
+    assert!(reply["text"]["body"].as_str().unwrap().starts_with("Changed files:\n"));
+    let reply = integration_job(&state, "commit", Err(refuse("git_failed", "x")));
     assert_eq!(reply["reason"], "changes_unreadable");
-    assert_eq!(reply["text"]["message"], "Apply task: Document retries");
+    assert_eq!(reply["text"]["message"], "Apply task changes");
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn checkout_commit_draft_is_taskless_and_reads_the_index_first() {
+    let base = temp("checkout-draft");
+    let root = repository(&base);
+    let state = base.join("state");
+    let config = crate::Config {
+        runtime_dir: base.join("run"),
+        state_dir: state.clone(),
+        allowed_root: base.clone(),
+        launch: crate::LaunchSpec::bare(),
+        request_timeout: Duration::from_secs(5),
+        shutdown_timeout: Duration::from_millis(150),
+        event_capacity: 128,
+    };
+    sh(&root, &["reset", "--", ".env.local"]);
+    sh(&root, &["add", "--", "README.md"]);
+    std::fs::write(root.join("README.md"), "unstaged version\n").unwrap();
+    let staged = changes(&root, "checkout_commit", "", &[], &mut Git::new()).await.unwrap();
+    assert_eq!(staged.files, [("README.md".into(), Some(1), Some(0))]);
+    assert!(staged.untracked.is_empty());
+    let approved = format!("  Markdown\n\n- {}\u{202E}", "é".repeat(6000));
+    let body = push_body(&approved);
+    assert!(body.starts_with("  Markdown\n\n- "));
+    assert!(body.len() <= MAX_PUSH_SUMMARY && !body.contains('\u{202E}'));
+
+    held().lock().unwrap().push((root.clone(), Arc::new(std::sync::atomic::AtomicBool::new(true))));
+    let started = run(&root, "p", &state, &json!({"action":"draft_checkout_commit","checkoutId":"p:main"}), &config).await.unwrap();
+    let mut poll = json!({"action":"short_text_poll","jobId":started["jobId"]});
+    poll["taskId"] = json!("t");
+    assert_eq!(run(&root, "p", &state, &poll, &config).await.unwrap_err().code, "unknown_job");
+    poll.as_object_mut().unwrap().remove("taskId");
+    let result = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let result = run(&root, "p", &state, &poll, &config).await.unwrap();
+            if result["state"] == "done" { break result; }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(result["source"], "template");
+    assert!(result["reason"].is_null() && result["route"].is_null());
+    assert_eq!(result["text"]["message"], "Update 1 file\n\nChanged files:\n- `README.md` (+1 -0)");
+    held().lock().unwrap().retain(|(r, _)| r != &root);
+
+    sh(&root, &["reset", "--", "README.md"]);
+    let all = changes(&root, "checkout_commit", "", &[], &mut Git::new()).await.unwrap();
+    assert!(all.untracked.contains(&"notes.txt".to_owned()));
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[tokio::test]
+async fn push_summary_counts_outgoing_commits_without_copying_their_prose() {
+    let base = temp("outgoing");
+    let root = repository(&base);
+    sh(&root, &["remote", "add", "origin", "./unused.git"]);
+    assert_eq!(outgoing(&mut Git::new(), &root, "origin", "cw/task").await.err().unwrap().code, "push_baseline_unavailable");
+    sh(&root, &["update-ref", "refs/remotes/origin/cw/task", "main"]);
+    let one = outgoing(&mut Git::new(), &root, "origin", "cw/task").await.unwrap();
+    assert_eq!(push_job(&base, Ok(one))["text"]["body"], "This push includes 1 outgoing commit.");
+    sh(&root, &["commit", "--only", "-m", "Corriger le chargement", "-m", "Le chargement est réparé.", "--", "README.md"]);
+    let commits = outgoing(&mut Git::new(), &root, "origin", "cw/task").await.unwrap();
+    let reply = push_job(&base, Ok(commits));
+    assert_eq!(reply["source"], "template");
+    assert!(reply["route"].is_null());
+    assert_eq!(reply["text"], json!({
+        "title":"Push 2 outgoing commits",
+        "body":"This push includes 2 outgoing commits."
+    }));
+    sh(&root, &["update-ref", "refs/remotes/origin/cw/task", "HEAD"]);
+    assert_eq!(outgoing(&mut Git::new(), &root, "origin", "cw/task").await.err().unwrap().code, "no_outgoing_commits");
+    std::fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
@@ -498,7 +508,7 @@ fn a_job_runs_once_per_task_and_purpose_and_is_polled_by_id() {
 }
 
 #[test]
-fn draft_jobs_are_shared_only_for_the_same_method_target_paths_and_summary() {
+fn draft_jobs_are_shared_only_for_the_same_method_target_paths_and_remote() {
     let paths = vec!["a.rs".to_owned(), "b.rs".to_owned()];
     let base = integration_key("squash", "main", &[], "");
     for other in [
@@ -506,7 +516,7 @@ fn draft_jobs_are_shared_only_for_the_same_method_target_paths_and_summary() {
         integration_key("pr", "main", &[], ""),
         integration_key("squash", "dev", &[], ""),
         integration_key("squash", "main", &paths, ""),
-        integration_key("squash", "main", &[], "summary"),
+        integration_key("squash", "main", &[], "origin"),
     ] {
         assert_ne!(base, other);
     }

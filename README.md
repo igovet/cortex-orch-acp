@@ -21,7 +21,7 @@
 
 Conversation waits explain when decision details are unavailable and point to Answer in the header. Open decisions also render before their timeline reference arrives. In Workspace, a pinned decision stays above the message box even when **Latest** appears over the conversation. If a draft becomes read-only, the composer keeps the text and displays the reason separately. Sent attachment chips tolerate the whitespace normalization used by runtime history.
 
-In Workspace, Changes excludes target-only changes after **Update from target**, including when **Finish merge** confirms an update you committed in Git. On a separate branch, **Git → Commit…** keeps an accepted result current when the commit contains exactly the accepted files; push it before choosing **Finish → Create a pull request**. See [IDE and Git](docs/cortex-workspace/ide-and-git.md).
+In Workspace, Changes excludes target-only changes after **Update from target**, including when **Finish merge** confirms an update you committed in Git. On a separate branch, **Git → Commit…** keeps an accepted result current when the commit contains exactly the accepted files; push it before choosing **Finish → Create a pull request**. Workspace drafts editable commit, squash, Push and pull-request text from fixed English templates and Git metadata, without calling a model. A confirmed Push summary can prefill the PR description. See [IDE and Git](docs/cortex-workspace/ide-and-git.md).
 
 In Workspace, you can add a comment to a route choice without changing the selected route. Explicit refusals still apply. See [routing and consent](docs/project/native-incoming-acp.md#native-routing-and-retained-consent).
 
@@ -110,7 +110,7 @@ the thought level shows its observed default. Each new session also refreshes
 the catalogue once per connection without a prompt, like Python. Every Python
 `/cortex-*`, `/harvest`, `/harvest-refresh` and `/skill-management` command is
 advertised and replies with Python's text, usage errors and transcript;
-`/cortex-clear` previews retention but refuses a confirmed deletion, and other
+`/cortex-clear` previews retention but refuses a confirmed deletion (Cortex Workspace separately archives and, by default, purges closed old tasks automatically; see [configuration](docs/configuration.md#workspace-storage-retention)), and other
 `/cortex-*` text that Python does not recognize is an ordinary prompt.
 `/cortex-new-task` retains the invoking client's access mode and language; cancelling
 that prompt stops only its separate task, not the invoking session's existing task.
@@ -613,7 +613,8 @@ restart. The Board and List group it under **Closed, not verified**, separate fr
 See [recorded activity and routes](docs/cortex-workspace/local-task-execution.md#recorded-data-and-pending-questions).
 
 Workspace settings include release updates, native/API-key engine connections and
-local Russian voice-model status. Add project also offers Clone from GitHub or
+local Russian voice-model status. In-app release updates require an Ed25519
+signature over the archive checksum; Dev updates remain manual. Add project also offers Clone from GitHub or
 an absolute local bare Git repository path.
 See the [desktop control map and verification limits](docs/cortex-workspace/maintenance-and-controls.md).
 Alt+Left/Right navigate Workspace history in the native window. Published worker
@@ -1082,6 +1083,12 @@ no in-app updates. See the [release steps](docs/project/packaging.md#manual-work
 [Cortex Workspace](docs/cortex-workspace/index.md) for the design, the contract and the current status,
 and [SECURITY.md](SECURITY.md) for its trust boundary.
 
+Sprint planning failures appear in the sprint conversation and Inbox, with Retry planning and Change
+request in the conversation. A planning warning does not stop planning. See
+[read-only sprint planning](docs/cortex-workspace/SCREENS.md#read-only-sprint-planning).
+
+Workspace sidebar rows mark changes you have not opened yet: a task or sprint that came to wait on you, a run that ended, or a finished sprint. Opening the row clears the mark. What was seen stays in the app's local storage as task, sprint and project ids with fixed-size state codes, never task text, bounded to 1000 rows. See [Unseen changes](docs/cortex-workspace/SCREENS.md#responsive-layout).
+
 Workspace task spend shows reported tokens by configured engine and model.
 Sent task prompts without a valid final token report remain unknown, not zero;
 the totals are not a cost estimate. See [token and plan usage](docs/features/token-and-plan-usage/index.md).
@@ -1108,8 +1115,9 @@ it does not install or start the ordinary user unit.
 
 The real task conversation reads durable Cortex messages, plans, tool activity, questions and results. A
 long conversation opens on its latest part: the window reads it from its end (`history.earlier`, at most
-four 100-row pages) and reads earlier parts only when the reader scrolls near the top or presses Show
-earlier; until the beginning is read the top says that earlier conversation is not shown (see
+four 100-row pages), then automatically reads earlier parts when their boundary is near the visible
+area, even while following the latest messages. It skips past pages that add nothing to the display
+until there is more to show or the beginning is reached. **Show earlier** remains a fallback (see
 [consistency and recovery](docs/cortex-workspace/consistency-and-recovery.md)). Owner messages and the
 unsent queue survive reopening. Workers show retained activity and accept owner guidance at their next
 successful Cortex tool call; this is not an immediate interrupt. Task Stop records a resumable pause,
