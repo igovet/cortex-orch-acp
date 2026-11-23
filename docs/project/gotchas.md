@@ -228,7 +228,9 @@ A background engine auto-update can install a new `claude-agent-acp` adapter ver
 
 ## F1/F2: schema-compatible post-result release and attributed advisory skill hints (2026-10-07)
 
-- **A post-result release must not require recreating an existing store.**
+- **Historical Python behavior: a post-result release did not require recreating an existing store.**
+  For current Rust behavior and compatibility, see
+  [coverage and interrupted turns](../features/token-and-plan-usage/index.md#coverage-and-interrupted-turns).
   The first F1 patch added a `released_after_result` usage basis, which
   existing SQLite CHECK constraints reject. That approach is removed:
   `EngineSessionManagerAdapter.prompt` keeps `basis='unknown'` when no
@@ -344,8 +346,9 @@ A background engine auto-update can install a new `claude-agent-acp` adapter ver
   `tests/test_streaming_redaction.py::test_t7_streaming_partition_invariance_for_h2_cases`,
   and `tests/test_dev_wire_trace.py
   ::test_redaction_authorization_token_header_free_text_preserves_ordinary_token_word`.
-- **Every worker card showed "Tokens unavailable · 1 call unavailable"
-  even for a fully successful attempt.** When this exact attempt had
+- **Historical Python behavior: a successful worker could still show "Tokens unavailable".**
+  The Rust driver records an unknown prompt when the final reply is lost,
+  without invalidating the result. When this exact attempt had
   already published its `worker_result` (its `result_submit` was accepted)
   and the runtime then tore the engine session down mid-turn (the
   surviving in-flight `prompt()` call sees the resulting `EngineTurnFailed`,

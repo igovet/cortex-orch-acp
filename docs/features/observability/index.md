@@ -440,63 +440,25 @@ does not infer a diff from the current file or from a status-only event.
 
 ## 2. Usage/cost attribution
 
-`usage_records` (also additive) holds one immutable row per completed
-engine `prompt()` call
- — a coordinator
-continuation, a worker assignment, a retry/fallback hop, or a
-recovery-capsule/clarification delivery. Every call gets its own row
-(`record_call_usage`, called from a `finally` block so a raised
-`EngineTurnFailed`/`PortableError` still gets attributed): retries and
-recovery calls are never collapsed into, or dropped in favor of, only the
-final successful attempt.
+The Rust session driver records one immutable `usage_records` row per sent
+task-bound ACP `session/prompt`, on a best-effort basis. The row names the
+task, exact attempt and engine session, and its one-based sequence among
+dispatched prompts on that session. Continuations and retries are separate
+calls; neither launch nor undispatched requests are calls. Workspace resolves
+engine and model from `NATIVE_SESSION_CONFIGURED` and correlates usage with
+`NATIVE_TURN_SETTLED` without double-counting a settled refusal.
 
-`UsageBasis` (`OBSERVED`/`ENGINE_REPORTED`/
-`ESTIMATED`/`UNKNOWN`) is the wire vocabulary;
-`session_manager` translates recognized token fields in a settled
-`session/prompt` response (or a token-bearing `usage_update`) into
-`EngineEvent(usage_basis=UsageBasis.ENGINE_REPORTED, usage_values={...})`.
-Top-level `usage_update.used/size` is context occupancy only. Field values are
-copied unchanged; their scope is the adapter's: Claude reports the whole turn,
-Codex only the turn's last model request (see
-[adapter token semantics](../token-and-plan-usage/index.md#adapter-token-semantics)).
-the runtime consumes token events and,
-when the engine reported nothing during the call, persists
-`basis='unknown'` with empty `tokens_json` — never `0`/free.
+Only validated, recognized counters in the exact final `PromptResponse.usage`
+are stored as `engine_reported`. Cost is not collected, and context occupancy
+does not stand in for consumption. Missing or invalid reports remain
+`unknown`, with empty `tokens_json`. Losing the response after an accepted
+worker result can leave token usage unknown without undoing that result.
+See [coverage and interrupted turns](../token-and-plan-usage/index.md#coverage-and-interrupted-turns).
 
-After an accepted `result_submit`, the runtime gives the exact worker/reviewer
-prompt consumer up to 15 seconds to persist usage on a separate cleanup thread;
-a turn that ends sooner settles at once.
-Dispatch is not synchronously blocked by this banking, but capacity and writer
-locks remain reserved until confirmed exit. Explicit cancellation bypasses the
-grace period; a timeout retains a `usage_settlement` progress diagnostic with
-reason `post_result_prompt_settlement_timeout` and `usage_coverage:
-"unavailable"` (teardown ends the engine before its only token carrier).
-Runtime shutdown interrupts the wait without that diagnostic and waits a
-bounded time for settlement teardown already in progress. The jailed engine's
-authority watchdog does not preempt this: a channel revoked by the attempt's own
-accepted result keeps the engine for at most 20 seconds, so the turn's final
-`PromptResponse.usage` can be recorded as `engine_reported` with stop reason
-`end_turn`; any other revocation still terminates at once.
-See [settlement and historical evidence limits](../token-and-plan-usage/index.md#coverage-and-interrupted-turns).
-Teardown can still interrupt an unfinished turn before its per-call usage arrives.
-When teardown raises and the exact attempt already has a
-`worker_result`, `prompt()` records `failed=False` and
-`stop_reason='released_after_result'`. Without a real figure the basis
-stays `unknown` with empty tokens; an already-observed `engine_reported`
-figure is kept. This uses only existing columns and the original closed
-basis vocabulary, so existing stores need no CHECK-constraint migration,
-format change or recreation.
-
-`usage_summary` derives `released_after_result_calls` from non-failed
-unknown rows with that exact stop reason, distinct from
-`unknown_basis_calls`. Token metrics remain unavailable when neither
-group has a real reported figure. Paseo's worker-history and pipeline
-totals omit only those marked release rows from `knownCalls` and
-`unknownCalls`, preventing a false "call unavailable" alarm on successful
-worker cards. Genuine unknown calls and failed rows still count, even if
-a failed row has that stop reason. Historical unmarked rows remain
-unknown; no usage or cost is inferred, and missing figures are never
-zero/free.
+The older Paseo reader still omits legacy non-failed `released_after_result`
+rows from known/unknown counts; the Rust writer does not generate that marker.
+The existing table and its closed basis vocabulary are unchanged. No old rows
+are rewritten.
 
 Automatic worker routing writes its full choice into the existing
 `attempt_route_audit.decision_detail_json` field. The `route_decision` object
@@ -515,14 +477,13 @@ A fallback hop's audit detail carries `failure_class`, the classified failure th
 the hop (from its `fallback_failure_class`), so a retry or fallback can be traced to its
 cause.
 
-Route/connection/model/config-revision are **not** duplicated onto every
-usage row: `list_usage`/`usage_summary` join
-`attempt_route_audit` on `attempt_id` at read time
-(`route_basis='derived'`), so the two tables never drift apart.
+Engine and model are not duplicated on each row. Workspace uses the exact
+configured session reference for new rows; the older readers retain their
+historical attribution rules. Route audit values are not token measurements.
 
 ## 3. Metrics and the read API
 
-`observability.metrics.diagnostics_summary(store, task_id)` returns, for
+The historical `observability.metrics.diagnostics_summary(store, task_id)` returned, for
 every metric, its own `unit` and either `availability="available"` or
 `availability="unavailable_reason"` with a plain-text reason — an
 unimplemented/uninstrumented metric is reported as unavailable, never
@@ -675,19 +636,12 @@ the redaction helper, or the task-creation redaction path, while ids/status/erro
 
 ## 5. Missing telemetry never gates execution
 
-the runtime records `basis='unknown'` and still
-returns the engine's actual `PromptOutcome` — a `claude-agent-acp`/
-`codex-acp` turn that emits no `usage_update` at all (either adapter, per
-the adapter distribution evidence) completes exactly as it would with
-usage reported; `diagnostics_summary`'s `tokens`
-section reports `availability="unavailable_reason"` in that case, never
-`0`/free. Conservative caps (`PolicyCeiling.limits`: `attempts`/`calls`/
-`tokens`/`concurrency`, enforced by the attempt and concurrency
-gates) remain in force regardless of whether usage telemetry exists.
-The usage tests exercise this directly: a fake
-adapter that never emits `usage_update` still lets `prompt()` return a
-successful outcome, and the resulting `usage_records` row is
-`basis='unknown'`.
+No state transition depends on accounting. The driver queues the insert
+separately from authoritative settlement and reports a sanitized diagnostic
+if it cannot save the row. It does not change the response, roll settlement
+back, or retry the prompt. Workspace distinguishes unknown counts from a
+reported zero. The no-paid fake-engine and SQLite tests cover the write
+failure, interrupted calls, reported zero and the task-spend read path.
 
 ## What's deferred
 

@@ -1068,6 +1068,10 @@ no in-app updates. See the [release steps](docs/project/packaging.md#manual-work
 [Cortex Workspace](docs/cortex-workspace/index.md) for the design, the contract and the current status,
 and [SECURITY.md](SECURITY.md) for its trust boundary.
 
+Workspace task spend shows reported tokens by configured engine and model.
+Sent task prompts without a valid final token report remain unknown, not zero;
+the totals are not a cost estimate. See [token and plan usage](docs/features/token-and-plan-usage/index.md).
+
 The merge card shows the recorded pull request address, and **View PR** (on the card and in the Git menu) opens it in your browser where `/usr/bin/xdg-open` or `/usr/bin/gio` is installed. When a branch and its upstream have diverged, **Pull…** asks whether to merge or rebase the remote commits. **Update from <target>…** merges the target's new commits into a task's own branch when that task has a worktree of its own on another branch and the machine offers the update; the native host runs every task in the project folder, so its tasks have no such item. See [IDE and Git](docs/cortex-workspace/ide-and-git.md).
 
 Desktop container builds derive their Rust source inputs from the root Cargo workspace membership and preserve `Cargo.lock`; new crates do not require a separate staging allowlist entry. See [local desktop builds](docs/project/packaging.md#local-desktop-debian-builds).

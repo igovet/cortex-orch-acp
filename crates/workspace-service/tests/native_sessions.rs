@@ -3457,6 +3457,20 @@ async fn answer_turn_replan_settles_the_answer_delivery() {
     })
     .unwrap();
     d.shutdown().await.unwrap();
+    s.read(|db| {
+        let mut q = db.prepare(
+            "SELECT engine_session_ref,call_sequence FROM usage_records
+             WHERE task_id='t' ORDER BY call_sequence",
+        )?;
+        let rows = q
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, rows[1].0);
+        assert_eq!((rows[0].1, rows[1].1), (1, 2));
+        Ok(())
+    })
+    .unwrap();
     drop(s);
     close(h).await;
 }
@@ -4042,6 +4056,229 @@ async fn inline_result_is_published_once_bound_to_attempt_and_reconciled_after_r
         .is_err());
     close(reopened).await;
 }
+async fn prompt_usage_follows_real_native_dispatches() {
+    let p = Project::new();
+    let h = p.host().await;
+    let o = h
+        .create("t".into(), "Usage fixture".into(), "owner".into())
+        .await
+        .unwrap();
+    let s = p.store();
+    std::fs::write(p.0.join("record-prompts"), "").unwrap();
+    s.write(|db| {
+        db.execute_batch(
+            "CREATE TRIGGER fixture_fail_usage BEFORE INSERT ON usage_records
+             WHEN NEW.call_sequence=5
+             BEGIN SELECT RAISE(ABORT,'fixture usage insert failure'); END;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let d = h
+        .dispatch("t".into(), o.clone(), SessionRole::Coordinator, p.route())
+        .await
+        .unwrap();
+    let wire_session = d.session_id().to_owned();
+    for text in [
+        "fixture-usage-reported",
+        "fixture-usage-zero",
+        "fixture-usage-invalid",
+    ] {
+        assert_eq!(d.prompt(text).await.unwrap().stop_reason, "end_turn");
+    }
+    assert_eq!(
+        d.prompt("fixture-usage-refusal").await.unwrap().stop_reason,
+        "refusal",
+    );
+    // The accounting trigger aborts this call's insert but not its own settle
+    // event, and no replay is delivered to the fake engine.
+    assert_eq!(
+        d.prompt("fixture-usage-reported")
+            .await
+            .unwrap()
+            .stop_reason,
+        "end_turn",
+    );
+    let prompt_count = || {
+        std::fs::read_to_string(p.0.join("prompt-log.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    {
+        let turn = d.prompt("fixture-usage-hang");
+        tokio::pin!(turn);
+        tokio::select! {
+            result = &mut turn => panic!("fixture must stay pending: {:?}", result.err()),
+            _ = async {
+                while prompt_count() != 6 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            } => {}
+        }
+        // Drop an already dispatched prompt, as owner/service interruption does.
+    }
+    assert_eq!(
+        d.prompt("fixture-usage-zero").await.err().unwrap().code(),
+        "native_turn_outcome_unknown",
+    );
+    assert_eq!(prompt_count(), 6);
+    d.shutdown().await.unwrap();
+    s.read(|db| {
+        let (attempt, engine_ref): (String, String) = db.query_row(
+            "SELECT c.attempt_id, json_extract(e.payload_json,'$.engine_session_ref')
+             FROM trusted_channels c JOIN runtime_events e
+             ON c.channel_id=json_extract(e.payload_json,'$.channel_id')
+             WHERE c.role='coordinator' AND c.task_id='t' AND e.type='NATIVE_SESSION_CONFIGURED'
+               AND json_extract(e.payload_json,'$.engine')='codex-acp'
+               AND json_extract(e.payload_json,'$.model')='fixture-model'
+               AND json_extract(e.payload_json,'$.session')=?",
+            [&wire_session],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        assert_eq!(engine_ref, format!("native:{attempt}:{wire_session}"));
+        let mut rows = db.prepare(
+            "SELECT call_sequence,basis,tokens_json,stop_reason,failed
+             FROM usage_records WHERE task_id='t' AND attempt_id=? AND engine_session_ref=?
+             ORDER BY call_sequence",
+        )?;
+        let actual = rows
+            .query_map((&attempt, &engine_ref), |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected = [
+            (
+                1,
+                "engine_reported",
+                json!({"inputTokens":4,"outputTokens":2,"cachedReadTokens":9,"totalTokens":15}),
+                Some("end_turn"),
+                0,
+            ),
+            (
+                2,
+                "engine_reported",
+                json!({"totalTokens":0}),
+                Some("end_turn"),
+                0,
+            ),
+            (3, "unknown", json!({}), Some("end_turn"), 0),
+            (
+                4,
+                "engine_reported",
+                json!({"outputTokens":3}),
+                Some("refusal"),
+                0,
+            ),
+            (6, "unknown", json!({}), None, 1),
+        ];
+        assert_eq!(actual.len(), expected.len());
+        for ((seq, basis, tokens, reason, failed), expected) in actual.into_iter().zip(expected) {
+            assert_eq!(
+                (
+                    seq,
+                    basis.as_str(),
+                    serde_json::from_str(&tokens)?,
+                    reason.as_deref(),
+                    failed
+                ),
+                expected,
+            );
+        }
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM runtime_events
+                 WHERE task_id='t' AND type='NATIVE_TURN_SETTLED'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?,
+            5,
+        );
+        Ok(())
+    })
+    .unwrap();
+
+    // A real worker result is retained even though the adapter exits without
+    // returning the last response. A prompt refused before dispatch adds no row.
+    s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'", [])?;
+        db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]','[\"src\"]','execution','running','a',NULL)", [])?;
+        Ok(())
+    }).unwrap();
+    std::fs::write(p.0.join("scenario.txt"), "usage-exit-after-result").unwrap();
+    let w = h
+        .dispatch(
+            "t".into(),
+            o.clone(),
+            SessionRole::Worker {
+                assignment: "a".into(),
+            },
+            p.route(),
+        )
+        .await
+        .unwrap();
+    let args = with_sections(json!({
+        "report":"# Usage exit fixture","summary":"The result was accepted",
+        "checks":[],"request_key":"usage-result"
+    }));
+    assert_eq!(
+        w.prompt(&call("result_submit", args))
+            .await
+            .err()
+            .unwrap()
+            .code(),
+        "native_turn_outcome_unknown",
+    );
+    assert_eq!(
+        h.result_receipt("t".into(), o, "a".into(), "usage-result".into())
+            .await
+            .unwrap()
+            .unwrap()["outcome"],
+        "recorded",
+    );
+    assert!(w.prompt("fixture-usage-zero").await.is_err());
+    let worker_session = w.session_id().to_owned();
+    w.shutdown().await.unwrap();
+    s.read(|db| {
+        let expected = db.query_row(
+            "SELECT attempt_id FROM trusted_channels WHERE task_id='t' AND role='worker'",
+            [],
+            |r| r.get::<_, String>(0),
+        )?;
+        let (attempt, session, seq, basis, tokens, stop, failed) = db.query_row(
+            "SELECT attempt_id,engine_session_ref,call_sequence,basis,tokens_json,stop_reason,failed
+             FROM usage_records WHERE task_id='t' AND attempt_id=?",
+            [&expected],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, Option<String>>(5)?,
+                r.get::<_, i64>(6)?)),
+        )?;
+        assert_eq!(attempt, expected);
+        assert_eq!(session, format!("native:{expected}:{worker_session}"));
+        assert_eq!(
+            (seq, basis.as_str(), tokens.as_str(), stop, failed),
+            (1, "unknown", "{}", None, 1)
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM usage_records", [], |r| r
+                .get::<_, i64>(0))?,
+            6,
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(prompt_count(), 7);
+    drop(s);
+    close(h).await;
+}
+
 async fn result_failure_and_review_refusal_are_not_acceptance() {
     for stage in ["execution", "review"] {
         let p = Project::new();
@@ -7008,6 +7245,16 @@ fn main() {
     )
     .then(command_acceptance::Inputs::new);
     tokio::runtime::Runtime::new().unwrap().block_on(async {
+        if mode == "prompt-usage" {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                prompt_usage_follows_real_native_dispatches(),
+            )
+            .await
+            .expect("prompt usage fixture exceeded deadline");
+            println!("native prompt usage: dispatch, settle, failure and result teardown passed");
+            return;
+        }
         if mode == "verifier-command-acceptance" {
             let inputs = command_acceptance::VerifierInputs::new();
             tokio::time::timeout(
@@ -7175,6 +7422,7 @@ fn main() {
             repeated_configure_transport_loss_stops_with_the_roles_blocker().await;
             inline_result_is_published_once_bound_to_attempt_and_reconciled_after_restart().await;
             result_failure_and_review_refusal_are_not_acceptance().await;
+            prompt_usage_follows_real_native_dispatches().await;
             native_plan_review_verification_journey(false, false, false, false, None).await;
             native_plan_review_verification_journey(true, false, false, false, None).await;
             native_plan_review_verification_journey(false, true, false, false, None).await;
@@ -7188,6 +7436,7 @@ fn main() {
         .expect("native session scenarios exceeded deadline");
     });
     if ![
+        "prompt-usage",
         "recovery-project-operations",
         "answer-replan",
         "verification-drift",

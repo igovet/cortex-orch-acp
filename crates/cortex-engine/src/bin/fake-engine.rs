@@ -709,6 +709,16 @@ pub async fn main() {
                 } else {
                     context
                 };
+                if mode == "desktop-coordinator" && full_scenario.trim() == "usage-refusal-twice" {
+                    wire::write_frame(
+                        &mut output,
+                        &json!({"jsonrpc":"2.0","id":id,
+                            "result":{"stopReason":"refusal","usage":{"totalTokens":2}}}),
+                    )
+                    .await
+                    .unwrap();
+                    continue;
+                }
                 // A degenerate coordinator turn: the model streams its own prompt text back
                 // (`degenerate-once`, only the first coordinator session; every later one
                 // works normally) or loops on one handle (`degenerate-twice`, every
@@ -1118,6 +1128,35 @@ pub async fn main() {
                 } else {
                     raw
                 };
+                if mode == "native-host" && text.starts_with("fixture-usage-") {
+                    if text == "fixture-usage-hang" {
+                        continue;
+                    }
+                    let result = match text {
+                        "fixture-usage-reported" => json!({
+                            "stopReason":"end_turn",
+                            "usage":{"inputTokens":4,"outputTokens":2,"cachedReadTokens":9,
+                                "totalTokens":15,"cost":99,"cumulative":{"totalTokens":900}}
+                        }),
+                        "fixture-usage-zero" => {
+                            json!({"stopReason":"end_turn","usage":{"totalTokens":0}})
+                        }
+                        "fixture-usage-invalid" => {
+                            json!({"stopReason":"end_turn","usage":{"totalTokens":-5}})
+                        }
+                        "fixture-usage-refusal" => {
+                            json!({"stopReason":"refusal","usage":{"outputTokens":3}})
+                        }
+                        _ => panic!("unknown usage fixture"),
+                    };
+                    wire::write_frame(
+                        &mut output,
+                        &json!({"jsonrpc":"2.0","id":id,"result":result}),
+                    )
+                    .await
+                    .unwrap();
+                    continue;
+                }
                 if (mode == "native-host" || mode.starts_with("desktop-"))
                     && text.starts_with("call:")
                 {
@@ -1448,6 +1487,15 @@ pub async fn main() {
                     // A refused call (a JSON-RPC refusal or a structured tool error) opened nothing.
                     let accepted =
                         reply.get("error").is_none() && reply["result"]["isError"] != true;
+                    if mode == "native-host"
+                        && full_scenario.trim() == "usage-exit-after-result"
+                        && params["name"] == "result_submit"
+                    {
+                        assert!(accepted, "{reply}");
+                        relay.kill().await.unwrap();
+                        relay.wait().await.unwrap();
+                        return; // No ACP response for this already accepted result.
+                    }
                     if params["name"] == "user_question_request" && accepted {
                         wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update",
                             "params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk",

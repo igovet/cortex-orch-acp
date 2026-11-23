@@ -1256,7 +1256,8 @@ async fn queued_message_journey() {
 /// the task stops with the `native_turn_degenerate` blocker.
 async fn degenerate_turn_journey(scenario: &str) {
     let f = Fixture::new();
-    let twice = scenario == "degenerate-twice";
+    let refusal = scenario == "usage-refusal-twice";
+    let twice = scenario == "degenerate-twice" || refusal;
     let worker = scenario == "degenerate-worker";
     std::fs::write(f.0.join("project/scenario.txt"), scenario).unwrap();
     let service = Service::bind_native(f.config(), Arc::new(Routes))
@@ -1316,15 +1317,49 @@ async fn degenerate_turn_journey(scenario: &str) {
     .unwrap_or_else(|_| panic!("{scenario}: the degenerate journey did not settle"));
     let (rule, role) = match scenario {
         "degenerate-twice" => ("repetition", "coordinator"),
+        "usage-refusal-twice" => ("refusal", "coordinator"),
         "degenerate-worker" => ("length", "worker"),
         _ => ("echo", "coordinator"),
     };
-    // Each trip is one record: the rule, the message id and its size, never its text.
+    // A streamed trip keeps only the rule, message id and size, never the text.
+    let detail = if refusal {
+        "AND json_extract(payload_json,'$.chars')=0"
+    } else {
+        "AND json_extract(payload_json,'$.message_id') LIKE 'degenerate-%'
+         AND json_extract(payload_json,'$.chars')>0"
+    };
     let trips = count(&format!(
         "SELECT count(*) FROM runtime_events WHERE type='NATIVE_TURN_DEGENERATE'
          AND json_extract(payload_json,'$.rule')='{rule}' AND json_extract(payload_json,'$.role')='{role}'
-         AND json_extract(payload_json,'$.message_id') LIKE 'degenerate-%' AND json_extract(payload_json,'$.chars')>0"
+         {detail}"
     ));
+    if refusal {
+        // The runtime still applies its refusal policy after committing the ACP settle.
+        // The original turn and the fresh-session retry each have one correlated row.
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM (
+                 SELECT id,task_id,payload_json FROM runtime_events
+                 WHERE type='NATIVE_TURN_SETTLED' ORDER BY id LIMIT 2
+                 ) e JOIN usage_records u
+                 ON u.task_id=e.task_id AND u.id=json_extract(e.payload_json,'$.usage_id')
+                 WHERE u.stop_reason='refusal' AND u.failed=1 AND u.call_sequence=1
+                   AND u.basis='engine_reported' AND json_extract(u.tokens_json,'$.totalTokens')=2"
+            ),
+            2
+        );
+        assert_eq!(
+            count(
+                "SELECT count(DISTINCT engine_session_ref) FROM (
+                 SELECT u.engine_session_ref
+                 FROM runtime_events e JOIN usage_records u
+                 ON u.task_id=e.task_id AND u.id=json_extract(e.payload_json,'$.usage_id')
+                 WHERE e.type='NATIVE_TURN_SETTLED' ORDER BY e.id LIMIT 2
+                 )"
+            ),
+            2
+        );
+    }
     // Twice: the no-stop policy then continues the task by itself (and the fixture's
     // model keeps degenerating), so later trips may follow the first two.
     if twice {
@@ -3994,6 +4029,20 @@ fn main() {
             "owner attachments: draft Start, follow-up message and answer retained and delivered to the engine"
         );
         return;
+    }
+    if mode.is_empty() || mode == "prompt-usage-refusal" {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(60),
+                degenerate_turn_journey("usage-refusal-twice"),
+            )
+            .await
+            .expect("prompt usage refusal journey timeout");
+        });
+        println!("settled ACP refusals each account once, including the fresh-session retry");
+        if mode == "prompt-usage-refusal" {
+            return;
+        }
     }
     // The degenerate-turn watchdog: a coordinator-only stop runs on every host; the
     // retried journey runs a worker, which needs the namespace sandbox.

@@ -399,6 +399,15 @@ impl Inner {
         r
     }
     async fn call(&self, method: &str, params: Value, deadline: Option<Duration>) -> Result<Value> {
+        self.call_observed(method, params, deadline, || {}).await
+    }
+    async fn call_observed(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Option<Duration>,
+        sent: impl FnOnce(),
+    ) -> Result<Value> {
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         if id > 9_007_199_254_740_991 {
             return Err(Error::Busy);
@@ -421,6 +430,7 @@ impl Inner {
         }
         self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
             .await?;
+        sent();
         match deadline {
             Some(d) => tokio::time::timeout(d, rx)
                 .await
@@ -875,6 +885,17 @@ impl Engine {
     }
     /// Content is prepared by the trusted host from verified stored input bytes.
     pub async fn prompt_content(&self, s: &Session, blocks: Vec<Value>) -> Result<Value> {
+        self.prompt_content_observed(s, blocks, || {}).await
+    }
+    /// Call `sent` once after a complete outbound prompt frame is written and flushed,
+    /// before awaiting its response. Validation, busy sessions and failed sends do
+    /// not invoke the observer.
+    pub async fn prompt_content_observed(
+        &self,
+        s: &Session,
+        blocks: Vec<Value>,
+        sent: impl FnOnce(),
+    ) -> Result<Value> {
         if blocks.is_empty()
             || blocks
                 .iter()
@@ -892,10 +913,11 @@ impl Engine {
         let _guard = TurnGuard(s.state.clone());
         let r = self
             .inner
-            .call(
+            .call_observed(
                 "session/prompt",
                 json!({"sessionId":s.id,"prompt":blocks}),
                 None,
+                sent,
             )
             .await?;
         if !matches!(

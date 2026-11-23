@@ -3544,15 +3544,15 @@ size is inferred from token totals. Plan percentages are labelled as snapshots
 at route selection, not live account meters. These UI states add no quota reader,
 credential access or network request.
 
-Post-result releases retain the original closed SQLite basis vocabulary and
-use existing `failed`/`stop_reason` columns; no table rebuild or format change
-is needed. Paseo hides only the token alarm for non-failed, explicitly marked
-release calls. It does not infer missing usage as zero/free or suppress genuine
-unknown/failed calls. Interrupted-turn accounting retains only recognized
-nonnegative integer token fields from the exact final response observed within
-the existing cleanup bound; it never reads native account transcripts or treats
-context occupancy as cost. Engine/role coverage remains metadata-only and does
-not change permission, acceptance, termination or storage-format contracts. See
-[usage attribution](docs/features/observability/index.md#2-usagecost-attribution-observabilityusage).
+Task-bound prompt accounting uses the existing immutable usage table and no
+new storage format or authority. It retains task, attempt and session
+identifiers, call sequence, outcome metadata, and validated numeric counters
+from the observed final engine reply. It does not retain raw engine payloads,
+read native account transcripts, or infer cost from context occupancy. A
+missing report stays unknown, including after an accepted result. Legacy
+Paseo reads still recognize previously marked post-result releases.
+A separate best-effort write can log a sanitized error and omit the row
+without changing result acceptance, termination, or replay policy. See
+[usage attribution](docs/features/observability/index.md#2-usagecost-attribution).
 
 Cortex supplies trusted role and route instructions through Claude's session system prompt and a per-session private Codex model instructions file. Task input, project skill listings and recovery context travel in user turns. A pending command reference is scoped to its issuing task and channel. It carries no acceptance authority. A completed command still requires a durable runtime result. Command diagnostics retain the failure class and registration stage without command arguments or paths.

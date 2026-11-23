@@ -3,17 +3,20 @@
 > Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
-Cortex records one `usage_records` row for each engine `session/prompt` call, including coordinator continuations, worker turns, retries, and calls that fail after starting. A row is tied to its exact task, attempt, and engine session. Cortex persists the last token report from that call's `PromptResponse.usage` once. What that report covers depends on the adapter: Claude reports the whole turn, Codex only the turn's **last model request** (see [adapter token semantics](#adapter-token-semantics)). Intermediate `usage_update.used/size` is current context occupancy and is never added to a task token total. It can change within a turn and after compaction.
+Cortex attempts one immutable `usage_records` insert per successfully sent,
+task-bound engine ACP `session/prompt` frame. Coordinator and worker prompts,
+continuations, and real retries are separate calls. Each row is tied to the
+task, execution attempt, and configured session, with a sequence starting at 1
+for that session. Launch/configuration without a sent prompt, taskless short
+text, and model requests internal to an adapter are not counted.
 
-The Pipeline **Task tokens** figure sums reported calls across the task, including the coordinator and every worker attempt. **Coordinator** is the subset whose runtime attempt ID starts with `co_`. A worker card sums reported calls bound to its displayed execution attempt and any audited predecessor route hops for that attempt. These are token counts, not a bill, account quota, or context-window percentage. `totalTokens` is authoritative when present; otherwise the display adds uncached input, output, cache reads, and cache writes. The separate cache figures are already part of the total. Claude and Codex both report cache reads separately from uncached input, so a card can show a small `↑` value beside a large cache-read value.
-
-A call with no recognized token report is **unavailable**, not zero. The UI displays the number of such calls beside known token totals; if every call is unknown, it says **Tokens unavailable**. The observability summary also counts unknown calls separately. The exception to
-this UI alarm is a runtime release after an accepted result: an unknown row with
-`failed=0` and `stop_reason='released_after_result'` is omitted from the UI's
-known/unknown call counts, while diagnostics retain a separate
-`released_after_result_calls` count. Real reported figures are kept; genuine
-unknown/failed calls still show unavailable. This uses existing store columns
-without changing CHECK constraints or format, and never means zero/free usage. It aggregates the full task; its public per-call list remains bounded. Replayed UI events do not create usage records. Repeated real engine prompts, including retries, each create their own record. The installed Claude adapter supplies per-turn `PromptResponse.usage` on a settled prompt, with uncached input, output, cache reads, cache writes and total tokens. If a prompt is interrupted before that response arrives, its partial `usage_update.used/size` still describes context occupancy and cannot be converted into a token total; the call remains explicitly unavailable.
+Workspace task spend sums the reported token counts by configured engine and
+model. It counts a settled prompt once even when that prompt also has a usage
+row; a sent prompt without a settle event is counted from its row. A missing
+or invalid report is **unknown**; an explicit reported zero is **0**. The
+total uses `totalTokens` when reported, otherwise it adds the reported input,
+output, cache-read and cache-write counters. Reasoning tokens are not added
+again. A known subtotal does not establish total consumption or cost.
 
 The Paseo plugin displays per-worker context occupancy (labelled **Context**) and token counts on worker cards. Without a valid context snapshot it says **Context unavailable**, independently of token totals. OpenCode workers instead explain **Context unknown until turn end**: the inspected OpenCode 2.2.0 adapter reports context only when the prompt finishes and its provider-error path skips that update. The explanation remains after an error without a snapshot; real context replaces it with the normal meter. Missing context is never zero or inferred from cumulative tokens.
 
@@ -21,95 +24,37 @@ The custom worker card and worker page also display **plan usage N% (at route se
 
 ## Coverage and interrupted turns
 
-Both installed adapters expose token counts only on the settled
-`session/prompt` response; their top-level `usage_update.used/size` reports
-context occupancy, not token expenditure. A worker released immediately after
-its accepted result may never deliver that final response. No context count,
-quota percentage or missing response can stand in for its tokens.
+The driver records only the normalized token report from the exact final
+response it observes. Intermediate `usage_update.used/size` values describe
+context occupancy, not expenditure. If the transport closes or the prompt is
+interrupted without that response, the row has basis `unknown`, no token data
+and no stop reason. A refused prompt with a valid final report still contributes
+only one call. A worker can publish an accepted result before its adapter's final
+response; losing the response records an unknown prompt, not a failed result.
 
-After an accepted worker or reviewer result, `EngineSessionManagerAdapter.finish_owned`
-lets the exact in-flight prompt finish and persist its usage before ordinary
-teardown, for at most **15 seconds** (`_RESULT_SETTLE_SECONDS`). The turn that
-called `result_submit` usually still writes a closing message. In live dev qualification runs such turns ended 2.5-4.9 s after their result,
-and 4 of 25 were cut by the former 5 s bound, losing their only token report. A turn that ends sooner
-settles at once, so the bound only limits a turn that does not end. The
-reviewer's turn end still precedes verification and completion, so a long
-closing message delays them by at most that bound. This runs on an owned cleanup thread rather
-than blocking the scheduler's dispatch loop. The result remains accepted while
-banking finishes. Capacity and the project writer lock are **not** released early:
-a dependent engine may still queue behind those existing safety boundaries until
-process exit is confirmed. Explicit cancellation and failure cleanup still use
-immediate `terminate_owned`, without this grace period. A replacement manager
-cannot be terminated by the previous manager's cleanup. Engines without
-`finish_owned` keep the original fence: a result-bearing attempt is not torn
-down while its turn is still in flight.
-
-Result acceptance revokes the attempt's worker MCP channel in the same
-transaction, while the turn that called `result_submit` is still running. The
-jailed engine's 1 s authority watchdog therefore gives a revocation caused by the
-attempt's own current `worker_result` a bounded grace of **20 seconds** from its
-first revoked observation instead of terminating the engine at once; settlement
-normally performs the teardown first (the grace exceeds the settlement bound by
-more than one watchdog poll plus controller latency). Terminating at the revocation itself would
-end the engine within a second of its accepted result, before the final
-`PromptResponse.usage` exists, leaving the call unknown with
-`released_after_result`. A revocation without such a result, a superseded
-result, an unprovable result lookup, a coordinator channel and an expired channel
-get no grace. Completion still requires every worker engine to be gone, so the
-last reviewer's turn end (bounded by the settlement) precedes completion.
-
-Runtime shutdown interrupts a pending settlement wait (re-checked every
-50 ms) and performs ordinary teardown at once; no settlement diagnostic is
-recorded for it, and unrecorded counts stay unknown. `finish_owned` called after
-shutdown tears down directly. Shutdown waits at most **5 seconds** in total for
-settlement teardown already in progress. A settlement owns teardown of its exact
-manager, so shutdown does not invoke it a second time if exit remains unconfirmed.
-Thread registration/start is serialized with shutdown; a replacement manager is
-not covered by its predecessor's settlement. Unconfirmed managers, capacity and
-writer locks remain quarantined for a later explicit retry. A teardown stuck
-beyond the join bound is left to
-the existing retained-registry recovery rather than awaited indefinitely.
-
-The existing prompt consumer records one row against its original task, attempt
-and engine session, then signals cleanup. A `usage_settlement` progress event
-records `prompt_recorded` (not a claim that tokens were present) or `timeout`
-with reason `post_result_prompt_settlement_timeout` and
-`usage_coverage: "unavailable"`. At timeout, ordinary teardown SIGTERMs the
-engine and closes the transport; neither installed adapter can send usage after
-that, because its final `PromptResponse` is the only token carrier. The usage
-row stays `unknown` with `released_after_result` (the closed basis vocabulary
-is unchanged); the settlement event is the specific reason for that call. This does not
-backfill historical rows. Historical stores without a retained prompt response
-cannot distinguish an engine that omitted token usage from a response preempted
-by teardown; `released_after_result` alone is not wire-emission evidence.
-
-During the existing bounded abandonment cleanup, `session_manager`
-retains recognized nonnegative integer token fields from a final response that
-actually arrived for that exact call. `live_adapters` consumes those
-counts once before recording the call; final counts replace, rather than add
-to, an earlier report for the same inner turn. A cleanup timeout or transport
-failure without a response remains unknown. An inner turn with only context
-updates also makes a multi-turn call unknown, even if a later turn reports
-tokens. Abandonment itself keeps its original bound; post-result settlement is
-the separate bounded cleanup described above. Result acceptance is unchanged.
-
-The former read-only aggregate timeline output (removed with its Python reader) included `token_coverage` by audited engine and role (coordinator,
-worker, review, or an explicit unattributed bucket). It counts reported,
-unknown and post-result release calls separately and sums only reported fields.
-An empty bucket list means no retained records, not zero consumption. The
-existing cohort `unknown_token_ratio` remains an execution-worker metric;
-coordinator coverage cannot make missing worker cost usable. These are call
-coverage ratios, not the proportion of actual tokens observed, and known
-subtotals are not the cost of the entire verified result. Historical unknown
-rows cannot be repaired without their exact original response.
+Usage recording is best effort on a separate store transaction. An accounting
+error logs a sanitized diagnostic and may leave a missing row; it does not
+change settlement, re-dispatch a prompt, or roll back an accepted result.
+The Rust driver adds no post-result settlement wait. Its existing active-worker
+revocation loop polls every second, allows 10 seconds after first observing
+revocation before requesting cancellation, then waits up to 25 seconds for the
+prompt to end. Neither this accounting nor a missing response changes those
+bounds, capacity release, or completion. Historical rows are not rewritten or
+backfilled. Paseo's older reader still recognizes legacy non-failed
+`released_after_result` rows; new interrupted prompts are not assigned that
+legacy marker.
 
 ## Adapter token semantics
 
-`_token_values` copies the recognized ACP fields
-(`inputTokens`, `outputTokens`, `cachedReadTokens`, `cachedWriteTokens`,
-`thoughtTokens`, `totalTokens`) from the settled `PromptResponse.usage`
-unchanged. Each adapter decides what those fields cover (read from the installed
-adapter bundles):
+The runtime keeps recognized nonnegative, exactly representable integer
+counters (`inputTokens`, `outputTokens`, `cachedReadTokens`,
+`cachedWriteTokens`, `thoughtTokens`, `totalTokens`) from the final
+`PromptResponse.usage` only. Unrecognized fields such as cost and cumulative
+metadata do not enter the record. A recognized but invalid counter (including
+a numeric string) invalidates the report. A reasoning counter on its own
+does not establish a prompt total. What the reported counters cover is
+adapter-specific. The following are historical bundle observations for the
+named versions, not a claim of coverage for every installed adapter:
 
 | Adapter | Scope of `PromptResponse.usage` | Field meaning |
 | --- | --- | --- |

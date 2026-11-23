@@ -12,15 +12,16 @@
 //! or waiting for the owner is never counted as spinning.
 //!
 //! **Spend** is what the engines actually reported: the time the task spent in a working
-//! state, the engine sessions configured for it and the turns they settled, both by engine
-//! and model as the engine confirmed them (`NATIVE_SESSION_CONFIGURED`), and the tokens of
-//! the turns whose engine report is stored in `usage_records`. The Rust runtime does not
-//! write that table yet, so tokens read "not reported" unless a store already holds such rows;
-//! a turn without a report is never counted as zero and no figure is estimated.
+//! state, the sessions and prompts by confirmed engine and model, and the tokens of
+//! prompts whose final engine report is stored in `usage_records`. A prompt without
+//! a report is never counted as zero and no figure is estimated.
 use cortex_core::CoreResult;
 use rusqlite::Connection;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Distinguishes current prompt rows from historical usage records.
+pub(crate) const NATIVE_USAGE_PREFIX: &str = "native_usage:";
 
 /// Runtime states in which a task works by itself.
 pub(crate) const WORKING: [&str; 6] = [
@@ -241,6 +242,22 @@ pub(crate) fn reported_tokens(usage: &Value) -> Option<Value> {
     }
     (!out.is_empty()).then_some(Value::Object(out))
 }
+/// Accept only an exact, useful report from the final ACP response. Unknown fields
+/// (including cost, cumulative data and arbitrary adapter metadata) are never kept.
+pub(crate) fn prompt_reported_tokens(usage: &Value) -> Option<Value> {
+    let map = usage.as_object()?;
+    for field in TOKEN_FIELDS {
+        if let Some(value) = map.get(field) {
+            // ACP numbers cross JSON interfaces implemented with JS numbers.
+            if value.as_u64()? > 9_007_199_254_740_991 {
+                return None;
+            }
+        }
+    }
+    let tokens = reported_tokens(usage)?;
+    (token_total(&tokens)? <= 9_007_199_254_740_991).then_some(tokens)
+}
+
 /// A report's total: `totalTokens` when the engine gave it, else its four counters.
 pub(crate) fn token_total(tokens: &Value) -> Option<u64> {
     if let Some(total) = tokens["totalTokens"].as_u64() {
@@ -253,7 +270,10 @@ pub(crate) fn token_total(tokens: &Value) -> Option<u64> {
         "cachedWriteTokens",
     ];
     let known: Vec<u64> = parts.iter().filter_map(|f| tokens[*f].as_u64()).collect();
-    (!known.is_empty()).then(|| known.iter().sum())
+    if known.is_empty() {
+        return None;
+    }
+    known.into_iter().try_fold(0_u64, u64::checked_add)
 }
 
 /// What one engine and model did for a task.
@@ -265,12 +285,13 @@ pub(crate) struct EngineSpend {
     pub sessions: u64,
     pub turns: u64,
     pub reported_turns: u64,
-    pub tokens: u64,
+    pub tokens: u128,
 }
 /// One usage record: the engine session it belongs to, whether the turn ended with a
 /// reply, and the tokens it reported.
 #[derive(Clone, Debug)]
 pub(crate) struct Usage {
+    pub call_id: Option<String>,
     pub session: String,
     pub failed: bool,
     pub tokens: Option<Value>,
@@ -299,7 +320,9 @@ impl Spend {
     }
     /// The reported tokens; None when no turn reported any.
     pub(crate) fn tokens(&self) -> Option<u64> {
-        (self.reported_turns() > 0).then(|| self.engines.iter().map(|e| e.tokens).sum())
+        (self.reported_turns() > 0)
+            .then(|| self.engines.iter().map(|e| e.tokens).sum::<u128>())
+            .and_then(|n| u64::try_from(n).ok())
     }
     /// The presentation the task page reads (`spend` on the task's facts).
     pub(crate) fn json(&self) -> Value {
@@ -314,7 +337,7 @@ impl Spend {
             "tokens": self.tokens(),
             "engines": self.engines.iter().map(|e| {
                 let mut row = json!({"engine":e.engine,"model":e.model,"sessions":e.sessions,"turns":e.turns,
-                    "reportedTurns":e.reported_turns,"tokens":(e.reported_turns > 0).then_some(e.tokens)});
+                    "reportedTurns":e.reported_turns,"tokens":(e.reported_turns > 0).then(|| u64::try_from(e.tokens).ok()).flatten()});
                 if let Some(label) = &e.model_label { row["modelLabel"] = json!(label); }
                 row
             }).collect::<Vec<_>>(),
@@ -338,6 +361,7 @@ pub(crate) fn compute(state: &str, events: &[Event], usage: &[Usage], now: i64) 
     // The engine and model each channel's session was configured with.
     let mut by_channel: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut by_session: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut by_session_ref = BTreeMap::new();
     let mut engines: BTreeMap<(String, String), EngineSpend> = BTreeMap::new();
     for e in events
         .iter()
@@ -351,6 +375,9 @@ pub(crate) fn compute(state: &str, events: &[Event], usage: &[Usage], now: i64) 
         }
         if let Some(s) = e.payload["session"].as_str() {
             by_session.insert(s.to_owned(), key.clone());
+        }
+        if let Some(reference) = e.payload["engine_session_ref"].as_str() {
+            by_session_ref.insert(reference.to_owned(), key.clone());
         }
         let row = engines.entry(key).or_insert_with(|| EngineSpend {
             engine,
@@ -373,7 +400,11 @@ pub(crate) fn compute(state: &str, events: &[Event], usage: &[Usage], now: i64) 
             ..Default::default()
         })
     }
+    let mut settled_calls = BTreeSet::new();
     for e in events.iter().filter(|e| e.kind == "NATIVE_TURN_SETTLED") {
+        if let Some(id) = e.payload["usage_id"].as_str() {
+            settled_calls.insert(id);
+        }
         let key = e.payload["channel_id"]
             .as_str()
             .and_then(|c| by_channel.get(c).cloned())
@@ -381,18 +412,25 @@ pub(crate) fn compute(state: &str, events: &[Event], usage: &[Usage], now: i64) 
         bucket(&mut engines, key).turns += 1;
     }
     for u in usage {
-        let key = wire_session(&u.session)
-            .and_then(|s| by_session.get(s).cloned())
-            .unwrap_or_else(unknown);
-        let row = bucket(&mut engines, key);
-        // A settled turn is already counted by its event; a turn that ended without a
-        // reply has only this record.
-        if u.failed {
+        let (key, count_turn) = match &u.call_id {
+            Some(id) => (
+                by_session_ref.get(&u.session).cloned(),
+                !settled_calls.contains(id.as_str()),
+            ),
+            None => (
+                wire_session(&u.session).and_then(|s| by_session.get(s).cloned()),
+                u.failed,
+            ),
+        };
+        let row = bucket(&mut engines, key.unwrap_or_else(unknown));
+        // New rows identify their exact settle event, including post-settle failures.
+        // Historical rows keep the old failed/settled counting convention.
+        if count_turn {
             row.turns += 1;
         }
         if let Some(total) = u.tokens.as_ref().and_then(token_total) {
             row.reported_turns += 1;
-            row.tokens += total;
+            row.tokens += u128::from(total);
         }
     }
     let stalled_since = if working { stalled_since(events) } else { None };
@@ -435,13 +473,15 @@ pub(crate) fn read(db: &Connection, task: &str, now: i64) -> CoreResult<Spend> {
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut statement = db.prepare(
-        "SELECT engine_session_ref,failed,basis,tokens_json FROM usage_records WHERE task_id=? ORDER BY created_at LIMIT 20000",
+        "SELECT engine_session_ref,failed,basis,tokens_json,id FROM usage_records WHERE task_id=? ORDER BY created_at LIMIT 20000",
     )?;
     let usage = statement
         .query_map([task], |r| {
             let basis: String = r.get(2)?;
             let tokens: String = r.get(3)?;
+            let id: String = r.get(4)?;
             Ok(Usage {
+                call_id: id.starts_with(NATIVE_USAGE_PREFIX).then_some(id),
                 session: r.get(0)?,
                 failed: r.get::<_, i64>(1)? != 0,
                 tokens: (basis == "engine_reported")
@@ -652,23 +692,27 @@ mod tests {
         ];
         let usage = vec![
             Usage {
+                call_id: None,
                 session: "native:co_1:s1".into(),
                 failed: false,
                 tokens: Some(json!({"inputTokens":10,"outputTokens":5,"totalTokens":1200})),
             },
             Usage {
+                call_id: None,
                 session: "native:co_1:s1".into(),
                 failed: false,
                 tokens: Some(json!({"inputTokens":100,"outputTokens":50})),
             },
             // Codex reported nothing for its turn.
             Usage {
+                call_id: None,
                 session: "native:wa_2:s2".into(),
                 failed: false,
                 tokens: None,
             },
             // A turn that ended without a reply.
             Usage {
+                call_id: None,
                 session: "native:wa_2:s2".into(),
                 failed: true,
                 tokens: None,
@@ -711,6 +755,154 @@ mod tests {
     }
 
     #[test]
+    fn spend_reads_exact_prompt_rows_and_legacy_rows_from_sqlite() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("../../cortex-core/src/store/schema.sql"))
+            .unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             INSERT INTO tasks VALUES ('t','/fixture','2026-01-01'), ('other','/fixture','2026-01-01');
+             INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at)
+             VALUES ('t','EXECUTING','Fixture','2026-01-01','2026-01-01'),
+                    ('other','EXECUTING','Fixture','2026-01-01','2026-01-01');",
+        )
+        .unwrap();
+        let event = |kind, payload: Value| {
+            db.execute(
+                "INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at)
+                 VALUES ('t',?,'runtime',?,'2026-01-01')",
+                (kind, payload.to_string()),
+            )
+            .unwrap();
+        };
+        let row = |task, id, attempt, session, seq, basis, tokens: Value, failed| {
+            db.execute(
+                "INSERT INTO usage_records(id,task_id,attempt_id,engine_session_ref,
+                 call_sequence,basis,tokens_json,failed,created_at)
+                 VALUES (?,?,?,?,?,?,?,?,'2026-01-01')",
+                (
+                    id,
+                    task,
+                    attempt,
+                    session,
+                    seq,
+                    basis,
+                    tokens.to_string(),
+                    failed,
+                ),
+            )
+            .unwrap();
+        };
+        // The same wire session ID can be returned by independent engine processes.
+        event(
+            "NATIVE_SESSION_CONFIGURED",
+            json!({"session":"same","channel_id":"c","engine_session_ref":"native:co:same",
+                "engine":"codex-acp","model":"gpt"}),
+        );
+        event(
+            "NATIVE_SESSION_CONFIGURED",
+            json!({"session":"same","channel_id":"w","engine_session_ref":"native:worker:same",
+                "engine":"claude-agent-acp","model":"opus"}),
+        );
+        event(
+            "NATIVE_SESSION_CONFIGURED",
+            json!({"session":"legacy","channel_id":"old","engine":"opencode","model":"legacy"}),
+        );
+        event(
+            "NATIVE_TURN_SETTLED",
+            json!({"channel_id":"c","usage_id":"native_usage:native:co:same:1","stop_reason":"refusal"}),
+        );
+        row(
+            "t",
+            "native_usage:native:co:same:1",
+            "co",
+            "native:co:same",
+            1,
+            "unknown",
+            json!({}),
+            1,
+        );
+        row(
+            "t",
+            "native_usage:native:worker:same:1",
+            "worker",
+            "native:worker:same",
+            1,
+            "unknown",
+            json!({}),
+            1,
+        );
+        let unknown = read(&db, "t", 0).unwrap().json();
+        assert_eq!(unknown["turns"], 2);
+        assert_eq!(unknown["reportedTurns"], 0);
+        assert_eq!(unknown["tokens"], Value::Null);
+
+        event(
+            "NATIVE_TURN_SETTLED",
+            json!({"channel_id":"c","usage_id":"native_usage:native:co:same:2"}),
+        );
+        row(
+            "t",
+            "native_usage:native:co:same:2",
+            "co",
+            "native:co:same",
+            2,
+            "engine_reported",
+            json!({"totalTokens":0}),
+            0,
+        );
+        let zero = read(&db, "t", 0).unwrap().json();
+        assert_eq!(zero["tokens"], 0);
+        assert_eq!(zero["reportedTurns"], 1);
+        assert_eq!(zero["turns"], 3);
+
+        event("NATIVE_TURN_SETTLED", json!({"channel_id":"old"}));
+        row(
+            "t",
+            "legacy-id",
+            "old",
+            "native:old:legacy",
+            1,
+            "engine_reported",
+            json!({"inputTokens":12}),
+            0,
+        );
+        row(
+            "other",
+            "native_usage:native:other:same:1",
+            "other",
+            "native:other:same",
+            1,
+            "engine_reported",
+            json!({"totalTokens":3000}),
+            0,
+        );
+        // A committed settle still contributes a turn if its separate write failed.
+        event(
+            "NATIVE_TURN_SETTLED",
+            json!({"channel_id":"w","usage_id":"native_usage:native:worker:same:2"}),
+        );
+        let shown = read(&db, "t", 0).unwrap().json();
+        assert_eq!(shown["tokens"], 12);
+        assert_eq!(shown["reportedTurns"], 2);
+        assert_eq!(shown["turns"], 5);
+        let engines = shown["engines"].as_array().unwrap();
+        assert_eq!(engines[0]["engine"], "claude-agent-acp");
+        assert_eq!(engines[0]["model"], "opus");
+        assert_eq!(engines[0]["turns"], 2);
+        assert_eq!(engines[0]["tokens"], Value::Null);
+        assert_eq!(engines[1]["engine"], "codex-acp");
+        assert_eq!(engines[1]["model"], "gpt");
+        assert_eq!(engines[1]["turns"], 2);
+        assert_eq!(engines[1]["tokens"], 0);
+        assert_eq!(engines[2]["model"], "legacy");
+        assert_eq!(engines[2]["tokens"], 12);
+        assert!(db
+            .execute("UPDATE usage_records SET failed=0 WHERE id='legacy-id'", [])
+            .is_err());
+    }
+
+    #[test]
     fn reasons_are_plain_short_and_newest_first() {
         let events = vec![
             ev("VERIFICATION_FAILED", json!({}), 1),
@@ -738,6 +930,20 @@ mod tests {
     fn usage_keeps_only_reported_integer_fields() {
         assert_eq!(reported_tokens(&Value::Null), None);
         assert_eq!(reported_tokens(&json!({"cost":1.5})), None);
+        for invalid in [
+            json!({"totalTokens":-1,"outputTokens":2}),
+            json!({"totalTokens":1.5}),
+            json!({"totalTokens":"0"}),
+            json!({"totalTokens":9_007_199_254_740_992_u64}),
+            json!({"thoughtTokens":5}),
+            json!({"used":25,"size":100,"cumulative":{"totalTokens":25}}),
+        ] {
+            assert_eq!(prompt_reported_tokens(&invalid), None, "{invalid}");
+        }
+        assert_eq!(
+            prompt_reported_tokens(&json!({"totalTokens":0,"cost":8})),
+            Some(json!({"totalTokens":0}))
+        );
         assert_eq!(
             reported_tokens(&json!({"inputTokens":3,"outputTokens":-1,"totalTokens":9,"x":1})),
             Some(json!({"inputTokens":3,"totalTokens":9}))

@@ -645,9 +645,9 @@ capabilities describe initial prompt admission, not full legacy attachment or
 engine-capability coverage. A schema-valid exchange is not proof of smoke
 capability, rendered client behavior, live accounts or release readiness.
 
-Token usage is unavailable: the Rust runtime writes no `usage_records` rows (the
-table remains in the store schema and is only read and cleaned up), so per-task
-and per-attempt token counts are not recorded and readers of that table find none.
+The Rust runtime records best-effort [token usage](../features/token-and-plan-usage/index.md)
+for dispatched task-bound engine prompts. Workspace spend uses reported counts;
+an omitted, invalid or lost final report is unknown, not zero.
 
 ### Launch status
 

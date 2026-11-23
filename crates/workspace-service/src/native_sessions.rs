@@ -778,10 +778,12 @@ impl NativeHost {
                 // The engine's name for the model (an alias such as `default` reads with the
                 // model it resolves to); absent when the engine names nothing better than the id.
                 if let Some(label) = model_label { configured["model_label"] = json!(label); }
+                let s_id = s.id().to_owned();
                 receive(self.executor.write(move |db| {
                     let i = channels::authenticate(db,&c.channel_id,c.secret(),false)?;
                     lifecycle::event_tx(db,&i.task,"NATIVE_ACCESS_MODE_CONFIRMED",
                         json!({"channel_id":c.channel_id,"mode":selected,"access":access,"session":i.session}))?;
+                    configured["engine_session_ref"] = json!(format!("native:{}:{}", i.attempt, s_id));
                     lifecycle::event_tx(db,&i.task,"NATIVE_SESSION_CONFIGURED",configured)?;
                     Ok(())
                 }).map_err(engine_error)?).await.map_err(engine_error)?;
@@ -915,6 +917,7 @@ impl NativeHost {
             policy,
             delivered_attachments: std::sync::Mutex::new(std::collections::HashSet::new()),
             refusal_is_degenerate: std::sync::atomic::AtomicBool::new(false),
+            dispatched_prompts: std::sync::atomic::AtomicI64::new(0),
         })
     }
 }
@@ -979,7 +982,81 @@ pub struct SessionDriver {
     /// Whether an ACP `refusal` stop ends a turn as degenerate (set for runtime-driven
     /// turns; see [`SessionDriver::treat_refusal_as_degenerate`]).
     refusal_is_degenerate: std::sync::atomic::AtomicBool,
+    dispatched_prompts: std::sync::atomic::AtomicI64,
 }
+
+/// A dispatched prompt is banked once, even when an outer runtime select drops
+/// the prompt future. Queue on drop, before any subsequent session shutdown
+/// write, without awaiting the accounting transaction on the turn's path.
+struct PromptUsage<'a> {
+    executor: &'a StoreExecutor,
+    runtime: tokio::runtime::Handle,
+    task: String,
+    attempt: String,
+    session: String,
+    call: std::sync::OnceLock<(String, i64)>,
+    reason: Option<String>,
+    tokens: Option<Value>,
+    failed: bool,
+}
+
+impl Drop for PromptUsage<'_> {
+    fn drop(&mut self) {
+        let Some((id, sequence)) = self.call.take() else {
+            return;
+        };
+        let (task, attempt, session) = (
+            std::mem::take(&mut self.task),
+            std::mem::take(&mut self.attempt),
+            std::mem::take(&mut self.session),
+        );
+        let reason = self.reason.take();
+        let (basis, tokens) = match self.tokens.take() {
+            Some(tokens) => ("engine_reported", tokens.to_string()),
+            None => ("unknown", "{}".into()),
+        };
+        let failed = self.failed;
+        match self.executor.write(move |db| {
+            db.execute(
+                "INSERT INTO usage_records(id,task_id,attempt_id,engine_session_ref,
+                 call_sequence,basis,tokens_json,stop_reason,failed,created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    id,
+                    task,
+                    attempt,
+                    session,
+                    sequence,
+                    basis,
+                    tokens,
+                    reason,
+                    failed,
+                    cortex_core::now(),
+                ),
+            )?;
+            Ok(())
+        }) {
+            Ok(receipt) => {
+                self.runtime.spawn(async move {
+                    if let Err(error) = receive(receipt).await {
+                        usage_write_diagnostic(&error);
+                    }
+                });
+            }
+            Err(error) => usage_write_diagnostic(&error),
+        }
+    }
+}
+
+fn usage_write_diagnostic(error: &CoreError) {
+    use std::io::Write as _;
+    let _ = writeln!(
+        std::io::stderr(),
+        "workspace-service: prompt usage was not recorded ({})",
+        error.code()
+    );
+}
+
 impl SessionDriver {
     fn root_for_input(&self) -> PathBuf {
         let channel = workspace_protocol::channel::current();
@@ -1015,6 +1092,17 @@ impl SessionDriver {
             .map_err(engine_error_to_core)?;
         let worker = identity.role == "worker";
         let writer = worker && !crate::native_engine_policy::read_only(&identity);
+        let mut usage = PromptUsage {
+            executor: &self.executor,
+            runtime: tokio::runtime::Handle::current(),
+            session: format!("native:{}:{}", identity.attempt, self.session.id()),
+            task: identity.task.clone(),
+            attempt: identity.attempt,
+            call: std::sync::OnceLock::new(),
+            reason: None,
+            tokens: None,
+            failed: true,
+        };
         let task = identity.task;
         let root = self.root_for_input();
         let stored = receive(self.executor.read(move|db|{
@@ -1070,7 +1158,21 @@ impl SessionDriver {
         } else {
             None
         };
-        let pending = self.engine.prompt_content(&self.session, blocks);
+        let call = &usage.call;
+        let session_ref = &usage.session;
+        let pending = self
+            .engine
+            .prompt_content_observed(&self.session, blocks, || {
+                let sequence = self
+                    .dispatched_prompts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                let id = format!(
+                    "{}{session_ref}:{sequence}",
+                    crate::notifier::progress::NATIVE_USAGE_PREFIX,
+                );
+                let _ = call.set((id, sequence));
+            });
         tokio::pin!(pending);
         let mut updates = 0;
         let mut compacted = false;
@@ -1142,6 +1244,10 @@ impl SessionDriver {
                 }
             }
         };
+        if let Ok(reply) = &result {
+            usage.reason = reply["stopReason"].as_str().map(str::to_owned);
+            usage.tokens = crate::notifier::progress::prompt_reported_tokens(&reply["usage"]);
+        }
         // The prompt reply may win select while earlier notifications remain
         // queued. Persist those too; never count a reply as activity evidence.
         for event in self.engine.drain_events().await {
@@ -1179,6 +1285,7 @@ impl SessionDriver {
         let reason = result["stopReason"].as_str().unwrap().to_owned();
         let credential = self.credential.clone();
         let recorded = reason.clone();
+        let usage_id = usage.call.get().map(|(id, _)| id.clone());
         receive(self.executor.write(move |db| {
             // A valid tool may already have advanced or revoked this channel.
             let task: String = db.query_row(
@@ -1192,7 +1299,7 @@ impl SessionDriver {
                 db,
                 &task,
                 "NATIVE_TURN_SETTLED",
-                json!({"channel_id":credential.channel_id,"stop_reason":recorded,"writer":writer}),
+                json!({"channel_id":credential.channel_id,"stop_reason":recorded,"writer":writer,"usage_id":usage_id}),
             )?;
             Ok(())
         })?)
@@ -1208,6 +1315,7 @@ impl SessionDriver {
                 .await?;
             return Err(CoreError::Refused("native_turn_degenerate"));
         }
+        usage.failed = false;
         Ok(Turn {
             stop_reason: reason,
             updates,
