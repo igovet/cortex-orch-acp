@@ -4,7 +4,7 @@
 
 ## Goal
 
-Expose `execution.steer`, `execution.stop` and `execution.recheck` as structured, idempotent commands in the Workspace contract. Back each command with the runtime's existing operations: the durable steering event, cancellation, and recheck after a foreign change. Each command must work without the Paseo plugin. Pause and resume are not advertised until the runtime has a real implementation and a capability test. ACP turn cancellation is not treated as a safe pause.
+Expose `execution.steer`, `execution.stop` and `execution.recheck` as structured, idempotent commands in the Workspace contract. Back each command with the runtime's existing operations: the durable steering event, cancellation, and recheck after a foreign change. Each command must work without the Paseo plugin. Owner Stop is a real pause: it records a durable `PAUSED` hold, and an owner Resume (a versioned `executions.control` action) restores the saved state ([Task Stop and Resume](../local-task-execution.md#task-stop-and-resume)). ACP turn cancellation is still not treated as a safe pause.
 
 ## Requirements
 
@@ -42,7 +42,7 @@ Negative:
 - A second steer from the same identity returns an explicit duplicate receipt, not silence.
 - A steer does not change effective grants unless the resolved `deny_write` behavior is documented and tested to do so.
 - A stop whose outcome is ambiguous is reported as unknown and is not retried automatically.
-- `execution.pause` and `execution.resume` do not appear in the capability list.
+- Resume is refused on a stale display version, a changed owner epoch, an unconfirmed owner process exit, and any cancelled, failed, closed or unknown task; no UI control offers it there.
 
 ## Dependencies
 
@@ -55,7 +55,7 @@ Negative:
 - `steer-cancelled-refused`: typed refusal for a cancelled task.
 - `stop-owned-children`: owned process groups are stopped; ambiguous stop reports unknown.
 - `recheck-new-execution`: a new execution is created; the old one is unchanged.
-- `pause-not-advertised`: the capability list omits pause and resume.
+- `pause-resume-journey`: the `paused-checkpoint` scenario of `binary_journey` in `crates/workspace-service/tests/native_desktop.rs` pauses a task with retained worker progress, kills the service process (SIGKILL), restarts the same binary and resumes with the current version; identities, history and files are unchanged, interrupted work gets a fresh attempt, and no finished work is replayed. The `hold` and `command-restart-lost` scenarios cover no-click automatic recovery and an unresolved command that stays held and is not relaunched. The component tests in `packages/workspace-ui/test/recovery-controls.test.tsx` cover which control each state shows.
 
 ## Documentation impact
 

@@ -18,7 +18,7 @@ cancels or replans, and never invents a user message or answer. Only explicit Re
 and an owner message to a waiting, held or reopened task replan at once; a message to
 a working task interrupts nothing and reaches the coordinator at its next boundary
 (see [steering](../steering-and-questions/index.md)). Stopping an individual worker still
-cancels its wait. See [Workspace Stop and Resume](../../cortex-workspace/local-task-execution.md#task-stop-and-resume).
+cancels its wait. Cancelled and failed tasks are final and are not resumed; a new owner message may reopen eligible finished work with a fresh plan. See [Workspace Stop and Resume](../../cortex-workspace/local-task-execution.md#task-stop-and-resume), which also lists the status and action each state shows and the tests that cover Stop and a real service restart.
 
 The task state machine (`crates/cortex-core/src/lifecycle`) is:
 

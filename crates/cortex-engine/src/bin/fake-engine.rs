@@ -3,6 +3,12 @@ use cortex_engine::wire;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use tokio::io::{AsyncWriteExt, BufReader};
+
+pub const CHECKPOINT_SCENARIO: &str = "rolling-checkpoint";
+pub const CHECKPOINT_ANSWER: &str = "Keep the restart checkpoint output";
+pub const CHECKPOINT_ANSWER_LOG: &str = "checkpoint-answer-deliveries";
+pub const CHECKPOINT_COMMAND: &str = "checkpoint-broker-command";
+
 fn config(value: &str) -> Value {
     config_with(value, "medium")
 }
@@ -274,7 +280,9 @@ pub async fn main() {
                 },
                 _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
                     let scenario = std::fs::read_to_string("scenario.txt").unwrap_or_default();
-                    if !scenario.contains("hold") && scenario.trim() != "rolling" {
+                    if !scenario.contains("hold")
+                        && !matches!(scenario.trim(), "rolling" | CHECKPOINT_SCENARIO)
+                    {
                         for (sid, mut frame) in releasable.drain() {
                             held.remove(&sid);
                             frame["__fixture_released"] = json!(true);
@@ -688,6 +696,22 @@ pub async fn main() {
                     *n += 1;
                 }
                 let full_scenario = std::fs::read_to_string("scenario.txt").unwrap_or_default();
+                let checkpoint = full_scenario.trim() == CHECKPOINT_SCENARIO;
+                let rolling = checkpoint || full_scenario.trim() == "rolling";
+                let checkpoint_answer = mode.starts_with("desktop-")
+                    && raw.rsplit("\n\n").next() == Some(CHECKPOINT_ANSWER)
+                    && (checkpoint || std::path::Path::new(CHECKPOINT_ANSWER_LOG).exists());
+                if checkpoint_answer {
+                    // Record actual ACP prompt delivery, not just the runtime's claim.
+                    // Also observe a delivery on a fresh session after the scenario changes.
+                    use std::io::Write as _;
+                    let mut log = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(CHECKPOINT_ANSWER_LOG)
+                        .unwrap();
+                    writeln!(log, "delivered").unwrap();
+                }
                 // Reports whether this worker or reviewer session was given the owner's
                 // task language, in words the test can find in the retained transcript.
                 if full_scenario.trim() == "language-ru"
@@ -857,9 +881,9 @@ pub async fn main() {
                     || scenario.trim() == "guidance" && *n == 1
                     || scenario.trim() == "guidance-preempt" && *n <= 2
                     || scenario.trim() == "stop-siblings" && !is_second
-                    || scenario.trim() == "rolling" && is_second
+                    || mode == "desktop-worker" && rolling && is_second
                 {
-                    if scenario.trim() == "hold" || scenario.trim() == "rolling" && is_second {
+                    if scenario.trim() == "hold" || rolling && is_second {
                         releasable.insert(sid.clone(), r.clone());
                     }
                     held.insert(sid, id);
@@ -950,13 +974,16 @@ pub async fn main() {
                         if full_scenario == "separate-task-hold" {
                             tasks[0]["scope"] = json!(["separate.txt"]);
                         }
+                        if checkpoint {
+                            tasks[0]["scope"] = json!(["work.txt", CHECKPOINT_ANSWER_LOG]);
+                        }
                         if full_scenario.trim() == "stop-siblings"
-                            || full_scenario.trim() == "rolling"
+                            || rolling
                             || full_scenario == "reconcile-worker-replan"
                         {
                             tasks.as_array_mut().unwrap().push(json!({"id":"second","role":"backend-dev","objective":"Change other.txt","dependencies":[],"scope":["other.txt"],"model":"auto"}));
                         }
-                        if full_scenario.trim() == "rolling" {
+                        if rolling {
                             tasks.as_array_mut().unwrap().push(json!({"id":"third","role":"backend-dev","objective":"Change third.txt after work.txt","dependencies":["work"],"scope":["third.txt"],"model":"auto"}));
                         }
                         // Owner messages handed over after verified work: this fixture's
@@ -1015,6 +1042,13 @@ pub async fn main() {
                         );
                         wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Guidance observed in same worker session."}}}})).await.unwrap();
                         json!({"name":"ask_question","arguments":{"question":"Guidance received; next?","options":["Continue","Wait"],"request_key":"guidance-question"}})
+                    } else if mode == "desktop-worker" && checkpoint
+                        && assignment["node"] == "work" && *n == 1
+                    {
+                        json!({"name":"ask_question","arguments":{
+                            "question":"Keep this output before pausing?",
+                            "options":[CHECKPOINT_ANSWER,"Discard the checkpoint output"],
+                            "request_key":"checkpoint-question"}})
                     } else if scenario.trim() == "batch" && *n == 1 {
                         json!({"name":"ask_question","arguments":{"questions":[
                             {"question":"Which output?","options":["Detailed","Brief"]},
@@ -1353,6 +1387,36 @@ pub async fn main() {
                     }
                     if mode == "desktop-worker" || mode == "desktop-reviewer" {
                         assert!(!tools.iter().any(|t| t["name"] == "list_route_options"));
+                    }
+                    if checkpoint && checkpoint_answer {
+                        assert_eq!(mode, "desktop-worker");
+                        assert_eq!(*n, 2, "answer must continue the original worker");
+                        let call = async |input: &mut tokio::process::ChildStdin,
+                                          output: &mut BufReader<tokio::process::ChildStdout>,
+                                          id: u64, name: &str, arguments: Value| {
+                            wire::write_frame(input, &json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                                "params":{"name":name,"arguments":arguments}})).await.unwrap();
+                            let reply = wire::read_frame(output).await.unwrap().unwrap();
+                            assert!(reply.get("error").is_none() && reply["result"]["isError"] != true, "{reply}");
+                            reply["result"]["structuredContent"].clone()
+                        };
+                        let mut receipt = call(&mut stdin, &mut stdout, 50, "command_run", json!({
+                            "argv":["/bin/echo",CHECKPOINT_COMMAND],
+                            "timeout_seconds":10,"request_key":CHECKPOINT_COMMAND
+                        })).await;
+                        let reference = receipt["tool_call_ref"].as_str().unwrap().to_owned();
+                        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                            let mut id = 50;
+                            while receipt["settled"] == false {
+                                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                                id += 1;
+                                receipt = call(&mut stdin, &mut stdout, id, "command_status",
+                                    json!({"tool_call_ref":reference})).await;
+                            }
+                        }).await.expect("checkpoint broker command did not settle");
+                        assert_eq!(receipt["settled"], true, "{receipt}");
+                        assert_eq!(receipt["exit_code"], 0, "{receipt}");
+                        assert_eq!(receipt["output"], format!("{CHECKPOINT_COMMAND}\n"), "{receipt}");
                     }
                     let plain_pending_turn = scenario.trim() == "pending-end-turn"
                         && params["name"] == "result_submit"

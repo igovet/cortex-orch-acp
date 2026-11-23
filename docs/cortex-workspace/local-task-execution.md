@@ -1410,9 +1410,10 @@ without a plan, planning is cancelled with a readable note. A planning task that
 fails or is cancelled cancels planning with a readable note. **Stop** pauses the
 planning task; **Resume planning** resumes it, asks the same task to continue
 after a cancelled plan, or starts a new planning task when the previous one
-ended. A message in the sprint conversation asks the same planning task for
-changes and disables **Create tasks** until its revised plan is ready; a
-failed revision keeps the previous proposal visible for reference. Planning,
+ended. When a planning task can receive a prompt, a message in the sprint
+conversation asks that task for changes and disables **Create tasks** until
+its revised plan is ready. A failed revision keeps the previous proposal
+visible for reference. Planning,
 resuming and revising never create or run the sprint's tasks. Create tasks
 materializes the plan, and the service then closes the planning task as done.
 Closing or deleting the sprint stops a working planning task through
@@ -1420,6 +1421,41 @@ its execution control. A sprint saved by an earlier version whose
 description-only planning was interrupted keeps its cancelled state and note;
 an answer or Resume planning starts a planning task with the description and
 the saved conversation.
+
+A failure that cancels planning saves a reason, step, code and timestamp on
+the sprint, with the same reason in the conversation. An owner stop is not a
+failure. If Start is refused or its reply is lost, the service checks for a
+committed execution. A confirmed never-started draft is unlinked in the same
+write as the failure and stays in task history; a committed execution keeps
+its link. If the check cannot be completed, the service does not assume it
+can start a replacement.
+
+**Retry planning** starts a fresh planning task when no execution was ever
+started, including for older failed sprints that still link the draft.
+**Change request** on a failed sprint with no live execution saves the
+message and requests a fresh planning task in one operation. Both use the
+current description, saved answers, messages and file references. If the
+combined request exceeds 32,000 characters (including planning instructions
+and saved conversation), the failure shows its length and limit. The owner
+can replace the original description and restart planning without deleting
+attachments, answers, the proposal or its history. These recovery actions
+clear the active failure, not its conversation event. Recovery requires an
+owner action; a failed start never launches a replacement by itself.
+
+These are project-scoped `machine.call` operations with `op: "product.sprint"`:
+`patch {sprintId, patch: {planning: "planning"}}` requests a retry,
+`recover_planning_message {sprintId, text, attachments?}` saves a recovery
+message (files are references), and `replace_planning_request {sprintId,
+description}` replaces the text after `planning_request_invalid`. Send the
+action name in `params.action`. Both recovery actions refuse if the sprint
+is closed, deleting, materialized, no longer failed or still has a live
+execution. A successful `{done: true}` records the owner change and requests
+planning; it does not certify that the subsequent start succeeded.
+
+Separately, if three consecutive service passes fail to check or advance
+planning, the service saves one warning and adds one conversation event
+without stopping planning. The service keeps checking and clears the
+active warning on the next successful pass; the conversation event remains.
 
 #### Reading relationships and prior results
 
@@ -1624,11 +1660,9 @@ sprint. For an open automated worker check, acceptance requires a retained techn
 and the owner's explicit acknowledgement; manual items need no acknowledgement. Missing checks and real test failures
 cannot be waived by that acknowledgement.
 
-Maintenance checks eligible records roughly once per minute while the activated
-service child runs. Done records are eligible for archive after the machine's
-auto-archive interval (default seven days). A done record is archived without a question, with its work kept; a record saved with the retired archive-question fields loads as an ordinary Done or archived task and shows no question. Archive retention defaults to 30 days
-and is machine-configurable. Purge requires archived state and checks live or
-unknown execution protection. Runtime deletion reuses the existing exclusive-lock,
+<a id="storage-retention"></a>
+Maintenance runs once when a local project is activated and then every 60 minutes while the service runs (a service-owned loop, separate from sprint execution; passes are coalesced and never overlap). Done records are eligible for archive after the machine's
+auto-archive interval `autoArchiveDays` (default seven days). A done record is archived without a question, with its work kept; a record saved with the retired archive-question fields loads as an ordinary Done or archived task and shows no question. Archive retention `retentionDays` defaults to 30 days, counted from the archive time, and is machine-configurable. The background purge is on by default (`automaticArchivePurge`: `true`) and can be switched off; the manual "Run cleanup now" is independent of that switch. Purge requires archived state (previously Done), an affirmative closure (merged, closed as-is by the owner, cancelled or closed externally) and a verified linked execution whose runtime state is COMPLETED, FAILED or CANCELLED. Paused, blocked, executing, awaiting-decision, unclosed, unlinked or ambiguous records, loaded sessions and unsettled attempts, processes or reservations are never purged, and eligibility and age are rechecked at the deletion fence. A scheduled pass never forces, and a transient refusal is retried at a later pass without writing a blocker. Unreferenced attachment files are swept by the same pass after `unreferencedAttachmentRetentionDays` (default 1). Runtime deletion reuses the existing exclusive-lock,
 journaled retention cleanup and reports SQLite checkpoint/VACUUM outcomes. Storage shows a persistent count of purged records with failed space reclamation, including explicit purges, and a per-maintenance-run count.
 Dirty worktrees explicitly allowed for discard can still be retained rather than
 force-removed; their Git branch and files remain available. Owner queue/comment
@@ -1771,7 +1805,7 @@ No storage migration or wire-version change is required.
 
 ## Short model texts
 
-Task titles, commit messages and pull request texts use one mechanism
+Task titles, commit messages, outgoing Push summaries and pull request texts use one mechanism
 (`crates/workspace-service/src/machine/short_text.rs`, route choice in
 `crates/workspace-service/src/native_routes/short_text.rs`).
 
@@ -1807,14 +1841,15 @@ Task titles, commit messages and pull request texts use one mechanism
   no runtime task or channel, writes nothing to a project store, takes no
   `machine.lock` and never appears in a task's history. At most two runs go at
   once; a job over that uses its fallback text.
-- Jobs: `generate_title` and `draft_integration_text` return `{"jobId"}` at once;
-  `short_text_poll` with `taskId` and `jobId` returns `{"state":"running"}` or the
-  finished job with `source` (`model` or `fallback`), `reason` and `route`
+- Jobs: `generate_title`, `draft_integration_text`, `draft_checkout_commit` and
+  `draft_push_summary` return `{"jobId"}`. `short_text_poll` takes the job ID and,
+  for task-bound jobs only, the task ID. A finished job reports `source`
+  (`model`, `fallback`, or `saved` for a PR body from Push), `reason` and `route`
   (engine, model, connection id, tier, plan reading and choice reason). None of
   them takes `machine.lock` or waits for a model. Jobs live in the service's
   memory for ten minutes; after a restart a poll is refused as `unknown_job`.
 - Diagnostics: `short-text.log` in the service log folder records
-  `short_text_selected`, `short_text_generated` and `short_text_fallback` with
+  `short_text_selected`, `short_text_generated`, `short_text_fallback` and `short_text_saved_push` with
   purpose, engine, model, connection id, tier, plan reading, choice reason,
   outcome code and duration. It never records a prompt, a description, a diff
   or an answer.
@@ -1963,6 +1998,21 @@ no Stop in the composer. Where a machine offers no message composer, Start, Stop
 Resume stay in the title band. A sprint's planning composer works the same way: Stop
 cancels planning and Resume continues it.
 
+One rule (`resumeState` in `packages/workspace-ui/src/session-model.ts`, read from the existing task projection only) decides the status text and the single action for the board card, task menu, command palette, title band, status strip and composer:
+
+| Situation | Status shown | Action |
+| --- | --- | --- |
+| Owner Stop | Paused by you | Resume (versioned) |
+| Interrupted turn or recovery hold waiting for the owner | Interrupted or Stopped, waits for you | Continue, or send a message |
+| Safe automatic recovery (worker lost, service restart) | Recovering automatically | None; the service continues from the recorded state and replays nothing |
+| Owned process exit or effect unconfirmed | Waiting for exit evidence, or for processes to stop | None; the reason is shown, and Resume and Continue stay off, also on a paused task |
+| Cancelled or failed run, closed task | The run is final and cannot be resumed | None; a new message may reopen eligible finished work with a fresh plan, otherwise Close task |
+| Unknown or offline | Unavailable until the task's state is confirmed | None |
+
+Stop keeps its behavior. Before the runtime exists (an engine launch still opening) there is nothing to pause, so Stop cancels the launch and the task is stopped. A paused task keeps its changes in the existing checkout: the service reports `taskWorktrees: false`, so tasks run in the project folder and no dedicated task worktree holds them. A restart of the service does not discard or replay them.
+
+Coverage, all no-paid: the `paused-checkpoint`, `hold` and `command-restart-lost` scenarios of `binary_journey` in `crates/workspace-service/tests/native_desktop.rs` start the compiled service with fake engines in a disposable Git project. The first pauses a task after worker progress, kills the service with SIGKILL, restarts the same binary and resumes with the current version: task, plan, node, report and attempt identities, history order and file contents are unchanged, the interrupted node gets a fresh attempt and the task completes without repeated side effects. `hold` continues without any owner click, and `command-restart-lost` keeps an unresolved command held and never relaunches it. `packages/workspace-ui/test/recovery-controls.test.tsx` covers each row of the table, including that terminal and unknown states offer neither Resume nor Continue. Rendered installed-desktop qualification of these controls was not run. A safe service-restart re-drive of a manual task cannot be told apart from other holds in the existing projection, so the UI does not label it separately.
+
 A started task whose runtime row does not exist yet (its coordinator's engine is
 still opening) projects as `starting`, not unknown, as long as its start, session
 and owner facts agree. Retry recovery may advance the owner epoch beyond the original launch binding while keeping that same task/session; older epochs remain invalid. Stop and Code’s “Stop the task first” cancel this exact launch through retries; prompts and worker controls do not receive an epoch exception. Each automatic engine-launch retry shows the runtime's own
@@ -2003,8 +2053,9 @@ explicit clipped-prefix/original-byte-count label. Original stored content is no
 changed. Old task-only cursors require reopening history.
 
 Older guidance pages carry delivery status and attachment names into the worker
-view. Activity filters include recorded failures, and scrolling away turns Follow
-off until the owner returns. Loading older events does not count as new live activity.
+view. Activity filters include recorded failures, and scrolling away from the end
+stops following until the owner returns to it or presses Latest. Loading older
+events does not count as new live activity.
 
 ## Local voice input
 

@@ -3104,6 +3104,177 @@ async fn completed_legacy_questions_are_readable() {
     println!("completed legacy questions: listed read-only");
 }
 
+// Capture logical identities separately from attempt identities: Resume must
+// replace only the interrupted session, not invalidate completed work.
+#[derive(Debug, PartialEq)]
+struct PauseCheckpoint {
+    identity: (String, i64),
+    nodes: Vec<(String, String, String, Option<String>)>,
+    reports: Vec<(String, String)>,
+    attempts: Vec<(String, String, String, String)>,
+    effects: Vec<(i64, String, String)>,
+    answers: Vec<(String, String, Option<String>)>,
+    commands: Vec<(i64, String, Value)>,
+    files: Vec<(Vec<u8>, u64, i64, i64, i64, i64)>,
+}
+
+impl PauseCheckpoint {
+    fn assert_fixture(&self) {
+        assert!(self.identity.1 > 0);
+        for node in ["work", "third"] {
+            let completed = self.nodes.iter().find(|n| n.0 == node).unwrap();
+            assert_eq!(completed.2, "completed");
+            let report = completed.3.as_ref().expect("completed worker report");
+            assert!(self.reports.iter().any(|(id, _)| id == report));
+        }
+        let work = self.nodes.iter().find(|n| n.0 == "work").unwrap();
+        let work_attempts: Vec<_> = self.attempts.iter().filter(|a| a.0 == work.1).collect();
+        let [(_, attempt, channel, _)] = work_attempts.as_slice() else {
+            panic!("expected one attempt for the completed work node: {work_attempts:?}");
+        };
+        let [(question, status, answer)] = self.answers.as_slice() else {
+            panic!("expected one real owner answer, got {:?}", self.answers);
+        };
+        assert_eq!(status, "answered");
+        assert_eq!(answer.as_deref(), Some(peer::CHECKPOINT_ANSWER));
+        for kind in ["NATIVE_QUESTION_ANSWERED", "WORKER_CONTINUATION_STARTED"] {
+            let records: Vec<_> = self.effects.iter().filter(|(_, k, _)| k == kind).collect();
+            let [(_, _, payload)] = records.as_slice() else {
+                panic!("expected exactly one {kind}, got {records:?}");
+            };
+            let event: Value = serde_json::from_str(payload).unwrap();
+            assert_eq!(event["question_id"], *question);
+            if kind == "WORKER_CONTINUATION_STARTED" {
+                assert!(event["delivery_id"].is_string());
+                assert_eq!(event["assignment_ref"], work.1);
+                assert_eq!(event["attempt_id"], *attempt);
+            }
+        }
+        let [(_, key, receipt)] = self.commands.as_slice() else {
+            panic!("expected one settled broker command, got {:?}", self.commands);
+        };
+        assert_eq!(key, peer::CHECKPOINT_COMMAND);
+        assert_eq!(receipt["argv"], json!(["/bin/echo", peer::CHECKPOINT_COMMAND]));
+        assert_eq!(receipt["settled"], true);
+        assert_eq!(receipt["complete"], true);
+        assert_eq!(receipt["output_truncated"], false);
+        assert_eq!(receipt["exit_code"], 0);
+        assert_eq!(receipt["output"], format!("{}\n", peer::CHECKPOINT_COMMAND));
+        let reference = receipt["tool_call_ref"].as_str().expect("command reference");
+        for (kind, pointer) in [
+            ("NATIVE_COMMAND_STARTED", "/ref"),
+            ("NATIVE_COMMAND_FINISHED", "/receipt/tool_call_ref"),
+        ] {
+            let records: Vec<_> = self.effects.iter().filter(|(_, k, _)| k == kind).collect();
+            let [(_, _, payload)] = records.as_slice() else {
+                panic!("expected one {kind}, got {records:?}");
+            };
+            let event: Value = serde_json::from_str(payload).unwrap();
+            assert_eq!(event.pointer(pointer), Some(&json!(reference)));
+            if kind == "NATIVE_COMMAND_STARTED" {
+                assert_eq!(event["channel_id"], *channel);
+            }
+        }
+        assert_eq!(self.files[0].0, b"after");
+        assert_eq!(self.files[1].0, b"after");
+        assert_eq!(self.files[2].0, b"delivered\n", "the peer saw the answer more or less than once");
+    }
+
+    fn assert_resumed(&self, after: &Self) {
+        assert_eq!(after.identity, self.identity);
+        assert_eq!(after.files[..2], self.files[..2], "completed worker files were rewritten");
+        assert_eq!(after.files[2], self.files[2], "the peer observed duplicate owner-answer delivery");
+        for node in &self.nodes {
+            let resumed = after.nodes.iter().find(|n| n.0 == node.0).unwrap();
+            assert_eq!(resumed.2, "completed");
+            if node.2 == "completed" {
+                assert_eq!(resumed, node);
+                assert_eq!(
+                    after.attempts.iter().filter(|a| a.0 == node.1).collect::<Vec<_>>(),
+                    self.attempts.iter().filter(|a| a.0 == node.1).collect::<Vec<_>>(),
+                    "completed worker was replayed: {}", node.0
+                );
+            }
+        }
+        assert!(self.reports.iter().all(|r| after.reports.contains(r)));
+        assert_eq!(after.effects, self.effects, "worker command or owner answer replayed");
+        assert_eq!(after.answers, self.answers, "retained questions or answers changed");
+        assert_eq!(after.commands, self.commands, "broker receipts changed");
+        let second_assignment = |checkpoint: &Self| {
+            checkpoint.nodes.iter().find(|n| n.0 == "second").unwrap().1.clone()
+        };
+        let interrupted = second_assignment(self);
+        let resumed = second_assignment(after);
+        assert!(self.attempts.iter().any(|a| a.0 == interrupted && a.3 == "worker-backend-dev"));
+        assert!(self.attempts.iter().any(|a| a.3 == "orchestrator"));
+        let fresh = |a: &(String, String, String, String)| {
+            !a.1.is_empty() && !a.2.is_empty()
+                && self.attempts.iter().all(|old| old.1 != a.1 && old.2 != a.2)
+        };
+        assert!(after.attempts.iter().any(|a| {
+            a.0 == resumed && a.3 == "worker-backend-dev" && fresh(a)
+        }), "the interrupted worker did not get a fresh attempt and channel");
+        // The clean completion path can synthesize without another coordinator.
+        // If Resume did provision one, it must not reuse an earlier identity.
+        for a in after.attempts.iter().filter(|a| a.3 == "orchestrator" && !self.attempts.contains(a)) {
+            assert!(fresh(a), "coordinator reused a previous attempt or channel");
+        }
+    }
+}
+
+fn pause_checkpoint(store: &Store, root: &Path) -> PauseCheckpoint {
+    use std::os::unix::fs::MetadataExt;
+    let files = ["work.txt", "third.txt", peer::CHECKPOINT_ANSWER_LOG].into_iter().map(|file| {
+        let path = root.join(file);
+        let meta = std::fs::metadata(&path).unwrap();
+        // A blind rewrite of the same bytes must not count as preservation.
+        (std::fs::read(&path).unwrap(), meta.ino(), meta.mtime(),
+         meta.mtime_nsec(), meta.ctime(), meta.ctime_nsec())
+    }).collect();
+    store.read(|db| {
+        let identity = db.query_row("SELECT task_id,revision FROM runtime_tasks", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+        let mut nodes = db.prepare("SELECT node_id,assignment_ref,status,json_extract(result_json,'$.report_ref')
+            FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='execution' ORDER BY node_id")?;
+        let mut reports = db.prepare("SELECT r.id,e.digest FROM reports r JOIN editions e ON r.id=e.report_id
+            WHERE r.task_id=? AND r.kind!='pipeline' ORDER BY r.id,e.sequence")?;
+        let mut attempts = db.prepare("SELECT idempotency_key,attempt_id,channel_id,role_id
+            FROM delegation_provisioning WHERE task_id=? ORDER BY rowid")?;
+        let mut effects = db.prepare("SELECT id,type,payload_json FROM runtime_events WHERE task_id=?1 AND (
+            type IN ('NATIVE_QUESTION_ANSWERED','USER_ANSWER_RECEIVED','COORDINATOR_ANSWER_CLAIMED',
+                     'WORKER_USER_ANSWER_RECEIVED','WORKER_CONTINUATION_STARTED')
+            OR (type='NATIVE_COMMAND_STARTED' AND json_extract(payload_json,'$.argv[1]')=?2)
+            OR (type='NATIVE_COMMAND_FINISHED' AND json_extract(payload_json,'$.receipt.argv[1]')=?2))
+            ORDER BY id")?;
+        let mut answers = db.prepare("SELECT id,status,answer_text FROM pending_questions WHERE task_id=? ORDER BY id")?;
+        let mut commands = db.prepare("SELECT rowid,request_key,result_json FROM runtime_requests
+            WHERE task_id=? AND operation IN ('command_run','outside_command') ORDER BY rowid")?;
+        let nodes = nodes.query_map((&identity.0, identity.1), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?.collect::<Result<_, _>>()?;
+        let reports = reports.query_map([&identity.0], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?.collect::<Result<_, _>>()?;
+        let attempts = attempts.query_map([&identity.0], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?.collect::<Result<_, _>>()?;
+        let effects = effects.query_map((&identity.0, peer::CHECKPOINT_COMMAND), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?.collect::<Result<_, _>>()?;
+        let answers = answers.query_map([&identity.0], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?.collect::<Result<_, _>>()?;
+        let commands = commands.query_map([&identity.0], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?))
+        })?.map(|row| -> CoreResult<_> {
+            let (id, key, raw) = row?;
+            Ok((id, key, serde_json::from_str(&raw)?))
+        }).collect::<CoreResult<_>>()?;
+        Ok(PauseCheckpoint { identity, nodes, reports, attempts, effects, answers, commands, files })
+    }).unwrap()
+}
+
 async fn binary_journey(scenario: &str) {
     use sha2::{Digest, Sha256};
     let hash = |v: &Value| format!("{:x}", Sha256::digest(serde_json::to_vec(v).unwrap()));
@@ -3188,11 +3359,31 @@ async fn binary_journey(scenario: &str) {
         .join("../..")
         .canonicalize()
         .unwrap();
+    let checkpoint_pause = scenario == "paused-checkpoint";
+    if checkpoint_pause {
+        let root = f.0.join("project");
+        for args in [
+            &["add", "--", "work.txt"][..],
+            &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+              "commit", "-qm", "Checkpoint baseline"][..],
+        ] {
+            assert!(std::process::Command::new("/usr/bin/git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success());
+        }
+    }
     if scenario != "complete" {
         std::fs::write(
             f.0.join("project/scenario.txt"),
             if scenario == "paused" {
                 "hold"
+            } else if checkpoint_pause {
+                // The first and dependent third workers publish results; the
+                // independent second worker holds execution open until Resume.
+                peer::CHECKPOINT_SCENARIO
             } else {
                 scenario
             },
@@ -3247,6 +3438,52 @@ async fn binary_journey(scenario: &str) {
         let reply = workspace_service::read_frame(&mut stream).await.unwrap();
         assert!(reply.get("error").is_none(), "{method}: {reply}");
         reply["result"].clone()
+    }
+    async fn pause_history(socket: &Path, project: &str, task: &str) -> Vec<Value> {
+        let (mut rows, mut cursor) = (Vec::new(), Value::Null);
+        for page_number in 0..128 {
+            let page = rpc(socket, "native.query", json!({
+                "protocol":{"major":2,"mapping":2},"requestId":format!("pause-history-{page_number}"),
+                "projectId":project,"operation":"history.page",
+                "payload":{"target":task,"cursor":cursor,"limit":1}
+            })).await;
+            assert_eq!(page["data"]["type"], "history", "{page}");
+            let value = &page["data"]["value"];
+            let items = value["items"].as_array().unwrap();
+            // Some raw rows are deliberately filtered from the conversation,
+            // so even an empty page can carry a cursor to more visible rows.
+            assert!(items.len() <= 1, "{page}");
+            let sequence = |row: &Value| row["sequence"].as_str().unwrap().parse::<u64>().unwrap();
+            for item in items {
+                assert_eq!(item["availability"], "available");
+                if let Some(previous) = rows.last() {
+                    assert!(sequence(previous) < sequence(item), "duplicate or reordered history");
+                }
+                rows.push(item.clone());
+            }
+            let next = &value["nextCursor"];
+            if next.is_null() {
+                assert!(page_number > 0, "fixture did not exercise multiple pages");
+                assert!(rows.len() > 1, "fixture must retain several visible rows: {rows:?}");
+                assert!(rows.iter().any(|row| row["text"].as_str().is_some_and(
+                    |text| text.contains("Native fixture progress.")
+                )), "the fake coordinator's actual output was not retained: {rows:?}");
+                let whole = rpc(socket, "native.query", json!({
+                    "protocol":{"major":2,"mapping":2},"requestId":"pause-unpaged-history",
+                    "projectId":project,"operation":"history.page",
+                    "payload":{"target":task,"cursor":null,"limit":100}
+                })).await;
+                let whole = &whole["data"]["value"];
+                assert_eq!(whole["nextCursor"], Value::Null, "fixture exceeds the bulk read");
+                assert_eq!(whole["highWatermark"], value["highWatermark"]);
+                assert_eq!(whole["items"], json!(rows), "cursor walk lost or changed rows");
+                return rows;
+            }
+            assert!(next.is_string());
+            assert_ne!(*next, cursor, "history cursor did not advance");
+            cursor = next.clone();
+        }
+        panic!("paused conversation did not end within 128 pages");
     }
     let project = rpc(
         &socket,
@@ -3604,9 +3841,43 @@ async fn binary_journey(scenario: &str) {
         );
         return;
     }
+    if checkpoint_pause {
+        restart_signal(&store, "SELECT EXISTS(SELECT 1 FROM pending_questions WHERE status='open')").await;
+        let execution: String = store.read(|db| {
+            Ok(db.query_row("SELECT execution_id FROM workspace_executions", [], |r| r.get(0))?)
+        }).unwrap();
+        let decisions = rpc(&socket, "workspace", json!({
+            "protocol":{"major":1,"minor":8},"projectId":id,"requestId":"checkpoint-question",
+            "operation":"decisions.list","target":execution,"cursor":null,"limit":100
+        })).await;
+        let pending = decisions["items"].as_array().unwrap();
+        let [question] = pending.as_slice() else {
+            panic!("expected one checkpoint question: {decisions}");
+        };
+        assert_eq!(question["status"], "pending");
+        assert_eq!(question["allowedOperations"], json!(["decisions.answer"]));
+        let option = question["options"].as_array().unwrap().iter()
+            .find(|option| option["label"] == peer::CHECKPOINT_ANSWER)
+            .expect("checkpoint answer option");
+        let mut answer = command(id, "decisions.answer", question["decisionId"].clone(),
+            "answer-before-pause", json!({
+                "executionId":execution,"acpSessionId":question["acpSessionId"],"batchId":null,
+                "answers":[{"decisionId":question["decisionId"],"questionId":question["questionId"],
+                    "expectedVersion":question["version"],"optionId":option["optionId"],"text":option["label"]}]
+            }));
+        answer["expectedVersion"] = question["version"].clone();
+        answer["ownerEpoch"] = question["ownerEpoch"].clone();
+        rpc(&socket, "workspace", answer).await;
+        restart_signal(&store,
+            "SELECT EXISTS(SELECT 1 FROM runtime_tasks WHERE state='EXECUTING')
+                AND (SELECT count(*) FROM runtime_nodes WHERE node_id IN ('work','third') AND status='completed')=2
+                AND EXISTS(SELECT 1 FROM runtime_nodes n JOIN delegation_provisioning d
+                    ON n.assignment_ref=d.idempotency_key WHERE n.node_id='second' AND d.status='ready')"
+        ).await;
+    }
     if scenario != "complete" {
         let signal = match scenario {
-            "hold" | "paused" => {
+            "hold" | "paused" | "paused-checkpoint" => {
                 "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')"
             }
             "review-hold" => {
@@ -3633,7 +3904,19 @@ async fn binary_journey(scenario: &str) {
             .await
             .unwrap();
         }
-        if scenario == "paused" {
+        if scenario == "paused" || checkpoint_pause {
+            let live_checkpoint = checkpoint_pause.then(|| {
+                let root = f.0.join("project");
+                let git = std::process::Command::new("/usr/bin/git")
+                    .args(["status", "--porcelain", "--", "work.txt", "third.txt"])
+                    .current_dir(&root)
+                    .output().unwrap();
+                assert!(git.status.success());
+                assert_eq!(git.stdout, b" M work.txt\n?? third.txt\n");
+                let checkpoint = pause_checkpoint(&store, &root);
+                checkpoint.assert_fixture();
+                checkpoint
+            });
             let execution: String = store
                 .read(|db| {
                     Ok(
@@ -3686,6 +3969,19 @@ async fn binary_journey(scenario: &str) {
                 Ok(())
             };
             store.read(settled).unwrap();
+            let before_checkpoint = if let Some(live) = live_checkpoint {
+                let saved = pause_checkpoint(&store, &f.0.join("project"));
+                saved.assert_fixture();
+                assert_eq!(saved.identity, live.identity);
+                assert_eq!(saved.files, live.files, "Pause changed worker files");
+                assert_eq!(saved.reports, live.reports, "Pause changed worker reports");
+                assert_eq!(saved.effects, live.effects, "Pause replayed a command or answer");
+                assert_eq!(saved.answers, live.answers, "Pause changed the retained answer");
+                assert_eq!(saved.commands, live.commands, "Pause changed broker receipts");
+                Some((pause_history(&socket, id, created["target"].as_str().unwrap()).await, saved))
+            } else {
+                None
+            };
             let before: i64 = store
                 .read(|db| {
                     Ok(
@@ -3696,7 +3992,8 @@ async fn binary_journey(scenario: &str) {
                 })
                 .unwrap();
             child.kill().await.unwrap();
-            assert!(!child.wait().await.unwrap().success());
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(child.wait().await.unwrap().signal(), Some(libc::SIGKILL));
             child = spawn_service();
             // Activation reconciles retained tasks before it reports the project ready;
             // `alreadyActive` means the supervisor's activation already did.
@@ -3740,7 +4037,20 @@ async fn binary_journey(scenario: &str) {
                     Ok(())
                 })
                 .unwrap();
-            // Only an explicit owner Resume continues, with a fresh coordinator.
+            if let Some((history, saved)) = &before_checkpoint {
+                let reopened = rpc(&socket, "native.board", json!({
+                    "protocol":{"major":2,"mapping":2},"requestId":"reopen-after-kill","projectId":id,
+                    "operation":"tasks.board","payload":{"id":id}
+                })).await;
+                let row = reopened["data"]["value"]["items"].as_array().unwrap().iter()
+                    .find(|row| row["taskId"] == created["target"])
+                    .expect("same draft on reopened board");
+                assert_eq!(row["executionId"], execution);
+                assert_eq!(&pause_checkpoint(&store, &f.0.join("project")), saved);
+                assert_eq!(&pause_history(&socket, id, created["target"].as_str().unwrap()).await, history);
+            }
+            // Only an explicit owner Resume continues. The runtime may finish
+            // without a second coordinator on the clean synthesis path.
             std::fs::write(f.0.join("project/scenario.txt"), "complete").unwrap();
             let version: i64 = store
                 .read(|db| {
@@ -3777,6 +4087,10 @@ async fn binary_journey(scenario: &str) {
                     Ok(())
                 })
                 .unwrap();
+            if let Some((_, saved)) = &before_checkpoint {
+                saved.assert_resumed(&pause_checkpoint(&store, &f.0.join("project")));
+                println!("checkpoint pause/restart: retained task, reports, conversation and file effects; interrupted worker continued with a fresh attempt and channel; completed broker command and delivered owner answer were not replayed");
+            }
             unsafe {
                 libc::kill(child.id().unwrap() as i32, libc::SIGTERM);
             }
@@ -3847,6 +4161,30 @@ async fn binary_journey(scenario: &str) {
             }
             Ok(())
         }).unwrap();
+        if scenario == "hold" {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let ready = store.read(|db| {
+                        Ok(db.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM delegation_provisioning
+                             WHERE rowid>? AND role_id='worker-backend-dev' AND status='ready')",
+                            [last_attempt], |r| r.get::<_, bool>(0),
+                        )?)
+                    }).unwrap();
+                    if ready {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("safe restart did not provision a replacement worker automatically");
+            // Release only the fixture peer. No owner Resume/Retry RPC was sent.
+            std::fs::write(f.0.join("project/scenario.txt"), "complete").unwrap();
+            restart_signal(
+                &store,
+                "SELECT EXISTS(SELECT 1 FROM runtime_tasks WHERE state='COMPLETED')",
+            ).await;
+            println!("live service SIGKILL: replacement worker ran automatically and the task completed without an owner action");
+        }
         unsafe {
             libc::kill(child.id().unwrap() as i32, libc::SIGTERM);
         }
@@ -3973,6 +4311,323 @@ async fn maintenance_admission() {
         "native maintenance: Start/resume/retry/prompt/rerun hold, Stop remains available; no engine or task admission"
     );
 }
+
+
+async fn worktree_fixture_peer() {
+    use cortex_engine::wire::{read_frame, write_frame};
+    use tokio::io::BufReader;
+    let mut input = BufReader::new(tokio::io::stdin());
+    let mut output = tokio::io::stdout();
+    let mut server = Value::Null;
+    let options = json!([
+        {"id":"model","currentValue":"fixture-model","options":[{"value":"fixture-model"}]},
+        {"id":"mode","currentValue":"default","options":[{"value":"default"}]}
+    ]);
+    while let Some(frame) = read_frame(&mut input).await.unwrap() {
+        let call_id = &frame["id"];
+        if call_id.is_null() { continue; }
+        let params = &frame["params"];
+        let result = match frame["method"].as_str() {
+            Some("initialize") => json!({"protocolVersion":1}),
+            Some("session/new") => {
+                let cwd = std::env::current_dir().unwrap();
+                assert_eq!(params["cwd"], json!(cwd));
+                server = params["mcpServers"][0].clone();
+                json!({"sessionId":"fixture","configOptions":options})
+            }
+            Some("session/set_config_option") => json!({"configOptions":options}),
+            Some("session/prompt") => {
+                let Some(calls) = params["prompt"].as_array().and_then(|blocks| {
+                    blocks.iter().rev().find_map(|block| {
+                        let text = block["text"].as_str()?;
+                        serde_json::from_str::<Vec<Value>>(text.rsplit_once("\n\n")?.1).ok()
+                    })
+                }) else {
+                    write_frame(&mut output,&json!({"jsonrpc":"2.0","id":call_id,
+                        "result":{"stopReason":"max_turn_requests"}})).await.unwrap();
+                    continue;
+                };
+                write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update",
+                    "params":{"sessionId":"fixture","update":{"sessionUpdate":"agent_message_chunk",
+                    "content":{"type":"text","text":"Fixture call starting"}}}})).await.unwrap();
+                let mut relay = tokio::process::Command::new(server["command"].as_str().unwrap())
+                    .arg(server["args"][0].as_str().unwrap())
+                    .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+                    .kill_on_drop(true).spawn().unwrap();
+                let mut stdin = relay.stdin.take().unwrap();
+                let mut stdout = BufReader::new(relay.stdout.take().unwrap());
+                let mut observed = true;
+                for (index, call) in calls.into_iter().enumerate() {
+                    if write_frame(&mut stdin, &json!({"jsonrpc":"2.0","id":index+1,
+                        "method":"tools/call","params":call})).await.is_err() {
+                        observed = false;
+                        break;
+                    }
+                    write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update",
+                        "params":{"sessionId":"fixture","update":{"sessionUpdate":"agent_message_chunk",
+                        "content":{"type":"text","text":format!("Fixture call sent {index}")}}}})).await.unwrap();
+                    let reply = read_frame(&mut stdout).await.ok().flatten().unwrap_or_else(|| {
+                        json!({"error":{"message":format!("relay_closed_at_{index}"),"code":-32000}})
+                    });
+                    if reply["error"].is_object() || reply["result"]["isError"] == true {
+                        // Only fixture-safe error tokens; no body, credentials or endpoint.
+                        let code = reply["result"]["structuredContent"]["code"].as_str()
+                            .or(reply["error"]["message"].as_str()).unwrap_or("unknown");
+                        write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update",
+                            "params":{"sessionId":"fixture","update":{"sessionUpdate":"agent_message_chunk",
+                            "content":{"type":"text","text":format!("Fixture call refused: {code}")}}}})).await.unwrap();
+                        observed = false;
+                        break;
+                    }
+                }
+                let _ = relay.kill().await;
+                json!({"stopReason":if observed {"end_turn"} else {"refusal"}})
+            }
+            _ => continue,
+        };
+        write_frame(&mut output,&json!({"jsonrpc":"2.0","id":call_id,"result":result})).await.unwrap();
+    }
+}
+
+async fn bound_worktree_journey() {
+    use cortex_core::workspace::{create_draft, start_native_worktree, worktrees::resolve};
+    use workspace_service::native_sessions::{NativeHost, SessionRole};
+    let f = Fixture::new();
+    let root = f.0.join("project").canonicalize().unwrap();
+    let trees = root.parent().unwrap().join("trees");
+    std::fs::create_dir(&trees).unwrap();
+    let home = f.0.join("fake-home");
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    let git = |path: &Path, argv: &[&str]| {
+        let o = std::process::Command::new("/usr/bin/git")
+            .env_clear().env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1")
+            .current_dir(path).args(["-c", "core.hooksPath=/dev/null"]).args(argv)
+            .output().unwrap();
+        assert!(o.status.success(), "{argv:?}: {}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stdout).trim().to_owned()
+    };
+    git(&root, &["symbolic-ref","HEAD","refs/heads/main"]);
+    git(&root, &["config", "user.name", "Fixture"]);
+    git(&root, &["config", "user.email", "fixture@example.invalid"]);
+    std::fs::write(root.join(".gitignore"), ".cortex/\n.cortex-dev/\nlocal.tmp\n").unwrap();
+    git(&root, &["add", "--", "work.txt", ".gitignore"]);
+    git(&root, &["commit", "-qm", "Baseline"]);
+    git(&root, &["branch", "backup"]);
+    let service = Service::bind_native(f.config(), Arc::new(Routes)).await.unwrap();
+    let registered = service.register(&root, "Worktree fixture").await.unwrap();
+    let id = registered["projectId"].as_str().unwrap();
+    let call = |op: &str, params: Value| {
+        let service = service.clone();
+        let request = serde_json::from_value(json!({"op":op,"projectId":id,"params":params})).unwrap();
+        async move { service.machine(request).await.unwrap() }
+    };
+    let key = cortex_core::ProjectKey::new(&root, if workspace_protocol::channel::current().is_dev() {
+        cortex_core::StoreChannel::Dev
+    } else { cortex_core::StoreChannel::Release }).unwrap();
+    let state = f.0.join("state");
+    let host = tokio::task::spawn_blocking(move || NativeHost::open_workspace(key, Default::default(), state)).await.unwrap().unwrap();
+    let store = f.store();
+    let actor = format!("uid:{}", unsafe { libc::getuid() });
+    store.write(|db| {
+        db.execute("INSERT INTO workspace_projects VALUES (?,?,?,'fixture',1)", (id,root.to_str(),&actor))?;
+        Ok(())
+    }).unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let route = |mode: &str| SessionRoute {
+        launch: EngineLaunch {
+            engine: EngineKind::Claude, executable: exe.clone(), args: vec![mode.into()],
+            cwd:root.clone(), native_home:home.clone(), credential_directory:home.join(".claude"),
+            base_environment: [("PATH".into(), "/usr/bin:/bin".into())].into(),
+            codex_launcher:None, confinement:None,
+        },
+        relay:exe.clone(), broker_parent:store.key().directory(),
+        connection:"worktree-fake".into(), connection_limit:4, model:"fixture-model".into(),
+        parameters:Default::default(), instructions:"Offline worktree fixture.".into(),
+        deadline:Duration::from_secs(10),
+    };
+    let refusals = |task: &str| store.read(|db| {
+        let mut q = db.prepare("SELECT h.text FROM host_transcript h JOIN acp_host_sessions s USING(session_id)
+            WHERE s.task_id=? AND h.text LIKE 'Fixture call%'")?;
+        let rows = q.query_map([task], |r| r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+        Ok(rows)
+    }).unwrap();
+    let mut runs = Vec::new();
+    for label in ["first", "second"] {
+        let mut create = command(id, "tasks.create", json!(id), label,
+            json!({"description":format!("Worktree {label}"),"checkout":{"kind":"worktree"}}));
+        create["actorId"] = json!(actor);
+        let created = create_draft(&store,id,&actor,&create).unwrap().receipt;
+        let draft = created["target"].as_str().unwrap().to_owned();
+        // The public rollout flag is intentionally off at this stage. Exercise the
+        // same trusted admission directly, then only production driver/gateway calls.
+        let mut start = command(id, "tasks.start", json!(draft), &format!("start-{label}"), json!({}));
+        start["actorId"] = json!(actor);
+        let admitted = start_native_worktree(&store, id, &actor, &start, &trees).unwrap();
+        let task = admitted["task"].as_str().unwrap().to_owned();
+        let owner = cortex_core::ownership::OwnerEpoch {
+            owner: admitted["owner"]["owner"].as_str().unwrap().into(),
+            epoch: admitted["owner"]["epoch"].as_i64().unwrap()
+        };
+        let w = resolve(&store,&task,&owner).unwrap().worktree.unwrap();
+        std::fs::write(w.path.join("expected.txt"), label).unwrap();
+        git(&w.path, &["add", "--", "expected.txt"]);
+        git(&w.path, &["commit", "-qm", "Checkout-specific verification fixture"]);
+        eprintln!("worktree fixture: planning {label}");
+        let session = host.dispatch(task.clone(),owner.clone(),SessionRole::Coordinator,route("worktree-fixture-peer")).await.unwrap();
+        let plan = json!({"name":"plan_submit","arguments":{"request_key":"plan","plan":{
+            "tasks":[{"id":"work","role":"backend-dev","objective":"Edit work.txt","dependencies":[],"scope":["work.txt"],"model":"auto"}],
+            "verification":[["/usr/bin/cmp","expected.txt","work.txt"]]
+        }}});
+        let turn = tokio::time::timeout(Duration::from_secs(15), session.prompt(&json!([plan]).to_string()))
+            .await.expect("plan prompt timeout").unwrap();
+        assert_eq!(turn.stop_reason, "end_turn", "{:?}", refusals(&task));
+        eprintln!("worktree fixture: plan turn returned {label}");
+        session.shutdown().await.unwrap();
+        let step = host.advance(task.clone(),owner.clone()).await.unwrap();
+        let assignment = step["assignments"][0]["assignment_ref"].as_str().unwrap_or_else(|| panic!("{step}"));
+        let worker = host.dispatch(task.clone(),owner.clone(),SessionRole::Worker { assignment:assignment.into() },route("worktree-fixture-peer")).await.unwrap();
+        eprintln!("worktree fixture: worker claimed {label}");
+        runs.push((label, draft, task, owner, w, worker));
+    }
+    assert_ne!(runs[0].4.path, runs[1].4.path);
+    let report = "# Fixture report\n\n## Inputs consumed\nDisposable fixture.\n\n## Changes\nEdited work.txt.\n\n## Verification\nRuntime verification follows.\n\n## Evidence links and delivery state\nWorktree fixture.\n\n## Risks and remaining work\nNo live checks.";
+    for (label, _, task, _, _, worker) in &runs {
+        let request = json!([
+            {"name":"project_read","arguments":{"path":"work.txt"}},
+            {"name":"project_edit","arguments":{"path":"work.txt","edits":[{"old_string":"before","new_string":label}],"request_key":"edit"}},
+            {"name":"result_submit","arguments":{"report":report,"summary":"Edited the fixture.","checks":[],"request_key":"result"}}
+        ]);
+        let turn = tokio::time::timeout(Duration::from_secs(15), worker.prompt(&request.to_string()))
+            .await.unwrap_or_else(|_| panic!("{label}: worker prompt timed out"));
+        // The worker may be revoked after its publication commits. The review
+        // consumes the actual retained report, not the fake peer's stop reason.
+        let completed = store.read(|db| Ok(db.query_row(
+            "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='WORKER_COMPLETED'
+             AND json_type(payload_json,'$.result.report_ref')='text'",
+            [task], |r| r.get::<_, i64>(0),
+        )?)).unwrap();
+        assert_eq!(completed, 1, "{label}: turn {:?}: {:?}", turn.as_ref().map(|t| &t.stop_reason), refusals(task));
+    }
+    eprintln!("worktree fixture: both worker turns returned");
+    let snap = call("repo.snapshot", json!({})).await;
+    assert_eq!(snap["ok"], true, "{snap}");
+    for (label, draft, _, _, w, _) in &runs {
+        let changes = snap["result"]["taskDiffs"][draft].to_string();
+        assert!(changes.contains(label), "{draft} {changes}");
+        let other = if *label == "first" { "second" } else { "first" };
+        assert!(!changes.contains(other), "{draft} {changes}");
+        let code = call("repo.file", json!({"checkoutId":w.id, "file":"work.txt", "taskId":draft})).await;
+        assert_eq!(code["result"]["text"], *label, "{code}");
+        let denied = call("repo.file.save", json!({"checkoutId":w.id,"taskId":draft,
+            "file":"work.txt","revision":code["result"]["revision"],"text":"must not write"})).await;
+        assert_eq!(denied["code"], "checkout_busy", "{denied}");
+        let wrong = call("repo.file", json!({"checkoutId":format!("{id}:main"),"taskId":draft,"file":"work.txt"})).await;
+        assert_eq!(wrong["code"], "worktree_binding_invalid", "{wrong}");
+        assert_eq!(std::fs::read_to_string(w.path.join("work.txt")).unwrap(), *label);
+    }
+    assert_eq!(std::fs::read_to_string(root.join("work.txt")).unwrap(), "before");
+    for (label, draft, task, owner, w, worker) in runs {
+        worker.shutdown().await.unwrap();
+        let step = host.advance(task.clone(),owner.clone()).await.unwrap();
+        let brief = &step["assignments"][0];
+        assert_eq!(brief["stage"], "review", "{step}");
+        let packet = brief["review_packet"].to_string();
+        assert!(packet.contains("work.txt"), "{packet}");
+        eprintln!("worktree fixture: reviewing {label}");
+        let reviewer = host.dispatch(task.clone(),owner.clone(),
+            SessionRole::Worker { assignment:brief["assignment_ref"].as_str().unwrap().into() },route("worktree-fixture-peer")).await.unwrap();
+        let worker_report: String = store.read(|db| Ok(db.query_row(
+            "SELECT json_extract(result_json,'$.report_ref') FROM runtime_nodes WHERE task_id=? AND stage='execution'",
+            [&task], |r| r.get(0),
+        )?)).unwrap();
+        let mut review_report = "# Fixture review".to_owned();
+        for section in brief["report"]["sections"].as_array().unwrap() {
+            if section["required"] == true {
+                review_report.push_str(&format!("\n\n{}\nObserved the fixture's changed bytes and report.", section["heading"].as_str().unwrap()));
+            }
+        }
+        let calls = json!([
+            {"name":"project_read","arguments":{"path":"work.txt"}},
+            {"name":"read_report","arguments":{"report_id":worker_report}},
+            {"name":"result_submit","arguments":{"report":review_report,"summary":"Approved the checkout.","checks":[],"request_key":"verdict","verdict":"APPROVE","findings":[]}}
+        ]);
+        let turn = tokio::time::timeout(Duration::from_secs(15), reviewer.prompt(&calls.to_string()))
+            .await.expect("review prompt timeout");
+        let verdict: Option<String> = store.read(|db| Ok(db.query_row(
+            "SELECT json_extract(result_json,'$.verdict') FROM runtime_nodes WHERE task_id=? AND stage='review'",
+            [&task], |r| r.get(0),
+        )?)).unwrap();
+        assert_eq!(verdict.as_deref(), Some("APPROVE"), "{label}: {:?}: {:?}", turn.as_ref().map(|t| &t.stop_reason), refusals(&task));
+        reviewer.shutdown().await.unwrap();
+        host.advance(task.clone(),owner.clone()).await.unwrap();
+        let receipt = store.read(|db| {
+            let raw: String = db.query_row("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='VERIFICATION_PASSED' ORDER BY id DESC LIMIT 1",
+                [&task], |r| r.get(0))?;
+            Ok(serde_json::from_str::<Value>(&raw)?)
+        }).unwrap();
+        assert_eq!(receipt["checks"][0]["cwd"], json!(w.path));
+        assert_eq!(receipt["checks"][0]["checkout"]["id"], w.id);
+        assert_eq!(receipt["checks"][0]["task"], task);
+        store.read(|db| {
+            use cortex_core::workspace::worktrees::receipt_matches;
+            let check = &receipt["checks"][0];
+            assert!(receipt_matches(db, &task, check, true)?);
+            let mut wrong = check.clone();
+            wrong["cwd"] = json!(root);
+            assert!(!receipt_matches(db, &task, &wrong, true)?);
+            wrong = check.clone();
+            wrong["checkout"]["owner_epoch"] = json!(owner.epoch + 1);
+            assert!(!receipt_matches(db, &task, &wrong, true)?);
+            Ok(())
+        }).unwrap();
+        {
+            // An ignored local artifact does not invalidate a deliverable check,
+            // but the stronger cleanup proof must retain this second checkout.
+            if label == "second" { std::fs::write(w.path.join("local.tmp"), "keep me").unwrap(); }
+            let facts = call("product.read", json!({})).await;
+            let action = &facts["result"]["tasks"][&draft]["reviewActions"];
+            assert_eq!(action["accept"], true, "{action}");
+            let accept = call("product.task",json!({"action":"accept","taskId":draft,"version":action["version"],"digest":action["digest"]})).await;
+            assert_eq!(accept["ok"], true, "{accept}");
+            let staged = call("git", json!({"action":"stage","checkoutId":w.id,"taskId":draft,"path":"work.txt","staged":true})).await;
+            assert_eq!(staged["ok"], true, "{staged}");
+            assert_eq!(git(&w.path,&["diff","--cached","--name-only"]), "work.txt");
+            assert!(git(&root,&["diff","--cached","--name-only"]).is_empty());
+            let committed = call("git", json!({"action":"commit","checkoutId":w.id,"taskId":draft,
+                "message":"Task change"})).await;
+            assert_eq!(committed["ok"], true, "{committed}");
+            let target = if label == "first" { "main" } else { "backup" };
+            if label == "first" {
+                let refused = call("product.integrate",json!({"taskId":draft,"requestId":"bad-cleanup-type",
+                    "method":"squash","targetBranch":target,"confirmed":true,"digest":action["digest"],
+                    "message":"Must not merge","deleteWorktree":"false"})).await;
+                assert_eq!(refused["code"], "invalid_request", "{refused}");
+                assert_eq!(git(&root,&["show","main:work.txt"]), "before");
+                assert!(w.path.is_dir());
+            }
+            let merge = call("product.integrate",json!({"taskId":draft,"requestId":format!("squash-{label}"),
+                "method":"squash","targetBranch":target,"confirmed":true,"digest":action["digest"],"message":format!("Merge {label}")})).await;
+            assert_eq!(git(&root,&["show",&format!("{target}:work.txt")]), label);
+            assert!(!git(&root,&["rev-parse",&format!("refs/heads/{}",w.branch)]).is_empty());
+            if label == "first" {
+                assert_eq!(merge["result"]["worktreeCleanup"]["status"], "removed", "{merge}");
+                assert!(!w.path.exists());
+                let missing = call("repo.file", json!({"checkoutId":w.id,"taskId":draft,"file":"work.txt"})).await;
+                assert_eq!(missing["code"], "worktree_closed", "{missing}");
+            } else {
+                assert_eq!(merge["result"]["worktreeCleanup"]["reason"], "worktree_dirty", "{merge}");
+                assert_eq!(std::fs::read_to_string(w.path.join("local.tmp")).unwrap(), "keep me");
+                let retained = call("repo.file", json!({"checkoutId":w.id,"taskId":draft,"file":"work.txt"})).await;
+                assert_eq!(retained["result"]["text"], "second", "{retained}");
+            }
+        }
+    }
+    assert_eq!(std::fs::read_to_string(root.join("work.txt")).unwrap(), "first");
+    tokio::task::spawn_blocking(move || drop(host)).await.unwrap();
+    service.stop().await.unwrap();
+}
+
 fn main() {
     if std::env::args().nth(1).as_deref()
         == Some(workspace_service::native_command_supervisor::MODE)
@@ -3995,9 +4650,23 @@ fn main() {
     if service_regressions::run(&mode) {
         return;
     }
+    if mode == "worktree-fixture-peer" {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(worktree_fixture_peer());
+        return;
+    }
     if mode.starts_with("desktop-") || mode.starts_with('/') {
         peer::main();
         return;
+    }
+    if mode.is_empty() || mode == "worktree-bound-probe" {
+        if !namespace_host::assert_unavailable_view() {
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+                tokio::time::timeout(Duration::from_secs(90), bound_worktree_journey())
+                    .await.expect("bound worktree journey timeout");
+            });
+            println!("two task checkouts passed Changes, Code, independent review, verification and squash cleanup");
+        }
+        if !mode.is_empty() { return; }
     }
     if mode.is_empty() || mode == "sprint-cross-task-probe" {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -4105,6 +4774,16 @@ fn main() {
         .unwrap()
         .block_on(maintenance_admission());
     if namespace_host::assert_unavailable_view() {
+        return;
+    }
+    if mode == "binary_journey" {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for scenario in ["paused-checkpoint", "hold", "command-restart-lost"] {
+                tokio::time::timeout(Duration::from_secs(90), binary_journey(scenario))
+                    .await
+                    .unwrap_or_else(|_| panic!("binary journey timed out: {scenario}"));
+            }
+        });
         return;
     }
     tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -4237,6 +4916,7 @@ fn main() {
             "verify-slow",
             "question",
             "paused",
+            "paused-checkpoint",
         ] {
             binary_journey(scenario).await;
         }

@@ -15,7 +15,7 @@ import { inConflict, repoOf, sentence, taskCheckout } from "./review-model";
 import type { Route, TaskTab } from "./router";
 import { age, attemptsSpentOn, clock, humanStatus, ownerHold, replanStopping, reviewDeadEnd, sprintRoute, stopReason, type OwnerHold } from "./selectors";
 import { inTask } from "./status-text";
-import { attemptsByNode, closeBlocked, contextOf, coordinatorLine, duration, elapsedOf, isFinished, messageDelivery, reviewLine, workersOutcome, phases, recordedCoordinatorRoute, sessionModel, tokens, unconfirmedState, verificationFace, workerFace, workerState, workingNow, type SessionModel } from "./session-model";
+import { attemptsByNode, closeBlocked, contextOf, coordinatorLine, duration, elapsedOf, isFinished, messageDelivery, reviewLine, workersOutcome, phases, recordedCoordinatorRoute, resumeState, sessionModel, tokens, unconfirmedState, verificationFace, workerFace, workerState, workingNow, type SessionModel } from "./session-model";
 import { CORTEX, Pill, StopCommand, VERIFICATION, WorkerPane, WaitingIndicator, WorkingIndicator } from "./worker";
 import { SpendLine } from "./task-spend";
 import { createOpenState, Fold, TextSteps } from "./feed";
@@ -24,6 +24,7 @@ import { ResultText, resultPreview } from "./result-text";
 import { CopySource, MessageTools } from "./message-copy";
 import { SentMessages } from "./sent";
 import { viewOfText } from "./tool-names";
+import { shownFold } from "./port/history";
 import { usePlanningSprint, useTaskRoutes } from "./task-place";
 
 type TaskRoute = Extract<Route, { name: "task" }>;
@@ -539,11 +540,11 @@ function HistoryState(props: { m: SessionModel }) {
 }
 
 /** A conversation read only in part says so at its top: earlier conversation exists and is not shown. It is read on
- *  request here, or as the reader scrolls near the top; while it is read, and when the read failed, the line says so. */
+ *  request here or automatically near the viewport; while it is read, and when the read failed, the line says so. */
 function Earlier(props: { m: SessionModel }) {
   const ws = useWs();
   const e = () => props.m.session.historyEarlier;
-  const load = () => ws.store.loadEarlierHistory(props.m.view.id);
+  const load = () => ws.store.loadEarlierHistory(props.m.view.id, ws.panels.showAllTools);
   return <Show when={e()}>{earlier => <div class="ws-earlier" data-follow-skip="">
     <Switch>
       <Match when={earlier().state === "loading"}><Loading class="cap faint" text="Loading earlier…" /></Match>
@@ -589,22 +590,46 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
   const entry = (id: string) => entries().get(id)!;
   // Earlier rows read above the ones on screen are neither new nor the owner's latest: only entries after them count.
   const older = createPrepended(ids);
-  const follow = createFollow(() => scroller, () => ids().length - older());
-  // What the owner just sent, and the work it starts, come into view above the composer even from a reader who had scrolled
-  // up: left where it was, the reply's Working line stayed out of view below.
-  // A message counts from the press, while it is still on its way, and once its record takes its place it is not counted twice.
+  const historyKey = () => `${m().view.id}:${m().view.task.executionId ?? ""}`;
+  const partialTail = createMemo<string | undefined>(previous => {
+    const key = historyKey();
+    return m().session.historyEarlier || previous === key ? key : undefined;
+  });
+  let pendingCheck = false, disposed = false;
+  const checkEarlier = () => {
+    if (pendingCheck) return;
+    pendingCheck = true;
+    queueMicrotask(() => {
+      pendingCheck = false;
+      if (disposed || props.hidden || !scroller?.clientHeight || m().session.historyEarlier?.state !== "available") return;
+      const marker = scroller.querySelector(".ws-earlier");
+      // The brief can be tall: measure the boundary, not the distance from scrollTop to zero.
+      if (marker && marker.getBoundingClientRect().bottom > scroller.getBoundingClientRect().top - scroller.clientHeight) {
+        ws.store.loadEarlierHistory(m().view.id, ws.panels.showAllTools);
+      }
+    });
+  };
+  onCleanup(() => { disposed = true; });
+  const follow = createFollow(() => scroller, () => ids().length - older(), undefined, checkEarlier);
+  // ResizeObserver covers geometry changes. Also recheck after a history publish or reveal when the size stayed the same.
+  const available = createMemo(() => m().session.historyEarlier?.state === "available" ? historyKey() : undefined);
+  createEffect(() => {
+    if (props.hidden || available() === undefined) return;
+    // Let keyed rows settle, then pin the end or restore the held row before measuring the boundary.
+    queueMicrotask(() => { if (!disposed && !props.hidden) follow.sync(); });
+  });
+  // What the owner just sent or answered here, and the work it starts, come into view above the composer and following turns
+  // on, even for a reader who had scrolled up: left where it was, the reply's Working line stayed out of view below. It counts
+  // from the press. A message that arrives from another window, or a record that takes a send's place, moves nobody.
   const sentHere = () => { const s = planning(); return s ? { kind: "sprint" as const, sprintId: s.id } : { kind: "task" as const, taskId: m().view.id }; };
-  const mine = createMemo(() => ids().slice(Math.max(0, older())).filter(id => { const k = entry(id).kind; return k === "said" || k === "message"; }).length + ws.store.sends.shown(sentHere()).length);
-  let mineSeen = mine();
-  createEffect(() => { const n = mine(); if (n > mineSeen) follow.jump(); mineSeen = n; });
+  const pressed = () => {
+    const id = m().view.id, s = planning();
+    return ws.store.sends.pressed({ kind: "task", taskId: id }, { kind: "queue", taskId: id }, ...(s ? [{ kind: "sprint" as const, sprintId: s.id }] : []));
+  };
+  let pressedSeen = pressed();
+  createEffect(() => { const n = pressed(); if (n > pressedSeen) follow.jump(); pressedSeen = n; });
   const decision = (id: string) => m().session.decisions.find(d => d.id === id)!;
   const message = (id: string) => m().messages.find(x => x.id === id)!;
-  // The reader scrolled up to within a screen of the top of a conversation read only in part: its earlier part is read. A
-  // failed read waits for Retry; one under way is not asked for again.
-  const nearTop = () => {
-    if (m().session.historyEarlier?.state !== "available" || !scroller || follow.following() || scroller.scrollTop >= scroller.clientHeight) return;
-    ws.store.loadEarlierHistory(m().view.id);
-  };
   const stranded = () => m().view.column === "needs" && !m().view.unknown && m().open.length === 0;
   // Questions asked together are one form until their answers are recorded.
   const asks = createMemo(() => m().view.task.closedAs === "unconfirmed" ? [] : m().session.decisions.filter(d => d.kind === "question" && (isOpen(d) || d.held)));
@@ -614,7 +639,7 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
   const changesAt = (): Route => ({ name: "task", machine: m().view.machine.id, task: m().view.id, tab: "changes" });
   const team = () => <TeamBar m={m()} now={props.now} pick={props.pick} onPick={props.onPick} />;
   return <section class="task-panel" aria-label="Conversation" hidden={props.hidden}>
-    <div class="timeline" ref={scroller} onScroll={() => { follow.onScroll(); nearTop(); }}>
+    <div class="timeline" classList={{ "ws-history-end": partialTail() !== undefined }} ref={scroller} onScroll={() => { follow.onScroll(); checkEarlier(); }}>
       <div class="tl-in">
         <Show when={props.brief} fallback={<Brief m={m()} />}>{props.brief}</Show>
         <HistoryState m={m()} />
@@ -633,7 +658,7 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
           })()}</Match>
           <Match when={entry(id).kind === "fold"}>{(() => {
             const f = () => entry(id) as Extract<TimelineEntry, { kind: "fold" }>;
-            const shown = () => ws.panels.showAllTools() && f().all ? f().all! : f();
+            const shown = () => shownFold(f(), ws.panels.showAllTools());
             return <Show when={shown().text}>
               <Fold text={shown().text} open={opened.is(id)} onToggle={() => opened.toggle(id)}>
                 {() => <TextSteps steps={shown().steps} taskId={m().view.id} view={viewOfText} state={opened} scope={id} />}
@@ -839,19 +864,31 @@ export function TaskPage(props: { id: string }) {
       <Show when={!checking()}>Machine settings → <A class="lnk" to={{ name: "settings", machine: m().view.machine.id, section: "diagnostics" }}>Diagnostics</A>.</Show>
     </>; },
     action: <button class="btn btn-line btn-sm" aria-busy={checking() ? "true" : undefined} onClick={() => void recheck()}>Re-check state</button> };
-  // A recorded recovery reason is shown in words; Stop and Close task stay available.
+  // A recorded recovery reason is shown in words, with the one action that applies (`resumeState`); Stop and Close task stay
+  // available. Only a recovery that waits for the owner reads as one: a recovery that waits for exit evidence, or continues by
+  // itself, gets its own line and never suggests Continue or a message to continue.
+  const run = createMemo(() => resumeState(m().view));
   const interrupted: StripItem = { id: "interrupted", tone: "info", icon: <I n="pause" s={14} />, get text() {
-    const reason = m().view.task.issue;
-    return !reason || reason === "turn_interrupted" ? "This turn was interrupted. Send a message to continue from the recorded state. Nothing has been restarted."
-      : `${sentence(inTask(stopReason(reason)))} Send a message to continue from the recorded state, or use Stop or Close task. Nothing has been restarted.`;
+    const reason = m().view.task.issue, retry = run()?.action === "retry_task";
+    return !reason || reason === "turn_interrupted" ? `This turn was interrupted and waits for you. Send a message to continue from the recorded state${retry ? ", or use Continue" : ""}. Nothing has been restarted.`
+      : `${sentence(inTask(stopReason(reason)))} It waits for you. Send a message to continue from the recorded state, or use ${retry ? "Continue, " : ""}Stop or Close task. Nothing has been restarted.`;
   } };
+  // The runtime continues the task by itself: say so, so the owner does not look for a button that is not needed.
+  const recovering: StripItem = { id: "recovering", tone: "info", icon: <I n="loader" s={14} class="spin" />, get text() { return `Recovering automatically. ${run()?.why ?? ""}`; } };
+  // A pause or a recovery whose stop or process exit is not confirmed: Resume and Continue stay off and this says why.
+  const evidence: StripItem = { id: "evidence", tone: "warn", icon: <I n="hourglass" s={14} class="st-warn" />, get text() { return `${run()?.text ?? ""}. ${run()?.why ?? ""}`; } };
+  // A cancelled or failed run is final: say it is not resumed, instead of leaving the owner to look for Resume.
+  const final: StripItem = { id: "final", tone: "info", icon: <I n="x-circle" s={14} class="faint" />, get text() { return run()?.why ?? ""; } };
   const unverified: StripItem = { id: "unverified", tone: "warn", icon: <I n="alert" s={14} class="st-warn" />, text: "Not verified. This task was closed as is, and the warning stays with its result." };
   const titleWhy: StripItem = { id: "title-why", tone: "info", icon: <I n="alert" s={14} class="st-warn" />, domId: taskWhyId(props.id), get text() { return titleBlock(m()) ?? ""; } };
   const status = createMemo<StripItem[]>(() => [
     ...(m().mode === "stopping" ? [stoppingItem] : []),
     ...(m().mode === "archived" ? [archived] : []),
     ...(["offline", "unconfirmed"].includes(m().mode) ? [offline] : []),
-    ...(m().mode === "live" && !m().view.ownerDecision && m().view.task.observedPhase === "recovery" ? [interrupted] : []),
+    ...(m().mode === "live" && !m().view.ownerDecision && m().view.task.observedPhase === "recovery" && run()?.kind === "held" ? [interrupted] : []),
+    ...(run()?.kind === "automatic" && m().view.task.observedPhase === "recovery" && m().view.task.status === "working" ? [recovering] : []),
+    ...(run()?.kind === "evidence" && (m().mode === "paused" || m().mode === "live") ? [evidence] : []),
+    ...(run()?.kind === "final" && (m().mode === "ended" || (m().mode === "review" && m().view.task.status === "failed")) ? [final] : []),
     ...(m().view.task.notVerifiedByCortex && m().view.task.closedAs === "as_is" ? [unverified] : []),
     ...(m().view.task.closedAs === "unconfirmed" ? [{
       id: "closed-unconfirmed", tone: "warn" as const, icon: <I n="alert" s={14} />,

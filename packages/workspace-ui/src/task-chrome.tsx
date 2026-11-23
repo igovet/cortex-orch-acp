@@ -4,10 +4,11 @@ import { asOf, automaticAcceptanceHold, checkCounts, clock, dayClock, engineLimi
 import { useWs } from "./ctx";
 import { FieldEdit } from "./field-edit";
 import { onScreen } from "./freshness";
+import { scrollIntoFeed } from "./follow";
 import { A, FactLine, I, Keyed, Modal, Pop } from "./kit";
 import { ActionBar, revealWhenCut } from "./layout";
 import { behindTarget, conflictLine, finishBlocked, taskCheckout } from "./review-model";
-import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, languageLabel, modeLabel, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
+import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, languageLabel, modeLabel, resumeState, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
 import { CHECK_ICON, VERIFICATION } from "./worker";
 import { archiveBlocked } from "./git-actions-model";
 import { spendRows, StallBadge } from "./task-spend";
@@ -80,9 +81,11 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
   const go = () => {
     const task = props.view.id, tab = ws.router.route();
     if (tab.name === "task" && (tab.tab || tab.live)) ws.go({ name: "task", machine: tab.machine, task });
-    queueMicrotask(() => onScreen().querySelector(".dc")?.scrollIntoView({ block: "center" }));
+    queueMicrotask(() => { const card = onScreen().querySelector(".dc"); if (card) scrollIntoFeed(card); });
   };
   const mode = () => m()?.mode;
+  // Continue and the fallback Resume follow the one rule the card, the menu and the palette use.
+  const run = createMemo(() => resumeState(props.view));
   const blocked = () => m() ? closeBlocked(m()!) : null;
   const archiveWhy = () => archiveBlocked(props.view.task);
   const answering = () => mode() === "live" && props.view.task.conflict === "none" && ((m()?.open.length ?? 0) > 0 || (props.view.column === "needs" && props.view.task.observedPhase !== "recovery"));
@@ -123,14 +126,14 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
     <Show when={seeNeeded()}><button class="btn btn-primary" onClick={() => {
       const tab = ws.router.route();
       if (tab.name === "task" && (tab.tab || tab.live)) ws.go({ name: "task", machine: tab.machine, task: props.view.id });
-      queueMicrotask(() => (onScreen().querySelector(".chat-review-hold") ?? onScreen().querySelector(".dc:not(.dc-done), .dc-panel"))?.scrollIntoView({ block: "center" }));
+      queueMicrotask(() => { const card = onScreen().querySelector(".chat-review-hold") ?? onScreen().querySelector(".dc:not(.dc-done), .dc-panel"); if (card) scrollIntoFeed(card); });
     }}>See what is needed</button></Show>
     {/* A held task waits for the owner: say what is expected with one concrete action, not only a message box. */}
-    <Show when={mode() === "live" && props.view.task.observedPhase === "recovery" && props.view.task.conflict === "none"}><button class="btn btn-primary" {...ws.needs("retry_task")} onClick={() => ws.run({ type: "retry_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Continue</button></Show>
+    <Show when={run()?.action === "retry_task"}><button class="btn btn-primary" {...ws.needs("retry_task")} onClick={() => ws.run({ type: "retry_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Continue</button></Show>
     {/* Start, Stop and Resume are the composer's action button. Where this machine offers no message composer, they stay here. */}
     <Show when={!ws.can(capabilityOf("send_message"))}>
       <Show when={mode() === "live" && props.view.task.status === "working"}><button class="btn btn-line" {...ws.needs("stop_task")} onClick={() => ws.stopTask(props.view.id)}><I n="stop" s={12} class="st-bad" />{stopLabel(ws.can(capabilityOf("continue_task")))}</button></Show>
-      <Show when={mode() === "paused"}><button class="btn btn-primary" {...ws.needs("continue_task")} onClick={() => ws.run({ type: "continue_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Resume</button></Show>
+      <Show when={run()?.action === "continue_task"}><button class="btn btn-primary" {...ws.needs("continue_task")} onClick={() => ws.run({ type: "continue_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Resume</button></Show>
       <Show when={mode() === "draft"}><button class="btn btn-primary" {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Start</button></Show>
     </Show>
     {props.git}
@@ -180,11 +183,19 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
     if (m().view.ownerIntegration) return humanStatus(m().view.ownerIntegration!.reason);
     if (t().conflict === "resolving") return `Handed over by you${t().merge?.handedAt != null ? ` at ${clock(t().merge!.handedAt)}` : ""}. You can stop it and take over at any time.`;
     if (t().conflict !== "none") return "Resolve it yourself, resolve it automatically or abort the merge.";
-    if (t().observedPhase === "recovery" && !m().view.unknown) return "Continue lets the coordinator decide the next step from the recorded state; nothing is replayed. Or send a message.";
+    // A recovery says what the shared rule says: Continue only where it is offered, the reason where a stop or a process exit is
+    // not confirmed, and that it goes on by itself where the runtime continues it. Anything else shows the recorded fact.
+    if (t().observedPhase === "recovery" && !m().view.unknown) {
+      const run = resumeState(m().view);
+      return run?.action === "retry_task" ? "Continue lets the coordinator decide the next step from the recorded state; nothing is replayed. Or send a message."
+        : run?.kind === "evidence" || run?.kind === "automatic" ? run.why : "";
+    }
     if (t().status === "review") return `Finished. Accepting v${t().result?.version ?? ""} is your decision.`;
     if (t().status === "ready_to_merge") return t().acceptance ? "Waiting for you to confirm." : m().view.project.hasGit === false ? "Review the result before closing the task." : sameBranch(t(), m().view.target) ? "Nothing is committed or closed without your confirmation." : "Nothing merges without your confirmation.";
-    if (m().mode === "ended") return "The run ended by itself. Close task moves it to Done and keeps what was done.";
+    if (m().mode === "ended") return resumeState(m().view)?.why || "The run ended. Close task moves it to Done and keeps what was done.";
     if (m().mode === "closed" && !archiveBlocked(t())) return "Archive moves it to the Archive with its work, without asking anything.";
+    // A pause whose stop or process exit is not confirmed cannot be resumed yet; it says so instead of offering Resume.
+    if (m().mode === "paused" && resumeState(m().view)?.kind === "evidence") return resumeState(m().view)!.why;
     return m().mode === "live" && m().view.sprint?.runMode !== "automatic" ? `${open() ? `${open()} question${open() === 1 ? "" : "s"} for you. ` : ""}Next step is Review.` : paused() ? "Resume, or send any message. Nothing was deleted." : "";
   };
   const base = () => { const b = m().session.base; if (!b) return []; const behind = behindTarget(checkout(), b.branch); return [["Base", behind ? `${b.branch}, ${behind} behind` : b.branch, true] as [string, string, boolean]]; };

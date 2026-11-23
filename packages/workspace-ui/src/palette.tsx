@@ -3,7 +3,7 @@ import { taskRoute } from "./board";
 import { useWs } from "./ctx";
 import { I, Keyed, Modal } from "./kit";
 import { rowIcon, sprintRoute, sprintTitle } from "./selectors";
-import { closeBlocked, sessionModel } from "./session-model";
+import { closeBlocked, resumeState, sessionModel } from "./session-model";
 
 type Entry = { id: string; group: string; label: string; sub?: string; icon: string; keys?: string; disabled?: string; run: () => void };
 const RESULT_LIMIT = 8;
@@ -23,10 +23,13 @@ export function Palette(props: { open: boolean; onClose: () => void }) {
   const taskActions = (): Entry[] => {
     const r = ws.router.route(), model = r.name === "task" ? sessionModel(ws.store.index(), r.task) : null;
     if (!model) return [];
-    const blocked = closeBlocked(model) ?? undefined, id = model.view.id;
+    const blocked = closeBlocked(model) ?? undefined, id = model.view.id, run = resumeState(model.view);
+    // Resume and Continue follow the one rule the card, the menu and the title band use; an unavailable Resume says why.
+    const notResumable = run?.action === "retry_task" ? "This task is not paused. Use Continue task to go on from the recorded state" : run?.why || "This task is not paused";
     return [
       { id: "a:stop", group: "Task", label: "Stop task", icon: "stop", keys: "Ctrl+.", disabled: model.mode === "live" ? ws.gate("stop_task") : "This task is not running", run: () => ws.stopTask(id) },
-      { id: "a:resume", group: "Task", label: "Resume task", icon: "play", disabled: model.mode === "paused" ? ws.gate("continue_task") : "This task is not paused", run: () => ws.run({ type: "continue_task", taskId: id, now: ws.store.clock() }) },
+      { id: "a:resume", group: "Task", label: "Resume task", icon: "play", disabled: run?.action === "continue_task" ? ws.gate("continue_task") : notResumable, run: () => ws.run({ type: "continue_task", taskId: id, now: ws.store.clock() }) },
+      ...(run?.action === "retry_task" ? [{ id: "a:continue", group: "Task", label: "Continue task", icon: "play", disabled: ws.gate("retry_task"), run: () => void ws.run({ type: "retry_task", taskId: id, now: ws.store.clock() }) }] : []),
       { id: "a:close", group: "Task", label: "Close task…", icon: "x", disabled: blocked ?? ws.gate("close_task"), run: () => ws.closeTask(id) },
     ];
   };

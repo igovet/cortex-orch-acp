@@ -1,6 +1,6 @@
 import { readableCheckReason, ACCESS_MODES, effortLabel, emptySession, engineLabel, isOpen, LANGUAGES, machineDefaults } from "@cortex/workspace-domain";
 import type { Check, Decision, EngineKey, Machine, Message, SessionOptions, TaskSession, TaskSettings, Worker, WorkerRoute, WorkerStatus } from "@cortex/workspace-domain";
-import { automaticAcceptanceHold, automaticStaleResultHold, staleResult, clock, interruptedTurn, plainChoice, readyLabel, readyStep, replanStopping, sameBranch, type TaskView, type WorkspaceIndex } from "./selectors";
+import { automaticAcceptanceHold, automaticStaleResultHold, staleResult, clock, interruptedTurn, ownerHold, plainChoice, readyLabel, readyStep, replanStopping, sameBranch, type TaskView, type WorkspaceIndex } from "./selectors";
 import { inTask } from "./status-text";
 
 /** Read models for the task session. Every count on the screen comes from these lists; nothing here changes state. */
@@ -152,7 +152,12 @@ function chipOf(m: SessionModel): Chip {
   if (m.view.ownerDecision) return { icon: m.view.fact.icon ?? "question", tone: "st-warn", text: "Needs you" };
   if (m.view.ownerIntegration) return { icon: "merge", tone: "st-warn", text: "Needs you", next: "Confirm integration" };
   if (m.view.automaticFact) return { ...m.view.automaticFact, icon: m.view.automaticFact.icon ?? "hourglass" };
-  if (task.observedPhase === "recovery") return { icon: "pause", tone: "st-warn", text: interruptedTurn(task.issue) ? "Interrupted" : "Stopped", next: "Waiting for you" };
+  if (task.observedPhase === "recovery") {
+    // A recovery whose stop or process exit is not confirmed does not wait for the owner: it waits for that evidence.
+    const run = resumeState(m.view);
+    if (run?.kind === "evidence") return { icon: "hourglass", tone: "st-warn", text: run.text };
+    return { icon: "pause", tone: "st-warn", text: interruptedTurn(task.issue) ? "Interrupted" : "Stopped", next: "Waiting for you" };
+  }
   if (task.conflict === "resolving") return { icon: "loader", tone: "st-run", spin: true, text: "Resolving" };
   if (task.conflict !== "none") return { icon: "alert", tone: "st-bad", text: "Conflict" };
   switch (task.status) {
@@ -325,3 +330,47 @@ export const closeBlocked = (m: SessionModel) =>
     : m.mode === "archived" ? "Restore the task first"
     : m.mode === "closed" ? "This task is already closed" : m.view.task.integration?.method === "squash" ? "This task is already merged"
     : m.view.task.conflict !== "none" ? "A merge is in progress. Abort it first" : null;
+
+/**
+ * Which existing run control a stopped, held or ended task offers, read from its projection alone. The card, the task menu,
+ * the palette, the title band, the strip and the composer all ask this one rule, so a state never offers Resume in one place
+ * and Continue, or nothing, in another:
+ * - `paused`: Stop paused it (or the runtime held it paused). Resume continues it.
+ * - `held`: the runtime recorded an interruption and waits for the owner. Continue (the runtime's retry) or a message.
+ * - `automatic`: the runtime or the sprint's Automatic run goes on by itself from the recorded state; no button is needed.
+ * - `evidence`: a stop or a process exit is not confirmed yet; nothing can resume or continue until it is.
+ * - `final`: a cancelled or failed run, or a closed task. It is never resumed.
+ * - `unknown`: the state is not confirmed or the machine is offline. Nothing is offered.
+ * `action` is the one command that applies, or null with `why` saying exactly why none does. Null for a task that simply runs,
+ * has not started or waits on a review, a question or a merge: those have their own actions.
+ */
+export type ResumeKind = "paused" | "held" | "automatic" | "evidence" | "final" | "unknown";
+export type ResumeState = { kind: ResumeKind; action: "continue_task" | "retry_task" | null; text: string; why: string };
+export const NOT_CONFIRMED = "Unavailable until this task's state is confirmed";
+export function resumeState(v: TaskView): ResumeState | null {
+  const t = v.task, mode = composerMode(v), warnings = t.warnings ?? [];
+  if (mode === "archived") return null;
+  if (mode === "offline") return { kind: "unknown", action: null, text: "Machine disconnected", why: NOT_CONFIRMED };
+  if (mode === "stopping") return { kind: "evidence", action: null, text: "Stopping", why: "Available once every worker is confirmed as stopped" };
+  if (warnings.includes("process_exit_unconfirmed")) return { kind: "evidence", action: null, text: "Waiting for exit evidence",
+    why: "A process of this task did not confirm that it stopped. Nothing can resume or continue while that is unknown; the service checks it again the next time it starts." };
+  if (warnings.includes("process_exit_pending") || replanStopping(t)) return { kind: "evidence", action: null, text: "Waiting for processes to stop",
+    why: "The service is confirming that this task's processes stopped and then continues by itself. Nothing can resume or continue until then." };
+  if (mode === "unconfirmed") return { kind: "unknown", action: null, text: "Not confirmed", why: NOT_CONFIRMED };
+  if (t.status === "done" || t.status === "closed_unverified") return { kind: "final", action: null, text: "Closed", why: "This task is closed. A closed task is never resumed." };
+  if (t.status === "cancelled") return { kind: "final", action: null, text: "Run cancelled",
+    why: "This run was cancelled. A cancelled run is final and cannot be resumed; Close task moves it to Done and keeps what was done." };
+  if (t.status === "failed") return { kind: "final", action: null, text: "Run failed",
+    why: mode === "review" ? "This run failed and cannot be resumed. Send a message to reopen it for a new plan."
+      : ownerHold(v)?.actions.length ? "This run failed and cannot be resumed. What you can do is on the card above the message box."
+      : "This run failed and cannot be resumed. Close task moves it to Done and keeps what was done." };
+  if (t.status === "paused") return { kind: "paused", action: "continue_task", text: t.automaticContinuation?.pause ? v.automaticFact?.text ?? "Paused" : "Paused by you", why: "" };
+  if (mode === "automatic") return { kind: "automatic", action: null, text: t.observedPhase === "recovery" && t.status === "working" ? "Recovering automatically" : v.automaticFact?.text ?? "Automatic",
+    why: t.observedPhase === "recovery" && t.status === "working"
+      ? "The service continues this task from its recorded state by itself. Nothing is needed from you, and nothing is replayed."
+      : "Automatic decides the next step from the recorded state. Anything it needs from you is on the card above the message box." };
+  if (t.observedPhase === "recovery" && t.status === "needs_you" && t.process === "live")
+    return t.conflict === "none" ? { kind: "held", action: "retry_task", text: interruptedTurn(t.issue) ? "Interrupted" : "Stopped", why: "" }
+      : { kind: "held", action: null, text: "Conflict", why: "A merge is in progress. Resolve or abort it first" };
+  return null;
+}

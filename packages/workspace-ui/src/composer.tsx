@@ -9,8 +9,8 @@ import { createLocalDictation } from "./voice";
 import { I, MenuItem, Pop } from "./kit";
 import { Action, Whole } from "./layout";
 import { createSuggest, SUGGEST_HINT, SuggestList, type SlashCommand, type SuggestOptions } from "./suggest";
-import { duration, stopLabel, taskSettings, workingNow, type ComposerMode, type SessionModel } from "./session-model";
-import { usePlanningSprint, useTaskRoutes } from "./task-place";
+import { duration, resumeState, stopLabel, taskSettings, workingNow, type ComposerMode, type SessionModel } from "./session-model";
+import { PlanningPlace, usePlanningSprint, useTaskRoutes } from "./task-place";
 
 /** Attached files are uploaded once, as they are added; the draft holds their references until an explicit send or queue action. */
 export function createAttachments() {
@@ -418,7 +418,7 @@ function QueueRow(props: { message: Accessor<Message>; ids: Accessor<string[]>; 
 
 const CLOSED_TEXT: Partial<Record<ComposerMode, string>> = {
   draft: "Start the task to send a message.",
-  closed: "This task is closed. Nothing more can be sent to it.", ended: "This run has ended. Nothing more can be sent to it; Close task moves it to Done.", archived: "This task is archived. Restore it to continue.",
+  closed: "This task is closed. Nothing more can be sent to it.", ended: "This run has ended and cannot be resumed. Nothing more can be sent to it; Close task moves it to Done.", archived: "This task is archived. Restore it to continue.",
   offline: "Sending is off because the machine is disconnected. Use Re-check state above to reconnect.",
   unconfirmed: "Sending is off because this task's state is not confirmed. Use Re-check state above.",
 };
@@ -465,13 +465,14 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
   // continues the same task, Stop pauses planning and Resume continues it. Sending stays open while the plan waits for
   // approval, and closes once its tasks are created.
   const planning = usePlanningSprint();
+  const changingRequest = useContext(PlanningPlace)?.changingRequest ?? (() => false);
   const routes = useTaskRoutes(() => ({ machine: m().view.machine.id, id: id() }));
   const planningOff = () => {
     const s = planning();
     if (!s) return undefined;
     if (s.planning === "created") return "Tasks are created. Edit them on the Board.";
-    if (s.planning === "cancelled") return "Planning is cancelled. Resume it to continue.";
     if (mode() === "offline" || mode() === "unconfirmed") return CLOSED_TEXT[mode()];
+    if (s.planning === "cancelled") return changingRequest() ? undefined : "Planning is cancelled. Resume it to continue.";
     return mode() === "draft" ? "Planning is starting." : undefined;
   };
   const queueIds = createMemo(() => m().queue.map(q => q.id));
@@ -512,7 +513,7 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
   /** The planning task's run control: Stop while it works, Resume once stopped, nothing once its tasks are created. */
   const planningControl = (): RunControl => {
     const s = planning()!;
-    if (s.planning === "created") return null;
+    if (s.planning === "created" || changingRequest()) return null;
     if (mode() === "stopping" && empty()) return { label: "Stopping", icon: "loader", why: STOPPING, go: () => undefined, effect: "Stopping planning. Messages can be sent once the stop is confirmed." };
     if (s.planning === "cancelled" || (mode() === "paused" && empty())) return { label: "Resume", icon: "play", needs: "resume_planning", go: resumePlanning, effect: "Resume continues planning." };
     if (running() && empty()) return { label: "Stop", icon: "stop", needs: "cancel_planning", go: stopPlanning, effect: "Stop pauses planning and keeps the conversation; Resume continues it. Write a message to send it instead." };
@@ -525,15 +526,18 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
     : mode() === "stopping" && empty() ? { label: "Stopping", icon: "loader", why: STOPPING, go: () => undefined, effect: "Stopping the task. Messages can be sent once the stop is confirmed." }
     : running() && empty() ? { label: stopLabel(resumable()), icon: "stop", needs: "stop_task", go: () => ws.stopTask(id()),
       effect: resumable() ? "Stop pauses the task and keeps everything; Resume continues it. Write a message to send it instead." : "End run stops this task. Write a message to send it instead." }
-    : mode() === "paused" && empty() ? { label: "Resume", icon: "play", needs: "continue_task", go: () => void ws.run({ type: "continue_task", taskId: id(), now: now() }), effect: "Resume continues the task. Write a message to send it and resume." }
+    : mode() === "paused" && empty() ? resumeState(m().view)?.action === "continue_task"
+      ? { label: "Resume", icon: "play", needs: "continue_task", go: () => void ws.run({ type: "continue_task", taskId: id(), now: now() }), effect: "Resume continues the task. Write a message to send it and resume." }
+      // A pause whose stop or process exit is not confirmed cannot be resumed yet: Resume stays off and says why.
+      : { label: "Resume", icon: "play", why: resumeState(m().view)?.why || "This task cannot be resumed now", go: () => undefined, effect: resumeState(m().view)?.why || "This task cannot be resumed now" }
     : null;
-  const plane = (): { label: string; needs: WorkspaceCommand["type"] } => planning() ? { label: "Send message now", needs: "plan_message" }
+  const plane = (): { label: string; needs: WorkspaceCommand["type"] } => planning() ? { label: changingRequest() ? "Send and resume planning" : "Send message now", needs: "plan_message" }
     : mode() === "review" ? { label: "Send and reopen", needs: "request_changes" }
     : mode() === "paused" ? { label: "Send and resume", needs: "send_message" }
     : delivery() === "queue" && mode() === "live" ? { label: "Queue message", needs: "send_message" }
     : { label: "Send message now", needs: "send_message" };
   const sendWhy = () => mode() === "stopping" ? STOPPING : files.busy() ? "Attachments are still loading" : text().trim() ? undefined : "Write a message first";
-  const planningEffect = () => control()?.effect ?? (props.folded ? "To the planner, not an answer to the question."
+  const planningEffect = () => control()?.effect ?? (changingRequest() ? "Sending your changes resumes planning." : props.folded ? "To the planner, not an answer to the question."
     : planning()!.planning === "ready" ? "Sending asks for changes to the plan. Create tasks waits for the revised plan." : undefined);
   const effect = () => planning() ? planningEffect() : control()?.effect ?? (mode() === "review" ? "Sending requests changes and reopens this task. Acceptance of this result is cleared."
     : mode() === "paused" ? "Sending resumes the task."
@@ -563,7 +567,7 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
     ];
   };
   // A draft in progress is never folded away.
-  const folded = () => props.folded && !opened() && !text().trim() && files.files().length === 0;
+  const folded = () => props.folded && !changingRequest() && !opened() && !text().trim() && files.files().length === 0;
   createEffect(() => { if (!props.folded) setOpened(false); });
   let input: HTMLTextAreaElement | undefined;
   createEffect(() => { if (planning() ? readOnly() : mode() !== "live" && mode() !== "paused") mic.stop(); });
