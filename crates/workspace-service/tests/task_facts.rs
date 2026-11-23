@@ -877,12 +877,32 @@ async fn an_answer_that_changed_no_files_has_nothing_to_commit() {
     assert_eq!(v["sameBranch"], true, "{facts}");
     assert_eq!(v["commitAvailable"], false);
     assert_eq!(v["noChanges"], true, "{facts}");
+    // Nothing to land: Automatic finishes the no-op instead of holding the sprint.
+    assert_eq!(v["alreadyInTarget"], true, "{facts}");
     assert_eq!(v["reason"], "This task answered without changing any files, so there is nothing to commit. Close the task when you are done with it.");
+    // Owner store 2026-11-23: an investigation-only plan (read-only workers that ran
+    // read-only commands, and their review) changed nothing either.
+    store.write(|db| {
+        db.execute("DELETE FROM runtime_events WHERE type='ANSWER_SUBMITTED'", [])?;
+        db.execute("INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1','TASK_CREATED','{\"execution_host\":\"rust\"}','runtime','now')", [])?;
+        db.execute("INSERT INTO runtime_nodes VALUES ('r1',1,'inspect','worker-explorer','Read','[]','[]','execution','completed','a',NULL)", [])?;
+        db.execute("INSERT INTO runtime_requests VALUES ('r1','k','explorer','command_run','d','{}')", [])?;
+        Ok(())
+    }).unwrap();
+    let facts = f.call("product.read", json!({})).await.unwrap();
+    let v = &facts["result"]["tasks"]["t1"]["integrationFacts"];
+    assert_eq!(v["noChanges"], true, "{facts}");
+    assert_eq!(v["alreadyInTarget"], true, "{facts}");
+    store.write(|db| {
+        db.execute_batch("DELETE FROM runtime_requests; DELETE FROM runtime_nodes; DELETE FROM runtime_events;")?;
+        db.execute("INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1','ANSWER_SUBMITTED','{\"text\":\"Seven stripes.\"}','runtime','now')", [])?;
+        Ok(())
+    }).unwrap();
     let unrecorded = "There is no record of which files this task changed in the project folder (only changes made through the app's own file tools are recorded), so they cannot be committed from here. Close as is, or commit in Git and use Done outside the app.";
     for (n, change) in [
-        "INSERT INTO runtime_requests VALUES ('r1','k','coordinator','command_run','d','{}')",
+        "INSERT INTO runtime_requests VALUES ('r1','k','coordinator','outside_command','d','{}')",
         "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1','NATIVE_PERMISSION_REQUESTED','{\"kind\":\"edit\"}','runtime','now')",
-        "INSERT INTO runtime_nodes VALUES ('r1',1,'n','worker-backend-dev','Work','[]','[\"src\"]','execution','completed','a',NULL)",
+        "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1','NATIVE_WRITER_TURN_STARTED','{\"channel_id\":\"c\"}','runtime','now')",
     ].into_iter().enumerate() {
         store.write(|db| {
             db.execute_batch("DELETE FROM runtime_requests; DELETE FROM runtime_nodes; DELETE FROM runtime_events WHERE type!='ANSWER_SUBMITTED';")?;

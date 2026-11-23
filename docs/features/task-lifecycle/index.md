@@ -83,6 +83,14 @@ digest, and the latest final verification must pass on that digest with exact,
 unique runtime execution bindings and complete retained output. Deferred checks
 must be closed by the existing evidence rules; open not_run, unverified or failed
 checks keep the coordinator path. A no-change review waiver is not eligible.
+A plan whose execution nodes are all read-only roles (an investigation) is not
+eligible either: its findings are not the change a task may ask for, so the
+coordinator keeps the turn, and its capsule `investigation_only` note tells it to
+ask the owner the decision the task requires or replan the implementation, and to
+submit a final result only when the task asked for findings alone. When such a
+result or a direct answer completes with no writing role, writer turn, write
+request or native edit, the Automatic finish treats it as a no-op (nothing to
+commit) instead of holding the sprint as unrecorded changes.
 
 Pending owner input (including claimed but undelivered input), steering, questions,
 consent, access waits, meaningful runtime proposals or ask_user_required prevents

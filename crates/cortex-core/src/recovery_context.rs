@@ -322,6 +322,18 @@ fn decision(row: Value) -> Value {
 /// (`completion::verification_diagnostics`). The runtime's full output is not readable
 /// from any worker channel, so this is how the coordinator and workers learn which
 /// step and test failed without rerunning everything.
+fn investigation_only_note(db: &Connection, task: &str) -> CoreResult<Value> {
+    let reconciling: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_tasks WHERE task_id=? AND state='RECONCILING')",
+        [task],
+        |r| r.get(0),
+    )?;
+    Ok(if reconciling && crate::lifecycle::reconciliation::investigation_only(db, task)? {
+        json!("This revision only investigated: every worker was read-only, so nothing the task may ask to change was changed yet. If the task asks for changes, do not submit a final result: ask the owner the decision the task requires (user_question_request, with the findings as current vs proposed behavior), or replan the implementation (replan_request). Submit a final result only when the task asked for findings alone.")
+    } else {
+        Value::Null
+    })
+}
 fn verification_failure(db: &Connection, task: &str) -> CoreResult<Value> {
     let latest: Option<(i64, String)> = db
         .query_row(
@@ -572,7 +584,7 @@ pub fn snapshot_for(
         "note":RULE_FILE_NOTE});
     let mut context = json!({"task":task,"owner_epoch":owner,"state":state,"revision":revision,"original_goal":goal,
         "retained_user_messages":messages,"retained_decisions":decisions,"constraints":constraints,"questions":questions,
-        "owner_write_denials":denials,"rule_file_protection":rule_files,"environment":environment(db, task)?,"verification_failure":verification_failure(db, task)?,"obstacles":crate::lifecycle::obstacles::capsule(db, task)?,
+        "owner_write_denials":denials,"rule_file_protection":rule_files,"environment":environment(db, task)?,"verification_failure":verification_failure(db, task)?,"investigation_only":investigation_only_note(db, task)?,"obstacles":crate::lifecycle::obstacles::capsule(db, task)?,
         "plan_summary":plan_summary(plan.as_deref())?,"current_nodes":nodes,"sources":sources,"attempts":attempts,
         "unresolved_commands":unresolved,"command_events_not_restated":command_events,
         "access_mode":crate::access::current(db,task)?,"clipping":notices});

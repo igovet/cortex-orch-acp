@@ -405,13 +405,30 @@ fn answered_without_changes(
     let Some(runtime) = runtime else {
         return Ok(false);
     };
+    // A result with no writing turn changed nothing: an answer, or a plan whose
+    // workers only read (an investigation and its review). Read-only commands do
+    // not count; any writing role, writer turn, write request or native edit keeps
+    // it unknown.
+    let roles = db
+        .prepare("SELECT role,stage FROM runtime_nodes WHERE task_id=?")?
+        .query_map([&runtime], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if !roles
+        .iter()
+        .all(|(role, stage)| cortex_core::scheduler::policy::read_only(role, stage))
+    {
+        return Ok(false);
+    }
     Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1 AND type='ANSWER_SUBMITTED')
-        AND NOT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=?1)
-        AND NOT EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=?1 AND role_id!='orchestrator')
+        "SELECT (EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1 AND type='ANSWER_SUBMITTED')
+            OR EXISTS(SELECT 1 FROM runtime_tasks WHERE task_id=?1 AND state='COMPLETED'))
+        AND NOT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1 AND type='NATIVE_WRITER_TURN_STARTED')
         AND NOT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=?1 AND operation IN
             ('project_write','project_edit','project_mkdir','project_delete','project_skill_link',
-             'outside_write','outside_command','command_run'))
+             'outside_write','outside_command'))
+        AND (EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1 AND type='ANSWER_SUBMITTED')
+            OR EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1 AND type IN ('TASK_CREATED','NATIVE_TASK_ADOPTED')
+                AND json_extract(payload_json,'$.execution_host')='rust'))
         AND NOT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1 AND (type='NATIVE_PROJECT_WRITTEN'
             OR (type IN ('NATIVE_PERMISSION_REQUESTED','NATIVE_PERMISSION_AUTO_ALLOWED') AND json_valid(payload_json)
                 AND json_extract(payload_json,'$.kind') IN ('edit','delete','move','execute'))))",
@@ -572,6 +589,9 @@ async fn same_branch(
             .map_err(context::core)?
         {
             facts["noChanges"] = json!(true);
+            // Nothing to land: Automatic finishes it as a no-op instead of holding.
+            facts["alreadyInTarget"] = json!(true);
+            facts["pendingPaths"] = json!([]);
             facts["reason"] = json!("This task answered without changing any files, so there is nothing to commit. Close the task when you are done with it.");
         } else {
             facts["reason"] = json!(unrecorded);

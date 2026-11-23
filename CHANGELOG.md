@@ -4,6 +4,10 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Fixed: a plan that only investigated no longer closes its task with a runtime-composed "work done"; the coordinator keeps the turn to ask the owner or plan the change. A task that changed nothing through read-only workers finishes in Automatic as a no-op instead of pausing the sprint with "no record of which files changed".
+
+- Fixed: the Automatic finish commits the bytes the task's final approved and verified review read, even when someone else changed a task file after the task wrote it.
+
 - Fixed: a worker can no longer park a task on "access missing" without trying. A `missing_access` dead end with no failed command, no refused request and no quoted login or permission error is a technical failure, and the next attempt is told to run the action and report the exact refusal.
 
 - Fixed: the app shows a task paused by an obstacle or an infrastructure wait as paused instead of "Task state not confirmed" with sending disabled; it also names the `sprint_task_result` and `sprint_graph` tools.

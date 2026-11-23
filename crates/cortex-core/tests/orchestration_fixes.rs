@@ -1352,3 +1352,39 @@ fn a_later_review_round_skips_files_an_earlier_review_read_at_the_same_bytes() {
     read_completely(&s, "src/a.rs", &now_changed);
     approve(&s, &e).unwrap();
 }
+
+/// An executed plan whose workers all only read (an investigation and its review)
+/// never closes itself with a runtime-composed "work done": the coordinator keeps
+/// the turn and its capsule says to ask the owner or plan the change (owner store
+/// 2026-11-23: a task that had to agree and implement a queue closed after its
+/// read-only inspection).
+#[test]
+fn an_investigation_only_plan_keeps_the_coordinator() {
+    let (_p, s, current) = reconciling("Found the gap", &[("src/a.rs", "9")]);
+    s.write(|db| {
+        db.execute(
+            "UPDATE runtime_nodes SET role='worker-explorer' WHERE task_id='t' AND stage='execution'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let text = s
+        .write(|db| {
+            reconciliation::compose_runtime_synthesis_tx(db, "t", Some(&current), Some(&"i".repeat(64)))
+        })
+        .unwrap();
+    assert_eq!(text, None);
+    let only = s.read(|db| reconciliation::investigation_only(db, "t")).unwrap();
+    assert!(only);
+    // A writing worker in the plan restores the clean runtime path.
+    s.write(|db| {
+        db.execute(
+            "UPDATE runtime_nodes SET role='worker-backend-dev' WHERE task_id='t' AND stage='execution'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(!s.read(|db| reconciliation::investigation_only(db, "t")).unwrap());
+}

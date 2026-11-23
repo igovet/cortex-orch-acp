@@ -778,6 +778,24 @@ fn escape_markdown(text: &str) -> String {
     }
     out
 }
+/// Whether the current revision's executed plan only investigated: every
+/// execution node is a read-only role. Its result is findings, not the change a
+/// task may ask for, so the coordinator (not the runtime) decides what follows
+/// (owner store 2026-11-23: a task that had to agree and implement a change was
+/// closed after its read-only inspection).
+pub fn investigation_only(db: &rusqlite::Connection, task: &str) -> CoreResult<bool> {
+    let roles = db
+        .prepare(
+            "SELECT n.role,n.stage FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+             WHERE n.task_id=? AND n.revision=t.revision AND n.stage='execution'",
+        )?
+        .query_map([task], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(!roles.is_empty()
+        && roles
+            .iter()
+            .all(|(role, stage)| crate::scheduler::policy::read_only(role, stage)))
+}
 /// Compose the final text without a coordinator turn on the clean first-review
 /// path, record it and `SYNTHESIS_RUNTIME_COMPOSED`. Returns None, changing
 /// nothing, whenever any condition of that path does not hold; the coordinator
@@ -807,7 +825,12 @@ pub fn compose_runtime_synthesis_tx(
         (task, task),
         |r| r.get(0),
     )?;
-    if existing.is_some() || blocked || review_cycle != 1 || !gaps(db, task)?.is_empty() {
+    if existing.is_some()
+        || blocked
+        || review_cycle != 1
+        || !gaps(db, task)?.is_empty()
+        || investigation_only(db, task)?
+    {
         return Ok(None);
     }
     let rows = db
