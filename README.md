@@ -1214,6 +1214,7 @@ read project files see these project skills listed and read them with Cortex MCP
 - [Packaging, onboarding and diagnostics](docs/project/packaging.md)
 - [Orchestration](docs/features/orchestration/index.md) — scheduling, review, verification in depth
 - [Roles and delegation](docs/features/roles-and-delegation/index.md) — the 23 specialist roles
+- [Unified system prompt](docs/features/unified-system-prompt/index.md) — how the single system prompt is assembled, delivered to each engine and role, and changed
 - [Routing and fallback](docs/features/routing-and-fallback/index.md)
 - [Permissions and execution containment](docs/features/permissions-and-containment/index.md)
 - [Storage and recovery](docs/project/storage.md)

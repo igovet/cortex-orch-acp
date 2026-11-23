@@ -41,7 +41,7 @@ Workspaces, recovery and context:
 - [Recovery races and session replacement](recovery-and-replacement/index.md)
 - [Deterministic recovery capsules](recovery-capsules/index.md)
 - [Context generations and qualified recovery delivery](context-generations/index.md)
-- [Unified system prompt](unified-system-prompt/index.md)
+- [Unified system prompt](unified-system-prompt/index.md) — prompt parts, sources, per-engine and per-role delivery, regeneration
 
 Access, commands and observability:
 

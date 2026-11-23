@@ -5,9 +5,11 @@
 > metadata fields no longer exist in the Rust runtime and are not described.
 
 Every native engine session (coordinator, writing worker, read-only worker,
-senior consultant) starts from one Cortex-owned instruction text instead of the
-engine's own base prompt. The host assembles the text when the session starts and
-hands it to the engine through an engine-specific channel. Per-turn material
+senior consultant) is given one Cortex-owned instruction text. The host assembles
+the text when the session starts and hands it to the engine through an
+engine-specific channel: Claude and Codex receive it as their system or base
+instructions, while OpenCode task turns receive it as a prefix of the user prompt
+(Cortex does not set or prove replacement of OpenCode's own base prompt). Per-turn material
 (recovery capsule, assignment brief, attachments, project skills) travels as user
 input, not as system instructions.
 
@@ -74,12 +76,20 @@ discovers their tools through `tools/list`.
 - **Project skills section** (`## Project skills`, `native_skills.rs::section`),
   only for channels served `project_read` (not the consultant); see
   [Project skills](#project-skills).
-- **Recovery capsule** (`cortex_core::recovery_context::delivery_tx`): complete in
-  the first prompt of a context generation, a short `read_capsule` reference
-  afterwards; see [context generations](../context-generations/index.md#delivery-ledger).
-- **Assignment brief or user text**, and stored attachments
-  (`native_attachments.rs`). Coordinator turns may also carry sprint dependency
-  context and a skill-proposal planning instruction (`native_runtime.rs`).
+- **Recovery capsule** (`cortex_core::recovery_context::delivery_tx`): sent in
+  full until delivery is confirmed in the current context generation (a
+  `delivery_confirmed` or `continuation_observed` receipt). Only after that
+  confirmation is a short `read_capsule` reference used; a capsule that was merely
+  transmitted, for example in an interrupted first turn, is sent in full again.
+  See [context generations](../context-generations/index.md#delivery-ledger).
+- **Assignment brief or user text.** Stored attachments are not embedded in the
+  brief: `native_attachments.rs` appends separate prompt blocks or markers whose
+  form (body or marker) depends on the engine's attachment capabilities and on
+  prior delivery. Coordinator turns may also carry sprint dependency context and a
+  skill-proposal planning instruction (`native_runtime.rs`).
+
+The project skill list is captured once at session start
+(`native_sessions.rs`) and reused for the turns of that session.
 
 Each prompt records digests, never text, of the instruction bundle, capsule,
 brief and served tool catalogue (`recovery_context::record_delivery_tx`).
@@ -90,7 +100,10 @@ brief and served tool catalogue (`recovery_context::record_delivery_tx`).
 | --- | --- | --- |
 | Claude | `systemPrompt` in the session `_meta`, a plain string that replaces the Claude Code preset, next to `native_engine_policy::claude_session_meta()` | `native_sessions.rs` |
 | Codex | a private `model-instructions.md` (mode 0600, created without following links in the broker directory) referenced by `model_instructions_file` inside `CODEX_CONFIG`; replaces Codex base instructions | `cortex-engine/src/broker.rs` (`write_model_instructions`), `cortex-engine/src/engine.rs` (`launch_with_model_instructions`), checked in `native_codex_runtime.rs` |
-| OpenCode | no system channel; the instruction text is prepended to the user prompt of every turn | `native_sessions.rs` (`SessionDriver::prompt`) |
+| OpenCode | on the native task path no system channel is set: the instruction text is prepended to the user prompt of every turn. Cortex does not install an agent prompt there, so it neither replaces nor proves replacement of OpenCode's base prompt | `native_sessions.rs` (`SessionDriver::prompt`), `native_routes.rs` |
+
+OpenCode also has a launch-time agent prompt, but it belongs to the separate
+catalog-read process (`machine/config_opencode.rs`), not to task sessions.
 
 Short-text generation sessions (`short_text_engine.rs`) are separate: they use a
 one-sentence text-generation instruction through the same two channels (Claude
@@ -103,10 +116,13 @@ request. `compose(name, stage, engine)` picks the profile (`orchestrator` for th
 coordinator, a `worker-*` id otherwise) and filters the served tool list.
 
 - **Coordinator** — `orchestrator` body and coordinator inlined skills.
-- **Writing worker** — worker body and worker inlined skills, including the
-  mutation-only skills (`skill-authoring`, `knowledge-harvest`).
-- **Read-only worker** — the same minus the mutation-only skills (the `READ_ONLY`
-  list in `instructions.rs`).
+- **Writing worker** — worker body and the worker inlined skills
+  (`INLINED_WORKER`). The mutation-only skills `skill-authoring` and
+  `knowledge-harvest` are not inlined: eligible writing profiles see their
+  triggers in the situational list and call `read_skill` when applicable.
+- **Read-only worker** — the same inlined skills; the read-only filter removes the
+  mutation-only skills from the available and advertised set, so `read_skill`
+  refuses them for these profiles (the `READ_ONLY` list in `instructions.rs`).
 - **Senior consultant** (`worker-senior-consultant`) — a worker variant limited
   to the supplied packet; no project-source or code-index tools and no project
   skills section.
@@ -156,7 +172,8 @@ SHA-256 and size. An unreadable skill is an ordinary tool error with a `code`:
 | Generated instruction data | `crates/workspace-service/schema/instructions.json` (`version`, `profiles`, `skills`), embedded with `include_str!` |
 | Generator | `crates/cortex-xtask/src/instructions.rs` |
 | Runtime assembly and bundled `read_skill` | `crates/workspace-service/src/native_instructions.rs` |
-| Tool catalogue and schemas | `crates/cortex-engine/src/schema.rs` |
+| Tool schemas and descriptions (edit here) | `crates/cortex-engine/schema/tools.json`; `schema.rs` embeds it and builds `schema::catalogue` |
+| Worker profile inputs | `agent-sources/profiles.json`, the protocol and verification fragments (`agent-sources/worker-protocol.md`, `consultant-protocol.md`, `verification-*.md`) and `agent-sources/references/` |
 | Session start, delivery, per-turn prompt | `crates/workspace-service/src/native_sessions.rs`, `native_runtime.rs` |
 | Codex instruction file | `crates/cortex-engine/src/broker.rs`, `engine.rs`; `native_codex_runtime.rs` |
 | Short-text sessions | `crates/workspace-service/src/short_text_engine.rs` |
@@ -169,12 +186,19 @@ SHA-256 and size. An unreadable skill is an ordinary tool error with a `code`:
    or role-restricted in the constants of
    `crates/cortex-xtask/src/instructions.rs`; runtime-appended text in
    `native_instructions.rs`, `native_sessions.rs` or `native_runtime.rs`; tool
-   descriptions and schemas in `crates/cortex-engine/src/schema.rs`.
-2. Regenerate: `scripts/cortex-xtask.sh profiles write` (worker skills from
-   `agent-sources/`), then `scripts/cortex-xtask.sh generate-instructions write`
-   (`instructions.json`). Verify with `scripts/cortex-xtask.sh check-generated`,
-   which runs the instruction, contract and profile checks together. Each of
-   these takes one positional action, `check` or `write`.
+   schemas and descriptions in `crates/cortex-engine/schema/tools.json` (the
+   Rust `schema.rs` only loads and filters it). Worker skills are rendered from
+   `agent-sources/profiles.json`, the protocol and verification fragments and
+   `agent-sources/references/`, not from the `skills/worker-*` output.
+2. Regenerate: `scripts/cortex-xtask.sh profiles write` (worker skills), then
+   `scripts/cortex-xtask.sh generate-instructions write` (`instructions.json`).
+   `generate-contract` is a separate command for the Workspace wire contract and
+   is not part of the prompt text. `profiles` and `generate-instructions` take one
+   positional action, `check` or `write`; verify with the bare
+   `scripts/cortex-xtask.sh check-generated`, which takes no action and runs the
+   contract, instruction and profile checks together. Instruction data is embedded
+   at build time, so a runtime built before regeneration keeps the old text until
+   it is rebuilt.
 3. After a package payload edit run `scripts/cortex-xtask.sh package stamp`, then
    `scripts/cortex-xtask.sh package check`.
 4. Tests: `cargo test -p workspace-service --lib native_instructions` (every
