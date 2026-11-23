@@ -381,6 +381,10 @@ fn policy(check: &Value) -> bool {
     if check["source"] == "runtime" {
         return paid_command(&check["command"]);
     }
+    // Only wording that says the check itself was restricted counts. A blocker that
+    // merely mentions refusal tests or a missing host capability is an environment
+    // gap the passed runtime verification covers (owner store 2026-11-23: "namespaces
+    // unavailable on this host. Its refusal cases ran" held an Automatic sprint).
     let text = check["blocker"].as_str().unwrap_or("").to_lowercase();
     [
         "paid",
@@ -388,10 +392,18 @@ fn policy(check: &Value) -> bool {
         "approval",
         "policy",
         "consent",
-        "permission",
-        "denied",
-        "refus",
         "prohibit",
+        "not permitted",
+        "not allowed",
+        "permission was denied",
+        "permission required",
+        "requires permission",
+        "needs permission",
+        "without permission",
+        "was refused",
+        "were refused",
+        "refused by",
+        "denied by",
     ]
     .iter()
     .any(|word| text.contains(word))

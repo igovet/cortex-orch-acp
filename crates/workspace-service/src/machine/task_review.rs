@@ -939,6 +939,34 @@ mod native_acceptance_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// Owner store 2026-11-23: a self-reported check whose blocker only mentions
+    /// refusal tests and a missing host capability is an environment gap, a note once
+    /// the runtime verification passed; an explicit restriction still asks the owner.
+    #[tokio::test]
+    async fn automatic_acceptance_takes_an_environment_gap_mentioning_refusals_as_a_note() {
+        for (blocker, accepted) in [
+            ("The harness reported native command namespaces unavailable on this host. Its refusal cases ran; positive journeys did not. Permission tests passed.", true),
+            ("Running it requires approval from the owner.", false),
+        ] {
+            let (root, runtime, draft) = completed().await;
+            let state = automatic_state(&root);
+            let mut product = sprint_product(&draft, "automatic");
+            report_checks(
+                &runtime,
+                json!([{"name":"Native session positive scenarios","outcome":"unverified","blocker":blocker}]),
+                json!([]),
+            )
+            .await;
+            let result = automatic(&root, "project", &draft, &state, &mut product, &mut Git::new())
+                .await
+                .unwrap();
+            assert_eq!(result["accepted"], accepted, "{blocker}: {result}");
+            runtime.shutdown().await;
+            drop(runtime);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     /// Owner store 2026-11-22: the final review was INCOMPLETE with its unreachable
     /// parts disclosed as limits, the runtime verified and completed the task, and the
     /// Automatic acceptance still held the sprint ("Independent review is not
