@@ -7032,25 +7032,7 @@ async fn recovery_project_operations_and_structured_tool_errors() {
         .await;
     }
     assert!(p.0.join("src/file.txt").is_file());
-    // `.claude` is a protected rule path until the owner lifts it (here: Remove).
-    checked(
-        &w,
-        "project_skill_link",
-        json!({"action":"link","name":"demo","request_key":"l-protected"}),
-        json!({"/result/isError":true,"/result/structuredContent/code":"rule_file_protected"}),
-        "end_turn",
-    )
-    .await;
-    s.write(|db| {
-        cortex_core::lifecycle::event_tx(
-            db,
-            "t",
-            "OWNER_WRITE_ALLOWED",
-            json!({"path":".claude","request":"lift-claude"}),
-        )?;
-        Ok(())
-    })
-    .unwrap();
+    // `.claude` is a rule path with no default protection: linking needs only a source.
     checked(
         &w,
         "project_skill_link",

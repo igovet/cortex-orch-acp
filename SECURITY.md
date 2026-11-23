@@ -1777,18 +1777,12 @@ and nothing is recorded. Only the owner lifts a denial: an explicit `allow-write
 working task no longer cancels running workers, review or verification; stopping work stays the
 explicit Stop, worker Stop and command stop.
 
-Project agent and process-rule files are write-protected by default: `AGENTS.md`, `CLAUDE.md`,
-`CLAUDE.local.md`, `GEMINI.md`, `.agents/`, `.claude/` and `docs/project/verification.md` at the
-project root (`lifecycle::steering::RULE_FILES`). A worker's file write to one of them is refused
-(`rule_file_protected`) unless the owner asked for it: the task goal or an owner message names the
-exact project path (whole-token match; a nested or home path does not count), the explicit
-`/skill-management` command names `.agents` and `.claude`, or the owner sends `allow-write: <path>`
-or removes the protection through the `allow_write` control. Model text never lifts it. The
-protection is enforced at write time only (plan and claim scopes containing such a path are not
-refused), and the coordinator's capsule lists it (`rule_file_protection`). Writing commands see the
-protected paths read-only once the command launcher passes the same set
-(`lifecycle::steering::write_denials`) to its sandbox. This guards the project's own process rules
-against a task rewriting them; it is not a boundary against the owner's other tools.
+Project agent and process-rule files (`AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`,
+`.agents/`, `.claude/` and `docs/project/verification.md`, `lifecycle::steering::RULE_FILES`) carry
+no default write protection (owner decision 2026-11-23): a task edits them with the runtime's
+approval like any other project file, and the owner is not asked. Only an explicit owner
+`deny-write: <path>` protects one; `allow-write: <path>` (in a message or in an answer) or Remove
+lifts that denial. The capsule's `rule_file_protection` list is empty.
 
 At task start the service records an environment preflight (`ENVIRONMENT_PREFLIGHT`, carried in the
 coordinator capsule as `environment`). It runs `gh auth status`, `codex login status`, `claude auth

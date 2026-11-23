@@ -183,13 +183,10 @@ pub fn denials(db: &Connection, task: &str) -> CoreResult<Vec<String>> {
     paths.sort();
     Ok(paths)
 }
-/// The project's own agent and process-rule files. A task never writes them unless
-/// the owner asks: its goal or one of the owner's messages names the path (see
-/// [`names_path`]), or the owner lifts it with `allow-write: <path>` or the desktop's
-/// Remove control. Directories cover everything below them. These protections are
-/// enforced at every write (project file tools and command sandboxes, through
-/// [`write_denials`]); plan and claim scope checks use the owner's own [`denials`]
-/// only, so a broad scope such as `.` or `docs` is never refused for them.
+/// The project's own agent and process-rule files. They carry no default write
+/// protection: the runtime approves a task's edit of them like any other project
+/// file (owner decision 2026-11-23: the owner must not be asked to permit them). An
+/// owner's explicit `deny-write: <path>` still protects any of them.
 pub const RULE_FILES: [&str; 7] = [
     ".agents",
     ".claude",
@@ -199,105 +196,10 @@ pub const RULE_FILES: [&str; 7] = [
     "GEMINI.md",
     "docs/project/verification.md",
 ];
-/// The explicit skill-management command: its whole purpose is editing project
-/// skills, so it names `.agents` and `.claude`.
-const SKILL_COMMAND: &str = "/skill-management";
-/// Whether `text` names the project-relative `path` explicitly: the exact path
-/// (ASCII case-insensitive), optionally `./`-prefixed or followed by `/...`, as a
-/// whole token. A longer name (`AGENTS.md.bak`, `MY_AGENTS.md`), a nested file
-/// (`crates/x/AGENTS.md`) or a home path (`~/.claude`) does not name it.
-pub fn names_path(text: &str, path: &str) -> bool {
-    let hay = text.as_bytes();
-    let needle = path.as_bytes();
-    if needle.is_empty() || hay.len() < needle.len() {
-        return false;
-    }
-    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
-    for start in 0..=hay.len() - needle.len() {
-        if !hay[start..start + needle.len()].eq_ignore_ascii_case(needle) {
-            continue;
-        }
-        let before_ok = match start {
-            0 => true,
-            _ => {
-                let b = hay[start - 1];
-                if b == b'/' {
-                    // `./AGENTS.md` at a token start; any other `/` is a longer path.
-                    start >= 2
-                        && hay[start - 2] == b'.'
-                        && (start == 2
-                            || !(word(hay[start - 3]) || b"./~".contains(&hay[start - 3])))
-                } else {
-                    !(word(b) || b == b'.' || b == b'~')
-                }
-            }
-        };
-        let end = start + needle.len();
-        let after_ok = match hay.get(end) {
-            None => true,
-            Some(&b) if word(b) => false,
-            // A sentence's full stop ends the token; `.bak` does not.
-            Some(&b'.') => hay.get(end + 1).is_none_or(|n| !word(*n)),
-            Some(_) => true,
-        };
-        if before_ok && after_ok {
-            return true;
-        }
-    }
-    false
-}
-/// The [`RULE_FILES`] still protected for this task, sorted. A task without a
-/// runtime row has none. The owner's texts (the goal and every recorded message)
-/// that name a path, an exact `allow-write:` lift or a desktop Remove of the path
-/// release it for this task.
-pub fn rule_file_protections(db: &Connection, task: &str) -> CoreResult<Vec<String>> {
-    use rusqlite::OptionalExtension;
-    let Some(goal) = db
-        .query_row(
-            "SELECT goal FROM runtime_tasks WHERE task_id=?",
-            [task],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()?
-    else {
-        return Ok(Vec::new());
-    };
-    let rows = db
-        .prepare(
-            "SELECT type,payload_json FROM runtime_events WHERE task_id=?
-            AND type IN ('USER_STEERING','OWNER_WRITE_ALLOWED') ORDER BY id",
-        )?
-        .query_map([task], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut texts = vec![goal];
-    let mut lifted = BTreeSet::new();
-    for (kind, raw) in rows {
-        let value: Value = serde_json::from_str(&raw)?;
-        if kind == "OWNER_WRITE_ALLOWED" {
-            if let Some(path) = value["path"].as_str() {
-                lifted.insert(path.to_owned());
-            }
-            continue;
-        }
-        if let Some(text) = value["text"].as_str() {
-            texts.push(text.to_owned());
-        }
-        for path in value["allow_write"].as_array().into_iter().flatten() {
-            if let Some(path) = path.as_str() {
-                lifted.insert(path.to_owned());
-            }
-        }
-    }
-    let skills = texts.iter().any(|t| t.contains(SKILL_COMMAND));
-    Ok(RULE_FILES
-        .iter()
-        .filter(|path| !lifted.contains(**path))
-        .filter(|path| !(skills && [".agents", ".claude"].contains(*path)))
-        .filter(|path| !texts.iter().any(|t| names_path(t, path)))
-        .map(|path| (*path).to_owned())
-        .collect())
+/// Default rule-file protections still in force for this task: none. Rule files are
+/// edited with the runtime's approval; only the owner's own [`denials`] protect paths.
+pub fn rule_file_protections(_db: &Connection, _task: &str) -> CoreResult<Vec<String>> {
+    Ok(Vec::new())
 }
 /// Every path a write of this task must avoid: the owner's [`denials`] and the
 /// [`rule_file_protections`], sorted and unique. Write-time checks use this;
@@ -555,40 +457,7 @@ an explicit `deny-write:` path is already enforced by the runtime.")
 
 #[cfg(test)]
 mod tests {
-    use super::{names_path, parse_denials};
-
-    #[test]
-    fn a_rule_file_is_named_only_as_a_whole_project_path() {
-        for text in [
-            "Update AGENTS.md with the new rule",
-            "fix agents.md.",
-            "edit `./AGENTS.md`",
-            "AGENTS.md",
-            "(AGENTS.md)",
-        ] {
-            assert!(names_path(text, "AGENTS.md"), "{text}");
-        }
-        for text in [
-            "update the rules",
-            "MY_AGENTS.md",
-            "AGENTS.md.bak",
-            "crates/x/AGENTS.md",
-            "AGENTS.mdx",
-        ] {
-            assert!(!names_path(text, "AGENTS.md"), "{text}");
-        }
-        assert!(names_path("add .claude/skills/x", ".claude"));
-        assert!(!names_path("see ~/.claude/settings.json", ".claude"));
-        assert!(!names_path("my.claude file", ".claude"));
-        assert!(names_path(
-            "rewrite docs/project/verification.md now",
-            "docs/project/verification.md"
-        ));
-        assert!(!names_path(
-            "verification.md",
-            "docs/project/verification.md"
-        ));
-    }
+    use super::parse_denials;
 
     #[test]
     fn explicit_directives_only_in_every_quoted_form() {

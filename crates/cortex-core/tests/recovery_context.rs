@@ -459,7 +459,8 @@ fn owner_steering_messages_are_constraints() {
     assert_eq!(v["owner_write_denials"]["paths"], json!(["src/api.rs"]));
 }
 /// The newest environment preflight is the capsule's `environment`, bounded and kept
-/// out of the decision rows; without one the capsule says so. Rule files are listed.
+/// out of the decision rows; without one the capsule says so. Rule files carry no
+/// default protection (owner decision 2026-11-23), so none is listed.
 #[test]
 fn environment_preflight_and_rule_files_are_in_the_capsule() {
     let p = Project::new();
@@ -467,10 +468,7 @@ fn environment_preflight_and_rule_files_are_in_the_capsule() {
     TaskMachine::new(&s).create("t", "Goal", "owner").unwrap();
     let v = s.read(|db| snapshot(db, "t")).unwrap();
     assert_eq!(v["environment"]["recorded"], false);
-    assert_eq!(
-        v["rule_file_protection"]["paths"],
-        json!(lifecycle::steering::RULE_FILES)
-    );
+    assert_eq!(v["rule_file_protection"]["paths"], json!([]));
     s.write(|db| {
         lifecycle::event_tx(db, "t", "ENVIRONMENT_PREFLIGHT", json!({"gh_auth":{"status":"old"}}))?;
         lifecycle::event_tx(db, "t", "ENVIRONMENT_PREFLIGHT",

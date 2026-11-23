@@ -51,8 +51,8 @@ bounded by construction and never stops a task for size:
   delivery), newest first, together with any constraint rows a store of the
   former runtime carries.
 - `owner_write_denials` lists the owner's `deny-write:` paths in force and
-  `rule_file_protection` the project's agent/rule files still write-protected for
-  this task (see [rule files](../steering-and-questions/index.md#project-rule-files-are-write-protected-by-default)).
+  `rule_file_protection` default rule-file protections, always empty: rule files are
+  edited with the runtime's approval (see [rule files](../steering-and-questions/index.md#project-rule-files)).
 - `environment` carries the newest `ENVIRONMENT_PREFLIGHT` facts the runtime
   recorded when the task started (bounded to 2,500 characters; `recorded:false`
   when none exists): exit-code-only GitHub CLI, native Codex and Claude login

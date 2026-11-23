@@ -1398,31 +1398,33 @@ fn an_answered_owner_decision_is_disclosed_not_asked_again() {
     }
 }
 
-/// Owner store 2026-11-23: the coordinator asked whether a protected rule file may
-/// be edited and offered "allow-write: docs/project/verification.md" as an answer.
-/// That answer lifts the protection like the Remove control; an answer naming an
-/// unprotected path lifts nothing.
+/// An owner's answer to a question is an owner message: an `allow-write: <path>` in it
+/// lifts the owner's own `deny-write` of that path like the Remove control; an answer
+/// naming another path lifts nothing. Rule files carry no default protection at all.
 #[test]
-fn an_allow_write_answer_lifts_that_rule_file_protection() {
-    use cortex_core::lifecycle::steering;
+fn an_allow_write_answer_lifts_that_owner_denial() {
+    use cortex_core::lifecycle::{event_tx, steering};
     for (answer, lifted) in [
         ("One, and allow-write: src/free.rs", false),
-        ("allow-write: docs/project/verification.md — разрешить правку", true),
+        ("allow-write: src/secret.rs — разрешить правку", true),
     ] {
         let (_p, s, _) = setup();
-        let protected = |s: &Store| -> bool {
-            s.read(|db| steering::write_denials(db, "t"))
-                .unwrap()
-                .iter()
-                .any(|p| p == "docs/project/verification.md")
+        assert!(s.read(|db| steering::rule_file_protections(db, "t")).unwrap().is_empty());
+        s.write(|db| {
+            event_tx(db, "t", "USER_STEERING", json!({"text":"deny-write: src/secret.rs","request":"m1","deny_write":["src/secret.rs"],"delivery":"boundary"}))?;
+            Ok(())
+        })
+        .unwrap();
+        let denied = |s: &Store| -> bool {
+            s.read(|db| steering::write_denials(db, "t")).unwrap().iter().any(|p| p == "src/secret.rs")
         };
-        assert!(protected(&s));
+        assert!(denied(&s));
         let q = ask(&s);
         s.write(|db| {
             assert!(answer_tx(db, "t", q["question_id"].as_str().unwrap(), answer, "text", None)?);
             Ok(())
         })
         .unwrap();
-        assert_eq!(protected(&s), !lifted, "{answer}");
+        assert_eq!(denied(&s), !lifted, "{answer}");
     }
 }

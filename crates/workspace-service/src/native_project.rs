@@ -827,7 +827,7 @@ mod effective_scope_tests {
             check(".cortex-dev/cortex.sqlite3"),
             Some("private_or_invalid_path")
         );
-        assert_eq!(check("AGENTS.md"), Some("rule_file_protected"));
+        assert_ne!(check("AGENTS.md"), Some("rule_file_protected"));
         store.write(|db| {
             lifecycle::event_tx(db, "t", "USER_STEERING",
                 json!({"text":"deny-write: other","deny_write":["other"],"request":"owner-denial"}))?;
@@ -1253,7 +1253,7 @@ mod recovery_tests {
     /// A writing worker's file write to a project rule file is refused with its own
     /// code unless the owner lifted it; an ancestor directory and other files stay writable.
     #[test]
-    fn rule_files_refuse_writes_until_the_owner_lifts_them() {
+    fn rule_files_are_writable_unless_the_owner_denies_them() {
         let f = Fixture::new();
         let store = f.open();
         TaskMachine::new(&store)
@@ -1277,16 +1277,25 @@ mod recovery_tests {
                 .err()
                 .map(|e| e.code())
         };
+        // Rule files carry no default protection (owner decision 2026-11-23); only an
+        // owner deny-write protects one, and allow-write lifts it again.
         for path in [
             "AGENTS.md",
             ".claude/settings.json",
             "docs/project/verification.md",
+            "docs",
+            "src/lib.rs",
         ] {
-            assert_eq!(check(path), Some("rule_file_protected"), "{path}");
-        }
-        for path in ["docs", "src/lib.rs", "docs/guide.md", "crates/x/AGENTS.md"] {
             assert_eq!(check(path), None, "{path}");
         }
+        store
+            .write(|db| {
+                lifecycle::event_tx(db, "t", "USER_STEERING",
+                    json!({"text":"deny-write: AGENTS.md","deny_write":["AGENTS.md"],"request":"d"}))?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(check("AGENTS.md"), Some("write_denied"));
         store
             .write(|db| {
                 lifecycle::event_tx(db, "t", "USER_STEERING",
@@ -1295,7 +1304,6 @@ mod recovery_tests {
             })
             .unwrap();
         assert_eq!(check("AGENTS.md"), None);
-        assert_eq!(check("CLAUDE.md"), Some("rule_file_protected"));
     }
     #[test]
     fn restart_reconciles_after_before_and_diverged_without_replaying() {

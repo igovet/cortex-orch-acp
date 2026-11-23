@@ -163,7 +163,7 @@ fn hint(code: &str) -> &'static str {
         "native_command_sandbox_unavailable" => "The command did not start: its supervisor could not prepare or confirm the sandbox before release. Nothing ran. This refusal does not authorize running on the host. Report the preparation blocker; a fresh contained attempt is appropriate only if the problem has cleared and the original receipt confirms it never launched.",
         "project_mount_alias_refused" => "Use a path directly in the bound checkout; this path crosses a mount boundary.",
         "write_outside_assignment_scope" => "Use a target inside the current assignment scope or request access to an additional project path before retrying. Outside paths cannot be added to the assignment.",
-        "rule_file_protected" => "This is a project rule file (AGENTS.md, CLAUDE.md, .agents/, .claude/, docs/project/verification.md…). Tasks don't edit it unless the owner's task names it or the owner sends `allow-write: <path>`. Leave it unchanged and propose rule changes in your result.",
+        "rule_file_protected" => "The owner denied writes to this path (`deny-write:`). Leave it unchanged; the owner lifts the denial with `allow-write: <path>`.",
         "outside_action_not_confirmed" => "The user did not allow this to run outside the sandbox, or no one could answer the permission card. Nothing ran. Do not repeat it; report the check as not run with this blocker.",
         "native_verification_sandbox_unavailable" =>"The verification sandbox could not run the probe; this does not show that the program is missing.",
         "skill_link_name_invalid" => "Use the exact skill directory name under .agents/skills: 1-64 lowercase letters, digits and single hyphens.",

@@ -334,98 +334,23 @@ fn allow_write_lifts_exactly_the_owners_own_denial() {
     assert_eq!(capsule["owner_write_denials"]["paths"], json!([]));
 }
 
+/// Owner decision 2026-11-23: the project's rule files carry no default write
+/// protection; the runtime approves a task's edit of them. Only an explicit owner
+/// `deny-write:` protects one, and `allow-write:` lifts that again.
 #[test]
-fn rule_files_are_write_protected_by_default_until_the_owner_names_or_lifts_them() {
+fn rule_files_are_writable_unless_the_owner_denies_them() {
     let (_p, s) = setup();
     let (task, execution) = started(&s, 0);
-    let all: Vec<String> = steering::RULE_FILES.iter().map(|p| p.to_string()).collect();
-    assert_eq!(
-        s.read(|db| steering::rule_file_protections(db, &task))
-            .unwrap(),
-        all
-    );
-    // They are write-time protections, not owner denials: the owner's own list,
-    // and so every plan/claim scope check, stays empty.
-    assert!(s
-        .read(|db| steering::denials(db, &task))
-        .unwrap()
-        .is_empty());
-    assert_eq!(
-        s.read(|db| steering::write_denials(db, &task)).unwrap(),
-        all
-    );
-    // A broad scope that contains a rule file is still a valid plan.
-    let plan = json!({"tasks":[{"id":"n","role":"backend-dev","objective":"Work","dependencies":[],"scope":["docs"],"model":"auto"}],
-        "verification":[["cargo","test"]]});
-    s.write(|db| plan::accept_tx(db, &task, "coordinator", "broad", &plan))
-        .unwrap();
-    // An owner message that names a file releases it; natural language does not.
-    say(
-        &s,
-        &execution,
-        "vague",
-        "you may update the rules if needed",
-    )
-    .unwrap();
-    say(&s, &execution, "named", "Please also fix CLAUDE.md.").unwrap();
-    say(&s, &execution, "lift", "allow-write: AGENTS.md").unwrap();
-    let left = s
-        .read(|db| steering::rule_file_protections(db, &task))
-        .unwrap();
-    assert_eq!(
-        left,
-        [
-            ".agents",
-            ".claude",
-            "CLAUDE.local.md",
-            "GEMINI.md",
-            "docs/project/verification.md"
-        ]
-    );
-    // The desktop's Remove control lifts a default protection too.
-    let request = control::canonical_request(
-        json!({"projectId":"p","executionId":execution,"requestId":"remove","action":"allow_write","path":".claude"}),
-        None,
-    )
-    .unwrap();
-    control::admit_input(&s, "p", "owner", &request, None).unwrap();
-    control::finish(&s, "p", "owner", &request, false).unwrap();
+    assert!(s.read(|db| steering::rule_file_protections(db, &task)).unwrap().is_empty());
+    assert!(s.read(|db| steering::write_denials(db, &task)).unwrap().is_empty());
     let capsule = s
         .read(|db| cortex_core::recovery_context::snapshot(db, &task))
         .unwrap();
-    assert_eq!(
-        capsule["rule_file_protection"]["paths"],
-        json!([
-            ".agents",
-            "CLAUDE.local.md",
-            "GEMINI.md",
-            "docs/project/verification.md"
-        ])
-    );
-    // A goal that names the file releases it from the start; the skill command
-    // releases the skill directories.
-    let (named, _) = started_with(&s, 1, "Rewrite docs/project/verification.md and AGENTS.md");
-    let left = s
-        .read(|db| steering::rule_file_protections(db, &named))
-        .unwrap();
-    assert_eq!(
-        left,
-        [
-            ".agents",
-            ".claude",
-            "CLAUDE.local.md",
-            "CLAUDE.md",
-            "GEMINI.md"
-        ]
-    );
-    let (skills, _) = started_with(&s, 2, "/skill-management create a release-notes skill");
-    let left = s
-        .read(|db| steering::rule_file_protections(db, &skills))
-        .unwrap();
-    assert!(
-        !left.iter().any(|p| p == ".agents" || p == ".claude"),
-        "{left:?}"
-    );
+    assert_eq!(capsule["rule_file_protection"]["paths"], json!([]));
+    say(&s, &execution, "deny", "deny-write: AGENTS.md").unwrap();
+    assert_eq!(s.read(|db| steering::write_denials(db, &task)).unwrap(), ["AGENTS.md"]);
+    say(&s, &execution, "lift", "allow-write: AGENTS.md").unwrap();
+    assert!(s.read(|db| steering::write_denials(db, &task)).unwrap().is_empty());
 }
 
 #[test]

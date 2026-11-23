@@ -387,36 +387,20 @@ enforces private-path restrictions and owner write protections. A grant does not
 override those protections or change command mounts or outside-action consent.
 See [orchestration](../orchestration/index.md#worker-questions-and-additional-access).
 
-### Project rule files are write-protected by default
+### Project rule files
 
-A task never edits the project's own agent and process-rule files unless the owner
-asks for it. The default set (`RULE_FILES` in `crates/cortex-core/src/lifecycle/steering.rs`)
-is `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`, `.agents/`, `.claude/`
-and `docs/project/verification.md`, at the project root (directories cover everything
-below them). A worker's file write to one of them (the path itself or below it) is
-refused with `rule_file_protected`; a writing command started while the protection
-holds sees an existing protected path read-only. The protections are write-time
-only: a plan, claim or access request whose scope merely contains one of them (for
-example `.` or `docs`) is not refused, and an ancestor directory stays writable.
+The project's own agent and process-rule files (`RULE_FILES` in
+`crates/cortex-core/src/lifecycle/steering.rs`: `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`,
+`GEMINI.md`, `.agents/`, `.claude/` and `docs/project/verification.md`) carry no default write
+protection (owner decision 2026-11-23). When the work needs a change to one of them, the runtime
+approves it like any other project file; the owner is never asked to permit it. Only an explicit
+owner `deny-write: <path>` protects one, and `allow-write: <exact path>` in a message or in the
+owner's answer to a question (recorded as `OWNER_WRITE_ALLOWED` with request
+`answer:<question id>`), or Remove for that path, lifts that denial again.
 
-The owner lifts a protection for one task in any of these ways, detected
-conservatively:
-
-- the task goal or one of the owner's messages names the exact project path
-  (ASCII case-insensitive, optionally `./`-prefixed or followed by `/...`, as a
-  whole token: "update AGENTS.md" names `AGENTS.md`; "update the rules",
-  `crates/x/AGENTS.md`, `AGENTS.md.bak` or `~/.claude` do not);
-- the explicit `/skill-management` command names `.agents` and `.claude`, which
-  that workflow exists to edit;
-- `allow-write: <exact path>` in a message or in the owner's answer to a question
-  (recorded as `OWNER_WRITE_ALLOWED` with request `answer:<question id>`), or Remove
-  for that path (the `allow_write` control accepts a protected rule file as well as
-  an owner denial).
-
-Natural language never creates or lifts any other rule. The coordinator's capsule
-lists the protections still in force (`rule_file_protection`), so plans avoid them
-and propose rule changes in their result instead. Owner `deny-write:` rules remain
-separate (`owner_write_denials`) and keep their plan-scope enforcement.
+Natural language never creates or lifts a denial. Owner `deny-write:` rules keep
+their plan-scope enforcement (`owner_write_denials`); the capsule's
+`rule_file_protection` list is empty.
 
 Language follows the reader. Everything another worker or the coordinator reads
 is English: worker reports (headings included), summaries, briefs, worker

@@ -1,6 +1,15 @@
 # Decisions
 
 > Historical record. Module, test and script paths in this page that name `.py` files, `src/`, `tests/test_*.py` or the former Python scripts refer to the former Python runtime, which was removed on 2026-11-16; they are kept as dated history, no longer exist in the checkout and are not current commands. The behavior statements are unverified against the Rust runtime unless a Rust source path is given.
+## 2026-11-23 Rule files are edited with the runtime's approval
+
+The owner decided that project rule files (`AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`,
+`GEMINI.md`, `.agents/`, `.claude/`, `docs/project/verification.md`) carry no default write
+protection: the owner must not be asked to permit an edit the work needs. The runtime approves
+it like any other project file (`lifecycle::steering::rule_file_protections` is empty); only an
+explicit owner `deny-write:` protects a path, and `allow-write:` in a message or an answer lifts
+it. This replaces the default protection recorded earlier.
+
 ## 2026-11-18 Queued messages are sent by the service; denials can be lifted; delivery is confirmed
 
 The owner decided four follow-ups to the entry below. A desktop Queue message for a

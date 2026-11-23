@@ -4,6 +4,8 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Changed (owner decision): project rule files (`AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`, `.agents/`, `.claude/`, `docs/project/verification.md`) are no longer write-protected by default. When the work needs a change to one of them, the runtime approves it like any other project file and the owner is not asked; only an explicit owner `deny-write:` protects one.
+
 - Fixed: an owner answer to a question that contains `allow-write: <path>` lifts that write protection (for example a protected rule file) like the Remove control, instead of being ignored and asked again.
 
 - Fixed: the Automatic finish treats a self-reported check as policy-restricted only for wording that restricts the check itself (paid, not authorized, requires approval or permission, not allowed, refused by); a blocker that merely mentions refusal tests or a missing host capability is a note once runtime verification passed.
