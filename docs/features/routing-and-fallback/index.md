@@ -1425,6 +1425,29 @@ Choosing and refusing:
     (possibly excluded) route -- that fallback only applies when nothing is
     engine-confirmed at all.
 
+Temporary provider holds (native host):
+
+- Separate from the `ROUTE_UNAVAILABLE` records above, the native service keeps
+  an in-memory hold per engine adapter, connection and model (all efforts of that
+  model) when a typed provider refusal arrives before any work began: Claude
+  `errorKind=rate_limit` or Codex `usageLimitExceeded`/`rateLimitExceeded`, with
+  optional validated integer `retryAfterSeconds` or `resetsAt`. Only the class,
+  numeric code and timing are kept, never provider text. Free-text messages,
+  bare HTTP numbers, authentication, billing, account-hold and model errors
+  are not holds.
+- The affected worker shows `waiting_for_provider_capacity` (rate or quota
+  reason), holds no process or slot, and retries the same route in a fresh
+  channel after the later of the reported reset and a growing backoff (5 s,
+  doubling to 5 min). One launch probes an expired hold; a success clears it and
+  a repeat refusal extends it. Release requires the refused process to be
+  confirmed settled.
+- It never substitutes a model or route, does not change admission, dependency
+  order, owner pause or acceptance, and does not use up ordinary retries.
+  Cancellation, pause and stop end the wait without launching. A model on the
+  same connection that is not held stays eligible. The local connection-slot wait
+  (`waiting_for_engine_capacity`) and the 32-job Start refusal
+  (`native_capacity_unavailable`) are different rules.
+
 Retries:
 
 - A routing refusal (`no_available_route`, `pinned_route_unavailable`,

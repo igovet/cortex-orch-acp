@@ -253,9 +253,23 @@ reservation enforces the same session-wide ceiling. A connection's validated
 lower that session's worker share on that connection; it neither raises the
 four-worker session cap nor pools unused slots across chat sessions.
 Coordinator reservations do not consume worker slots and retain their own
-per-connection limit. A worker queued for available session or connection
-capacity waits in bounded periods (`capacity_queue_timeout_seconds`, 600 s);
-cancellation ends the wait at once. A finished worker continues to occupy its
+per-connection limit. Two different waits exist; neither fails the worker.
+The scheduler claims only as many ready nodes as the session has free worker
+slots, so excess nodes stay `pending`. A claimed worker whose engine connection
+has no free slot (other holders, other chats, or an ambiguous unconfirmed exit)
+is not refused: it waits locally. The task view shows the warning
+`waiting_for_engine_capacity` with the reason "Waiting for an engine connection
+slot" (`NATIVE_WORKER_CAPACITY_WAITING`, closed by
+`NATIVE_WORKER_CAPACITY_WAIT_ENDED`). The worker wakes when a slot's release is
+confirmed (and on a one-second recheck) and is admitted in the scheduler's claim
+order for that connection. The authority check, slot check and reservation are
+one store transaction, so two contenders can never take the same slot. This wait
+has no timeout of its own; it lasts while the task's authority stands. An owner
+pause, stop, cancellation or service shutdown ends it without launching
+anything. Siblings and workers on other connections keep running, and an
+ambiguous holder never counts as released. The top-level Start limit (32 tracked
+jobs) is a separate admission rule: it still refuses with
+`native_capacity_unavailable` and is not queued. A finished worker continues to occupy its
 session slot until its engine is confirmed gone and its reservation is released
 or safely reclaimed. Scope overlap serializes writing nodes across every task of
 the project, including tasks of other chats; review-stage nodes and READ_ONLY
@@ -311,7 +325,9 @@ they never change scheduling.
 
 When no worker of the task is running and a step still cannot start, the
 scheduler stops the task with `scheduler_capacity_timeout` after 30 minutes,
-which bounds a slot or path release that is never observed. That deadline does
+which bounds a slot or path release that is never observed. This deadline
+belongs to scheduler-level `capacity_limit` and scope waits; it does not apply to
+the local engine-connection wait above, whose worker is already claimed. That deadline does
 not run while every shown wait is a scope wait on a worker observed alive
 through its recorded process identity (a matching pid, start time and boot):
 such a worker, often in another chat, releases its paths when it ends. The

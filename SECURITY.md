@@ -593,6 +593,20 @@ refused, and only a later exact complete passing receipt can close it. Repair
 continuation does not release unknown capacity, waive review or verification, or
 convert incomplete evidence into success.
 
+Two waits keep a worker from failing, and neither widens authority. A claimed
+worker whose engine connection has no free slot waits locally
+(`waiting_for_engine_capacity`); the authority check, slot check and reservation
+are one store transaction, only a confirmed process exit releases a slot (an
+ambiguous holder never does), and pause, stop, cancellation or shutdown ends the
+wait without a launch. A typed provider rate/quota refusal that arrives before
+any work began holds only that exact engine, connection and model in memory
+(`waiting_for_provider_capacity`); the hold stores the limit class and timing,
+never provider text, and the same route is probed once after expiry. Neither wait
+substitutes a model, relaxes routing consent, owner pause, dependency order or
+acceptance, or queues top-level Start: the 32-job limit still refuses with
+`native_capacity_unavailable`, and authentication, billing, account-hold and
+invalid-model errors remain hard refusals.
+
 Every Hybrid or Automatic queue hold records one next actor (runtime, agent or
 owner), decided by the scheduler alone. An agent repair (a repairable result or
 a run that failed with every effect known) reopens the same task for its

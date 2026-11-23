@@ -62,6 +62,7 @@ mod native_project;
 mod native_project_ops;
 mod native_recovery;
 mod native_results;
+mod native_route_hold;
 pub mod native_routes;
 pub mod native_runtime;
 mod native_sandbox;

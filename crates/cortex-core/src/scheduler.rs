@@ -173,6 +173,63 @@ pub fn claim_ready_tx(
     }
     Ok(claimed)
 }
+/// Replace only the already-running claim whose exact provider-refused channel
+/// was revoked and reaped. Keep its slot in the task's DAG; dependencies are
+/// neither re-claimed nor released. Ordinary infrastructure retry budgets do
+/// not count a provider's pre-work refusal.
+pub fn replace_provider_refused_claim_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    owner: &OwnerEpoch,
+    assignment: &str,
+    channel: &str,
+) -> CoreResult<String> {
+    ownership::check_tx(db, task, owner)?;
+    use rusqlite::OptionalExtension;
+    let row: Option<(String, i64)> = db.query_row(
+        "SELECT n.node_id,n.revision FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+         JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
+         JOIN trusted_channels c ON c.channel_id=p.channel_id AND c.attempt_id=p.attempt_id
+         JOIN capacity_reservations r ON r.task_id=n.task_id AND r.attempt_id=p.attempt_id
+         WHERE n.task_id=? AND n.assignment_ref=? AND c.channel_id=? AND c.owner_epoch=?
+         AND c.task_id=n.task_id AND c.assignment_id=n.assignment_ref AND c.revoked_at IS NOT NULL
+         AND p.status='terminated' AND r.state='released' AND r.release_observation='process_exited'
+         AND n.revision=t.revision AND n.status='running' AND n.result_json IS NULL
+         AND ((t.state='EXECUTING' AND n.stage='execution') OR (t.state='REVIEWING' AND n.stage='review'))
+         AND NOT EXISTS(SELECT 1 FROM task_stopped s WHERE s.task_id=n.task_id)
+         AND NOT EXISTS(SELECT 1 FROM runtime_requests q WHERE q.task_id=n.task_id AND q.actor=c.channel_id)
+         AND EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='NATIVE_PROVIDER_ROUTE_REFUSED'
+           AND json_extract(e.payload_json,'$.channel_id')=c.channel_id)",
+        (task, assignment, channel, owner.epoch), |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    let Some((node, revision)) = row else {
+        return refuse("native_provider_retry_claim_changed");
+    };
+    let replacement = crate::digest(
+        format!("{task}|{assignment}|{channel}|provider_retry").as_bytes(),
+    );
+    db.execute("UPDATE runtime_nodes SET assignment_ref=? WHERE task_id=? AND assignment_ref=?",
+        (&replacement, task, assignment))?;
+    event_tx(db, task, "NATIVE_PROVIDER_RETRY_CLAIMED", json!({
+        "previous_assignment":assignment,"assignment_ref":replacement,"channel_id":channel,
+        "node":node,"revision":revision
+    }))?;
+    event_tx(db, task, "ASSIGNMENT_CREATED",
+        json!({"node":node,"assignment_ref":replacement,"revision":revision}))?;
+    // The route was already authorized and is not selected again on this retry.
+    let route: Option<String> = db.query_row(
+        "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='NATIVE_ROUTE_SELECTED'
+         AND json_extract(payload_json,'$.assignment_ref')=? ORDER BY id DESC LIMIT 1",
+        (task, assignment), |row| row.get(0),
+    ).optional()?;
+    if let Some(raw) = route {
+        let mut route: serde_json::Value = serde_json::from_str(&raw)?;
+        route["assignment_ref"] = json!(replacement);
+        event_tx(db, task, "NATIVE_ROUTE_SELECTED", route)?;
+    }
+    Ok(replacement)
+}
+
 pub fn submit_claim(
     executor: &crate::store::executor::StoreExecutor,
     task: String,
@@ -202,17 +259,26 @@ pub struct Reservation<'a> {
     pub kind: ReservationKind,
     pub connection_limit: u16,
 }
+/// Capacity shared by workers of one task; ambiguous holders still occupy it.
+pub fn worker_capacity_available(
+    db: &Transaction<'_>,
+    task: &str,
+    connection: &str,
+    connection_limit: u16,
+) -> CoreResult<bool> {
+    let (total, on_connection): (i64, i64) = db.query_row(
+        "SELECT count(*),coalesce(sum(connection_id=?),0) FROM capacity_reservations
+         WHERE task_id=? AND kind='worker' AND state IN ('reserved','ambiguous')",
+        (connection, task),
+        |v| Ok((v.get(0)?, v.get(1)?)),
+    )?;
+    Ok(total < 4 && on_connection < i64::from(connection_limit))
+}
 pub fn reserve_tx(db: &Transaction<'_>, r: &Reservation<'_>) -> CoreResult<Option<String>> {
-    if r.kind == ReservationKind::Worker {
-        let (total, on_connection): (i64, i64) = db.query_row(
-            "SELECT count(*),coalesce(sum(connection_id=?),0) FROM capacity_reservations
-            WHERE task_id=? AND kind='worker' AND state IN ('reserved','ambiguous')",
-            (r.connection, r.task),
-            |v| Ok((v.get(0)?, v.get(1)?)),
-        )?;
-        if total >= 4 || on_connection >= r.connection_limit as i64 {
-            return Ok(None);
-        }
+    if r.kind == ReservationKind::Worker
+        && !worker_capacity_available(db, r.task, r.connection, r.connection_limit)?
+    {
+        return Ok(None);
     }
     let id = format!("cap_{}", uuid::Uuid::new_v4().simple());
     db.execute(

@@ -205,7 +205,12 @@ failure more than 10 minutes after the previous one starts a new streak.
   `infrastructure_wait`) and is retried by the runtime when the delay ends,
   without a replan, or at once when the owner chooses Retry (`OWNER_RETRY_REQUESTED`
   ends every pending delay of the task). A route failure (`capacity_unavailable`) is bounded the same
-  way. An owner pause (`owner_paused`) or a restart (`runtime_restart`) is
+  way. A full engine connection and a clearly typed temporary provider
+  rate/quota refusal are not failures at all: the worker waits
+  (`waiting_for_engine_capacity`, `waiting_for_provider_capacity`), is not
+  retried or counted, and restarts on the same route; cancellation, pause and stop
+  end the wait with nothing launched. Ambiguous, auth, billing and invalid-model
+  errors keep the failure path above. An owner pause (`owner_paused`) or a restart (`runtime_restart`) is
   retried at once and not counted. A model that lost the same node lineage twice
   is routed away from on the next dispatch (another model when one is usable,
   preferably another engine) without raising the tier. A quality retry

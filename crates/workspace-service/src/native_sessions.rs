@@ -282,6 +282,8 @@ pub struct NativeHost {
     pub(super) root: PathBuf,
     pub(super) driver: tokio::sync::Mutex<()>,
     pub(super) commands: crate::native_commands::Running,
+    pub(super) capacity_changed: Arc<tokio::sync::Notify>,
+    pub(super) route_holds: Arc<crate::native_route_hold::Holds>,
 }
 impl NativeHost {
     /// The trusted owner-client decision transport for native permission cards.
@@ -357,6 +359,8 @@ impl NativeHost {
             root,
             driver: tokio::sync::Mutex::new(()),
             commands: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            capacity_changed: Arc::new(tokio::sync::Notify::new()),
+            route_holds: Default::default(),
         })
     }
     pub async fn create(
@@ -486,6 +490,30 @@ impl NativeHost {
         who: SessionRole,
         route: SessionRoute,
     ) -> CoreResult<SessionDriver> {
+        self.dispatch_with_wait(task, owner, who, route, None).await
+    }
+
+    pub(super) async fn dispatch_with_wait(
+        &self,
+        task: String,
+        owner: OwnerEpoch,
+        who: SessionRole,
+        route: SessionRoute,
+        wait: Option<WorkerLaunch>,
+    ) -> CoreResult<SessionDriver> {
+        self.dispatch_managed(task, owner, who, route, wait, None).await
+    }
+
+    pub(super) async fn dispatch_managed(
+        &self,
+        task: String,
+        owner: OwnerEpoch,
+        who: SessionRole,
+        route: SessionRoute,
+        mut wait: Option<WorkerLaunch>,
+        mut managed: Option<(&mut crate::native_route_hold::Attempt, LaunchInterrupts)>,
+    ) -> CoreResult<SessionDriver> {
+        use crate::native_route_hold::{Admission, LIMITED};
         if route.launch.cwd != self.root
             || route.connection.is_empty()
             || route.connection_limit == 0
@@ -495,62 +523,284 @@ impl NativeHost {
         {
             return Err(CoreError::Refused("invalid_session_route"));
         }
-        let connection = route.connection.clone();
-        let limit = route.connection_limit;
         let engine_kind = route.launch.engine;
-        let (credential, reservation, instructions, automatic) = receive(self.executor.write(move |db| {
-            let credential = channels::issue_tx(
-                db,
-                &task,
-                &owner,
-                match &who {
-                    SessionRole::Coordinator => Principal::Coordinator,
-                    SessionRole::Worker { assignment } => Principal::Worker { assignment },
-                },
-            )?;
-            let identity =
-                channels::authenticate(db, &credential.channel_id, credential.secret(), false)?;
-            cortex_engine::schema::catalogue(
-                &identity.role,
-                identity.profile.as_deref(),
-                identity.stage.as_deref(),
-            )
-            .map_err(|_| CoreError::Refused("unknown_session_role"))?;
-            let mut instructions = crate::native_instructions::compose(
-                identity.profile.as_deref().unwrap_or("orchestrator"),
-                identity.stage.as_deref(),
-                engine_kind,
-            )?;
-            let automatic = lifecycle::automatic::enabled(db, &task)?;
-            if identity.role == "coordinator" {
-                // The no-stop policy holds for every task, not only Automatic ones.
-                instructions.push_str("\n\n");
-                instructions.push_str(lifecycle::automatic::COORDINATOR_NOTE);
-                if automatic {
-                    instructions.push_str(" Have execution workers use Cortex project file tools for changes that must be included in the task's local finish.");
-                }
-            } else if automatic && identity.stage.as_deref() == Some("execution") {
-                instructions.push_str("\n\nAutomatic sprint: make the task's final file changes through Cortex project file tools so the runtime retains attributable write receipts. Do not stage or commit changes yourself; automatic finish only commits changes it can attribute to this task.");
+        let limit = route.connection_limit;
+        let assignment = match &who {
+            SessionRole::Worker { assignment } => Some(assignment.clone()),
+            SessionRole::Coordinator => None,
+        };
+        if let Some(wait) = &wait {
+            wait.ticket.as_ref().unwrap().select(
+                &route.connection, managed.as_ref().map(|(attempt, _)| attempt.key()),
+            );
+        }
+        let mut queued = false;
+        let mut provider_wait: Option<String> = None;
+        let hold_changed = &self.route_holds.changed;
+        enum Decision<T> {
+            Waiting,
+            RecheckRoute,
+            Reserved(T),
+        }
+        let admitted = loop {
+            let changed = self.capacity_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let route_wake = hold_changed.notified();
+            tokio::pin!(route_wake);
+            route_wake.as_mut().enable();
+            if let Some(error) = managed.as_ref().and_then(|(_, watches)| watches.interruption())
+                .or_else(|| wait.as_ref().and_then(WorkerLaunch::interruption))
+            {
+                break Err(error);
             }
-            let reservation = scheduler::reserve_tx(
-                db,
-                &Reservation {
-                    task: &task,
-                    connection: &connection,
-                    assignment: identity.assignment.as_deref(),
-                    attempt: &identity.attempt,
-                    kind: if identity.role == "worker" {
-                        ReservationKind::Worker
-                    } else {
-                        ReservationKind::Coordinator
+            let admission = managed.as_mut().map_or(Admission::Ready, |(attempt, _)| {
+                let first = wait.as_ref().is_none_or(|w| {
+                    w.ticket.as_ref().unwrap().first_for_route(attempt.key())
+                });
+                attempt.admit(first)
+            });
+            let (reason, until) = match admission {
+                Admission::Ready => (None, None),
+                Admission::Waiting { reason, until } => (Some(reason), until),
+            };
+            if let Some(wait) = &wait {
+                // A provider-held route must not head-of-line block another model
+                // sharing its connection. The ticket keeps its original position.
+                wait.ticket.as_ref().unwrap().set_held(reason.is_some());
+            }
+            let wait_id = if reason.is_some() && provider_wait.is_none() {
+                match crate::identity() {
+                    Ok(id) => Some(id),
+                    Err(_) => break Err(CoreError::Refused("native_wait_identity_unavailable")),
+                }
+            } else {
+                provider_wait.clone()
+            };
+            let wait_id_for_tx = wait_id.clone();
+            let already_waiting = provider_wait.is_some();
+            let eligible = wait.as_ref().is_none_or(|w| {
+                w.ticket.as_ref().unwrap().first_on(&route.connection)
+            });
+            let (task, owner, assignment, connection) =
+                (task.clone(), owner.clone(), assignment.clone(), route.connection.clone());
+            let interrupts = managed.as_ref().map(|(_, w)| w.clone())
+                .or_else(|| wait.as_ref().map(|w| w.interrupts.clone()));
+            let model = route.model.clone();
+            let gate = managed.as_ref().map(|(attempt, _)| attempt.reservation_gate());
+            let result = receive(self.executor.write(move |db| {
+                let principal = match &assignment {
+                    Some(assignment) => Principal::Worker { assignment },
+                    None => Principal::Coordinator,
+                };
+                if let Some(interrupts) = &interrupts {
+                    if let Some(error) = interrupts.interruption() {
+                        return Err(error);
+                    }
+                    cortex_core::ownership::check_tx(db, &task, &owner)?;
+                    if let Some(assignment) = assignment.as_deref() {
+                        if !db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+                         WHERE n.task_id=? AND n.assignment_ref=? AND n.revision=t.revision
+                         AND n.status='running' AND n.result_json IS NULL
+                         AND ((t.state='EXECUTING' AND n.stage='execution') OR (t.state='REVIEWING' AND n.stage='review'))
+                         AND NOT EXISTS(SELECT 1 FROM task_stopped WHERE task_id=n.task_id))",
+                        (&task, assignment), |row| row.get::<_, bool>(0),
+                    )? {
+                            return Err(CoreError::Refused("native_task_interrupted"));
+                        }
+                    } else if !db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM runtime_tasks t WHERE task_id=? AND state IN ('PLANNING','RECONCILING')
+                         AND NOT EXISTS(SELECT 1 FROM task_stopped s WHERE s.task_id=t.task_id))",
+                        [&task], |row| row.get::<_, bool>(0),
+                    )? {
+                        return Err(CoreError::Refused("native_task_interrupted"));
+                    }
+                }
+                if let Some(reason) = reason {
+                    if !already_waiting {
+                        lifecycle::event_tx(db, &task, "NATIVE_PROVIDER_ROUTE_WAITING", json!({
+                            "wait_id":wait_id_for_tx, "assignment_ref":assignment, "owner_epoch":owner.epoch,
+                            "reason":reason, "connection_id":connection, "model":model
+                        }))?;
+                    }
+                    return Ok(Decision::Waiting);
+                }
+                if let (Some(_), Some(assignment)) = (&interrupts, assignment.as_deref()) {
+                    let available = scheduler::worker_capacity_available(db, &task, &connection, limit)?;
+                    if !available {
+                        // No channel, provisioning intent or process exists for a waiter.
+                        // A wait reopens (visibly) after an earlier one of this assignment ended.
+                        if !capacity_wait_open(db, &task, assignment)? {
+                            lifecycle::event_tx(db, &task, "NATIVE_WORKER_CAPACITY_WAITING", json!({
+                                "assignment_ref":assignment,"reason":"waiting_for_engine_capacity","connection_id":connection,"limit":limit
+                            }))?;
+                        }
+                    }
+                    if !available || !eligible {
+                        return Ok(Decision::Waiting);
+                    }
+                }
+                // A refusal may have landed since the async check. Re-enter the
+                // wait loop with no channel or reservation if admission changed.
+                let _route_admission = match &gate {
+                    Some(gate) => match gate.lock_ready() {
+                        Some(guard) => Some(guard),
+                        None => return Ok(Decision::RecheckRoute),
                     },
-                    connection_limit: limit,
-                },
-            )?
-            .ok_or(CoreError::Refused("engine_capacity_exhausted"))?;
-            Ok((credential, reservation, instructions, automatic))
-        })?)
-        .await?;
+                    None => None,
+                };
+                let credential = channels::issue_tx(db, &task, &owner, principal)?;
+                let identity =
+                    channels::authenticate(db, &credential.channel_id, credential.secret(), false)?;
+                cortex_engine::schema::catalogue(
+                    &identity.role,
+                    identity.profile.as_deref(),
+                    identity.stage.as_deref(),
+                )
+                .map_err(|_| CoreError::Refused("unknown_session_role"))?;
+                let mut instructions = crate::native_instructions::compose(
+                    identity.profile.as_deref().unwrap_or("orchestrator"),
+                    identity.stage.as_deref(),
+                    engine_kind,
+                )?;
+                let automatic = lifecycle::automatic::enabled(db, &task)?;
+                if identity.role == "coordinator" {
+                    // The no-stop policy holds for every task, not only Automatic ones.
+                    instructions.push_str("\n\n");
+                    instructions.push_str(lifecycle::automatic::COORDINATOR_NOTE);
+                    if automatic {
+                        instructions.push_str(" Have execution workers use Cortex project file tools for changes that must be included in the task's local finish.");
+                    }
+                } else if automatic && identity.stage.as_deref() == Some("execution") {
+                    instructions.push_str("\n\nAutomatic sprint: make the task's final file changes through Cortex project file tools so the runtime retains attributable write receipts. Do not stage or commit changes yourself; automatic finish only commits changes it can attribute to this task.");
+                }
+                let reservation = scheduler::reserve_tx(
+                    db,
+                    &Reservation {
+                        task: &task,
+                        connection: &connection,
+                        assignment: identity.assignment.as_deref(),
+                        attempt: &identity.attempt,
+                        kind: if identity.role == "worker" {
+                            ReservationKind::Worker
+                        } else {
+                            ReservationKind::Coordinator
+                        },
+                        connection_limit: limit,
+                    },
+                )?
+                .ok_or(CoreError::Refused("engine_capacity_exhausted"))?;
+                // The visible wait ends in the same transaction that reserves the slot.
+                if let (Some(_), Some(assignment)) = (&interrupts, assignment.as_deref()) {
+                    if capacity_wait_open(db, &task, assignment)? {
+                        lifecycle::event_tx(db, &task, "NATIVE_WORKER_CAPACITY_WAIT_ENDED", json!({
+                            "assignment_ref":assignment,"outcome":"admitted","reservation_id":reservation
+                        }))?;
+                    }
+                }
+                if interrupts.is_some() {
+                    // Also close an observational wait left by an earlier driver
+                    // of this claim (for example on service restart).
+                    let mut query = db.prepare(
+                        "SELECT json_extract(e.payload_json,'$.wait_id') FROM runtime_events e
+                         WHERE e.task_id=?1 AND e.type='NATIVE_PROVIDER_ROUTE_WAITING'
+                         AND json_extract(e.payload_json,'$.assignment_ref') IS ?2
+                         AND NOT EXISTS(SELECT 1 FROM runtime_events x WHERE x.task_id=e.task_id AND x.id>e.id
+                           AND x.type='NATIVE_PROVIDER_ROUTE_WAIT_ENDED'
+                           AND json_extract(x.payload_json,'$.wait_id')=json_extract(e.payload_json,'$.wait_id'))",
+                    )?;
+                    let waits = query.query_map((&task, &assignment), |row| row.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for id in waits {
+                        lifecycle::event_tx(db, &task, "NATIVE_PROVIDER_ROUTE_WAIT_ENDED", json!({
+                            "wait_id":id, "outcome":"admitted", "reservation_id":reservation
+                        }))?;
+                    }
+                }
+                Ok(Decision::Reserved((credential, reservation, instructions, automatic)))
+            })?)
+            .await;
+            match result {
+                Ok(Decision::RecheckRoute) => continue,
+                Ok(Decision::Waiting) if reason.is_some() => {
+                    provider_wait = wait_id;
+                    let (_, interrupts) = managed.as_mut().expect("provider hold is managed");
+                    // Wake at expiry, on probe settlement, or on interruption. The
+                    // same bounded recheck as local capacity catches durable-only changes.
+                    let recheck = tokio::time::Instant::now() + Duration::from_secs(1);
+                    tokio::select! {
+                        _ = &mut route_wake => {},
+                        _ = &mut changed => {},
+                        _ = interrupts.changed() => {},
+                        _ = tokio::time::sleep_until(until.map_or(recheck, |at| at.min(recheck))) => {},
+                    }
+                }
+                Ok(Decision::Waiting) => {
+                    queued = true;
+                    let Some(wait) = &mut wait else {
+                        unreachable!("unqueued dispatch never returns a wait");
+                    };
+                    tokio::select! {
+                        _ = &mut changed => {},
+                        _ = &mut route_wake => {},
+                        _ = wait.interrupts.changed() => {},
+                        // Reconcile release and authority from other store writers too.
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+                    }
+                }
+                Ok(Decision::Reserved(admitted)) => break Ok(admitted),
+                Err(error) => break Err(error),
+            }
+        };
+        if let Some(wait) = &mut wait {
+            // The transaction committed before the next contender can reserve.
+            drop(wait.ticket.take());
+        }
+        if let (Err(error), true, Some(assignment)) = (&admitted, queued, assignment.clone()) {
+            let (task, outcome) = (task.clone(), error.code().to_owned());
+            let closed = async {
+                receive(self.executor.write(move |db| {
+                    if capacity_wait_open(db, &task, &assignment)? {
+                        lifecycle::event_tx(db, &task, "NATIVE_WORKER_CAPACITY_WAIT_ENDED", json!({
+                            "assignment_ref":assignment,"outcome":outcome
+                        }))?;
+                    }
+                    Ok(())
+                })?)
+                .await
+            }
+            .await;
+            // The interruption that ended the wait stays the reported cause; an
+            // unrecorded end is only observational (the projection also requires a
+            // live claim of the active stage of an unstopped task).
+            if let Err(record) = closed {
+                eprintln!(
+                    "workspace-service: the end of an engine capacity wait was not recorded ({})",
+                    record.code()
+                );
+            }
+        }
+        if let (Err(error), Some(id)) = (&admitted, provider_wait) {
+            let (task, outcome) = (task.clone(), error.code());
+            if let Err(record) = async {
+                receive(self.executor.write(move |db| {
+                    lifecycle::event_tx(db, &task, "NATIVE_PROVIDER_ROUTE_WAIT_ENDED", json!({
+                        "wait_id":id, "outcome":outcome
+                    }))?;
+                    Ok(())
+                })?).await
+            }.await {
+                eprintln!("workspace-service: provider wait end was not recorded ({})", record.code());
+            }
+        }
+        let (credential, reservation, instructions, automatic) = admitted?;
+        if let Some(error) = managed.as_ref().and_then(|(_, watches)| watches.interruption())
+            .or_else(|| wait.as_ref().and_then(WorkerLaunch::interruption))
+        {
+            self.settle_unstarted(credential, reservation).await?;
+            return Err(error);
+        }
         let policy = Arc::new(CorePolicy {
             workspace_state: self.workspace_state.clone(),
             commands: self.commands.clone(),
@@ -570,6 +820,7 @@ impl NativeHost {
             ],
             engine: engine_kind,
             mcp_servers: std::sync::Mutex::new(Vec::new()),
+            activity: Default::default(),
         });
         let credentials = || {
             Credentials::new(
@@ -587,7 +838,7 @@ impl NativeHost {
             engine: engine_kind,
         });
         let c = credential.clone();
-        let (identity, scopes) = receive(self.executor.read(move |db| {
+        let authority = receive(self.executor.read(move |db| {
             let i = channels::authenticate(db, &c.channel_id, c.secret(), false)?;
             let scopes = if let Some(a) = &i.assignment {
                 let raw: String = db.query_row(
@@ -601,7 +852,21 @@ impl NativeHost {
             };
             Ok((view(&i), scopes))
         })?)
-        .await?;
+        .await;
+        let (identity, scopes) = match authority {
+            Ok(authority) => authority,
+            Err(error) => {
+                self.settle_unstarted(credential, reservation).await?;
+                if let Some(interrupted) = wait.as_ref().and_then(WorkerLaunch::interruption) {
+                    return Err(interrupted);
+                }
+                return Err(error);
+            }
+        };
+        if let Some(error) = wait.as_ref().and_then(WorkerLaunch::interruption) {
+            self.settle_unstarted(credential, reservation).await?;
+            return Err(error);
+        }
         // The owner-facing stop names the role whose session could not start.
         let blocker = if identity.role == "coordinator" {
             "coordinator_session_start_failed"
@@ -825,9 +1090,11 @@ impl NativeHost {
             } else {
                 ProcessObservation::Unknown
             };
-            if let Some(b) = broker.take() {
-                let _ = b.shutdown().await;
-            }
+            let broker_settled = if let Some(b) = broker.take() {
+                b.shutdown().await.is_ok()
+            } else {
+                true
+            };
             for a in external {
                 if a.shutdown().await.is_err() {
                     observation = ProcessObservation::Unknown;
@@ -858,19 +1125,23 @@ impl NativeHost {
             } else {
                 blocker
             };
+            let provider_limit = (managed.is_some() && observation == ProcessObservation::ConfirmedExited
+                && broker_settled && !bound && phase == "session_new")
+                .then(|| error.provider_limit()).flatten();
             let failure = StartFailure {
                 attempt,
                 phase,
                 // A refusal with a stable code (`restricted_mode_unavailable`, ...)
                 // records that code; it is static and secret-free.
                 error: match &error {
+                    _ if provider_limit.is_some() => LIMITED.into(),
                     Error::Refused(code) => (*code).to_owned(),
                     other => other.to_string(),
                 },
                 role: identity.role.clone(),
                 engine: engine_kind.name(),
-                blocker: (!retry).then_some(blocker),
-                diagnostics: diagnostics.map(|d| d.snapshot()),
+                blocker: (!retry && provider_limit.is_none()).then_some(blocker),
+                diagnostics: diagnostics.filter(|_| provider_limit.is_none()).map(|d| d.snapshot()),
                 withheld: if withheld_recorded {
                     vec![]
                 } else {
@@ -884,8 +1155,14 @@ impl NativeHost {
                 record_start_failure(&self.executor, &credential, failure).await?;
                 continue;
             }
+            if let (Some((attempt, _)), Some(limit)) = (&mut managed, provider_limit) {
+                attempt.limited(limit, credential.channel_id.clone());
+            }
             let recorded = record_start_failure(&self.executor, &credential, failure).await;
-            settle(&self.executor, credential.clone(), reservation, observation).await?;
+            settle(&self.executor, credential.clone(), reservation, observation, provider_limit).await?;
+            if observation == ProcessObservation::ConfirmedExited {
+                self.capacity_changed.notify_waiters();
+            }
             recorded?;
             if explicit_auth && observation == ProcessObservation::ConfirmedExited {
                 let t = identity.task.clone();
@@ -901,10 +1178,14 @@ impl NativeHost {
                 })?)
                 .await?;
             }
+            if provider_limit.is_some() {
+                return Err(CoreError::Refused(LIMITED));
+            }
             return Err(CoreError::Refused(blocker));
         };
         Ok(SessionDriver {
             executor: self.executor.clone(),
+            capacity_changed: self.capacity_changed.clone(),
             credential,
             reservation,
             engine,
@@ -918,9 +1199,178 @@ impl NativeHost {
             delivered_attachments: std::sync::Mutex::new(std::collections::HashSet::new()),
             refusal_is_degenerate: std::sync::atomic::AtomicBool::new(false),
             dispatched_prompts: std::sync::atomic::AtomicI64::new(0),
+            provider_refusal: Default::default(),
         })
     }
+
+    async fn settle_unstarted(
+        &self,
+        credential: Credential,
+        reservation: String,
+    ) -> CoreResult<()> {
+        settle(&self.executor, credential, reservation, ProcessObservation::ConfirmedExited, None).await?;
+        self.capacity_changed.notify_waiters();
+        Ok(())
+    }
 }
+
+/// Whether this assignment's latest engine capacity wait has not ended yet.
+fn capacity_wait_open(db: &rusqlite::Connection, task: &str, assignment: &str) -> CoreResult<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=?1
+         AND e.type='NATIVE_WORKER_CAPACITY_WAITING' AND json_extract(e.payload_json,'$.assignment_ref')=?2
+         AND NOT EXISTS(SELECT 1 FROM runtime_events x WHERE x.task_id=e.task_id AND x.id>e.id
+            AND x.type='NATIVE_WORKER_CAPACITY_WAIT_ENDED' AND json_extract(x.payload_json,'$.assignment_ref')=?2))",
+        (task, assignment),
+        |row| row.get(0),
+    )?)
+}
+
+/// A batch registers claims before polling any of their futures. Unresolved
+/// predecessors can be on this connection; a known different route never holds it.
+#[derive(Default)]
+pub(super) struct WorkerLaunchOrder {
+    queue: std::sync::Mutex<std::collections::VecDeque<(String, Option<LaunchSelection>)>>,
+}
+
+struct LaunchSelection {
+    connection: String,
+    route: Option<crate::native_route_hold::RouteKey>,
+    held: bool,
+}
+impl WorkerLaunchOrder {
+    pub(super) fn push(
+        self: &Arc<Self>,
+        assignment: String,
+        changed: Arc<tokio::sync::Notify>,
+    ) -> LaunchTicket {
+        self.queue
+            .lock()
+            .unwrap()
+            .push_back((assignment.clone(), None));
+        LaunchTicket {
+            order: self.clone(),
+            assignment,
+            changed,
+        }
+    }
+}
+pub(super) struct LaunchTicket {
+    order: Arc<WorkerLaunchOrder>,
+    assignment: String,
+    changed: Arc<tokio::sync::Notify>,
+}
+impl LaunchTicket {
+    pub(super) fn order(&self) -> Arc<WorkerLaunchOrder> {
+        self.order.clone()
+    }
+
+    fn select(&self, connection: &str, route: Option<&crate::native_route_hold::RouteKey>) {
+        let mut queue = self.order.queue.lock().unwrap();
+        let (_, selection) = queue.iter_mut().find(|(a, _)| a == &self.assignment).unwrap();
+        *selection = Some(LaunchSelection { connection: connection.into(), route: route.cloned(), held: false });
+        self.changed.notify_waiters();
+    }
+
+    fn set_held(&self, held: bool) {
+        let mut queue = self.order.queue.lock().unwrap();
+        let (_, selection) = queue.iter_mut().find(|(a, _)| a == &self.assignment).unwrap();
+        let selection = selection.as_mut().unwrap();
+        if selection.held != held {
+            selection.held = held;
+            self.changed.notify_waiters();
+        }
+    }
+
+    fn first_for_route(&self, route: &crate::native_route_hold::RouteKey) -> bool {
+        for (assignment, selection) in self.order.queue.lock().unwrap().iter() {
+            if assignment == &self.assignment {
+                return true;
+            }
+            if selection.as_ref().is_none_or(|s| s.route.as_ref() == Some(route)) {
+                return false;
+            }
+        }
+        false
+    }
+    fn first_on(&self, connection: &str) -> bool {
+        for (assignment, route) in self.order.queue.lock().unwrap().iter() {
+            if assignment == &self.assignment {
+                return true;
+            }
+            if route.as_ref().is_none_or(|s| !s.held && s.connection == connection) {
+                return false;
+            }
+        }
+        false
+    }
+}
+impl Drop for LaunchTicket {
+    fn drop(&mut self) {
+        self.order
+            .queue
+            .lock()
+            .unwrap()
+            .retain(|(a, _)| a != &self.assignment);
+        self.changed.notify_waiters();
+    }
+}
+type StopWatch = tokio::sync::watch::Receiver<bool>;
+
+#[derive(Clone)]
+pub(super) struct LaunchInterrupts {
+    pub service: StopWatch,
+    pub batch: StopWatch,
+    pub worker: StopWatch,
+}
+impl LaunchInterrupts {
+    fn interruption(&self) -> Option<CoreError> {
+        let code = if *self.service.borrow() || self.service.has_changed().is_err() {
+            "native_service_stopped"
+        } else if *self.batch.borrow() || self.batch.has_changed().is_err() {
+            "native_task_interrupted"
+        } else if *self.worker.borrow() || self.worker.has_changed().is_err() {
+            "native_worker_stopped_before_launch"
+        } else {
+            return None;
+        };
+        Some(CoreError::Refused(code))
+    }
+
+    async fn changed(&mut self) {
+        tokio::select! {
+            _ = self.service.changed() => {},
+            _ = self.batch.changed() => {},
+            _ = self.worker.changed() => {},
+        }
+    }
+}
+pub(super) struct WorkerLaunch {
+    ticket: Option<LaunchTicket>,
+    interrupts: LaunchInterrupts,
+}
+impl WorkerLaunch {
+    pub(super) fn new(
+        ticket: LaunchTicket,
+        service: StopWatch,
+        batch: StopWatch,
+        worker: StopWatch,
+    ) -> Self {
+        Self {
+            ticket: Some(ticket),
+            interrupts: LaunchInterrupts {
+                service,
+                batch,
+                worker,
+            },
+        }
+    }
+
+    fn interruption(&self) -> Option<CoreError> {
+        self.interrupts.interruption()
+    }
+}
+#[derive(Clone)]
 pub enum SessionRole {
     Coordinator,
     Worker { assignment: String },
@@ -967,6 +1417,7 @@ pub(crate) enum SessionWait {
 
 pub struct SessionDriver {
     executor: Arc<StoreExecutor>,
+    capacity_changed: Arc<tokio::sync::Notify>,
     credential: Credential,
     reservation: String,
     engine: Engine,
@@ -983,6 +1434,7 @@ pub struct SessionDriver {
     /// turns; see [`SessionDriver::treat_refusal_as_degenerate`]).
     refusal_is_degenerate: std::sync::atomic::AtomicBool,
     dispatched_prompts: std::sync::atomic::AtomicI64,
+    provider_refusal: std::sync::Mutex<Option<cortex_engine::ProviderLimit>>,
 }
 
 /// A dispatched prompt is banked once, even when an outer runtime select drops
@@ -1069,6 +1521,12 @@ impl SessionDriver {
     pub fn session_id(&self) -> &str {
         self.session.id()
     }
+    fn provider_refusal(&self) -> Option<(
+        cortex_engine::ProviderLimit, Arc<std::sync::atomic::AtomicBool>,
+    )> {
+        self.provider_refusal.lock().unwrap().map(|limit| (limit, self.policy.activity.clone()))
+    }
+
     /// Drain ACP updates concurrently. Chat/end_turn never become tool authority.
     pub async fn prompt(&self, text: &str) -> CoreResult<Turn> {
         self.policy
@@ -1275,6 +1733,18 @@ impl SessionDriver {
             .await?;
         if tripped {
             return Err(CoreError::Refused("native_turn_degenerate"));
+        }
+        if let Some(limit) = result.as_ref().err().and_then(Error::provider_limit_before_work) {
+            use std::sync::atomic::Ordering::SeqCst;
+            // Replaying a prompt after output or effects could repeat an action.
+            // Only the first direct refusal, without native/gateway activity or
+            // attached external servers, is eligible to start fresh.
+            if self.dispatched_prompts.load(SeqCst) == 1
+                && !self.policy.activity.load(SeqCst)
+                && self.external.is_empty()
+            {
+                *self.provider_refusal.lock().unwrap() = Some(limit);
+            }
         }
         let result = result.map_err(|_| CoreError::Refused("native_turn_outcome_unknown"))?;
         self.delivered_attachments.lock().unwrap().extend(fresh);
@@ -1849,8 +2319,17 @@ impl SessionDriver {
         Ok(true)
     }
     pub async fn shutdown(self) -> CoreResult<()> {
+        self.shutdown_managed(None).await
+    }
+
+    pub(super) async fn shutdown_managed(
+        self,
+        attempt: Option<&mut crate::native_route_hold::Attempt>,
+    ) -> CoreResult<()> {
+        let refusal = attempt.as_ref().and_then(|_| self.provider_refusal());
         let Self {
             executor,
+            capacity_changed,
             credential,
             reservation,
             engine,
@@ -1871,7 +2350,18 @@ impl SessionDriver {
         if !external_ok {
             observation = ProcessObservation::Unknown;
         }
-        settle(&executor, credential, reservation, observation).await?;
+        let provider_limit = refusal.and_then(|(limit, activity)| {
+            (observation == ProcessObservation::ConfirmedExited && broker_result.is_ok()
+                && !activity.load(std::sync::atomic::Ordering::SeqCst))
+                .then_some(limit)
+        });
+        if let (Some(attempt), Some(limit)) = (attempt, provider_limit) {
+            attempt.limited(limit, credential.channel_id.clone());
+        }
+        settle(&executor, credential, reservation, observation, provider_limit).await?;
+        if observation == ProcessObservation::ConfirmedExited {
+            capacity_changed.notify_waiters();
+        }
         if observation != ProcessObservation::ConfirmedExited
             || broker_result.is_err()
             || !external_ok
@@ -1886,6 +2376,7 @@ async fn settle(
     c: Credential,
     reservation: String,
     observation: ProcessObservation,
+    provider_limit: Option<cortex_engine::ProviderLimit>,
 ) -> CoreResult<()> {
     receive(executor.write(move |db| {
         channels::revoke_tx(db, &c.channel_id)?;
@@ -1906,6 +2397,20 @@ async fn settle(
                 &c.channel_id,
             ),
         )?;
+        if let Some(limit) = provider_limit {
+            let task: String = db.query_row(
+                "SELECT task_id FROM trusted_channels WHERE channel_id=?",
+                [&c.channel_id], |row| row.get(0),
+            )?;
+            lifecycle::event_tx(db, &task, "NATIVE_PROVIDER_ROUTE_REFUSED", json!({
+                "channel_id":c.channel_id,
+                "reason":match limit.kind {
+                    cortex_engine::LimitKind::Rate => "provider_rate_limited",
+                    cortex_engine::LimitKind::Quota => "provider_quota_limited",
+                },
+                "retry_after_seconds":limit.retry_after_seconds, "resets_at":limit.resets_at_unix_seconds
+            }))?;
+        }
         // A removed receiver or interrupted prompt cannot leave a durable queue
         // looking deliverable after its exact worker process has settled.
         let pending=db.prepare("SELECT q.task_id,json_extract(q.payload_json,'$.request') FROM runtime_events q
@@ -1936,6 +2441,7 @@ struct CorePolicy {
     /// External MCP servers attached to this session, set by the start attempt
     /// that launched it before the session is bound.
     mcp_servers: std::sync::Mutex<Vec<String>>,
+    activity: Arc<std::sync::atomic::AtomicBool>,
 }
 impl CorePolicy {
     async fn check(&self, ready: bool) -> cortex_engine::Result<Identity> {
@@ -2003,6 +2509,7 @@ impl PermissionPolicy for CorePolicy {
         request: &'a Value,
     ) -> FutureResult<'a, PermissionDecision> {
         Box::pin(async move {
+            self.activity.store(true, std::sync::atomic::Ordering::SeqCst);
             use cortex_engine::permission::{self, Action, Fallback};
             let c = self.credential.clone();
             let expected_session = session.to_owned();
@@ -2226,6 +2733,7 @@ impl GatewayCore for CorePolicy {
         // Enforcement is unchanged; a non-authority failure after channel
         // authentication is reported as a structured, correctable tool error.
         Box::pin(async move {
+            self.activity.store(true, std::sync::atomic::Ordering::SeqCst);
             let result = self
                 .dispatch_call(credentials, channel, name, arguments, false)
                 .await;

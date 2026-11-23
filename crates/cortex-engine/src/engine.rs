@@ -42,7 +42,46 @@ pub enum Event {
     LateOrDuplicateReply,
     TransportClosed,
 }
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>>;
+type Pending = Arc<Mutex<HashMap<u64, PendingCall>>>;
+struct PendingCall {
+    reply: oneshot::Sender<Result<Value>>,
+    prompt: Option<PromptActivity>,
+}
+
+struct PromptActivity {
+    session: String,
+    notice: Option<String>,
+    work: bool,
+}
+
+impl PromptActivity {
+    fn observe(&mut self, update: &Value) {
+        match update["sessionUpdate"].as_str() {
+            Some("available_commands_update" | "current_mode_update" | "config_option_update"
+                | "session_info_update") => {}
+            Some("agent_message_chunk") if self.notice.is_none()
+                && update["content"]["type"] == "text" =>
+            {
+                // Some pinned v1 adapters echo their terminal error as one text
+                // update. Retain it in-flight only, never in the decoded error.
+                self.notice = update["content"]["text"].as_str()
+                    .filter(|s| s.len() <= 4096 && !s.trim().is_empty())
+                    .map(|s| s.trim().to_owned());
+                self.work |= self.notice.is_none();
+            }
+            _ => self.work = true,
+        }
+    }
+
+    fn before_work(&self, error: &Value) -> bool {
+        !self.work && self.notice.as_ref().is_none_or(|text| {
+            // Equality recognizes an echo of this exact RPC error, not a rate
+            // limit from prose. The RPC still needs an allowlisted typed code.
+            [error["message"].as_str(), error["data"]["message"].as_str()]
+                .into_iter().flatten().any(|message| message.trim() == text)
+        })
+    }
+}
 struct Inner {
     writer: AsyncMutex<tokio::process::ChildStdin>,
     pending: Pending,
@@ -282,8 +321,8 @@ pub struct Engine {
 }
 fn close(inner: &Inner) {
     inner.closed.store(true, Ordering::SeqCst);
-    for (_, tx) in inner.pending.lock().unwrap().drain() {
-        let _ = tx.send(Err(Error::Closed));
+    for (_, call) in inner.pending.lock().unwrap().drain() {
+        let _ = call.reply.send(Err(Error::Closed));
     }
 }
 struct SendGuard<'a> {
@@ -418,7 +457,11 @@ impl Inner {
             if p.len() >= 1024 {
                 return Err(Error::Busy);
             }
-            p.insert(id, tx);
+            let prompt = (method == "session/prompt")
+                .then(|| params["sessionId"].as_str())
+                .flatten()
+                .map(|session| PromptActivity { session: session.to_owned(), notice: None, work: false });
+            p.insert(id, PendingCall { reply: tx, prompt });
         }
         let _guard = PendingGuard {
             pending: self.pending.clone(),
@@ -602,6 +645,7 @@ impl Engine {
         });
         let (events, event_rx) = mpsc::channel(256);
         let reader_inner = inner.clone();
+        let kind = spec.engine;
         let reader = tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
             let mut permissions = tokio::task::JoinSet::new();
@@ -631,6 +675,13 @@ impl Engine {
                             break "invalid_or_repeated_request_id";
                         }
                         let sid = v["params"]["sessionId"].as_str().unwrap_or("").to_owned();
+                        for call in reader_inner.pending.lock().unwrap().values_mut() {
+                            if let Some(prompt) = &mut call.prompt {
+                                if prompt.session == sid {
+                                    prompt.work = true;
+                                }
+                            }
+                        }
                         let state = reader_inner.sessions.lock().unwrap().get(&sid).cloned();
                         if method == "session/request_permission"
                             && permissions.len() < 32
@@ -687,6 +738,13 @@ impl Engine {
                             if !reader_inner.sessions.lock().unwrap().contains_key(sid) {
                                 break "update_for_unknown_session";
                             }
+                            for call in reader_inner.pending.lock().unwrap().values_mut() {
+                                if let Some(prompt) = &mut call.prompt {
+                                    if prompt.session == sid {
+                                        prompt.observe(&v["params"]["update"]);
+                                    }
+                                }
+                            }
                             Event::Update(v["params"].clone())
                         } else {
                             Event::UnknownNotification
@@ -702,15 +760,19 @@ impl Engine {
                     if v.get("result").is_some() == v.get("error").is_some() {
                         break "malformed_reply";
                     }
-                    let tx = reader_inner.pending.lock().unwrap().remove(&id);
-                    if let Some(tx) = tx {
+                    let call = reader_inner.pending.lock().unwrap().remove(&id);
+                    if let Some(call) = call {
                         let result = if let Some(e) = v.get("error") {
-                            Err(Error::Rpc(e["code"].as_i64().unwrap_or(-32603)))
+                            let mut error = Error::from_rpc(kind, e);
+                            if let Error::ProviderLimit { before_work, .. } = &mut error {
+                                *before_work = call.prompt.as_ref().is_some_and(|p| p.before_work(e));
+                            }
+                            Err(error)
                         } else {
                             reader_inner.register_created(id, &v["result"]);
                             Ok(v["result"].clone())
                         };
-                        let _ = tx.send(result);
+                        let _ = call.reply.send(result);
                     } else if events.try_send(Event::LateOrDuplicateReply).is_err() {
                         break "event_queue_full";
                     }

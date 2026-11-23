@@ -302,6 +302,11 @@ stays renamable after Start (it is presentation only); its saved request and
 settings do not.
 A separate native session-host API now composes Rust ACP sessions with durable
 channel authentication, capacity reservations and a restricted MCP gateway.
+A worker whose engine connection is full waits (`waiting_for_engine_capacity`) and
+starts in claim order when a slot release is confirmed; a typed provider
+rate/quota refusal before any work holds only that route
+(`waiting_for_provider_capacity`) and retries it after the reset. Neither fails
+the worker or substitutes a model; top-level Start still refuses beyond 32 jobs.
 Workers can publish inline reports and record attempt-bound native results;
 publication retries reuse the same immutable report. The runtime chooses each
 report's template by role and stage, hands the worker its skeleton with the

@@ -651,11 +651,26 @@ preview as the complete requirement. `<key>_omitted` records list entries that
 were left out of a long list.
 
 A full connection is not a failure. Seven parallel workers on a four-slot
-connection once lost three of them to `capacity_timeout` →
-`fallback_refused:no_untried_authorized_route` after 600 s, while the four
-holders were live and still working. A queued open now keeps waiting while
-every slot is held by a live session. A capacity-class fallback refusal is also
-retried within `MAX_ATTEMPT_RETRIES`. A chat session can run at most four
+connection once lost three of them after a 600 s timeout while the four
+holders were live and still working. A claimed worker whose connection has no
+free slot now waits (`waiting_for_engine_capacity`, "Waiting for an engine
+connection slot") with no timeout of its own, starts when a slot release is
+confirmed, in scheduler claim order, and is reserved atomically. Siblings are not
+cancelled; pause, stop, cancellation and shutdown end the wait without a launch.
+This is not a queue for top-level Start: the 32-job limit still refuses with
+`native_capacity_unavailable`. A capacity-class fallback refusal is also
+retried within `MAX_ATTEMPT_RETRIES`.
+
+A provider rate or usage-quota refusal is a different, temporary wait. When the
+engine returns a typed rate/quota error before any work began (Claude
+`rate_limit`, Codex `usageLimitExceeded`/`rateLimitExceeded`), that exact
+engine, connection and model is held in memory and the worker shows
+`waiting_for_provider_capacity` ("Waiting for the provider's rate limit to reset"
+or "... usage quota to reset"). The same route is probed once after the
+reported reset or a growing delay (5 s doubling to 5 min); other models and
+siblings stay eligible and nothing is substituted. Plain-text-only messages,
+authentication, billing, account-hold and invalid-model errors are not holds and
+keep the normal failure path. A chat session can run at most four
 workers across engines and connections; a connection's
 `max_concurrent_sessions` can only lower that session's share. Excess ready
 nodes remain pending, and queued worker opens wait for capacity. Plan size does

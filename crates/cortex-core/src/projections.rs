@@ -213,12 +213,30 @@ pub(super) fn task(
                     }
                     // A step queued behind another task's files waits, visibly, for
                     // that task to release them; it is not stopped.
-                    if reason.is_none() && matches!(raw, "EXECUTING" | "REVIEWING") {
-                        if let Some(wait) =
-                            files_wait(db, runtime, field(r, "project_root").unwrap_or(""))?
-                        {
-                            reason = Some(wait);
-                            warnings.push("waiting_for_files".into());
+                    if matches!(raw, "EXECUTING" | "REVIEWING") {
+                        if reason.is_none() {
+                            if let Some(wait) =
+                                files_wait(db, runtime, field(r, "project_root").unwrap_or(""))?
+                            {
+                                reason = Some(wait);
+                                warnings.push("waiting_for_files".into());
+                            }
+                        }
+                    }
+                    if state != "paused" {
+                        if let Some(wait) = provider_route_wait(db, runtime)? {
+                            warnings.push("waiting_for_provider_capacity".into());
+                            if reason.is_none() {
+                                reason = Some(wait.into());
+                            }
+                        }
+                    }
+                    if matches!(raw, "EXECUTING" | "REVIEWING") {
+                        if worker_capacity_wait(db, runtime)? {
+                            warnings.push("waiting_for_engine_capacity".into());
+                            if reason.is_none() {
+                                reason = Some("Waiting for an engine connection slot".into());
+                            }
                         }
                     }
                 }
@@ -348,6 +366,49 @@ pub fn owner_closed(
     }
     Ok(out)
 }
+/// Observational only: an active native claim is waiting for its exact route.
+pub fn provider_route_wait(db: &Connection, task: &str) -> CoreResult<Option<&'static str>> {
+    let wait = row(db,
+        "SELECT json_extract(e.payload_json,'$.reason') AS reason
+         FROM runtime_events e JOIN runtime_tasks t USING(task_id)
+         WHERE e.task_id=? AND e.type='NATIVE_PROVIDER_ROUTE_WAITING'
+         AND EXISTS(SELECT 1 FROM task_owners o WHERE o.task_id=t.task_id
+           AND o.epoch=json_extract(e.payload_json,'$.owner_epoch'))
+         AND NOT EXISTS(SELECT 1 FROM task_stopped s WHERE s.task_id=e.task_id)
+         AND ((json_extract(e.payload_json,'$.assignment_ref') IS NULL AND t.state IN ('PLANNING','RECONCILING'))
+         OR EXISTS(SELECT 1 FROM runtime_nodes n WHERE n.task_id=t.task_id AND n.revision=t.revision
+           AND n.assignment_ref=json_extract(e.payload_json,'$.assignment_ref') AND n.status='running'
+           AND n.result_json IS NULL AND ((t.state='EXECUTING' AND n.stage='execution')
+           OR (t.state='REVIEWING' AND n.stage='review'))))
+         AND NOT EXISTS(SELECT 1 FROM runtime_events x WHERE x.task_id=e.task_id AND x.id>e.id
+           AND x.type='NATIVE_PROVIDER_ROUTE_WAIT_ENDED'
+           AND json_extract(x.payload_json,'$.wait_id')=json_extract(e.payload_json,'$.wait_id'))
+         ORDER BY e.id DESC LIMIT 1", [task])?;
+    Ok(wait.as_ref().and_then(|value| match field(value, "reason") {
+        Some("provider_rate_limited") => Some("Waiting for the provider's rate limit to reset"),
+        Some("provider_quota_limited") => Some("Waiting for the provider's usage quota to reset"),
+        _ => None,
+    }))
+}
+
+/// Observational only: the current claim of the active stage has an engine
+/// capacity wait that has not ended (admission ends it in the reserving
+/// transaction). This never changes task state or worker authority.
+pub fn worker_capacity_wait(db: &Connection, task: &str) -> CoreResult<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+         JOIN runtime_events e ON e.task_id=n.task_id AND e.type='NATIVE_WORKER_CAPACITY_WAITING'
+            AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref
+         WHERE n.task_id=?1 AND n.revision=t.revision AND n.status='running' AND n.result_json IS NULL
+         AND ((t.state='EXECUTING' AND n.stage='execution') OR (t.state='REVIEWING' AND n.stage='review'))
+         AND NOT EXISTS(SELECT 1 FROM task_stopped WHERE task_id=n.task_id)
+         AND NOT EXISTS(SELECT 1 FROM runtime_events x WHERE x.task_id=n.task_id AND x.id>e.id
+            AND x.type='NATIVE_WORKER_CAPACITY_WAIT_ENDED' AND json_extract(x.payload_json,'$.assignment_ref')=n.assignment_ref))",
+        [task],
+        |r| r.get(0),
+    )?)
+}
+
 /// Native hosts never write task_orchestration. A recovery with a recorded
 /// blocker states its reason; one whose owned processes all settled is an
 /// ended turn waiting for the owner. Anything else stays unconfirmed.
@@ -938,6 +999,50 @@ mod files_wait_tests {
                 )?;
                 lifecycle::event_tx(db, "t", "ASSIGNMENT_CREATED", json!({}))?;
                 assert_eq!(super::files_wait(db, "t", &base)?, None);
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A claimed worker waiting for an engine connection slot reads as waiting only
+    /// while its latest wait is open, its claim is current and the stage is active;
+    /// a later wait of the same claim is visible again.
+    #[test]
+    fn a_worker_waiting_for_an_engine_slot_is_visible_only_while_its_wait_is_open() {
+        let root = std::env::temp_dir().join(format!("capacity-wait-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let store = Store::open(
+            crate::ProjectKey::new(&root, crate::StoreChannel::Dev).unwrap(),
+            crate::OpenMode::Initialize,
+        )
+        .unwrap();
+        lifecycle::TaskMachine::new(&store).create("t", "g", "o").unwrap();
+        store
+            .write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1", [])?;
+                db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]','[]','execution','running','a1',NULL)", [])?;
+                let wait = |db: &rusqlite::Connection| super::worker_capacity_wait(db, "t");
+                assert!(!wait(db)?);
+                let event = |db: &rusqlite::Connection, kind: &str, assignment: &str| {
+                    lifecycle::event_tx(db, "t", kind, json!({"assignment_ref":assignment}))
+                };
+                event(db, "NATIVE_WORKER_CAPACITY_WAITING", "a1")?;
+                assert!(wait(db)?);
+                // Another claim's end does not close this one.
+                event(db, "NATIVE_WORKER_CAPACITY_WAIT_ENDED", "a0")?;
+                assert!(wait(db)?);
+                db.execute("UPDATE runtime_tasks SET state='PAUSED'", [])?;
+                assert!(!wait(db)?);
+                db.execute("UPDATE runtime_tasks SET state='EXECUTING'", [])?;
+                event(db, "NATIVE_WORKER_CAPACITY_WAIT_ENDED", "a1")?;
+                assert!(!wait(db)?);
+                event(db, "NATIVE_WORKER_CAPACITY_WAITING", "a1")?;
+                assert!(wait(db)?);
+                // A replaced claim (new assignment) no longer reads as waiting.
+                db.execute("UPDATE runtime_nodes SET assignment_ref='a2'", [])?;
+                assert!(!wait(db)?);
                 Ok(())
             })
             .unwrap();
