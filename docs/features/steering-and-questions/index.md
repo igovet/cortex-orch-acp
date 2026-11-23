@@ -408,8 +408,10 @@ conservatively:
   `crates/x/AGENTS.md`, `AGENTS.md.bak` or `~/.claude` do not);
 - the explicit `/skill-management` command names `.agents` and `.claude`, which
   that workflow exists to edit;
-- `allow-write: <exact path>` in a message, or Remove for that path (the
-  `allow_write` control accepts a protected rule file as well as an owner denial).
+- `allow-write: <exact path>` in a message or in the owner's answer to a question
+  (recorded as `OWNER_WRITE_ALLOWED` with request `answer:<question id>`), or Remove
+  for that path (the `allow_write` control accepts a protected rule file as well as
+  an owner denial).
 
 Natural language never creates or lifts any other rule. The coordinator's capsule
 lists the protections still in force (`rule_file_protection`), so plans avoid them

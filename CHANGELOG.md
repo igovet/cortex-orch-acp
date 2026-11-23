@@ -4,6 +4,8 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Fixed: an owner answer to a question that contains `allow-write: <path>` lifts that write protection (for example a protected rule file) like the Remove control, instead of being ignored and asked again.
+
 - Fixed: the Automatic finish treats a self-reported check as policy-restricted only for wording that restricts the check itself (paid, not authorized, requires approval or permission, not allowed, refused by); a blocker that merely mentions refusal tests or a missing host capability is a note once runtime verification passed.
 
 - Fixed: the Automatic finish counts a failed worker check as closed by a later passing run of the same command when that run was bound to its runtime-verified work set, as completion already did; such results no longer ask the owner to rerun a check that passed.

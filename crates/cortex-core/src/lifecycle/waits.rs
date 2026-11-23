@@ -492,6 +492,17 @@ pub fn answer_tx(
     }
     db.execute("UPDATE pending_questions SET status='answered',answer_text=?,answer_source=?,answered_at=? WHERE id=?",
         (text,source,crate::now(),question))?;
+    // The owner's answer is an owner message: an `allow-write: <path>` in it lifts that
+    // write protection exactly like the desktop's Remove control (owner store
+    // 2026-11-23: the coordinator offered the directive as an answer option, the
+    // answer lifted nothing, and the same question was asked again). An invalid or
+    // undenied path lifts nothing and never refuses the answer.
+    if let Ok(lifted) = super::steering::parse_lifts(text) {
+        let held = super::steering::write_denials(db, task)?;
+        for path in lifted.iter().filter(|p| held.contains(p)) {
+            super::steering::lift_tx(db, task, path, &format!("answer:{question}"))?;
+        }
+    }
     event_tx(
         db,
         task,

@@ -1397,3 +1397,32 @@ fn an_answered_owner_decision_is_disclosed_not_asked_again() {
         }
     }
 }
+
+/// Owner store 2026-11-23: the coordinator asked whether a protected rule file may
+/// be edited and offered "allow-write: docs/project/verification.md" as an answer.
+/// That answer lifts the protection like the Remove control; an answer naming an
+/// unprotected path lifts nothing.
+#[test]
+fn an_allow_write_answer_lifts_that_rule_file_protection() {
+    use cortex_core::lifecycle::steering;
+    for (answer, lifted) in [
+        ("One, and allow-write: src/free.rs", false),
+        ("allow-write: docs/project/verification.md — разрешить правку", true),
+    ] {
+        let (_p, s, _) = setup();
+        let protected = |s: &Store| -> bool {
+            s.read(|db| steering::write_denials(db, "t"))
+                .unwrap()
+                .iter()
+                .any(|p| p == "docs/project/verification.md")
+        };
+        assert!(protected(&s));
+        let q = ask(&s);
+        s.write(|db| {
+            assert!(answer_tx(db, "t", q["question_id"].as_str().unwrap(), answer, "text", None)?);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(protected(&s), !lifted, "{answer}");
+    }
+}
