@@ -149,7 +149,18 @@ pub fn details_tx(db: &Connection, task: &str, id: &str) -> CoreResult<(Value, O
     Ok((details, reason))
 }
 /// The owner-facing sentence for a withdrawal reason.
-pub fn withdrawn_sentence(reason: Option<&str>, status: &str) -> &'static str {
+pub fn withdrawn_sentence(reason: Option<&str>, status: &str, ru: bool) -> &'static str {
+    if ru {
+        return match reason {
+            Some("service_restarted") => "Служба перезапустилась до вашего ответа; запрос движка больше не действует.",
+            Some("engine_request_ended") => "Движок исполнителя перестал ждать ответа.",
+            Some("task_paused") => "Задачу приостановили до вашего ответа.",
+            Some("task_stopped") => "Задачу остановили до вашего ответа.",
+            Some(_) => "Сессия исполнителя завершилась до вашего ответа.",
+            None if status == "superseded" => "До вашего ответа появился другой вопрос.",
+            None => "Задачу остановили до вашего ответа.",
+        };
+    }
     match reason {
         Some("service_restarted") => {
             "The service restarted before you answered; the engine's request no longer exists."

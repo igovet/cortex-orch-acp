@@ -10,8 +10,8 @@
 //!   (`OWNER_ACTION_RESOLVED`, or an environment preflight recheck that shows the
 //!   access is now present) the parked work is retried at once.
 //! - `owner_decision`: the requirements conflict or the decision is the owner's.
-//!   The coordinator must ask the owner one question (`OWNER_DECISION_REQUIRED`,
-//!   continuation strategy `ask_owner`); no rung of the strategy ladder is used.
+//!   The runtime opens a question for the exact failed execution node while its
+//!   siblings continue; no rung of the strategy ladder is used.
 //! - `external_outage`: a built-in public endpoint is down or unreachable (DNS,
 //!   refused or timed-out connection, 5xx, 429). The runtime waits without model calls and
 //!   rechecks the host itself with backoff ([`BACKOFF`]; a rate limit from a host it
@@ -708,19 +708,7 @@ pub fn classify(s: &Signals) -> Classification {
         );
     }
     if let Some((rule, service)) = access {
-        let why = match service.as_str() {
-            "github" => {
-                "GitHub access is missing (GitHub CLI not logged in or the token lacks permission)"
-                    .to_owned()
-            }
-            "codex" => "Codex/OpenAI access is missing (not logged in or no API key)".to_owned(),
-            "claude" => {
-                "Claude/Anthropic access is missing (not logged in or no API key)".to_owned()
-            }
-            "sudo" => "Administrator (sudo) access was not granted".to_owned(),
-            other => format!("Access to {other} is missing (login, credential or permission)"),
-        };
-        let mut c = Classification::new(ACCESS, rule, summary(&why));
+        let mut c = Classification::new(ACCESS, rule, summary(&access_detail(&service, false)));
         c.service = Some(service);
         return c;
     }
@@ -898,8 +886,17 @@ pub fn open_decisions(db: &Connection, task: &str) -> CoreResult<Vec<Value>> {
     let rows = db
         .prepare(
             "SELECT s.payload_json FROM runtime_events s WHERE s.task_id=?1 AND s.type='OWNER_DECISION_REQUIRED'
-             AND NOT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=?1 AND e.id>s.id AND e.type IN
-                 ('USER_ANSWER_RECEIVED','USER_STEERING','WORKER_USER_ANSWER_RECEIVED','TASK_REOPENED'))
+             AND (EXISTS(SELECT 1 FROM pending_questions q JOIN runtime_nodes n
+                     ON n.task_id=q.task_id AND n.assignment_ref=q.assignment_ref
+                     JOIN runtime_tasks t ON t.task_id=n.task_id AND t.revision=n.revision
+                     WHERE q.task_id=s.task_id AND q.dedup_key='obstacle:'||json_extract(s.payload_json,'$.id')
+                     AND q.status='open' AND n.status='failed')
+                 OR (NOT EXISTS(SELECT 1 FROM pending_questions q WHERE q.task_id=s.task_id
+                         AND q.dedup_key='obstacle:'||json_extract(s.payload_json,'$.id'))
+                     AND NOT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=?1 AND e.id>s.id AND e.type IN
+                         ('USER_ANSWER_RECEIVED','USER_STEERING','WORKER_USER_ANSWER_RECEIVED','TASK_REOPENED','REPLAN_REQUEST_ACCEPTED'))))
+             AND EXISTS(SELECT 1 FROM runtime_tasks t WHERE t.task_id=s.task_id
+                 AND t.state NOT IN ('COMPLETED','CANCELLED','FAILED'))
              ORDER BY s.id",
         )?
         .query_map([task], |r| r.get::<_, String>(0))?
@@ -971,6 +968,33 @@ fn latest_environment(db: &Connection, task: &str) -> CoreResult<Option<(i64, Va
         .transpose()
 }
 
+fn access_detail(service: &str, ru: bool) -> String {
+    match (service, ru) {
+        ("github", false) => "GitHub access is missing (GitHub CLI not logged in or the token lacks permission)".to_owned(),
+        ("github", true) => "Нет доступа к GitHub: не выполнен вход через GitHub CLI или у токена недостаточно прав".to_owned(),
+        ("codex", false) => "Codex/OpenAI access is missing (not logged in or no API key)".to_owned(),
+        ("codex", true) => "Нет доступа к Codex/OpenAI: не выполнен вход или отсутствует ключ API".to_owned(),
+        ("claude", false) => "Claude/Anthropic access is missing (not logged in or no API key)".to_owned(),
+        ("claude", true) => "Нет доступа к Claude/Anthropic: не выполнен вход или отсутствует ключ API".to_owned(),
+        ("sudo", false) => "Administrator (sudo) access was not granted".to_owned(),
+        ("sudo", true) => "Не предоставлены права администратора (sudo)".to_owned(),
+        (other, false) => format!("Access to {other} is missing (login, credential or permission)"),
+        (other, true) => format!("Нет доступа к {other}: проверьте вход, учётные данные или разрешения"),
+    }
+}
+
+/// Render a runtime-authored missing-access reason without translating retained quotes.
+pub fn owner_access_detail(service: &str, detail: &str, ru: bool) -> String {
+    if ru {
+        if let Some(suffix) = detail.strip_prefix(&access_detail(service, false)) {
+            if suffix.is_empty() || suffix.starts_with(": ") {
+                return format!("{}{suffix}", access_detail(service, true));
+            }
+        }
+    }
+    detail.to_owned()
+}
+
 /// Record (or reuse) the obstacle a classification calls for. Returns its id, or
 /// `None` for `technical`. One open owner action per task and service; one open
 /// external wait per task and host; one open owner decision per node.
@@ -981,6 +1005,9 @@ pub fn open_obstacle_tx(
     node: Option<&str>,
     revision: i64,
 ) -> CoreResult<Option<String>> {
+    if domain::task_tx(db, task)?.0.terminal() {
+        return Ok(None);
+    }
     match found.class {
         ACCESS => {
             let service = found
@@ -1127,17 +1154,22 @@ pub fn answered_decision_tx(
     let since = super::review::repeat_window_tx(db, task)?;
     let rows = db
         .prepare(
-            "SELECT id,json_extract(payload_json,'$.detail') FROM runtime_events WHERE task_id=?
-             AND type='OWNER_DECISION_REQUIRED' AND id>? AND json_valid(payload_json) ORDER BY id DESC LIMIT 64",
+            "SELECT e.id,json_extract(e.payload_json,'$.detail'),q.id,q.answer_text
+             FROM runtime_events e LEFT JOIN pending_questions q ON q.task_id=e.task_id
+                 AND q.dedup_key='obstacle:'||json_extract(e.payload_json,'$.id')
+             WHERE e.task_id=? AND e.type='OWNER_DECISION_REQUIRED' AND e.id>?
+             AND json_valid(e.payload_json) ORDER BY e.id DESC LIMIT 64",
         )?
-        .query_map((task, since), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)))?
+        .query_map((task, since), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?)))?
         .collect::<Result<Vec<_>, _>>()?;
-    for (id, earlier) in rows {
+    for (id, earlier, question, answer) in rows {
         if !same_decision(detail, earlier.as_deref().unwrap_or("")) {
             continue;
         }
-        if let Some(answer) = super::review::answer_after_tx(db, task, id)? {
-            return Ok(Some(answer));
+        let answer = if question.is_some() { answer } else { super::review::answer_after_tx(db, task, id)? };
+        if answer.is_some() {
+            return Ok(answer);
         }
     }
     Ok(None)
@@ -1298,7 +1330,7 @@ pub fn classify_failed_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
     let rows = db
         .prepare(
             "SELECT node_id,assignment_ref FROM runtime_nodes WHERE task_id=? AND revision=?
-             AND status='failed' AND assignment_ref IS NOT NULL ORDER BY rowid",
+             AND stage='execution' AND status='failed' AND assignment_ref IS NOT NULL ORDER BY rowid",
         )?
         .query_map((task, revision), |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -1327,6 +1359,11 @@ pub fn classify_failed_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
             );
         }
         let obstacle = open_obstacle_tx(db, task, &found, Some(&node), revision)?;
+        if found.class == OWNER_DECISION {
+            if let Some(id) = obstacle.as_deref() {
+                publish_node_question_tx(db, task, revision, &node, &assignment, id, &found.detail)?;
+            }
+        }
         let mut payload = found.to_json();
         payload["node"] = json!(node);
         payload["revision"] = json!(revision);
@@ -1335,6 +1372,101 @@ pub fn classify_failed_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
         event_tx(db, task, "FAILURE_CLASSIFIED", payload)?;
     }
     Ok(())
+}
+
+/// Put a decision on the ordinary owner question surface without taking the
+/// task out of execution. The exact failed assignment remains the answer's scope.
+fn publish_node_question_tx(
+    db: &Transaction<'_>, task: &str, revision: i64, node: &str, assignment: &str,
+    decision: &str, detail: &str,
+) -> CoreResult<()> {
+    let question = new_id("pq");
+    // The detail's classifier prefix is runtime prose; preserve the actual blocker verbatim.
+    let detail = detail.strip_prefix("A decision only the owner can make blocks this work: ")
+        .or_else(|| detail.strip_prefix("The requirements conflict and need the owner's decision: "))
+        .unwrap_or(detail);
+    let prompt = if domain::task_language_tx(db, task)? == "ru" {
+        format!("Как продолжить работу «{node}»? {detail}")
+    } else {
+        format!("How should work on “{node}” proceed? {detail}")
+    };
+    if db.execute(
+        "INSERT OR IGNORE INTO pending_questions(id,task_id,assignment_ref,dedup_key,text,options_json,status,created_at)
+         VALUES (?,?,?,?,?,'[]','open',?)",
+        (&question, task, assignment, format!("obstacle:{decision}"), &prompt, crate::now()),
+    )? == 1 {
+        event_tx(db, task, "USER_QUESTION_REQUESTED", json!({"question_id":question,
+            "question":prompt,"options":[],"node":node,"revision":revision,
+            "assignment_ref":assignment,"obstacle":decision}))?;
+    }
+    Ok(())
+}
+
+/// Whether a node-local question still binds to its exact current failed assignment.
+pub(crate) fn node_question_is_current(
+    db: &Connection, task: &str, question: &str,
+) -> CoreResult<bool> {
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM pending_questions q
+        JOIN runtime_nodes n ON n.task_id=q.task_id AND n.assignment_ref=q.assignment_ref
+        JOIN runtime_tasks t ON t.task_id=n.task_id AND t.revision=n.revision
+        WHERE q.task_id=? AND q.id=? AND q.dedup_key LIKE 'obstacle:%'
+        AND q.status='open' AND n.status='failed' AND t.state IN ('EXECUTING','PAUSED','RECOVERING'))",
+        (task, question), |r| r.get(0))?)
+}
+
+/// Owner answer attached to one exact retried assignment, not any later task message.
+pub fn retry_decision_answer(
+    db: &Connection, task: &str, node: &str, revision: i64,
+) -> CoreResult<Option<String>> {
+    Ok(db.query_row("SELECT q.answer_text FROM runtime_events e JOIN pending_questions q
+        ON q.task_id=e.task_id AND q.dedup_key='obstacle:'||json_extract(e.payload_json,'$.obstacle')
+        WHERE e.id=(SELECT max(id) FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'
+            AND json_extract(payload_json,'$.node')=? AND json_extract(payload_json,'$.revision')=?)
+        AND q.status='answered'", (task, node, revision), |r| r.get(0)).optional()?)
+}
+
+/// Park a review that cannot proceed solely because of access. Its result and
+/// binding remain attributable to the old assignment; a retry gets a fresh packet.
+pub(super) fn park_review_access_tx(
+    db: &Transaction<'_>, task: &str, node: &str, assignment: &str,
+    revision: i64, found: Classification,
+) -> CoreResult<bool> {
+    if classified(db, task, assignment)?.is_some_and(|c| c["class"] == ACCESS) {
+        return Ok(true);
+    }
+    let found = settle_repeats_tx(db, task, found, Some(node), Some(assignment))?;
+    if found.class != ACCESS {
+        return Ok(false);
+    }
+    let Some(id) = open_obstacle_tx(db, task, &found, Some(node), revision)? else {
+        return Ok(false);
+    };
+    db.execute("UPDATE runtime_nodes SET status='failed'
+        WHERE task_id=? AND revision=? AND node_id=? AND assignment_ref=? AND stage='review'",
+        (task, revision, node, assignment))?;
+    let mut payload = found.to_json();
+    payload["node"] = json!(node);
+    payload["revision"] = json!(revision);
+    payload["assignment_ref"] = json!(assignment);
+    payload["obstacle"] = json!(id);
+    event_tx(db, task, "FAILURE_CLASSIFIED", payload)?;
+    Ok(true)
+}
+
+/// A failed reviewer without a submitted review may also be blocked by access.
+pub fn park_failed_review_tx(db: &Transaction<'_>, task: &str) -> CoreResult<bool> {
+    let (_, revision) = domain::task_tx(db, task)?;
+    let row: Option<(String, String)> = db.query_row(
+        "SELECT node_id,assignment_ref FROM runtime_nodes WHERE task_id=? AND revision=?
+         AND stage='review' AND status='failed' AND assignment_ref IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+        (task, revision), |r| Ok((r.get(0)?, r.get(1)?)),
+    ).optional()?;
+    let Some((node, assignment)) = row else { return Ok(false) };
+    if super::review::checkout_drift_tx(db, task, &assignment)?.is_some() {
+        return Ok(false);
+    }
+    let found = classify(&node_signals(db, task, &assignment)?);
+    park_review_access_tx(db, task, &node, &assignment, revision, found)
 }
 
 /// A failed node of the current revision with its classification.
@@ -1401,18 +1533,25 @@ pub fn unparked_failure(db: &Connection, task: &str) -> CoreResult<bool> {
 /// external wait ended. Returns the retried nodes.
 pub fn retry_unblocked_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<String>> {
     let (state, revision) = domain::task_tx(db, task)?;
-    if !matches!(state, TaskState::Executing | TaskState::Recovering) {
+    if !matches!(state, TaskState::Executing | TaskState::Recovering | TaskState::Reviewing) {
         return Ok(Vec::new());
     }
     let mut retried = Vec::new();
     for f in failed_nodes(db, task)? {
         let (true, Some(id)) = (
-            matches!(f.class.as_str(), ACCESS | EXTERNAL_OUTAGE),
+            matches!(f.class.as_str(), ACCESS | EXTERNAL_OUTAGE | OWNER_DECISION),
             f.obstacle.as_deref(),
         ) else {
             continue;
         };
         if is_open(db, task, &f.class, id)? {
+            continue;
+        }
+        if f.class == OWNER_DECISION && !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pending_questions WHERE task_id=? AND dedup_key=?
+             AND assignment_ref=? AND status='answered')",
+            (task, format!("obstacle:{id}"), &f.assignment), |r| r.get::<_, bool>(0),
+        )? {
             continue;
         }
         let previous: Option<String> = db
@@ -1425,8 +1564,11 @@ pub fn retry_unblocked_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<St
             .flatten();
         let changed = db.execute(
             "UPDATE runtime_nodes SET status='pending',assignment_ref=NULL,result_json=NULL
-             WHERE task_id=? AND revision=? AND assignment_ref=? AND status='failed'",
-            (task, revision, &f.assignment),
+             WHERE task_id=?1 AND revision=?2 AND assignment_ref=?3 AND status='failed'
+             AND (?4='RECOVERING' OR stage=CASE ?4 WHEN 'REVIEWING' THEN 'review' ELSE 'execution' END)
+             AND NOT EXISTS(SELECT 1 FROM capacity_reservations
+                 WHERE task_id=?1 AND assignment_ref=?3 AND state!='released')",
+            (task, revision, &f.assignment, state.as_str()),
         )?;
         if changed != 1 {
             continue;
@@ -1449,11 +1591,9 @@ pub fn retry_unblocked_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<St
     Ok(retried)
 }
 
-/// When nothing else of the plan can run (no live worker, no dependency-ready
-/// node) and parked nodes remain, settle what the parked work waits for: an owner
-/// decision becomes a stop that asks the owner (`owner_decision_required`), and
-/// access or an outage pauses the task, without cancelling its plan, until the
-/// obstacle clears. Returns whether the task changed state.
+/// Legacy obstacle continuation for an idle plan. A node-local owner question
+/// stays in execution. Access and outage waits can still be retained as an
+/// automatic continuation by callers that do not drive in-place waits.
 pub fn settle_parked_tx(db: &Transaction<'_>, task: &str) -> CoreResult<bool> {
     let (state, _) = domain::task_tx(db, task)?;
     if state != TaskState::Executing {
@@ -1490,11 +1630,12 @@ pub fn settle_parked_tx(db: &Transaction<'_>, task: &str) -> CoreResult<bool> {
     if !crate::scheduler::dependency_ready(&nodes, "execution")?.is_empty() {
         return Ok(false);
     }
+    // Do not take the task away from its DAG while a node-local question is
+    // answerable. The driver waits without spending progress budget.
     if parked.iter().any(|p| p.1 == OWNER_DECISION) {
-        domain::stop_tx(db, task, OWNER_DECISION_STOP)?;
-    } else {
-        super::automatic::obstacle_pause_tx(db, task, &parked)?;
+        return Ok(false);
     }
+    super::automatic::obstacle_pause_tx(db, task, &parked)?;
     Ok(true)
 }
 
@@ -1647,6 +1788,9 @@ pub fn record_recheck_tx(
     let Some(wait) = open_waits(db, task)?.into_iter().find(|w| w["id"] == id) else {
         return Ok(false);
     };
+    if wait["next_check_at"].as_i64().is_some_and(|at| at > now) {
+        return Ok(false);
+    }
     let attempt = wait["attempt"].as_u64().unwrap_or(0) as usize + 1;
     // A timer wait is due exactly when its backoff elapsed; nothing is probed.
     if wait["probe"] == TIMER {
@@ -1697,6 +1841,58 @@ pub fn due_waits(db: &Connection, task: &str, now: i64) -> CoreResult<Vec<Value>
         .collect())
 }
 
+/// Close outstanding obstacles in the terminal transition, without granting access
+/// or treating the terminal disposition as a successful probe.
+pub(super) fn close_terminal_tx(db: &Transaction<'_>, task: &str, state: TaskState) -> CoreResult<()> {
+    for action in open_actions(db, task)? {
+        event_tx(db, task, "OWNER_ACTION_RESOLVED",
+            json!({"id":action["id"],"by":"task_terminal","state":state}))?;
+    }
+    for wait in open_waits(db, task)? {
+        event_tx(db, task, "EXTERNAL_WAIT_ENDED",
+            json!({"id":wait["id"],"reason":"task_terminal","state":state}))?;
+    }
+    db.execute("UPDATE pending_questions SET status='cancelled',answered_at=? WHERE task_id=? AND status='open'",
+        (crate::now(), task))?;
+    Ok(())
+}
+
+/// Claim due environment probes in a writer transaction. Each card has its own
+/// persistent backoff; a crash during preflight leaves the next deadline intact.
+pub fn claim_environment_rechecks_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    now: i64,
+) -> CoreResult<Vec<String>> {
+    if domain::task_tx(db, task)?.0.terminal() {
+        return Ok(Vec::new());
+    }
+    let mut claimed = Vec::new();
+    for action in open_actions(db, task)? {
+        let Some((_, present)) = action["service"].as_str().and_then(environment_fact) else {
+            continue;
+        };
+        if action["environment_status"] == present {
+            continue;
+        }
+        let Some(id) = action["id"].as_str() else { continue };
+        let previous: Option<(i64, i64)> = db.query_row(
+            "SELECT json_extract(payload_json,'$.attempt'),json_extract(payload_json,'$.next_check_at')
+             FROM runtime_events WHERE task_id=? AND type='OWNER_ACTION_RECHECK_SCHEDULED'
+             AND json_extract(payload_json,'$.id')=? ORDER BY id DESC LIMIT 1",
+            (task, id), |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        if previous.is_some_and(|(_, due)| due > now) {
+            continue;
+        }
+        let attempt = previous.map_or(0, |(n, _)| n).clamp(0, BACKOFF.len() as i64) as usize;
+        event_tx(db, task, "OWNER_ACTION_RECHECK_SCHEDULED",
+            json!({"id":id,"attempt":attempt+1,"next_check_at":now.saturating_add(backoff(attempt))}))?;
+        claimed.push(id.to_owned());
+    }
+    Ok(claimed)
+}
+
 /// Services of open owner actions that an environment preflight can recheck.
 pub fn environment_services(db: &Connection, task: &str) -> CoreResult<Vec<String>> {
     Ok(open_actions(db, task)?
@@ -1720,8 +1916,21 @@ pub fn resolve_by_environment_tx(
     task: &str,
     facts: &Value,
 ) -> CoreResult<Vec<String>> {
+    resolve_environment_actions_tx(db, task, facts, None)
+}
+
+/// Apply a preflight only to cards claimed before it ran.
+pub fn resolve_environment_actions_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    facts: &Value,
+    claimed: Option<&[String]>,
+) -> CoreResult<Vec<String>> {
     let mut resolved = Vec::new();
     for action in open_actions(db, task)? {
+        if claimed.is_some_and(|ids| !ids.iter().any(|id| action["id"] == id.as_str())) {
+            continue;
+        }
         let Some(service) = action["service"].as_str() else {
             continue;
         };

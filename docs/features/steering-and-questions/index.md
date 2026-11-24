@@ -236,7 +236,28 @@ the queue, received and waiting for the coordinator's next step, or delivered to
 the coordinator with its time. The facts are read with the task's product facts,
 which its runtime events already trigger; nothing polls for them.
 
-A message that arrives while workers, review or verification run is therefore
+A **Send now** message that arrives while execution workers run is also handed to the
+coordinator at once, without waiting for the workers or restarting unaffected ones.
+The Workspace service runs one serial steering turn beside the active workers on the
+existing coordinator route. In it the coordinator can answer in the conversation,
+submit `steer_plan` (a runtime-validated amendment of nodes no worker has claimed yet:
+the retained plan digest, dependency graph, role/scope policy and `deny-write` rules
+are rechecked, the execution revision, existing attempts and results are kept, and the
+scheduler picks up the amended work), or send targeted instructions to one exact live
+worker attempt. Targeted guidance reuses cancel-and-next-prompt on that worker's own
+session, never overlaps prompts and never cancels siblings. Repeated stable action keys
+and identical instructions are deduplicated, and guidance for a completed or foreign
+attempt is refused. The queue receipt is not delivery; a replacement attempt does not
+inherit it. The steering turn is offered only read tools and the two steering tools:
+no planning, finalization, command, file-mutation or external-MCP lane, and steering
+prose never grants an assignment, route, approval or write reservation. An
+unconfirmed turn is not retried in a loop; the input stays pending for the next owner
+input or safe boundary. Queued (Queue) messages and messages during review or
+verification still wait for their boundary, and the ordinary replan (which revokes
+running worker channels) is unchanged.
+
+A message that arrives during review or verification, or one the live turn left
+unresolved, is therefore
 applied only after the runtime verification passed: it returns a reviewed and
 verified revision to planning before completion (`RECONCILING → RECOVERING →
 PLANNING`) and clears any synthesis not yet completed. `synthesis_submit` stays
@@ -277,12 +298,14 @@ descriptors from that task's exact durable source revision, including the origin
 availability/reason, before recording the missing steering event. Already-recorded
 steering remains idempotent: one event and one requirement revision.
 
-A message sent to a task that already reached `COMPLETED` reopens the task
-(`TASK_REOPENED`) and returns it to planning. If the message only asks about
-the finished work, the coordinator answers with `answer_submit` and the task
-completes again. If it asks for changes, the coordinator submits a plan, and
-that new revision gets its own review and verification. See
-[orchestration](../orchestration/index.md) for the exact eligibility rule.
+An ordinary owner message can reopen a task that reached `COMPLETED` but
+has not been closed by the owner. It returns to planning (`TASK_REOPENED`);
+a follow-up question may use `answer_submit` when the
+[orchestration gates](../orchestration/index.md) allow it. A new plan gets
+its own review and verification. Ordinary late messages do not reopen closed or
+cancelled work (`task_not_resumable`). Workspace's explicit
+[Return for rework](../../cortex-workspace/local-task-execution.md#return-for-rework)
+action is separate and requires a fresh plan.
 
 The previously inspected Paseo 0.9.2 ACP bridge had no native `prompt.steer` (observed in the live implementation checks). The Cortex provider sends a message (text, and any inline
 image or uploaded-file content) through the bridge's concurrent configuration
@@ -407,10 +430,13 @@ is English: worker reports (headings included), summaries, briefs, worker
 messages and the coordinator's instructions to workers. Everything the owner reads
 directly is in the owner's language: the coordinator's messages and questions to
 the owner, the final result text and its not-verified list, a worker's question to
-the owner (question text and option labels) and the runtime's own stop questions.
-The owner's language is the task's `en`/`ru` setting, otherwise the language of the
-goal (`domain::task_language_tx`); it is recorded in `task_language` at task start
-and refreshed at every turn. Every turn's route instructions state it per role
+the owner (question text and option labels), and runtime-authored recovery and
+verification questions. The explicit English or Russian choice wins. Automatic
+uses the language of the original request, not the most recent message.
+The runtime uses this same language for ACP consent prompts and their option
+names, and for service-authored access explanations. Commands, paths and quoted
+words are preserved. Workspace interface labels are independent of this
+setting; its permission buttons still use their existing English labels. Every turn's route instructions state it per role
 (`Owner-selected response language: <lang>.` with the coordinator's owner-facing
 scope, or with the worker's `user_question_language: <lang>.` and its English
 rule), and every worker brief carries `user_question_language`. The coordinator
@@ -432,9 +458,12 @@ certifying unfinished work. The runtime stop question keeps its own Finish optio
 Two plain "stop" answers once failed to stop a task because only the coordinator
 interpreted them (2026-10-22).
 
-A message that arrives while workers, review or verification run is recorded at once
-and waits for the next safe point; the desktop shows it as "Received, waiting for the
-coordinator's next step", then "Delivered to the coordinator" with the time. It used to wait 13-35 minutes with no sign it was received.
+A message that arrives while review or verification runs is recorded at once and
+waits for the next safe point; the desktop shows it as "Received, waiting for the
+coordinator's next step", then "Delivered to the coordinator" with the time. While
+execution workers run, a Send now message is processed immediately by the live
+steering turn described above. Before that change every such message waited for the
+next coordinator boundary (13-35 minutes with no sign it was received).
 
 A long runtime verification command updates its tool card once a minute with its
 position and elapsed time (`Verify project · 2/4 · 12 min`); a full Storybook run was

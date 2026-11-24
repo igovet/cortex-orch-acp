@@ -68,7 +68,9 @@ language is the task's `en`/`ru` setting, otherwise the language of the task's
 goal; the runtime records it in `task_language` at task start and at every turn,
 states it in every turn's route instructions per role, and gives workers
 `user_question_language`. The coordinator composes the owner-facing text from the
-English reports in the owner's language. The runtime relays strings verbatim and
+English reports in the owner's language, including owner-facing report prose.
+Submitting a plan or reading English tool output is not a reason to repeat the
+plan or switch languages. The runtime relays model-authored strings verbatim and
 does not translate or deterministically verify their natural language.
 
 The profile catalogue (`profiles.json`) declares `access_class` as `write`,

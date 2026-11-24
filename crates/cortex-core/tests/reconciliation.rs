@@ -171,6 +171,42 @@ fn runtime_exact_command_closes_gap_but_unrelated_or_failed_runs_do_not() {
     assert!(s.read(|db| gaps(db, "t")).unwrap().contains_key("same"));
 }
 #[test]
+fn disclosure_labels_use_effective_language() {
+    for (setting, goal, expected) in [
+        (Some("en"), "Исправить проверку", false),
+        (Some("ru"), "Fix the check", true),
+        (Some("auto"), "Исправить проверку", true),
+        (Some("auto"), "Fix the check", false),
+        (None, "Исправить проверку", true),
+    ] {
+        let (_p, s, _, _) = setup();
+        s.write(|db| {
+            lifecycle::event_tx(db, "t", "NATIVE_START_ADMITTED", json!({"goal":goal}))?;
+            if let Some(language) = setting {
+                lifecycle::event_tx(
+                    db,
+                    "t",
+                    "NATIVE_TASK_SETTINGS",
+                    json!({"settings":{"language":language}}),
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let gaps = json!([{"item":"a","description":"Exact label","blocker":"Exact reason"}]);
+        let body = s.read(|db| disclosed(db, "t", "Exact prose", &gaps)).unwrap();
+        assert_eq!(
+            body,
+            if expected {
+                "Exact prose\n\n## Не проверено\n\n- Exact label — причина: Exact reason"
+            } else {
+                "Exact prose\n\n## Not verified\n\n- Exact label — blocker: Exact reason"
+            },
+            "{setting:?}: {goal}",
+        );
+    }
+}
+#[test]
 fn localized_single_disclosure_and_heading_refusal() {
     let (_p, s, _, _) = setup();
     let gaps = json!([{"item":"a","description":"Проверка","blocker":"Нет устройства"},{"item":"b","blocker":"Нет устройства"}]);

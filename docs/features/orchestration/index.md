@@ -17,7 +17,12 @@ runtime can compose metadata plus attributed report-summary quotations and
 complete without a coordinator reconciliation turn. Any open evidence gap,
 pending decision/input, repair or historical replan uses the ordinary coordinator
 path. No-change review waivers also retain that path. The runtime does not infer
-semantic conclusions from reports or translate quoted summaries.
+semantic conclusions from reports or translate quoted summaries. Its own
+result prose and disclosure labels follow the effective owner language, including
+Russian inferred from the original request when the setting is Automatic. The
+runtime-owned pipeline body uses the same language for new editions; internal
+catalogue titles and summaries, status codes and quoted evidence keep their
+original wording.
 
 See [runtime-composed lifecycle](../task-lifecycle/index.md#runtime-composed-synthesis)
 for exact eligibility, atomicity, recovery and display limits. The distinct
@@ -1206,7 +1211,8 @@ ANSWER_READY and validates the exact answer receipt before completion. Any plan
 revision, node or worker provisioning disallows this path. There are three
 exceptions. First, the user answered a runtime stop question, or a question
 asked after verification, by choosing to finish. Second, a new user message
-reopened a task that had reached `COMPLETED`, and since that `TASK_REOPENED`
+reopened a task that had reached `COMPLETED` through ordinary steering (not
+Workspace's **Return for rework**), and since that `TASK_REOPENED`
 event no plan was accepted, no assignment or replan was created, no node is
 pending or running, and no worker was provisioned outside an earlier
 assignment. Third, a user message was applied after the current revision's

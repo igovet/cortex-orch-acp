@@ -183,7 +183,12 @@ fn the_same_stop_walks_every_rung_once_then_the_runtime_asks_the_owner_once() {
             "retry_later"
         ])
     );
-    assert_eq!(asked["options"].as_array().unwrap().len(), 4);
+    assert_eq!(asked["options"], json!([
+        "Повторить сейчас: начать новый круг всех стратегий",
+                "Другой подход: опишите в ответе, что сделать иначе",
+                "Принять без проверки: отметить как непроверенное и завершить задачу",
+                "Повторить позже: автоматически через 30 минут",
+    ]));
     assert!(asked["runtime_stop"].is_null());
     let broken = latest(&s, &task, "LOOP_BROKEN");
     assert_eq!(broken["action"], "ask_owner");
@@ -570,9 +575,10 @@ fn real_progress_resets_the_coordinator_interruption_series_but_plan_acceptance_
 
 #[test]
 fn the_owner_sees_the_coordinator_reason_and_can_delay_or_give_new_direction() {
-    for (answer_text, choice) in [
-        ("3", "retry_later"),
+    for (language, answer_text, choice) in [
+        ("ru", "3", "retry_later"),
         (
+            "en",
             "Use the existing evidence and investigate the connection.",
             "other_approach",
         ),
@@ -585,7 +591,7 @@ fn the_owner_sees_the_coordinator_reason_and_can_delay_or_give_new_direction() {
                     db,
                     &task,
                     "NATIVE_TASK_SETTINGS",
-                    json!({"settings":{"language":"ru"}}),
+                    json!({"settings":{"language":language}}),
                 )?;
                 for _ in 0..7 {
                     assert_eq!(domain::stop_tx(db, &task, reason)?, TaskState::Recovering);
@@ -608,11 +614,23 @@ fn the_owner_sees_the_coordinator_reason_and_can_delay_or_give_new_direction() {
         .unwrap();
         assert_eq!(card["status"], "pending");
         assert_eq!(card["allowedOperations"], json!(["decisions.answer"]));
-        assert!(card["prompt"]
-            .as_str()
-            .unwrap()
-            .contains("ход координатора был прерван"));
-        assert_eq!(card["options"].as_array().unwrap().len(), 3);
+        let prompt = card["prompt"].as_str().unwrap();
+        let labels: Vec<_> = card["options"].as_array().unwrap().iter().map(|o| o["label"].as_str().unwrap()).collect();
+        if language == "ru" {
+            assert!(prompt.contains("ход координатора был прерван"));
+            assert_eq!(labels, [
+                "Повторить сейчас: продолжить с текущим подходом",
+                "Другой подход: опишите в ответе, что сделать иначе",
+                "Повторить позже: автоматически через 30 минут",
+            ]);
+        } else {
+            assert!(prompt.contains("the coordinator's turn was interrupted"));
+            assert_eq!(labels, [
+                "Retry now: continue on the current approach",
+                "Another approach: describe in your answer what to do differently",
+                "Retry later: try again automatically in 30 minutes",
+            ]);
+        }
 
         let owed = answer(&s, &task, &question, answer_text);
         assert_eq!(owed.evidence["owner_choice"], choice);

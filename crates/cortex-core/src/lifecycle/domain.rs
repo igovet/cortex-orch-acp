@@ -9,7 +9,7 @@ use crate::{
     ownership::{self, OwnerEpoch},
     CoreError, CoreResult, TaskState,
 };
-use rusqlite::{OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -31,6 +31,9 @@ pub(crate) fn state_tx(
     blocker: Option<&str>,
 ) -> CoreResult<()> {
     let (source, _) = task_tx(db, task)?;
+    if target.terminal() {
+        super::obstacles::close_terminal_tx(db, task, target)?;
+    }
     db.execute(
         "UPDATE runtime_tasks SET state=?,blocker=?,updated_at=? WHERE task_id=?",
         (target.as_str(), blocker, crate::now(), task),
@@ -170,7 +173,7 @@ pub fn cancel_nodes_tx(db: &Transaction<'_>, task: &str, reason: &str) -> CoreRe
 }
 /// The language the owner chose for this task's messages: the task settings' `en`/`ru`, and
 /// for `auto` (or no setting) the language of the task's own goal text.
-pub fn task_language_tx(db: &Transaction<'_>, task: &str) -> CoreResult<&'static str> {
+pub fn task_language_tx(db: &Connection, task: &str) -> CoreResult<&'static str> {
     let chosen: Option<String> = db
         .query_row(
             "SELECT json_extract(payload_json,'$.settings.language') FROM runtime_events
@@ -193,6 +196,17 @@ pub fn task_language_tx(db: &Transaction<'_>, task: &str) -> CoreResult<&'static
             |r| r.get(0),
         )
         .optional()?;
+    // Older rows may have a retained effective language but no native admission.
+    if goal.is_none() {
+        let retained: Option<String> = db
+            .query_row("SELECT language FROM task_language WHERE task_id=?", [task], |r| r.get(0))
+            .optional()?;
+        match retained.as_deref() {
+            Some("ru") => return Ok("ru"),
+            Some("en") => return Ok("en"),
+            _ => {}
+        }
+    }
     let cyrillic = goal
         .unwrap_or_default()
         .chars()
@@ -481,6 +495,43 @@ pub fn reopen_tx(db: &Transaction<'_>, task: &str) -> CoreResult<bool> {
     )?;
     Ok(true)
 }
+/// Explicit owner rework is the only transition that clears a closed task's hold.
+pub(crate) fn owner_rework_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    mut payload: Value,
+) -> CoreResult<i64> {
+    let (state, revision) = task_tx(db, task)?;
+    let synthesis: Option<String> = db.query_row(
+        "SELECT synthesis FROM runtime_tasks WHERE task_id=?", [task], |r| r.get(0),
+    )?;
+    waits::cancel_tx(db, task, None, "owner_rework", "cancelled")?;
+    cancel_nodes_tx(db, task, "owner_rework")?;
+    db.execute("UPDATE pending_questions SET status='superseded',answered_at=? WHERE task_id=? AND status='open'",
+        (crate::now(),task))?;
+    db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND revoked_at IS NULL",
+        (crate::now(),task))?;
+    db.execute("DELETE FROM task_stopped WHERE task_id=?", [task])?;
+    db.execute("UPDATE task_orchestration SET wait_reason=NULL WHERE task_id=?", [task])?;
+    db.execute("UPDATE runtime_tasks SET synthesis=NULL WHERE task_id=?", [task])?;
+    payload["closed"]["synthesis"] = json!(synthesis);
+    state_tx(db, task, TaskState::Recovering, None)?;
+    payload["origin"] = json!("owner_rework");
+    payload["previous"] = json!(state);
+    payload["revision"] = json!(revision);
+    event_tx(db, task, "TASK_REOPENED", payload)
+}
+/// Direct answers cannot bypass the explicit request for another planning cycle.
+pub(crate) fn owner_rework_needs_plan(db: &rusqlite::Connection, task: &str) -> CoreResult<bool> {
+    let Some(rework) = crate::workspace::control::owner_rework_event(db, task)? else {
+        return Ok(false);
+    };
+    Ok(!db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND id>? AND type='PLAN_ACCEPTED')",
+        (task, rework), |row| row.get::<_, bool>(0),
+    )?)
+}
+
 /// A worker stop cancels only that worker's wait; its capacity is NOT released.
 pub fn stop_assignment_tx(
     db: &Transaction<'_>,

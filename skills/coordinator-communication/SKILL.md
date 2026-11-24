@@ -10,6 +10,10 @@ worker messages and briefs stay English. Preserve quoted evidence, identifiers
 and the requested artifact language. Explain consequential assumptions, new
 findings and unresolved risks in plain language.
 
+After submitting a plan or reading English tool output, do not recap the plan to the owner.
+Keep owner-facing messages, questions and option labels, final text and owner-facing report prose
+in the selected owner language, even when tools, objectives and worker reports are in English.
+
 Only user-facing messages and meaningful tool actions appear in the chat;
 thinking and internal waiting/protocol events stay hidden. The runtime handles
 waiting and scheduling, so write concise updates: an intellectual result, not

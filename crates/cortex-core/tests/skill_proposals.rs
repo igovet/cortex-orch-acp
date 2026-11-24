@@ -63,6 +63,43 @@ fn setup() -> (Project, cortex_core::Store, Value) {
     )
 }
 #[test]
+fn skill_proposal_header_uses_effective_language_without_changing_options() {
+    for (language, action_label, question, options) in [
+        ("en", "create", "Create?", ["Create the skill", "Not now"]),
+        ("ru", "создание", "Создать?", ["Создать навык", "Не сейчас"]),
+    ] {
+        let (p, s, mut args) = setup();
+        args["question"] = json!(question);
+        args["options"] = json!(options);
+        let evidence_id = args["skill_proposal"]["evidence"][0]["report_id"].as_str().unwrap();
+        let (text, labels) = s.write(|db| {
+            cortex_core::lifecycle::event_tx(
+                db, "t", "NATIVE_TASK_SETTINGS", json!({"settings":{"language":language}}),
+            )?;
+            let receipt = skills::request(db, &p.0, "t", "c", "q", &args)?;
+            Ok(db.query_row(
+                "SELECT text,options_json FROM pending_questions WHERE id=?",
+                [receipt["question_id"].as_str().unwrap()],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )?)
+        }).unwrap();
+        assert!(text.starts_with(&format!("case-skill ({action_label})\n")));
+        assert!(text.contains(&format!("- {evidence_id} Case: one")));
+        assert!(text.ends_with(question));
+        assert_eq!(serde_json::from_str::<Value>(&labels).unwrap(), json!(options));
+    }
+}
+#[test]
+fn skill_proposals_still_require_an_exact_plain_string_pair() {
+    let (p, s, mut args) = setup();
+    args["options"][0] = json!({"label":"Create the skill","detail":"Creates a reusable skill"});
+    let err = s
+        .write(|db| skills::request(db, &p.0, "t", "c", "q", &args))
+        .unwrap_err();
+    assert_eq!(err.code(), "skill_proposal_options");
+}
+
+#[test]
 fn coordinator_batch_waits_for_every_answer() {
     let (p, s, _) = setup();
     let a = json!({"request_key":"batch","questions":[

@@ -79,7 +79,7 @@ pub(super) fn settle_unrecorded_tx(
     timings: &Value,
 ) -> CoreResult<bool> {
     let row: Option<(String, String)> = db.query_row("SELECT operation,result_json FROM runtime_requests
-        WHERE task_id=? AND actor=? AND request_key=? AND operation IN ('command_run','outside_command')",
+        WHERE task_id=? AND actor=? AND request_key=? AND (operation IN ('command_run','outside_command') OR (operation='project_git' AND json_type(result_json,'$.checkout')='object'))",
         (task, actor, key), |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
     let Some((operation, raw)) = row else {
         return Ok(false);
@@ -149,6 +149,9 @@ pub(super) fn settle_unrecorded_tx(
             "tool_call_ref":reference,"argv":value["argv"],"request_key":key,"operation":operation,
             "observation":observation}}),
         )?;
+        if let Some(reference) = reference {
+            crate::owner_command_output::coordinator_marker(db, task, actor, reference, "failed")?;
+        }
     }
     Ok(true)
 }
@@ -409,6 +412,7 @@ pub(super) async fn outside_capture(
             return Err(CoreError::Refused("command_outcome_unknown"));
         }
         lifecycle::event_tx(db, &t, "NATIVE_COMMAND_STARTED", json!({"ref":r,"argv":a,"channel_id":actor}))?;
+        crate::owner_command_output::coordinator_marker(db, &t, &actor, &r, "in_progress")?;
         Ok(())
     })?)
     .await?;
@@ -510,7 +514,12 @@ pub(super) async fn outside_capture(
         recv(executor.write(move|db|{
             db.execute("INSERT INTO large_outputs VALUES (?,?,?,'terminal',?,?,?,?,?,NULL,?,?)",
                 rusqlite::params![id,task,c.channel_id,hash,filename,size as i64,0,code,failure,cortex_core::now()])?;
-            lifecycle::event_tx(db,&task,"NATIVE_COMMAND_FINISHED",json!({"receipt":{"tool_call_ref":event["tool_call_ref"],"argv":event["argv"],"observation":event}}))?;Ok(())
+            lifecycle::event_tx(db,&task,"NATIVE_COMMAND_FINISHED",json!({"receipt":{"tool_call_ref":event["tool_call_ref"],"argv":event["argv"],"observation":event}}))?;
+            if let Some(reference) = event["tool_call_ref"].as_str() {
+                crate::owner_command_output::coordinator_marker(db, &task, &c.channel_id, reference,
+                    if event["complete"] == true && event["exit_code"] == 0 {"completed"} else {"failed"})?;
+            }
+            Ok(())
         })?).await?;
         Ok::<_,CoreError>(value)
     }.await;
@@ -573,7 +582,7 @@ async fn retain_process(
 pub(super) fn recover_commands(store: &Store) -> CoreResult<()> {
     store.write(|db| {
         let rows = db.prepare("SELECT task_id,request_key,actor,result_json FROM runtime_requests
-            WHERE operation IN ('command_run','outside_command') AND json_extract(result_json,'$.settled') IS NOT 1 AND json_extract(result_json,'$.complete') IS NOT 1")?
+            WHERE (operation IN ('command_run','outside_command') OR (operation='project_git' AND json_type(result_json,'$.checkout')='object')) AND json_extract(result_json,'$.settled') IS NOT 1 AND json_extract(result_json,'$.complete') IS NOT 1")?
             .query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?
             .collect::<Result<Vec<_>,_>>()?;
         for (task, key, actor, raw) in rows {
@@ -907,27 +916,40 @@ pub(super) async fn execute(
     name: &str,
     args: Value,
     scoped: bool,
+    worktree: Option<String>,
 ) -> CoreResult<Value> {
     let name = name.to_owned();
+    let linked = worktree.is_some();
     let c = credential.clone();
     let a = args.clone();
     let n = name.clone();
     let hash = digest(&serde_json::to_vec(&json!([name, args]))?);
     let h = hash.clone();
     let root_for_auth = root.clone();
-    let (i,mode,scopes,saved,output_dir)=recv(executor.publication(move|store|{
+    let worktree_for_auth = worktree.clone();
+    let (i,mode,scopes,saved,output_dir,checkout)=recv(executor.publication(move|store|{
         let i=store.read(|db|channels::authenticate(db,&c.channel_id,c.secret(),true))?;
         if scoped && n == "project_git" {
             return Err(CoreError::Refused("managed_codex_git_refused"));
+        }
+        let checkout = if linked {
+            crate::native_project::checkout_binding(store, &i)?
+        } else { None };
+        if linked && !checkout.as_ref().is_some_and(|v| v["id"].as_str() == worktree_for_auth.as_deref()
+            && v["root"].as_str().map(std::path::Path::new) == Some(root_for_auth.as_path())) {
+            return Err(CoreError::Refused("worktree_binding_invalid"));
         }
         let mode=store.read(|db|access::current(db,&i.task))?;
         let saved:Option<(String,String,String)>=store.read(|db|Ok(db.query_row("SELECT operation,digest,result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?",
             (&i.task,&c.channel_id,a["request_key"].as_str()),|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?))?;
         if let Some((op,hash,v))=saved {if op!=n||hash!=h{return Err(CoreError::Refused("request_key_conflict"));}let v:Value=serde_json::from_str(&v)?;
-            let value = if n == "command_run" {
+            if linked && v.get("checkout") != checkout.as_ref() {
+                return Err(CoreError::Refused("worktree_receipt_binding_mismatch"));
+            }
+            let value = if n == "command_run" || linked {
                 crate::native_command_handles::public_status(store,&i.task,&v)?
             } else if v["settled"]==true { v } else {return Err(CoreError::Refused("command_outcome_unknown"));};
-            return Ok((i,mode,Vec::new(),Some(value),PathBuf::new()));
+            return Ok((i,mode,Vec::new(),Some(value),PathBuf::new(), checkout));
         }
         let scopes=store.write(|db|{
             if n=="command_run" {if i.role!="worker"||i.profile.as_deref()==Some("worker-senior-consultant"){return Err(CoreError::Refused("worker_required"));}
@@ -946,11 +968,11 @@ pub(super) async fn execute(
         let dir=store.key().directory().join(&i.task).join(".native-output");
         cortex_core::store::locks::private_directory(&store.key().directory().join(&i.task),true)?;
         cortex_core::store::locks::private_directory(&dir,true)?;
-        Ok((i,mode,scopes,None,dir))
+        Ok((i,mode,scopes,None,dir,checkout))
     })?).await?;
     if let Some(v) = saved {
         // Old output-driven annotations must not resume a host effect after upgrade.
-        if !scoped
+        if !scoped && !linked
             && eligible_prestart_receipt(&v)
             && v["rerouted_to"]["note"]["reason"] == "sandbox_unavailable"
             && v["rerouted_to"]["args"].is_object()
@@ -1070,8 +1092,8 @@ pub(super) async fn execute(
         if cwd != root {
             safe(relative.to_str().ok_or(CoreError::Refused("invalid_cwd"))?)?;
         }
-    } else if scoped {
-        return Err(CoreError::Refused("scoped_command_cwd_refused"));
+    } else if linked || scoped {
+        return Err(CoreError::Refused(if linked { "worktree_command_cwd_refused" } else { "scoped_command_cwd_refused" }));
     } else if mode == "guarded"
         || crate::native_access::protected(&cwd)
         || crate::native_command_live::policy::protected_target(&root, &cwd)
@@ -1088,6 +1110,9 @@ pub(super) async fn execute(
     // A writing worker's sudo, pkexec or doas cannot work in the sandbox: the runtime
     // runs it on the host at once. Read-only roles are never rerouted (they stay in
     // their read-only sandbox, where the privileged program fails).
+    if linked && privileged(&argv) {
+        return Err(CoreError::Refused("worktree_host_effect_unavailable"));
+    }
     if scoped && privileged(&argv) {
         return Err(CoreError::Refused("managed_codex_host_command_refused"));
     }
@@ -1121,9 +1146,14 @@ pub(super) async fn execute(
     if is_delete && mode != "auto" {
         let c = credential.clone();
         let task = i.task.clone();
-        let session=recv(executor.read(move|db|Ok(db.query_row("SELECT session_id FROM acp_host_sessions WHERE task_id=? AND json_extract(client_info,'$.name')='cortex-rust-acp'",[task],|r|r.get::<_,String>(0)).optional()?))?).await?;
-        let request = json!({"toolCall":{"toolCallId":args["request_key"],"title":"Delete project data","kind":"execute","rawInput":args},
-            "options":[{"optionId":"allow","name":"Allow once","kind":"allow_once"},{"optionId":"deny","name":"Deny","kind":"reject_once"}]});
+        let (session, ru) = recv(executor.read(move |db| {
+            let session = db.query_row("SELECT session_id FROM acp_host_sessions WHERE task_id=? AND json_extract(client_info,'$.name')='cortex-rust-acp'", [&task], |r| r.get::<_, String>(0)).optional()?;
+            let ru = cortex_core::lifecycle::domain::task_language_tx(db, &task)? == "ru";
+            Ok((session, ru))
+        })?).await?;
+        let title = if ru { "Удалить данные проекта" } else { "Delete project data" };
+        let request = json!({"toolCall":{"toolCallId":args["request_key"],"title":title,"kind":"execute","rawInput":args},
+            "options":cortex_engine::permission::one_shot_options(ru)});
         let allowed = match (permissions, session) {
             (Some(p), Some(s)) => {
                 matches!(p.decide(&s,&request).await,Ok(PermissionDecision::Selected(id)) if id=="allow")
@@ -1146,7 +1176,9 @@ pub(super) async fn execute(
     let id = format!("lo_{}", &crate::native_effects::identity()?[..12]);
     let file = format!("{id}.bin");
     let out = create_command_output(&output_dir, &file)?;
-    let profile = if scoped {
+    let profile = if linked {
+        crate::native_command_sandbox::WORKTREE_READ_ONLY
+    } else if scoped {
         crate::native_command_sandbox::CODEX_SCRATCH
     } else if name == "project_git" {
         "git_context"
@@ -1162,7 +1194,7 @@ pub(super) async fn execute(
     let checks_work = !scoped
         && name == "command_run"
         && !cortex_core::lifecycle::completion::trivial_command(&argv);
-    let writes = if !scoped && !readonly && name == "command_run" {
+    let writes = if !linked && !scoped && !readonly && name == "command_run" {
         vec![root.clone()]
     } else {
         Vec::new()
@@ -1183,6 +1215,8 @@ pub(super) async fn execute(
         scopes: scopes.clone(),
     });
     let start_authority = command_authority.clone();
+    let started_checkout = checkout.clone();
+    let started_cwd = cwd.clone();
     let _flight = Flight::new(&reference);
     let work_set = recv(executor.write(move |db| {
         let i = expected;
@@ -1198,23 +1232,29 @@ pub(super) async fn execute(
         } else if n == "command_run" && !readonly {
             writable(db, &i, None)?;
         }
+        let mut intent = json!({"complete":false,"tool_call_ref":r,"argv":a["argv"]});
+        if let Some(binding) = &started_checkout {
+            intent["checkout"] = binding.clone();
+            intent["cwd"] = json!(&started_cwd);
+        }
         db.execute(
             "INSERT INTO runtime_requests VALUES (?,?,?,?,?,?)",
-            (
-                &i.task,
-                a["request_key"].as_str(),
-                &c.channel_id,
-                n,
-                h,
-                json!({"complete":false,"tool_call_ref":r,"argv":a["argv"]}).to_string(),
-            ),
+            (&i.task, a["request_key"].as_str(), &c.channel_id, n, h, intent.to_string()),
         )?;
         lifecycle::event_tx(
             db,
             &i.task,
             "NATIVE_COMMAND_STARTED",
-            json!({"ref":r,"channel_id":c.channel_id,"argv":a["argv"]}),
+            {
+                let mut event = json!({"ref":r,"channel_id":c.channel_id,"argv":a["argv"]});
+                if let Some(checkout) = &started_checkout {
+                    event["checkout"] = checkout.clone();
+                    event["cwd"] = json!(started_cwd);
+                }
+                event
+            },
         )?;
+        crate::owner_command_output::coordinator_marker(db, &i.task, &c.channel_id, &r, "in_progress")?;
         // Taken with the start record, so it names exactly the writes before it.
         if !checks_work {
             return Ok(None);
@@ -1222,7 +1262,7 @@ pub(super) async fn execute(
         lifecycle::worker_checks::work_set_tx(db, &i.task, i.assignment.as_deref(), &scopes)
     })?)
     .await?;
-    if name == "command_run" {
+    if name == "command_run" || linked {
         drop(out);
         let (args_copy, argv_copy) = (args.clone(), argv.clone());
         // The work set's digest before launch (`native_work_set`); its end is observed
@@ -1260,6 +1300,8 @@ pub(super) async fn execute(
             args,
             profile.to_owned(),
             command_authority,
+            name.clone(),
+            checkout.clone(),
         )
         .await;
         if let (Ok(_), Some(set), Some(start)) = (&reply, work_set, start) {
@@ -1274,6 +1316,7 @@ pub(super) async fn execute(
                     root,
                     set,
                     start,
+                    checkout,
                 );
             }
         }
@@ -1281,6 +1324,7 @@ pub(super) async fn execute(
         // The private supervisor handshake and a durably settled receipt must
         // both prove a launcher failure before the payload could run.
         if scoped
+            || linked
             || readonly
             || !matches!(
                 reply,

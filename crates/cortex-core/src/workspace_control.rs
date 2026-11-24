@@ -67,6 +67,59 @@ mod coordinator_card_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn coordinator_card_option_details_survive_reopen_alongside_legacy_labels() {
+        let root = std::env::temp_dir().join(format!("option-details-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let key = crate::ProjectKey::new(&root, crate::StoreChannel::Dev).unwrap();
+        let store = Store::open(key.clone(), crate::OpenMode::Initialize).unwrap();
+        let machine = lifecycle::TaskMachine::new(&store);
+        let owner = machine.create("t", "g", "o").unwrap();
+        machine
+            .transition("t", &owner, "plan", TaskState::Planning, None, &lifecycle::FoundationGuards)
+            .unwrap();
+        let receipt = store.write(|db| {
+            lifecycle::skill_proposals::request(
+                db, &root, "t", "c", "ask",
+                &json!({"questions":[
+                    {"question":"Keep it?", "options":[{"label":"Yes","detail":"Keeps `src/a.rs:42`"}, "No"]},
+                    {"question":"Try again?", "options":["Retry", "Stop"]},
+                ]}),
+            )
+        }).unwrap();
+        drop(store);
+        let store = Store::open(key, crate::OpenMode::Initialize).unwrap();
+        store.write(|db| {
+            let b = Binding {
+                task: "t".into(), draft: "d".into(), session: "s".into(), owner,
+                version: 1, execution_version: 1, goal: "g".into(),
+            };
+            let cards = decisions_tx(db, &b)?;
+            assert_eq!(cards[0]["kind"], "question_batch");
+            assert_eq!(cards[0]["options"][0]["label"], "Yes");
+            assert_eq!(cards[0]["options"][0]["detail"], "Keeps `src/a.rs:42`");
+            let option = workspace_protocol::DecisionOption::try_from(cards[0]["options"][0].clone())
+                .expect("ordinary detail must survive the existing Workspace wire decoder");
+            assert_eq!(option.as_value()["detail"], "Keeps `src/a.rs:42`");
+            assert!(cards[0]["options"][1].get("detail").is_none());
+            assert_eq!(cards[1]["options"][0]["label"], "Retry");
+            assert!(cards[1]["options"][0].get("detail").is_none());
+            let id = receipt["question_id"].as_str().unwrap();
+            waits::answer_tx(db, "t", id, "Yes", "text", None)?;
+            let answered = &decisions_tx(db, &b)?[0];
+            assert_eq!(answered["answerText"], "Yes");
+            assert_eq!(answered["options"], cards[0]["options"]);
+            assert!(crate::routing::evidence(db, "t", &root)?.inputs.iter()
+                .any(|i| i.text == "Yes" && i.selected_option));
+            assert_eq!(
+                waits::answered_question_tx(db, "t", "Keep it?", &["Yes".into(), "No".into()])?,
+                Some((id.into(), "Yes".into()))
+            );
+            Ok(())
+        }).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn stop_option_of_a_coordinator_question_is_an_answer_but_the_runtime_stop_question_finishes() {
         let root = std::env::temp_dir().join(format!("stop-answer-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
@@ -215,11 +268,15 @@ mod coordinator_card_tests {
             db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'work','worker-backend-dev','Work','[]','[\"src\"]','execution','running','assignment',NULL)",[])?;
             let c=crate::channels::issue_tx(db,"t",&owner,crate::channels::Principal::Worker{assignment:"assignment"})?;
             crate::channels::bind_session_tx(db,&c,"engine")?;
-            waits::request_tx_bound(db,"t",&c.channel_id,"question",&[waits::QuestionForm{question:"Continue?".into(),options:vec!["Yes".into(),"No".into()]}])?;
+            let wait = waits::request_tx_bound(db,"t",&c.channel_id,"question",&[waits::QuestionForm{
+                question:"Continue?".into(),options:vec![json!({"label":"Yes","detail":"Keep the current route"}),"No".into()]}])?;
+            assert_eq!(wait["questions"][0]["options"], json!(["Yes", "No"]));
             let mut b=Binding{task:"t".into(),draft:"d".into(),session:"s".into(),owner:owner.clone(),version:1,execution_version:1,goal:"g".into()};
             let first=decisions_tx(db,&b)?[0].clone();
             // The worker's question is the owner's to answer in the task's Conversation, named by the role that asked.
             assert_eq!(first["askedBy"],"backend-dev");
+            assert_eq!(first["options"][0]["label"],"Yes");
+            assert_eq!(first["options"][0]["detail"],"Keep the current route");
             assert_eq!(first["status"],"pending");
             lifecycle::event_tx(db,"t","NATIVE_TURN_SETTLED",json!({"status":"completed"}))?;
             b.execution_version+=100;
@@ -487,7 +544,7 @@ pub fn close_unconfirmed(
             (
                 project,
                 actor,
-                projections::unconfirmed_close_key(task),
+                projections::unconfirmed_close_key(db, task, execution)?,
                 projections::CLOSE_UNCONFIRMED,
                 crate::digest(identity.to_string().as_bytes()),
                 receipt.to_string(),
@@ -652,7 +709,7 @@ pub fn canonical_request(
     if let Some(c) = capture.filter(|c| !c.blocks.is_empty()) {
         if !matches!(
             request["action"].as_str(),
-            Some("prompt" | "incoming_prompt")
+            Some("prompt" | "incoming_prompt" | "rework")
         ) {
             return refuse("native_attachments_unavailable");
         }
@@ -660,6 +717,160 @@ pub fn canonical_request(
     }
     Ok(request)
 }
+const OWNER_REWORK: &str = "workspace_owner_rework";
+
+/// Saved owner disposition, read under the Workspace machine lock. It is
+/// trusted adapter evidence, never supplied in the public request.
+pub struct ReworkDisposition<'a> {
+    pub archived: bool,
+    pub closed: bool,
+    pub integrated: bool,
+    pub target: Option<&'a str>,
+    pub history: Value,
+    pub worktree_root: &'a std::path::Path,
+}
+
+pub fn owner_rework_event(db: &Connection, task: &str) -> CoreResult<Option<i64>> {
+    Ok(db.query_row(
+        "SELECT max(id) FROM runtime_events WHERE task_id=? AND type='TASK_REOPENED'
+         AND json_extract(payload_json,'$.origin')='owner_rework'",
+        [task], |r| r.get(0),
+    )?)
+}
+
+pub fn owner_resolution_current(db: &Connection, task: &str) -> CoreResult<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1
+         AND type IN ('OWNER_TASK_RESOLVED','USER_FORCE_FINISHED')
+         AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='TASK_REOPENED'),0))",
+        [task], |r| r.get(0),
+    )?)
+}
+
+pub fn rework_allowed(
+    db: &Connection, task: &str, closed: bool, archived: bool,
+) -> CoreResult<()> {
+    if archived {
+        return refuse("task_archived");
+    }
+    match db.query_row("SELECT state FROM runtime_tasks WHERE task_id=?", [task], |r| r.get::<_, String>(0))?.as_str() {
+        "CANCELLED" | "FAILED" => {}
+        "COMPLETED" if closed || owner_resolution_current(db, task)? => {}
+        "PAUSED" if closed => {}
+        _ => return refuse("task_not_closed"),
+    }
+    lifecycle::automatic::require_settled_execution(db, task)
+}
+
+pub fn rework_binding(
+    db: &Connection, root: &str, project: &str, actor: &str, request: &Value,
+) -> CoreResult<Binding> {
+    if request["projectId"] != project || request["action"] != "rework" {
+        return refuse("invalid_request");
+    }
+    let execution = request["executionId"].as_str().ok_or(CoreError::Refused("invalid_execution"))?;
+    let b = rework_binding_for_execution(db, root, project, actor, execution)?;
+    if request["taskId"] != b.draft {
+        return refuse("invalid_task");
+    }
+    if request["ownerEpoch"] != b.owner.epoch.to_string() {
+        return refuse("stale_epoch");
+    }
+    Ok(b)
+}
+
+/// A close without confirmation grants no runtime authority. It is eligible
+/// only once the exact underlying execution can be independently reconciled.
+pub fn rework_binding_for_execution(
+    db: &Connection, root: &str, project: &str, actor: &str, execution: &str,
+) -> CoreResult<Binding> {
+    let b = binding_with(db, root, project, actor, execution, true)?;
+    let raw = projections::task_with_disposition(db, project, root, &b.draft, false)?
+        .ok_or(CoreError::Refused("native_execution_binding_invalid"))?;
+    if raw.execution_id.as_deref() != Some(execution)
+        || raw.warnings.iter().any(|w| w == projections::CONTRADICTORY_EVIDENCE)
+    {
+        return refuse("native_execution_binding_invalid");
+    }
+    Ok(b)
+}
+
+pub fn unconfirmed_close_current(
+    db: &Connection, project: &str, root: &str, task: &str, execution: &str,
+) -> CoreResult<bool> {
+    Ok(projections::unconfirmed_close_at(db, project, root, task, execution)?.is_some())
+}
+
+pub fn replay_rework(db: &Connection, b: &Binding, request: &Value) -> CoreResult<Option<Value>> {
+    let prior: Option<(String, String)> = db.query_row(
+        "SELECT digest,result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?",
+        (&b.task, &b.owner.owner, key(request)?), |r| Ok((r.get(0)?,r.get(1)?)),
+    ).optional()?;
+    prior.map(|(digest,result)| {
+        let expected = crate::digest(&serde_json::to_vec(&json!({"operation":OWNER_REWORK,"payload":request}))?);
+        if digest != expected { return refuse("payload_conflict"); }
+        Ok(serde_json::from_str(&result)?)
+    }).transpose()
+}
+
+/// Reopen, bind the working base, keep the owner's new input, and record the
+/// planning state and receipt together. The host starts the ordinary driver
+/// only after this commits. A repeated request has no Git or message effects.
+pub fn rework(
+    store: &Store,
+    project: &str,
+    actor: &str,
+    request: &Value,
+    capture: Option<&crate::input::Capture>,
+    disposition: ReworkDisposition<'_>,
+) -> CoreResult<Value> {
+    let capture = capture.filter(|c| !c.blocks.is_empty());
+    if request.get("capture") != capture.map(|c| c.fingerprint()).as_ref() {
+        return refuse("invalid_input_capture");
+    }
+    let root = store.key().root().to_string_lossy();
+    let mut replacement = None;
+    let mut task = None;
+    let result = store.write(|db| {
+        let b = rework_binding(db, &root, project, actor, request)?;
+        task = Some(b.task.clone());
+        lifecycle::request_tx(db, &b.task, &b.owner.owner, key(request)?, OWNER_REWORK, request, || {
+            if disposition.archived {
+                return refuse("task_archived");
+            }
+            if request["expectedVersion"] != b.version.to_string() {
+                return refuse("stale_version");
+            }
+            let closed = disposition.closed
+                || unconfirmed_close_current(db, project, &root, &b.draft, request["executionId"].as_str().unwrap())?;
+            rework_allowed(db, &b.task, closed, false)?;
+            checked_owner_text(request)?;
+            let generation = format!("{}:rework:{}", b.task, key(request)?);
+            let base = super::worktrees::rework_checkout(
+                db, store.key(), project, &b, &generation, disposition.worktree_root,
+                disposition.target, disposition.integrated, &mut replacement,
+            )?;
+            let mut change = json!({"request":key(request)?,"baseRevision":base,"closed":disposition.history,
+                "targetBranch":disposition.target,"resetChangesBase":disposition.integrated});
+            if let Some((tree, witness)) = &replacement {
+                change["worktree"] = serde_json::to_value(tree)?;
+                change["worktreeWitness"] = serde_json::to_value(witness)?;
+            }
+            let event = domain::owner_rework_tx(db, &b.task, change)?;
+            owner_message_tx(store, db, &b, request, capture, TaskState::Recovering, false)?;
+            domain::settle_recovery_tx(db, &b.task, TaskState::Planning)?;
+            Ok(json!({"outcome":"recorded","done":true,"state":"PLANNING",
+                "reworkEvent":event.to_string(),"baseRevision":base}))
+        })
+    });
+    if result.is_err() {
+        if let Some(task) = task {
+            super::worktrees::abandon_unbound_rework(store, &task, replacement);
+        }
+    }
+    result
+}
+
 /// An owned process that has not been confirmed gone.
 fn unsettled_tx(db: &rusqlite::Transaction<'_>, task: &str) -> CoreResult<bool> {
     Ok(db.query_row(
@@ -669,6 +880,55 @@ fn unsettled_tx(db: &rusqlite::Transaction<'_>, task: &str) -> CoreResult<bool> 
         |r| r.get(0),
     )?)
 }
+pub(super) fn checked_owner_text(request: &Value) -> CoreResult<(&str, Vec<String>, Vec<String>)> {
+    let text=request["text"].as_str().filter(|s|!s.trim().is_empty()&&s.chars().count()<=32_000).ok_or(CoreError::Refused("invalid_message"))?;
+    if request.get("attachments").is_some_and(|a|a.as_array().is_none_or(|a|!a.is_empty())) {return refuse("native_attachments_unavailable");}
+    // Parsed before anything is kept: a denial outside the project refuses whole.
+    let denied=lifecycle::steering::parse_denials(text)?;
+    let lifted=lifecycle::steering::parse_lifts(text)?;
+    // One message never both denies and allows the same path.
+    if lifted.iter().any(|p|denied.contains(p)) {return refuse("write_rule_conflict");}
+    Ok((text, denied, lifted))
+}
+
+/// Use the same source, steering and transcript path for an owner message on rework.
+pub(super) fn owner_message_tx(
+    store: &Store,
+    db: &Transaction<'_>,
+    b: &Binding,
+    request: &Value,
+    capture: Option<&crate::input::Capture>,
+    state: TaskState,
+    boundary: bool,
+) -> CoreResult<()> {
+    let (text, denied, lifted) = checked_owner_text(request)?;
+    let sessions=db.prepare("SELECT session_id FROM acp_host_sessions WHERE task_id=?
+        AND json_extract(client_info,'$.name')='cortex-rust-acp'")?
+        .query_map([&b.task],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+    if sessions.len()>1 {return refuse("incoming_session_binding_conflict");}
+    let attachments=match capture {
+        Some(c)=>Some(c.persist(store,db,&b.task,sessions.first().unwrap_or(&b.session),text)?),
+        None=>None,
+    };
+    let mut steering=json!({"text":text,"request":key(request)?,"deny_write":denied,
+        "delivery":if boundary {lifecycle::steering::BOUNDARY} else {lifecycle::steering::RESTART}});
+    if !lifted.is_empty() {steering["allow_write"]=json!(lifted);}
+    if let Some(a)=&attachments {steering["attachments"]=a.clone();}
+    lifecycle::event_tx(db,&b.task,"USER_STEERING",steering)?;
+    // A restart applies the message now: the relaunched coordinator gets it.
+    if !boundary {lifecycle::event_tx(db,&b.task,"STEERING_APPLIED",json!({"request":key(request)?,"state":state}))?;}
+    let attachments=attachments.map(|a|a.to_string());
+    let at=crate::now();
+    for session in std::iter::once(&b.session).chain(sessions.iter()) {
+        let seq:i64=db.query_row("SELECT coalesce(max(seq),-1)+1 FROM (
+            SELECT seq FROM host_transcript WHERE session_id=? UNION ALL SELECT seq FROM host_updates WHERE session_id=?)",
+            (session,session),|r|r.get(0))?;
+        db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,attachments_json,created_at) VALUES (?,?,'user_message',?,?,?)",
+            (session,seq,text,&attachments,&at))?;
+    }
+    Ok(())
+}
+
 /// Admit a canonical request from `canonical_request`. Captured attachments
 /// become the next source revision in the same transaction as steering and
 /// transcript rows. Replay and finish must receive this same request.
@@ -748,19 +1008,8 @@ pub fn admit_input(
                     }
                 },
                 "prompt" | "incoming_prompt" => {
-                    let text=request["text"].as_str().filter(|s|!s.trim().is_empty()&&s.chars().count()<=32_000).ok_or(CoreError::Refused("invalid_message"))?;
-                    if request.get("attachments").is_some_and(|a|a.as_array().is_none_or(|a|!a.is_empty())) {return refuse("native_attachments_unavailable");}
-                    // Parsed before anything is kept: a denial outside the project refuses whole.
-                    let denied=lifecycle::steering::parse_denials(text)?;
-                    let lifted=lifecycle::steering::parse_lifts(text)?;
-                    // One message never both denies and allows the same path.
-                    if lifted.iter().any(|p|denied.contains(p)) {return refuse("write_rule_conflict");}
-                    // A working task keeps its running work; the coordinator receives the
-                    // message at its next boundary. Waiting, held, paused or reopened tasks
-                    // keep the restart delivery.
+                    checked_owner_text(request)?;
                     let boundary=lifecycle::steering::boundary_tx(db,&b.task,state)?;
-                    // A queued message the service takes is only ever a boundary message;
-                    // otherwise it stays in the owner's queue (nothing is recorded).
                     if request["queued"]==true && !boundary {return refuse("queued_message_not_at_boundary");}
                     if state==TaskState::Paused {
                         if action!="incoming_prompt" {return refuse("task_paused");}
@@ -770,30 +1019,7 @@ pub fn admit_input(
                         if unsettled_tx(db,&b.task)? {return refuse("native_shutdown_unconfirmed");}
                         domain::owner_pause_tx(db,&b.task,&b.owner,&format!("incoming-resume:{}",key(request)?),true,b.version)?;
                     }
-                    let sessions=db.prepare("SELECT session_id FROM acp_host_sessions WHERE task_id=?
-                        AND json_extract(client_info,'$.name')='cortex-rust-acp'")?
-                        .query_map([&b.task],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
-                    if sessions.len()>1 {return refuse("incoming_session_binding_conflict");}
-                    let attachments=match capture {
-                        Some(c)=>Some(c.persist(store,db,&b.task,sessions.first().unwrap_or(&b.session),text)?),
-                        None=>None,
-                    };
-                    let mut steering=json!({"text":text,"request":key(request)?,"deny_write":denied,
-                        "delivery":if boundary {lifecycle::steering::BOUNDARY} else {lifecycle::steering::RESTART}});
-                    if !lifted.is_empty() {steering["allow_write"]=json!(lifted);}
-                    if let Some(a)=&attachments {steering["attachments"]=a.clone();}
-                    lifecycle::event_tx(db,&b.task,"USER_STEERING",steering)?;
-                    // A restart applies the message now: the relaunched coordinator gets it.
-                    if !boundary {lifecycle::event_tx(db,&b.task,"STEERING_APPLIED",json!({"request":key(request)?,"state":state}))?;}
-                    let attachments=attachments.map(|a|a.to_string());
-                    let at=crate::now();
-                    for session in std::iter::once(&b.session).chain(sessions.iter()) {
-                        let seq:i64=db.query_row("SELECT coalesce(max(seq),-1)+1 FROM (
-                            SELECT seq FROM host_transcript WHERE session_id=? UNION ALL SELECT seq FROM host_updates WHERE session_id=?)",
-                            (session,session),|r|r.get(0))?;
-                        db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,attachments_json,created_at) VALUES (?,?,'user_message',?,?,?)",
-                            (session,seq,text,&attachments,&at))?;
-                    }
+                    owner_message_tx(store, db, &b, request, capture, state, boundary)?;
                     if !boundary {domain::interrupt_tx(db,&b.task)?;}
                 },
                 "close_task" | "mark_resolved" => {
@@ -909,7 +1135,8 @@ fn permission_item(
         value["askedBy"] = json!(role);
     }
     if shown == "superseded" {
-        value["headline"] = json!(pd::withdrawn_sentence(reason.as_deref(), status));
+        let ru = domain::task_language_tx(db, &b.task)? == "ru";
+        value["headline"] = json!(pd::withdrawn_sentence(reason.as_deref(), status, ru));
     }
     Ok(value)
 }
@@ -1030,10 +1257,22 @@ fn decisions_tx(db: &Transaction<'_>, b: &Binding) -> CoreResult<Vec<Value>> {
             && w["continuation_required"]==true) && !resumable;
         let paused_question=paused_saved.as_ref().is_some_and(|saved|saved["resumeState"]=="WAITING_USER"
             &&saved["questionIds"].as_array().is_some_and(|ids|ids.contains(&json!(id))));
-        let valid=match w {Some(w)=>w["status"]=="open"&&(interrupted||resumable),None=>assignment.is_none()&&(state==TaskState::WaitingUser||paused_question)};
+        let node_question = dedup.starts_with("obstacle:");
+        let valid=if node_question {
+            lifecycle::obstacles::node_question_is_current(db,&b.task,&id)?
+        } else {
+            match w {Some(w)=>w["status"]=="open"&&(interrupted||resumable),None=>assignment.is_none()&&(state==TaskState::WaitingUser||paused_question)}
+        };
         let status=match status.as_str() {"answered"=>"answered","open" if valid=>"pending",_=>"superseded"};
-        let labels:Vec<String>=serde_json::from_str(options.as_deref().unwrap_or("[]"))?;
-        let options:Vec<_>=labels.into_iter().enumerate().map(|(i,label)|json!({"optionId":format!("wo_{}", &crate::digest(format!("{id}:{i}:{label}").as_bytes())[..40]),"label":label})).collect();
+        let stored: Vec<Value> = serde_json::from_str(options.as_deref().unwrap_or("[]"))?;
+        let options = stored.iter().enumerate().map(|(i, option)| {
+            let label = waits::option_label(option).ok_or(CoreError::Refused("invalid_question_form"))?;
+            let mut wire = json!({"optionId":format!("wo_{}", &crate::digest(format!("{id}:{i}:{label}").as_bytes())[..40]),"label":label});
+            if let Some(detail) = option["detail"].as_str() {
+                wire["detail"] = json!(detail);
+            }
+            Ok(wire)
+        }).collect::<CoreResult<Vec<_>>>()?;
         let saved_batch: Option<String> = if w.is_none() {
             db.query_row("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_QUESTION_REQUESTED'
                 AND EXISTS(SELECT 1 FROM json_each(json_extract(payload_json,'$.questions'))
@@ -1046,7 +1285,7 @@ fn decisions_tx(db: &Transaction<'_>, b: &Binding) -> CoreResult<Vec<Value>> {
         // activity events arriving between display and the answer transaction.
         let question_version: Option<i64> = if let Some(w)=w {
             w["event_id"].as_i64()
-        } else if assignment.is_none() {
+        } else if assignment.is_none() || node_question {
             db.query_row("SELECT id FROM runtime_events WHERE task_id=? AND type='USER_QUESTION_REQUESTED'
                 AND (json_extract(payload_json,'$.question_id')=? OR EXISTS(
                     SELECT 1 FROM json_each(json_extract(payload_json,'$.questions'))

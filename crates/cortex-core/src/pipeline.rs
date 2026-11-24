@@ -35,6 +35,7 @@ pub struct Route<'a> {
 }
 
 struct Facts {
+    ru: bool,
     state: String,
     revision: i64,
     review_cycle: i64,
@@ -99,7 +100,8 @@ fn facts(store: &Store, task: &str) -> CoreResult<Facts> {
         };
         let verification = event("'VERIFICATION_PASSED','VERIFICATION_FAILED'")?;
         let review_waiver = event("'REVIEW_NOT_REQUIRED'")?.map(|v| v.1);
-        Ok(Facts { state, revision, review_cycle, goal, synthesis, blocker, open_questions, nodes, verification, review_waiver })
+        let ru = crate::lifecycle::domain::task_language_tx(db, task)? == "ru";
+        Ok(Facts { ru, state, revision, review_cycle, goal, synthesis, blocker, open_questions, nodes, verification, review_waiver })
     })
 }
 fn summary(f: &Facts) -> String {
@@ -115,24 +117,41 @@ fn summary(f: &Facts) -> String {
     }
     s.chars().take(320).collect()
 }
-fn quoted(text: &str) -> String {
+fn quoted(text: &str, ru: bool) -> String {
     let text = text.trim();
     if text.is_empty() {
-        return "The user's original request text is not recorded for this task.".into();
+        return if ru {
+            "Текст исходного запроса не сохранён."
+        } else {
+            "The user's original request text is not recorded for this task."
+        }.into();
     }
     let text: String = text.chars().take(GOAL_CHARACTERS).collect();
     format!("> {}", text.replace('\n', "\n> "))
 }
-fn bounded_goal(goal: &str) -> String {
+fn bounded_goal(goal: &str, ru: bool) -> String {
     let total = goal.trim().chars().count();
-    let mut q = quoted(goal);
+    let mut q = quoted(goal, ru);
     if total > GOAL_CHARACTERS {
-        q.push_str(&format!("\n\n(The request is {total} characters; the first {GOAL_CHARACTERS} are shown. The full text is the task's retained original goal.)"));
+        let note = if ru {
+            format!("(В запросе {total} симв.; показаны первые {GOAL_CHARACTERS}. Полный текст сохранён как исходная цель.)")
+        } else {
+            format!("(The request is {total} characters; the first {GOAL_CHARACTERS} are shown. The full text is the task's retained original goal.)")
+        };
+        q.push_str("\n\n");
+        q.push_str(&note);
     }
     q
 }
-fn initial(task: &str, goal: &str, route: Option<&Route<'_>>) -> String {
+fn initial(task: &str, goal: &str, route: Option<&Route<'_>>, ru: bool) -> String {
     let route = match route {
+        Some(r) if ru => format!(
+            "Маршрут координатора: движок `{}`, модель `{}`, усилие {}.",
+            r.engine,
+            r.model,
+            r.effort.map(|e| format!("`{e}`")).unwrap_or_else(|| "не указано".into())
+        ),
+        None if ru => "Движок, модель и усилие координатора ещё не определены.".into(),
         Some(r) => format!(
             "Bound coordinator route: engine `{}`, model `{}`, effort `{}`.",
             r.engine,
@@ -142,10 +161,32 @@ fn initial(task: &str, goal: &str, route: Option<&Route<'_>>) -> String {
         None => "The bound engine, model and effort for this task's coordinator route are not yet determined.".into(),
     };
     let fill = |line: &str| -> Option<String> {
+        if ru {
+            return Some(match line {
+                "# Pipeline decision basis" => "# Основания для решений".into(),
+                "## Requirements and constraints" => "## Требования и ограничения".into(),
+                "## Work graph" => "## План работ".into(),
+                "## Assignments and routing" => "## Назначения и маршруты".into(),
+                "## Evidence and verification" => "## Доказательства и проверка".into(),
+                "## State and evidence links" => "## Состояние и ссылки на доказательства".into(),
+                "## Decisions, alternatives, discriminating checks, and unresolved deliverable work" => "## Решения, альтернативы, проверки и оставшаяся работа".into(),
+                "{{CURRENT_OBJECTIVE_AND_DECISION_BASIS}}" => format!(
+                    "Задача `{task}` открыта с этим запросом:\n\n{}\n\nРабота ещё не началась. Эту запись создала служба до первого хода координатора.",
+                    bounded_goal(goal, true)
+                ),
+                "{{CURRENT_REQUIREMENTS_AND_CONSTRAINTS}}" => "Координатор ещё не разобрал требования и ограничения; пока ориентируйтесь на исходный запрос.".into(),
+                "{{CURRENT_WORK_GRAPH}}" => "Работа ещё не запланирована и не поручена исполнителям.".into(),
+                "{{CURRENT_ASSIGNMENTS_AND_ROUTING}}" => format!("{route} Поручений пока нет."),
+                "{{CURRENT_EVIDENCE_AND_VERIFICATION}}" => "Проверки ещё не проводились.".into(),
+                "{{CURRENT_DECISIONS_QUESTIONS_AND_REMAINING_WORK}}" => "Решений пока нет, оставшаяся работа ещё не определена.".into(),
+                l if l.starts_with("<!--") && l.ends_with("-->") => "Данных пока нет: координатор ещё не приступил к работе.".into(),
+                _ => return None,
+            });
+        }
         Some(match line {
             "{{CURRENT_OBJECTIVE_AND_DECISION_BASIS}}" => format!(
                 "Task `{task}` was just opened from this exact user request:\n\n{}\n\nStatus: not yet worked. This initial edition was published by the runtime itself, before any coordinator turn ran.",
-                bounded_goal(goal)
+                bounded_goal(goal, false)
             ),
             "{{CURRENT_REQUIREMENTS_AND_CONSTRAINTS}}" => "Not yet determined: the coordinator has not yet reviewed the request for explicit requirements or constraints. The user's own words above are the only source of truth until it does.".into(),
             "{{CURRENT_WORK_GRAPH}}" => "Not yet determined: no work has been planned or delegated yet.".into(),
@@ -164,21 +205,23 @@ fn initial(task: &str, goal: &str, route: Option<&Route<'_>>) -> String {
         + "\n"
 }
 fn projection(f: &Facts) -> String {
+    let ru = f.ru;
+    let words = |en, ru_text| if ru { ru_text } else { en };
     let mut rows = vec![
-        "# Runtime pipeline".to_owned(),
+        words("# Runtime pipeline", "# Ход работы").to_owned(),
         String::new(),
-        format!("State: {}", f.state),
-        format!("Plan revision: {}", f.revision),
+        format!("{}: {}", words("State", "Состояние"), f.state),
+        format!("{}: {}", words("Plan revision", "Редакция плана"), f.revision),
         String::new(),
-        "## Original objective".into(),
+        words("## Original objective", "## Исходная цель").into(),
         String::new(),
-        bounded_goal(&f.goal),
+        bounded_goal(&f.goal, ru),
         String::new(),
-        "## Assignments".into(),
+        words("## Assignments", "## Поручения").into(),
         String::new(),
     ];
     if f.nodes.is_empty() {
-        rows.push("No assignment in this plan revision.".into());
+        rows.push(words("No assignment in this plan revision.", "В этой редакции плана нет поручений.").into());
     }
     for (id, role, status, deps, result) in &f.nodes {
         let deps = deps
@@ -190,36 +233,42 @@ fn projection(f: &Facts) -> String {
                     .join(", ")
             })
             .filter(|d| !d.is_empty())
-            .unwrap_or_else(|| "none".into());
-        let report = result["report_ref"].as_str().unwrap_or("not published");
+            .unwrap_or_else(|| words("none", "нет").into());
+        let report = result["report_ref"].as_str().unwrap_or(words("not published", "не опубликован"));
+        let dependencies = words("dependencies", "зависимости");
+        let report_label = words("report", "отчёт");
         rows.push(format!(
-            "- {id} ({role}): {status}; dependencies: {deps}; report: {report}"
+            "- {id} ({role}): {status}; {dependencies}: {deps}; {report_label}: {report}"
         ));
     }
     if !f.open_questions.is_empty() {
-        rows.extend([String::new(), "## Open questions".into(), String::new()]);
-        rows.push(format!(
-            "{} question(s) wait for the owner's answer.",
-            f.open_questions.len()
-        ));
+        rows.extend([String::new(), words("## Open questions", "## Открытые вопросы").into(), String::new()]);
+        let count = f.open_questions.len();
+        rows.push(if ru {
+            format!("Ожидают ответа владельца: {count}.")
+        } else {
+            format!("{count} question(s) wait for the owner's answer.")
+        });
     }
     if let Some(waiver) = &f.review_waiver {
-        rows.extend([String::new(), "## Independent review".into(), String::new()]);
-        rows.push(format!(
-            "Not required ({}): the runtime observed no project file changes.",
-            waiver["reason"].as_str().unwrap_or("no project change")
-        ));
+        rows.extend([String::new(), words("## Independent review", "## Независимое ревью").into(), String::new()]);
+        let reason = waiver["reason"].as_str().unwrap_or(words("no project change", "нет изменений"));
+        rows.push(if ru {
+            format!("Не требовалось ({reason}): служба не обнаружила изменений в файлах проекта.")
+        } else {
+            format!("Not required ({reason}): the runtime observed no project file changes.")
+        });
     }
     if let Some((kind, payload)) = &f.verification {
         rows.extend([
             String::new(),
-            "## Runtime verification".into(),
+            words("## Runtime verification", "## Итоговая проверка").into(),
             String::new(),
         ]);
         rows.push(if kind == "VERIFICATION_PASSED" {
-            "Passed.".into()
+            words("Passed.", "Пройдена.").into()
         } else {
-            "Failed.".into()
+            words("Failed.", "Не пройдена.").into()
         });
         rows.push(String::new());
         let detail = serde_json::to_string_pretty(payload).unwrap_or_default();
@@ -231,7 +280,7 @@ fn projection(f: &Facts) -> String {
     if let Some(synthesis) = f.synthesis.as_deref().filter(|s| !s.trim().is_empty()) {
         rows.extend([
             String::new(),
-            "## Synthesis".into(),
+            words("## Synthesis", "## Итог").into(),
             String::new(),
             synthesis.to_owned(),
         ]);
@@ -239,7 +288,7 @@ fn projection(f: &Facts) -> String {
     if let Some(blocker) = f.blocker.as_deref().filter(|s| !s.trim().is_empty()) {
         rows.extend([
             String::new(),
-            "## Blocker".into(),
+            words("## Blocker", "## Препятствие").into(),
             String::new(),
             blocker.to_owned(),
         ]);
@@ -273,7 +322,7 @@ pub fn sync(store: &Store, task: &str, route: Option<&Route<'_>>) -> CoreResult<
         None if untouched => (
             INITIAL_TITLE.to_owned(),
             INITIAL_SUMMARY.to_owned(),
-            initial(task, &f.goal, route),
+            initial(task, &f.goal, route, f.ru),
         ),
         Some((_, s, _)) if *s == key => return Ok(None),
         Some((t, _, _)) if t == INITIAL_TITLE && untouched => return Ok(None),
@@ -330,6 +379,41 @@ mod tests {
         })
         .unwrap()
     }
+    #[test]
+    fn pipeline_body_uses_owner_language_and_keeps_catalogue_keys_and_exact_evidence() {
+        let root = Root(std::env::temp_dir().join(format!("cortex-pipeline-{}", uuid::Uuid::new_v4())));
+        std::fs::DirBuilder::new().mode(0o700).create(&root.0).unwrap();
+        let s = Store::open(
+            ProjectKey::new(&root.0, StoreChannel::Dev).unwrap(),
+            OpenMode::Initialize,
+        ).unwrap();
+        TaskMachine::new(&s).create("t", "Исправить проверку", "owner").unwrap();
+        s.write(|db| {
+            crate::lifecycle::event_tx(db, "t", "NATIVE_START_ADMITTED", serde_json::json!({"goal":"Исправить проверку"}))?;
+            crate::lifecycle::event_tx(db, "t", "NATIVE_TASK_SETTINGS", serde_json::json!({"settings":{"language":"auto"}}))?;
+            Ok(())
+        }).unwrap();
+        let id = sync(&s, "t", None).unwrap().unwrap();
+        let initial = Publisher::new(&s).read_report("t", &id, None, 4000).unwrap().markdown;
+        assert!(initial.contains("# Основания для решений"));
+        assert!(initial.contains("> Исправить проверку"));
+        assert!(initial.contains("## Требования и ограничения"));
+        s.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='COMPLETED',synthesis='EXACT QUOTE' WHERE task_id='t'", [])?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(sync(&s, "t", None).unwrap().as_deref(), Some(id.as_str()));
+        assert_eq!(sync(&s, "t", None).unwrap(), None);
+        let page = Publisher::new(&s).read_report("t", &id, None, 4000).unwrap();
+        assert!(page.markdown.contains("Состояние: COMPLETED"));
+        assert!(page.markdown.contains("## Итог\n\nEXACT QUOTE"));
+        assert_eq!(
+            editions(&s),
+            [(INITIAL_TITLE.into(), INITIAL_SUMMARY.into()),
+             ("Runtime COMPLETED".into(), "Plan revision 0; stage COMPLETED.".into())]
+        );
+    }
+
     #[test]
     fn task_start_and_each_later_state_publish_one_edition_newest_first() {
         let root =

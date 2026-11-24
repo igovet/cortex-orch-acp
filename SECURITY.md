@@ -33,6 +33,8 @@ Automatic prefetch of earlier Workspace conversation uses the same authorized hi
 earlier**. The task, session and page-size cursor bindings, service display filters and remote
 operation allowlist are unchanged. Paging does not send messages or start an engine.
 
+Coordinator language reminders are prompt guidance, not output filtering or authorization. They do not change who may ask or answer a decision or how the runtime validates an answer.
+
 Conversation fallback text grants no decision authority. Answers still require the existing decision identity, capability and runtime validation. A draft kept visible in a read-only composer remains unsent; its explanation does not enable message delivery or change the capability check. For route consent, an option plus a comment must match exactly one recorded option in the stored answer format. The comment cannot grant another route or set effort, but recognized refusals still apply.
 
 Workspace model catalogues distinguish connection readiness from policy permission:

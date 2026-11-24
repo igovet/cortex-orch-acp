@@ -37,6 +37,8 @@ plan and keeps earlier results in history. Restore archived tasks first. See
 
 In Workspace, you can add a comment to a route choice without changing the selected route. Explicit refusals still apply. See [routing and consent](docs/project/native-incoming-acp.md#native-routing-and-retained-consent).
 
+Choose English, Russian, or Automatic for coordinator responses. Internal work stays in English; the coordinator is guided to keep replies, questions and final results in your language even when tool output is English.
+
 Workspace result checks list recorded skips with their reasons, including checks that required authorization and did not run.
 
 For MCP result submissions, unknown fields such as `artifacts` are rejected with the offending field path. Copy `tool_call_ref` exactly from the completed command response. See [Markdown reports](docs/features/markdown-reports/index.md#result-submission-arguments).

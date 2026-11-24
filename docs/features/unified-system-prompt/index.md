@@ -59,9 +59,14 @@ The final text for a session is built in
 6. **Route text** (`route.instructions`): the route's instruction string (in
    `native_routes.rs`) plus the owner-language paragraph added in
    `native_runtime.rs`. The coordinator is told to write what the owner reads in
-   the owner's language and to keep worker-facing text in English; workers get
+   the owner's language, including final-result prose and descriptions of
+   verification limits, and to keep worker-facing text in English. The
+   coordinator-only communication skill reinforces this after plan submission
+   and English tool output: skip the plan recap and keep direct replies,
+   questions and owner-facing report prose in the owner's language. Workers get
    `user_question_language` and are told to write reports and every other
-   message in English.
+   message in English. The runtime resolves Automatic using the original
+   request; it does not translate model text.
 
 The Rust host does **not** add an attached-MCP-servers section, a
 worker-capability summary or an environment section to the system text. External

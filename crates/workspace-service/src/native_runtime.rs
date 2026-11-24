@@ -256,6 +256,7 @@ mod refill_tests {
 printf '%s\n' "$1" >> "$0/starts"
 model=${2:-fixture-model}
 mode=${3:-workspace-write}
+if [ -f "$0/observe-owner-language" ]; then mode=read-only; fi
 config=$(printf '[{"id":"model","type":"select","currentValue":"%s","options":[{"value":"%s","name":"Fixture"}]},{"id":"mode","type":"select","currentValue":"%s","options":[{"value":"%s","name":"Fixture Mode"}]}]' "$model" "$model" "$mode" "$mode")
 while IFS= read -r line; do
     id=${line#*\"id\":}
@@ -274,6 +275,21 @@ while IFS= read -r line; do
         *'"method":"session/set_config_option"'*)
             printf '{"jsonrpc":"2.0","id":%s,"result":{"configOptions":%s}}\n' "$id" "$config" ;;
         *'"method":"session/prompt"'*)
+            if [ -f "$0/observe-owner-language" ]; then
+                instructions=$(printf '%s\n' "$CODEX_CONFIG" | /usr/bin/sed -n 's/.*"model_instructions_file":"\([^"]*\)".*/\1/p')
+                directive=no
+                reminder=no
+                if /usr/bin/grep -Fq 'Owner-selected response language: ru. Write in it everything the owner reads directly:' "$instructions"; then directive=yes; fi
+                if /usr/bin/grep -Fq 'After submitting a plan or reading English tool output, do not recap the plan to the owner.' "$instructions"; then reminder=yes; fi
+                case "$line" in
+                    *'Live steering snapshot'*'steering fixture'*) kind=steering ;;
+                    *'Recorded owner answer: Short'*) kind=answer ;;
+                    *'Continue from the retained-state capsule'*) kind=reconciliation ;;
+                    *'Initial language fixture'*) kind=initial ;;
+                    *) kind=unexpected ;;
+                esac
+                printf '%s %s %s %s\n' "$kind" "$$" "$directive" "$reminder" >> "$0/owner-language"
+            fi
             : > "$0/entered-$1"
             if [ -f "$0/defer-refusal-$1" ]; then
                 while [ ! -f "$0/release-$1" ]; do /usr/bin/sleep .02; done
@@ -507,6 +523,131 @@ done
     async fn end_provider_turn(job: tokio::task::JoinHandle<CoreResult<()>>) -> CoreResult<()> {
         tokio::time::timeout(std::time::Duration::from_secs(8), job)
             .await.unwrap().unwrap()
+    }
+
+    // The fixture drives the real coordinator session path and inspects what the
+    // fake Codex peer receives on each prompt. Seed checkpoints in the disposable
+    // store so no project command or worker namespace is required.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn coordinator_owner_language_survives_answer_reconciliation_and_steering() {
+        use cortex_core::lifecycle::{event_tx, skill_proposals, waits};
+
+        let (runtime, owner, task, root) = fixture_with_routes(Arc::new(CapacityPeer)).await;
+        let executor = &runtime.host.executor;
+        executor
+            .write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='t'", [])?;
+                event_tx(db, "t", "NATIVE_TASK_SETTINGS", json!({"settings":{"language":"ru"}}))?;
+                Ok(())
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::write(root.join("observe-owner-language"), "").unwrap();
+
+        let (_cancel, cancelled) = watch::channel(false);
+        let initial = {
+            let (runtime, task, owner, cancelled) =
+                (runtime.clone(), task.clone(), owner.clone(), cancelled.clone());
+            let route = runtime.coordinator_route(&task, None).await.unwrap();
+            tokio::spawn(async move {
+                runtime
+                    .turn_once(
+                        &task,
+                        &owner,
+                        SessionRole::Coordinator,
+                        route,
+                        "Initial language fixture",
+                        cancelled,
+                        None,
+                    )
+                    .await
+            })
+        };
+        entered(&root, "orchestrator").await;
+
+        let fixture_root = root.clone();
+        executor
+            .write(move |db| {
+                let channel: String = db.query_row(
+                    "SELECT channel_id FROM delegation_provisioning WHERE task_id='t' AND status='ready'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let receipt = skill_proposals::request(db, &fixture_root, "t", &channel, "format",
+                    &json!({"question":"Какой формат?","options":["Long","Short"]}))?;
+                waits::answer_tx(db, "t", receipt["question_id"].as_str().unwrap(), "Short", "text", None)?;
+                Ok(())
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::write(root.join("release-orchestrator"), "").unwrap();
+        end_provider_turn(initial).await.unwrap();
+        assert_eq!(starts(&root), ["orchestrator"]);
+
+        executor
+            .write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id='t'", [])?;
+                Ok(())
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let route = runtime.coordinator_route(&task, None).await.unwrap();
+        runtime
+            .turn_once(
+                &task,
+                &owner,
+                SessionRole::Coordinator,
+                route,
+                "Continue from the retained-state capsule.",
+                cancelled.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        executor
+            .write(|db| {
+                let plan = json!({"tasks":[{"id":"next","role":"worker-devops-engineer",
+                    "dependencies":[]}],"verification":[]});
+                db.execute(
+                    "UPDATE runtime_tasks SET state='EXECUTING',plan_json=? WHERE task_id='t'",
+                    [plan.to_string()],
+                )?;
+                event_tx(db, "t", "USER_STEERING",
+                    json!({"request":"steer","text":"steering fixture","delivery":"boundary"}))?;
+                Ok(())
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        runtime.steer_running(&task, &owner, cancelled).await.unwrap();
+
+        assert_eq!(starts(&root), ["orchestrator", "orchestrator", "orchestrator"]);
+        let observations = std::fs::read_to_string(root.join("owner-language")).unwrap();
+        let rows: Vec<Vec<_>> = observations
+            .lines()
+            .map(|line| line.split_whitespace().collect())
+            .collect();
+        assert_eq!(rows.len(), 4, "{observations}");
+        for (row, kind) in rows.iter().zip(["initial", "answer", "reconciliation", "steering"]) {
+            let [observed_kind, _, "yes", "yes"] = row.as_slice() else {
+                panic!("missing language directive or reminder: {observations}");
+            };
+            assert_eq!(*observed_kind, kind, "{observations}");
+        }
+        assert_eq!(
+            rows[0][1], rows[1][1],
+            "answer must reuse the healthy coordinator process"
+        );
+        tokio::task::spawn_blocking(move || drop(runtime)).await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     const RATE_WAIT: &str = "Waiting for the provider's rate limit to reset";

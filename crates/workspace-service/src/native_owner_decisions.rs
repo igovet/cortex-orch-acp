@@ -173,13 +173,14 @@ pub(crate) async fn ask(
 }
 
 /// The decision details for an asked native request.
-pub(crate) fn details(request: &Value, role: &str, rule: &str, access: &str) -> Value {
+pub(crate) fn details(request: &Value, role: &str, rule: &str, access: &str, ru: bool) -> Value {
     serde_json::json!({
         "role": role,
         "operation": permission::operation(request),
         "paths": permission::paths(request),
         "reason": permission::reason_code(rule),
-        "reason_text": permission::ask_reason(rule),
+        "reason_text": permission::ask_reason(rule, ru),
+        "language": if ru { "ru" } else { "en" },
         "access": access,
         "rule": rule,
         "tool": permission::tool_name(request),
@@ -203,7 +204,7 @@ mod tests {
             "prompt":"Owner decision: worker-backend-dev wants to read /etc/hosts because it reads outside the project",
             "allowedOperations":["decisions.answer"]});
         let decisions = HashMap::from([("t1".to_owned(), vec![decision])]);
-        let found = crate::notifier::items("p", &tasks, &product, &decisions);
+        let found = crate::notifier::items("p", &tasks, &product, &decisions, &[]);
         let item = found.iter().find(|i| i.place.id == "t1").unwrap();
         assert_eq!(item.kind, crate::notifier::Kind::Question);
         assert_eq!(

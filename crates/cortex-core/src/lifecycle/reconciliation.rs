@@ -214,10 +214,7 @@ pub fn disclosed(db: &Connection, task: &str, text: &str, entries: &Value) -> Co
     if authored_disclosure(text) {
         return refuse("synthesis_disclosure_in_text");
     }
-    let language: Option<String> = db.query_row("SELECT coalesce(
-        (SELECT json_extract(payload_json,'$.settings.language') FROM runtime_events WHERE task_id=? AND type='NATIVE_TASK_SETTINGS' ORDER BY id DESC LIMIT 1),
-        (SELECT language FROM task_language WHERE task_id=?))", (task,task), |r|r.get(0))?;
-    let (heading, label) = if language.as_deref() == Some("ru") {
+    let (heading, label) = if domain::task_language_tx(db, task)? == "ru" {
         ("Не проверено", "причина")
     } else {
         ("Not verified", "blocker")
@@ -870,10 +867,7 @@ pub fn compose_runtime_synthesis_tx(
     }) {
         return Ok(None);
     }
-    let language: Option<String> = db.query_row("SELECT coalesce(
-        (SELECT json_extract(payload_json,'$.settings.language') FROM runtime_events WHERE task_id=? AND type='NATIVE_TASK_SETTINGS' ORDER BY id DESC LIMIT 1),
-        (SELECT language FROM task_language WHERE task_id=?))", (task,task), |r|r.get(0))?;
-    let (done, summary_label, files_label) = if language.as_deref() == Some("ru") {
+    let (done, summary_label, files_label) = if domain::task_language_tx(db, task)? == "ru" {
         (
             "Работа выполнена.",
             "Сводки работы (как их передали исполнители):",
@@ -913,7 +907,7 @@ pub fn compose_runtime_synthesis_tx(
     Ok(Some(text))
 }
 pub fn direct_answer_allowed(db: &Connection, task: &str) -> CoreResult<bool> {
-    if super::automatic::enabled(db, task)? {
+    if super::automatic::enabled(db, task)? || domain::owner_rework_needs_plan(db, task)? {
         return Ok(false);
     }
     let (revision,informational):(i64,bool)=db.query_row("SELECT revision,plan_json IS NULL
@@ -948,7 +942,8 @@ pub fn direct_answer_allowed(db: &Connection, task: &str) -> CoreResult<bool> {
         WHERE q.task_id=? AND q.type='USER_QUESTION_REQUESTED' AND q.id>? AND json_extract(q.payload_json,'$.revision')=?
         AND json_extract(q.payload_json,'$.after_verification')=1)",(task,boundary,revision),|r|r.get(0))?;
     let steered:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events v JOIN runtime_events s ON s.task_id=v.task_id AND s.id>v.id
-        AND s.type='STEERING_APPLIED' WHERE v.task_id=? AND v.type='VERIFICATION_PASSED' AND v.id>?
+        AND s.type='STEERING_APPLIED' AND json_type(s.payload_json,'$.channel_id') IS NULL
+        WHERE v.task_id=? AND v.type='VERIFICATION_PASSED' AND v.id>?
         AND json_extract(v.payload_json,'$.revision')=? AND NOT EXISTS(SELECT 1 FROM runtime_events f
             WHERE f.task_id=v.task_id AND f.id>v.id AND f.type='VERIFICATION_FAILED'))",(task,boundary,revision),|r|r.get(0))?;
     Ok(release || steered || stopped_release)

@@ -3,7 +3,7 @@
 //! format-12 SQLite transactions.
 mod support;
 use cortex_core::{
-    lifecycle::{completion::*, domain::*, plan, reconciliation, review, *},
+    lifecycle::{self, completion::*, domain::*, plan, reconciliation, review, *},
     ownership::OwnerEpoch,
     ports::CommandObservation,
     CoreResult, Store, TaskState,
@@ -556,6 +556,53 @@ fn runtime_synthesis_quotes_execution_summaries_lists_changed_files_and_records_
         ))
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn runtime_synthesis_uses_effective_language() {
+    for (setting, goal, expected) in [
+        (Some("en"), "Исправить проверку", false),
+        (Some("ru"), "Fix the check", true),
+        (Some("auto"), "Исправить проверку", true),
+        (Some("auto"), "Fix the check", false),
+        (None, "Исправить проверку", true),
+    ] {
+        let (_p, s, current) =
+            reconciling("Exact worker wording", &[("src/a.rs", "9"), ("README.md", "2")]);
+        s.write(|db| {
+            lifecycle::event_tx(db, "t", "NATIVE_START_ADMITTED", json!({"goal":goal}))?;
+            if let Some(language) = setting {
+                lifecycle::event_tx(
+                    db,
+                    "t",
+                    "NATIVE_TASK_SETTINGS",
+                    json!({"settings":{"language":language}}),
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let body = s
+            .write(|db| {
+                reconciliation::compose_runtime_synthesis_tx(
+                    db,
+                    "t",
+                    Some(&current),
+                    Some(&"i".repeat(64)),
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            body,
+            if expected {
+                "Работа выполнена.\n\nСводки работы (как их передали исполнители):\n- Exact worker wording\n\nИзменённые файлы:\n- `src/a.rs`"
+            } else {
+                "The work is done.\n\nWork summaries (as submitted by the workers):\n- Exact worker wording\n\nChanged files:\n- `src/a.rs`"
+            },
+            "{setting:?}: {goal}",
+        );
+    }
 }
 
 #[test]

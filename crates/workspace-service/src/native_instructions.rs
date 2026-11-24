@@ -35,6 +35,9 @@ fn profile(name: &str) -> CoreResult<&'static Profile> {
 }
 /// One capability filter shared by the gateway and instruction renderer.
 pub(crate) fn supports(stage: Option<&str>, name: &str) -> bool {
+    if stage == Some(cortex_core::lifecycle::steering::ACTIVE_STAGE) {
+        return matches!(name, "steer_plan" | "steer_worker") || schema::active_steering_read(name);
+    }
     match name {
         "read_skill"
         | "read_batch"
@@ -115,6 +118,7 @@ pub(crate) fn compose(name: &str, stage: Option<&str>, engine: EngineKind) -> Co
         text.push_str(
             "\n## Work without narration\n\n\
              Do not write assistant text before the first tool call, between tool calls, or after a tool result while work remains. \
+             Before asking a genuine user question, write its supporting details as the question tool directs; this is the only exception while work remains. \
              Use tools for questions, reports and the structured result. \
              After the last tool call, if a closing response is needed, give at most one short sentence. \
              It never replaces the structured result.\n",
@@ -183,18 +187,7 @@ fn signature(schema: &Value) -> String {
             } else {
                 "?"
             };
-            let kind = field["type"].as_str().unwrap_or("value");
-            let detail = if let Some(items) = field.get("items") {
-                if items.get("properties").is_some() {
-                    format!("[{{{}}}]", signature(items))
-                } else {
-                    format!("[{}]", items["type"].as_str().unwrap_or("value"))
-                }
-            } else if let Some(values) = field.get("enum") {
-                values.to_string()
-            } else {
-                kind.to_owned()
-            };
+            let detail = field_kind(field);
             let min = field
                 .get("minimum")
                 .or(field.get("minLength"))
@@ -215,9 +208,40 @@ fn signature(schema: &Value) -> String {
         .join(", ")
 }
 
+fn field_kind(field: &Value) -> String {
+    if let Some(alternatives) = field["anyOf"].as_array() {
+        alternatives
+            .iter()
+            .map(field_kind)
+            .collect::<Vec<_>>()
+            .join(" | ")
+    } else if let Some(items) = field.get("items") {
+        format!("[{}]", field_kind(items))
+    } else if field.get("properties").is_some() {
+        format!("{{{}}}", signature(field))
+    } else if let Some(values) = field.get("enum") {
+        values.to_string()
+    } else {
+        field["type"].as_str().unwrap_or("value").to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn question_option_details_are_derived_from_the_worker_tool_schema() {
+        let tools = schema::catalogue("worker", Some("worker-backend-dev"), Some("execution"))
+            .unwrap();
+        let tool = tools.iter().find(|t| t["name"] == "ask_question").unwrap();
+        let signature = signature(&tool["inputSchema"]);
+        assert_eq!(
+            signature
+                .matches("[string | {detail?=string 1..1000, label=string 1..1000}]")
+                .count(),
+            2
+        );
+    }
     #[test]
     fn every_profile_and_required_skill_is_embedded_and_scoped() {
         assert_eq!(bundle().profiles.len(), 24); // 22 specialists, consultant, coordinator
@@ -235,6 +259,32 @@ mod tests {
         assert!(read_skill("worker-ux-designer", "design-colors").is_ok());
         assert!(read_skill("worker-senior-consultant", "tool-discipline-worker").is_err());
         assert!(read_skill("worker-explorer", "skill-authoring").is_err());
+    }
+    #[test]
+    fn owner_language_reminder_is_only_in_coordinator_instructions() {
+        let reminder = "After submitting a plan or reading English tool output, do not recap the plan to the owner.\n\
+                        Keep owner-facing messages, questions and option labels, final text and owner-facing report prose\n\
+                        in the selected owner language, even when tools, objectives and worker reports are in English.";
+        for engine in [EngineKind::Claude, EngineKind::Codex, EngineKind::OpenCode] {
+            for (name, stage, expected) in [
+                ("orchestrator", None, true),
+                (
+                    "orchestrator",
+                    Some(cortex_core::lifecycle::steering::ACTIVE_STAGE),
+                    true,
+                ),
+                ("worker-backend-dev", Some("execution"), false),
+                ("worker-code-reviewer", Some("review"), false),
+                ("worker-senior-consultant", Some("execution"), false),
+            ] {
+                let instructions = compose(name, stage, engine).unwrap();
+                assert_eq!(
+                    instructions.contains(reminder),
+                    expected,
+                    "{name} {stage:?} {engine:?}",
+                );
+            }
+        }
     }
     #[test]
     fn only_claude_execution_and_review_specialists_receive_the_narration_rule() {
@@ -345,6 +395,13 @@ mod tests {
         assert!(sheet.contains("- read_skill:"));
         assert!(!sheet.contains("- result_submit:"));
         assert!(!sheet.contains("- command_run:"));
+        let live = compose(
+            "orchestrator", Some(cortex_core::lifecycle::steering::ACTIVE_STAGE), EngineKind::Codex,
+        ).unwrap();
+        let live = live.split("# Cortex tool cheat sheet").nth(1).unwrap();
+        assert!(live.contains("- steer_plan:") && live.contains("- steer_worker:"));
+        assert!(!live.contains("- plan_submit:") && !live.contains("- replan_request:"));
+        assert!(!live.contains("- command_run:") && !live.contains("- answer_submit:"));
         let worker = compose("worker-general", Some("execution"), EngineKind::Codex).unwrap();
         assert!(worker.contains("- result_submit:"));
         assert!(!compose("worker-general", None, EngineKind::Claude)

@@ -174,15 +174,16 @@ fn a_worker_pass_of_the_same_command_on_the_same_bytes_is_found() {
     .unwrap();
     s.read(|db| {
         let argv = ["bash".to_owned(), "scripts/test-integration.sh".to_owned()];
-        assert!(worker_passed_tx(db, "t", &argv, &[digest])?);
-        assert!(worker_passed_tx(db, "t", &argv, &["", digest])?);
-        assert!(!worker_passed_tx(db, "t", &argv, &[&"b".repeat(64)])?);
-        assert!(!worker_passed_tx(db, "t", &["bash".to_owned()], &[digest])?);
+        assert!(worker_passed_tx(db, "t", &argv, &[digest], &serde_json::Value::Null)?);
+        assert!(worker_passed_tx(db, "t", &argv, &["", digest], &serde_json::Value::Null)?);
+        assert!(!worker_passed_tx(db, "t", &argv, &[&"b".repeat(64)], &serde_json::Value::Null)?);
+        assert!(!worker_passed_tx(db, "t", &["bash".to_owned()], &[digest], &serde_json::Value::Null)?);
         assert!(worker_passed_tx(
             db,
             "t",
             &["npm".to_owned(), "test".to_owned()],
-            &[digest]
+            &[digest],
+            &serde_json::Value::Null
         )?);
         Ok(())
     })
@@ -236,6 +237,7 @@ fn an_interrupted_verification_is_settled_unknown_and_rerun_by_the_runtime() {
 /// question (no model call) naming the command and the reason in plain words.
 fn exhaust_environment_waits(s: &Store) -> String {
     let argv = json!(["scripts/cortex-xtask.sh", "test-fast", "--only", "cargo"]);
+    let ru = s.read(|db| Ok(lifecycle::domain::task_language_tx(db, "t")? == "ru")).unwrap();
     s.write(|db| {
         db.execute(
             "UPDATE runtime_tasks SET state='VERIFYING' WHERE task_id='t'",
@@ -291,15 +293,29 @@ fn exhaust_environment_waits(s: &Store) -> String {
         text.contains("`scripts/cortex-xtask.sh test-fast --only cargo`"),
         "{text}"
     );
-    assert!(text.contains("its output never reached its end"), "{text}");
-    assert!(text.contains("1, 2, 5 and 10 minutes"), "{text}");
+    if ru {
+        assert!(text.contains("итоговая проверка") && text.contains("1, 2, 5 и 10 минут"), "{text}");
+    } else {
+        assert!(text.contains("its output never reached its end"), "{text}");
+        assert!(text.contains("1, 2, 5 and 10 minutes"), "{text}");
+    }
     assert_eq!(
-        serde_json::from_str::<Value>(&options)
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len(),
-        4
+        serde_json::from_str::<Value>(&options).unwrap(),
+        if ru {
+            json!([
+                "Повторить сейчас: начать новый круг всех стратегий",
+                "Другой подход: опишите в ответе, что сделать иначе",
+                "Принять без проверки: отметить как непроверенное и завершить задачу",
+                "Повторить позже: автоматически через 30 минут",
+            ])
+        } else {
+            json!([
+                "Retry now: start a new round of every strategy",
+                "Another approach: describe in your answer what to do differently",
+                "Accept unverified: record this as not verified and finish the task",
+                "Retry later: try again automatically in 30 minutes",
+            ])
+        },
     );
     let requested = events(s, "USER_QUESTION_REQUESTED");
     assert_eq!(requested.len(), 1);
@@ -315,6 +331,24 @@ fn exhaust_environment_waits(s: &Store) -> String {
         .is_none());
     question
 }
+#[test]
+fn russian_verification_environment_question_and_disclosure_use_effective_language() {
+    let (_p, s, _, _) = setup();
+    s.write(|db| {
+        lifecycle::event_tx(db, "t", "NATIVE_START_ADMITTED", json!({"goal":"Исправить проверку"}))?;
+        lifecycle::event_tx(db, "t", "NATIVE_TASK_SETTINGS", json!({"settings":{"language":"auto"}}))?;
+        Ok(())
+    }).unwrap();
+    let question = exhaust_environment_waits(&s);
+    let owed = answer(&s, &question, "Принять без проверки: отметить как непроверенное и завершить задачу");
+    assert_eq!(owed.evidence["owner_choice"], "accept_unverified");
+    let broken = events(&s, "LOOP_BROKEN");
+    let limit = &broken.last().unwrap()["limits"][0];
+    assert_eq!(limit["outcome"], "unverified");
+    assert!(limit["blocker"].as_str().unwrap().contains(&format!("(вопрос {question})")));
+    assert!(events(&s, "VERIFICATION_PASSED").is_empty());
+}
+
 fn answer(s: &Store, question: &str, text: &str) -> lifecycle::automatic::Owed {
     s.write(|db| {
         assert!(lifecycle::waits::answer_tx(

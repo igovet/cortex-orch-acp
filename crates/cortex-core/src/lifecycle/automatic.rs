@@ -1801,10 +1801,15 @@ fn record_loop_answer_tx(db: &Transaction<'_>, task: &str, evidence: &Value) -> 
         if let Some(argv) = commands.first() {
             name.push_str(&format!(" ({argv})"));
         }
+        let question = evidence["owner_question"].as_str().unwrap_or("");
+        let ru = domain::task_language_tx(db, task)? == "ru";
+        let blocker = if ru {
+            format!("Владелец принял повторяющийся сбой без проверки (вопрос {question}): все стратегии дали тот же сбой, результат не проверен.")
+        } else {
+            format!("The owner accepted this repeated failure without verification (question {question}) after every strategy of the ladder failed the same way; it is not verified.")
+        };
         let limit = json!({"name":name.chars().take(200).collect::<String>(),"outcome":"unverified",
-            "blocker":format!("The owner accepted this repeated failure without verification (question {}) after every strategy of the ladder failed the same way; it is not verified.",
-                evidence["owner_question"].as_str().unwrap_or("")),
-            "source":"runtime"});
+            "blocker":blocker,"source":"runtime"});
         event_tx(
             db,
             task,

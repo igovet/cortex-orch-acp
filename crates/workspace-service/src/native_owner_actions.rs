@@ -14,7 +14,8 @@
 //! desktop's project terminal (`gh auth login`, `codex login`, `claude auth login`), paste a
 //! token where the CLI has a documented non-interactive login on stdin (GitHub only:
 //! `gh auth login --with-token`), ask for a check now, or dismiss. While an action is open the
-//! service checks it again in the background every [`RECHECK_EVERY`].
+//! service sweeps for due checks every [`RECHECK_EVERY`] and shares the task
+//! driver's persisted recheck schedule.
 //!
 //! A pasted token is handled like a `sudo` password ([`crate::native_askpass`]): moved from the
 //! request into a [`Secret`], written once to the CLI's stdin, overwritten with zeros, never
@@ -33,7 +34,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// How often an open action is checked again in the background.
+/// How often the service looks for due background card checks.
 pub const RECHECK_EVERY: Duration = Duration::from_secs(60);
 /// Longest token accepted (one line).
 pub const TOKEN_BYTES: usize = 4096;
@@ -115,7 +116,9 @@ pub(crate) struct Open {
     pub created_at: String,
     pub opened_ms: u64,
     pub task: Option<String>,
+    pub execution: Option<String>,
     pub task_title: Option<String>,
+    ru: bool,
 }
 
 fn printable(text: &str, limit: usize) -> String {
@@ -136,7 +139,7 @@ fn now_ms() -> u64 {
 }
 
 const OPEN_SQL: &str = "SELECT r.task_id, r.payload_json, r.created_at,
-     CAST((julianday(r.created_at) - 2440587.5) * 86400000 AS INTEGER), w.task_id, wt.description
+     CAST((julianday(r.created_at) - 2440587.5) * 86400000 AS INTEGER), w.task_id, wt.description, w.execution_id
      FROM runtime_events r JOIN runtime_tasks t ON t.task_id=r.task_id
      LEFT JOIN workspace_executions w ON w.runtime_task_id=r.task_id
      LEFT JOIN workspace_tasks wt ON wt.task_id=w.task_id
@@ -159,12 +162,13 @@ pub(crate) fn open_actions(db: &rusqlite::Connection) -> cortex_core::CoreResult
                 r.get::<_, Option<i64>>(3)?,
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, Option<String>>(5)?,
+                r.get::<_, Option<String>>(6)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
-    for (runtime_task, payload, created_at, ms, task, description) in rows {
+    for (runtime_task, payload, created_at, ms, task, description, execution) in rows {
         let Ok(payload) = serde_json::from_str::<Value>(&payload) else {
             continue;
         };
@@ -177,14 +181,17 @@ pub(crate) fn open_actions(db: &rusqlite::Connection) -> cortex_core::CoreResult
         if payload["kind"] != "access" || !seen.insert((runtime_task.clone(), service.to_owned())) {
             continue;
         }
+        let ru = cortex_core::lifecycle::domain::task_language_tx(db, &runtime_task)? == "ru";
         out.push(Open {
             id: id.to_owned(),
             runtime_task,
+            ru,
             service: service.to_owned(),
             detail: printable(payload["detail"].as_str().unwrap_or(""), 600),
             created_at,
             opened_ms: ms.and_then(|m| u64::try_from(m).ok()).unwrap_or(0),
             task,
+            execution,
             task_title: description
                 .as_deref()
                 .and_then(|d| d.lines().map(str::trim).find(|l| !l.is_empty()))
@@ -280,17 +287,23 @@ fn view(place: &Place, open: &Open) -> Value {
     let key = (place.project.clone(), open.id.clone());
     let check = marks(|m| m.checks.get(&key).cloned());
     let detail = if open.detail.is_empty() {
-        match open.service.as_str() {
-            "sudo" => "A command in this task needs sudo.".to_owned(),
-            other => format!("This task needs access to {other}."),
+        match (open.service.as_str(), open.ru) {
+            ("sudo", false) => "A command in this task needs sudo.".to_owned(),
+            ("sudo", true) => "Для команды нужен sudo.".to_owned(),
+            (other, false) => format!("This task needs access to {other}."),
+            (other, true) => format!("Для продолжения нужен доступ к {other}."),
         }
     } else {
-        open.detail.clone()
+        cortex_core::lifecycle::obstacles::owner_access_detail(&open.service, &open.detail, open.ru)
     };
-    let title = if access.probe.is_none() {
-        format!("{}: {}", access.title, open.service)
-    } else {
-        access.title.to_owned()
+    let title = match (open.service.as_str(), open.ru) {
+        ("github", true) => "Войдите в GitHub".to_owned(),
+        ("codex", true) => "Войдите в Codex".to_owned(),
+        ("claude", true) => "Войдите в Claude".to_owned(),
+        ("sudo", true) => "Для sudo нужен ваш пароль".to_owned(),
+        (service, true) => format!("Нужен доступ: {service}"),
+        (service, false) if access.probe.is_none() => format!("{}: {service}", access.title),
+        (_, false) => access.title.to_owned(),
     };
     json!({
         "actionId": open.id,
@@ -303,7 +316,14 @@ fn view(place: &Place, open: &Open) -> Value {
         "title": title,
         "detail": detail,
         "terminal": access.terminal.map(|argv| json!({"command": argv.join(" "), "argv": argv})),
-        "token": access.token.as_ref().map(|t| json!({"label": t.label, "hint": t.hint})),
+        "token": access.token.as_ref().map(|t| json!({
+            "label": if open.ru { "Токен GitHub" } else { t.label },
+            "hint": if open.ru {
+                "Персональный токен доступа (classic) с правами repo, read:org и gist. Он передаётся один раз команде gh auth login на компьютере, не сохраняется и не показывается модели."
+            } else {
+                t.hint
+            },
+        })),
         "recheck": access.probe.is_some(),
         "openedAt": open.opened_ms,
         "checkedAt": check.as_ref().map(|c| c.0),
@@ -435,15 +455,8 @@ async fn check(
     probed: &mut BTreeMap<&'static str, Option<Value>>,
 ) -> Checked {
     let key = (place.project.clone(), open.id.clone());
-    if open.service == "sudo" {
-        let answered = marks(|m| {
-            m.sudo.iter().any(|(root, task, at)| {
-                *root == place.root && *task == open.runtime_task && *at >= open.created_at
-            })
-        });
-        if answered {
-            return Checked::Resolved("recheck");
-        }
+    if sudo_was_answered(place, open) {
+        return Checked::Resolved("recheck");
     }
     let Some(name) = access(&open.service).probe else {
         return Checked::Needed("not_checkable".into());
@@ -506,16 +519,42 @@ async fn resolve(place: &Place, open: &Open, how: &'static str) -> io::Result<bo
     Ok(resolved)
 }
 
-/// One background pass: every open action is checked once (each probe runs at most once)
-/// and resolved where the access is there. Answers how many resolved.
+fn sudo_was_answered(place: &Place, open: &Open) -> bool {
+    open.service == "sudo" && marks(|m| {
+        m.sudo.iter().any(|(root, task, at)| {
+            *root == place.root && *task == open.runtime_task && *at >= open.created_at
+        })
+    })
+}
+
+/// Claim the same durable deadlines as the task driver. A confirmed sudo answer
+/// is new evidence, not a periodic probe, so it may resolve the card immediately.
 pub(crate) async fn pass(places: &[Place]) -> usize {
+    pass_at(places, (now_ms() / 1000) as i64).await
+}
+
+async fn pass_at(places: &[Place], now: i64) -> usize {
     let mut probed = BTreeMap::new();
     let mut resolved = 0;
     for place in places {
         let Ok(opens) = read_open(place).await else {
             continue;
         };
+        let tasks: std::collections::BTreeSet<_> = opens.iter().map(|o| o.runtime_task.clone()).collect();
+        let claimed = match place.executor.write(move |db| {
+            let mut claimed = std::collections::BTreeSet::new();
+            for task in tasks {
+                claimed.extend(cortex_core::lifecycle::obstacles::claim_environment_rechecks_tx(db, &task, now)?);
+            }
+            Ok(claimed)
+        }) {
+            Ok(reply) => reply.await.ok().and_then(Result::ok).unwrap_or_default(),
+            Err(_) => Default::default(),
+        };
         for open in &opens {
+            if !sudo_was_answered(place, open) && !claimed.contains(&open.id) {
+                continue;
+            }
             if let Checked::Resolved(how) = check(place, open, &mut probed).await {
                 if resolve(place, open, how).await.unwrap_or(false) {
                     resolved += 1;
@@ -756,6 +795,70 @@ mod tests {
     }
     /// The fake programs are process-wide: tests that set them run one at a time.
     static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn owner_access_card_uses_effective_language_and_keeps_command() {
+        let f = fixture("access-language");
+        require(&f.place, "oa_gh", "github").await;
+        for (language, title, label) in [
+            ("en", "Sign in to GitHub", "GitHub token"),
+            ("ru", "Войдите в GitHub", "Токен GitHub"),
+        ] {
+            f.place.executor.write(move |db| {
+                cortex_core::lifecycle::event_tx(
+                    db, "rt1", "NATIVE_TASK_SETTINGS", json!({"settings":{"language":language}}),
+                )?;
+                Ok(())
+            }).unwrap().await.unwrap().unwrap();
+            let listed = list(std::slice::from_ref(&f.place)).await;
+            let card = &listed["actions"][0];
+            assert_eq!(card["title"], title);
+            assert_eq!(card["token"]["label"], label);
+            assert_eq!(card["terminal"]["command"], "gh auth login");
+            assert_eq!(card["detail"], "gh is not logged in, so the pull request cannot be opened.");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn owner_access_notifications_keep_each_card_and_withdraw_resolved_cards() {
+        use crate::notifier::{items, Action, Book, Kind};
+        let f = fixture("notices");
+        require(&f.place, "oa_github", "github").await;
+        require(&f.place, "oa_codex", "codex").await;
+        let tasks = [json!({"taskId":"wt_1","executionId":"we_1","phase":"blocked"})];
+        let product = json!({"tasks": {}});
+        let decisions = std::collections::HashMap::from([("wt_1".into(), vec![
+            json!({"decisionId":"decision1","status":"pending"})
+        ])]);
+        let mut book = Book::default();
+        let enabled = Kind::ALL.into_iter().collect();
+        let project = &f.place.project;
+        let read = || async {
+            f.place.executor.read(open_actions).unwrap().await.unwrap().unwrap()
+        };
+        let cards = read().await;
+        let found = items(project, &tasks, &product, &decisions, &cards);
+        assert_eq!(found.len(), 3);
+        assert!(book.plan(project, found.clone(), None, &enabled, false).len() == 3);
+        for (i, item) in found.iter().enumerate() {
+            if item.kind == Kind::Stop {
+                assert_eq!(item.target()["kind"], "task");
+                assert!(!item.detail.as_deref().unwrap().contains("pull request"));
+            }
+            book.raised(item, i as u32 + 1);
+        }
+        assert!(book.plan(project, found, None, &enabled, false).is_empty());
+        f.place.executor.write(|db| {
+            cortex_core::lifecycle::event_tx(db, "rt1", "OWNER_ACTION_RESOLVED",
+                json!({"id":"oa_github","how":"dismissed"}))?;
+            Ok(())
+        }).unwrap().await.unwrap().unwrap();
+        assert_eq!(
+            book.plan(project, items(project, &tasks, &product, &decisions, &read().await),
+                None, &enabled, false),
+            vec![Action::Withdraw { id: 1 }]
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn open_actions_are_listed_with_their_task_and_the_right_card() {
@@ -1058,38 +1161,15 @@ mod tests {
         require(&f.place, "oa_gh1", "github").await;
         require(&f.place, "oa_su1", "sudo").await;
         let places = vec![f.place.clone()];
-        assert_eq!(pass(&places).await, 0);
-        // The loop as the service runs it, at a test interval.
-        let watched = places.clone();
-        let watcher = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-                    _ = WAKE.notified() => {}
-                }
-                pass(&watched).await;
-            }
-        });
+        assert_eq!(pass_at(&places, 100).await, 0);
         set_exit(&f.root, "gh", 0);
-        let mut left = Value::Null;
-        for _ in 0..100 {
-            left = list(&places).await["actions"].clone();
-            if left.as_array().unwrap().len() == 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        assert_eq!(pass_at(&places, 159).await, 0);
+        assert_eq!(pass_at(&places, 160).await, 1);
+        let left = list(&places).await["actions"].clone();
         assert_eq!(left[0]["actionId"], "oa_su1", "{left}");
         sudo_answered(&f.root, "rt1");
-        for _ in 0..100 {
-            left = list(&places).await["actions"].clone();
-            if left == json!([]) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert_eq!(left, json!([]));
-        watcher.abort();
+        assert_eq!(pass_at(&places, 161).await, 1);
+        assert_eq!(list(&places).await["actions"], json!([]));
         let hows: Vec<Value> = events(&f.place)
             .await
             .into_iter()

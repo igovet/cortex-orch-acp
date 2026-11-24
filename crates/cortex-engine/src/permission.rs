@@ -352,13 +352,27 @@ fn targets(request: &Value, facts: &Facts<'_>) -> Targets {
     out
 }
 /// Why an asked request is outside the normal bounds, for the owner card.
-pub fn ask_reason(rule: &str) -> &'static str {
+pub fn ask_reason(rule: &str, ru: bool) -> &'static str {
+    if ru {
+        return match rule {
+            "credential" => "запрос затрагивает учётные данные или ключи",
+            "control_target" => "запрос изменяет служебные файлы Git или настройки движка или Cortex",
+            "unclassified_path" => "не удалось определить точный путь",
+            "outside_read" => "запрос читает данные за пределами проекта",
+            "outside_write" => "запрос записывает данные за пределами проекта",
+            "outside_command" => "команда запускается вне песочницы",
+            "native_fetch" => "запрос обращается к сети",
+            "deletion" => "запрос удаляет или перемещает файлы",
+            _ => "не удалось подтвердить, что запрос ограничен проектом",
+        };
+    }
     match rule {
         "credential" => "it reaches credential or key material",
         "control_target" => "it changes Git control files or engine/Cortex configuration",
         "unclassified_path" => "its path cannot be resolved",
         "outside_read" => "it reads outside the project",
         "outside_write" => "it writes outside the project",
+        "outside_command" => "it runs outside the sandbox",
         "native_fetch" => "it fetches from the network",
         "deletion" => "it deletes or moves files",
         _ => "it is not provably contained in the project",
@@ -412,9 +426,9 @@ pub fn paths(request: &Value) -> Vec<String> {
 /// the exact paths and why it is outside the normal bounds lead the title, and
 /// only one-shot Allow once / Deny options are offered. A deletion keeps its
 /// `Removal blocked pending confirmation: ...` title.
-pub fn owner_card(request: &Value, role: &str, rule: &str) -> Value {
+pub fn owner_card(request: &Value, role: &str, rule: &str, ru: bool) -> Value {
     let mut card = if rule == "deletion" {
-        deletion_card(request)
+        deletion_card(request, ru)
     } else {
         let mut card = request.clone();
         let call = &request["toolCall"];
@@ -431,18 +445,37 @@ pub fn owner_card(request: &Value, role: &str, rule: &str) -> Value {
             paths.join(", ")
         };
         let subject: String = subject.chars().take(300).collect();
-        card["toolCall"]["title"] = json!(format!(
-            "Owner decision: {role} wants to {} {subject} because {}",
-            operation(request),
-            ask_reason(rule)
-        ));
+        let operation = operation(request);
+        let reason = ask_reason(rule, ru);
+        card["toolCall"]["title"] = json!(if ru {
+            let verb = match operation {
+                "read" => "прочитать",
+                "write" => "записать",
+                "delete" => "удалить",
+                "fetch" => "загрузить",
+                _ => "запустить",
+            };
+            format!("Требуется ваше решение: {role} запрашивает разрешение {verb} {subject}. Причина: {reason}.")
+        } else {
+            format!("Owner decision: {role} wants to {operation} {subject} because {reason}")
+        });
         card
     };
     if let Some(options) = request["options"].as_array() {
         card["options"] = json!(options
             .iter()
-            .filter(|o| matches!(o["kind"].as_str(), Some("allow_once" | "reject_once")))
-            .cloned()
+            .filter_map(|option| {
+                let allow = match option["kind"].as_str()? {
+                    "allow_once" => true,
+                    "reject_once" => false,
+                    _ => return None,
+                };
+                let mut option = option.clone();
+                if ru {
+                    option["name"] = json!(one_shot_label(allow, true));
+                }
+                Some(option)
+            })
             .collect::<Vec<_>>());
     }
     card
@@ -565,20 +598,42 @@ pub fn offered_allow(request: &Value, option: &str) -> bool {
         })
     })
 }
+/// Display text only: option IDs and one-shot semantics are independent of language.
+pub fn one_shot_label(allow: bool, ru: bool) -> &'static str {
+    match (allow, ru) {
+        (true, false) => "Allow once",
+        (false, false) => "Deny",
+        (true, true) => "Разрешить один раз",
+        (false, true) => "Отклонить",
+    }
+}
+
+pub fn one_shot_options(ru: bool) -> Value {
+    json!([
+        {"optionId":"allow","name":one_shot_label(true, ru),"kind":"allow_once"},
+        {"optionId":"deny","name":one_shot_label(false, ru),"kind":"reject_once"}
+    ])
+}
+
 /// The owner card for a deletion: the declared command (or tool title) leads.
-pub fn deletion_card(request: &Value) -> Value {
+fn deletion_card(request: &Value, ru: bool) -> Value {
     let mut card = request.clone();
+    let prefix = if ru { "Удаление требует подтверждения: " } else { DELETION_TITLE };
     let command = command_text(&request["toolCall"]);
     let command = command.trim();
     let title = if command.is_empty() {
         let title = request["toolCall"]["title"].as_str().unwrap_or("");
         format!(
-            "{DELETION_TITLE}{}",
-            if title.is_empty() { "file" } else { title }
+            "{prefix}{}",
+            if title.is_empty() {
+                if ru { "файл" } else { "file" }
+            } else {
+                title
+            }
         )
     } else {
         format!(
-            "{DELETION_TITLE}{}",
+            "{prefix}{}",
             command.chars().take(300).collect::<String>()
         )
     };
@@ -944,12 +999,48 @@ mod tests {
         // The owner card names role, operation, path and reason with one-shot options.
         let request = json!({"toolCall":{"kind":"read","locations":[{"path":"/etc/hosts"}]},
             "options":[{"optionId":"a","kind":"allow_once"},{"optionId":"aa","kind":"allow_always"},{"optionId":"r","kind":"reject_once"}]});
-        let card = owner_card(&request, "worker-explorer", "outside_read");
+        let card = owner_card(&request, "worker-explorer", "outside_read", false);
         assert_eq!(card["toolCall"]["title"],
             "Owner decision: worker-explorer wants to read /etc/hosts because it reads outside the project");
         assert_eq!(card["options"].as_array().unwrap().len(), 2);
         std::fs::remove_dir_all(&base).unwrap();
     }
+    #[test]
+    fn owner_permission_language_preserves_one_shot_ids_and_targets() {
+        let request = json!({
+            "toolCall":{"kind":"read","locations":[{"path":"/tmp/exact path"}]},
+            "options":[
+                {"optionId":"provider-allow","kind":"allow_once","name":"Allow once"},
+                {"optionId":"provider-always","kind":"allow_always","name":"Always allow"},
+                {"optionId":"provider-deny","kind":"reject_once","name":"Deny"}
+            ]
+        });
+        let en = owner_card(&request, "worker-explorer", "outside_read", false);
+        let ru = owner_card(&request, "worker-explorer", "outside_read", true);
+        assert_eq!(en["toolCall"]["title"],
+            "Owner decision: worker-explorer wants to read /tmp/exact path because it reads outside the project");
+        assert_eq!(ru["toolCall"]["title"],
+            "Требуется ваше решение: worker-explorer запрашивает разрешение прочитать /tmp/exact path. Причина: запрос читает данные за пределами проекта.");
+        assert_eq!(ru["toolCall"]["locations"], en["toolCall"]["locations"]);
+        for (card, labels) in [(&en, ["Allow once", "Deny"]), (&ru, ["Разрешить один раз", "Отклонить"])] {
+            assert_eq!(card["options"].as_array().unwrap().len(), 2);
+            assert_eq!(card["options"][0]["name"], labels[0]);
+            assert_eq!(card["options"][1]["name"], labels[1]);
+            assert_eq!(allow_option(card).as_deref(), Some("provider-allow"));
+            assert_eq!(reject_option(card).as_deref(), Some("provider-deny"));
+        }
+        let deletion = json!({"toolCall":{"title":"EXACT TOOL TITLE"}});
+        assert_eq!(
+            owner_card(&deletion, "worker-explorer", "deletion", true)["toolCall"]["title"],
+            "Удаление требует подтверждения: EXACT TOOL TITLE",
+        );
+        for ru in [false, true] {
+            let options = one_shot_options(ru);
+            assert_eq!(options[0]["optionId"], "allow");
+            assert_eq!(options[1]["optionId"], "deny");
+        }
+    }
+
     #[test]
     fn options_are_only_offered_ones() {
         let request = json!({"options":[{"optionId":"r","kind":"reject_always"},{"optionId":"","kind":"allow_once"},
@@ -961,7 +1052,7 @@ mod tests {
                 && !offered_allow(&request, "r")
                 && !offered_allow(&request, "x")
         );
-        let card = deletion_card(&json!({"toolCall":{"title":"t","rawInput":{"command":"rm a"}}}));
+        let card = deletion_card(&json!({"toolCall":{"title":"t","rawInput":{"command":"rm a"}}}), false);
         assert_eq!(
             card["toolCall"]["title"],
             "Removal blocked pending confirmation: rm a"

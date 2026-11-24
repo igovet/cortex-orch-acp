@@ -215,32 +215,8 @@ pub fn request(
             if forms.is_empty() || forms.len() > 8 {
                 return refuse("question_batch_invalid");
             }
-            // A question the owner already answered (the same text and options) is
-            // not asked again: the reply carries the earlier answer
-            // (`waits::already_answered_tx`). A skill proposal has its own rules.
-            if proposal.is_none() {
-                let asked: Vec<super::waits::QuestionForm> = forms
-                    .iter()
-                    .filter_map(|f| {
-                        Some(super::waits::QuestionForm {
-                            question: f["question"].as_str()?.to_owned(),
-                            options: f["options"]
-                                .as_array()?
-                                .iter()
-                                .filter_map(|o| o.as_str().map(str::to_owned))
-                                .collect(),
-                        })
-                    })
-                    .collect();
-                if let Some(mut refused) =
-                    super::waits::already_answered_tx(db, task, None, &asked)?
-                {
-                    refused["state"] = json!(state);
-                    return Ok(refused);
-                }
-            }
-            let mut questions = Vec::new();
-            for f in forms {
+            let mut asked = Vec::with_capacity(forms.len());
+            for f in &forms {
                 if f["question"]
                     .as_str()
                     .is_none_or(|s| s.trim().is_empty() || s.chars().count() > 4000)
@@ -258,10 +234,11 @@ pub fn request(
                     .ok_or(CoreError::Refused("question_options_required"))?;
                 let labels: Vec<_> = options
                     .iter()
-                    .map(|v| v.as_str().map(|s| s.trim().to_lowercase()))
+                    .map(|v| super::waits::option_label(v).map(|s| s.trim().to_lowercase()))
                     .collect();
                 let unique: BTreeSet<_> = labels.iter().collect();
                 if !(2..=8).contains(&options.len())
+                    || options.iter().any(|o| !super::waits::valid_question_option(o, 1000))
                     || unique.len() != options.len()
                     || labels.iter().any(|s| {
                         s.as_ref().is_none_or(|s| {
@@ -279,17 +256,35 @@ pub fn request(
                 {
                     return refuse("question_options_invalid");
                 }
+                asked.push(super::waits::QuestionForm {
+                    question: f["question"].as_str().unwrap().to_owned(),
+                    options: options.clone(),
+                });
+            }
+            // A question the owner already answered (the same text and options) is
+            // not asked again: the reply carries the earlier answer
+            // (`waits::already_answered_tx`). A skill proposal has its own rules.
+            if proposal.is_none() {
+                if let Some(mut refused) =
+                    super::waits::already_answered_tx(db, task, None, &asked)?
+                {
+                    refused["state"] = json!(state);
+                    return Ok(refused);
+                }
+            }
+            let mut questions = Vec::new();
+            for (f, asked) in forms.into_iter().zip(asked) {
+                let options = &asked.options;
                 let id = format!("pq_{}", uuid::Uuid::new_v4().simple());
-                let mut text = f["question"]
-                    .as_str()
-                    .ok_or(CoreError::Refused("invalid_question"))?
-                    .to_owned();
+                let mut text = asked.question;
                 if let Some(p) = &proposal {
-                    let mut header = format!(
-                        "{} ({})\n",
-                        p["name"].as_str().unwrap(),
-                        p["action"].as_str().unwrap()
-                    );
+                    let action = p["action"].as_str().unwrap();
+                    let action = match (action, domain::task_language_tx(db, task)? == "ru") {
+                        ("create", true) => "создание",
+                        ("update", true) => "обновление",
+                        _ => action,
+                    };
+                    let mut header = format!("{} ({action})\n", p["name"].as_str().unwrap());
                     for e in p["evidence"].as_array().unwrap() {
                         header.push_str(&format!(
                             "- {} {}: {}\n",
@@ -302,7 +297,8 @@ pub fn request(
                 }
                 db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,options_json,status,created_at) VALUES (?,?,?,?,?,'open',?)",
                 (&id,task,format!("{key}:{}",questions.len()),&text,f["options"].to_string(),crate::now()))?;
-                questions.push(json!({"question_id":id,"question":text,"options":f["options"],"topic":f["topic"]}));
+                let labels: Vec<_> = options.iter().filter_map(super::waits::option_label).collect();
+                questions.push(json!({"question_id":id,"question":text,"options":labels,"topic":f["topic"]}));
             }
             let mut saved = json!({"question_id":questions[0]["question_id"],"question":questions[0]["question"],
             "options":questions[0]["options"],"resume_state":"PLANNING","revision":revision,"channel_id":channel,"coordinator":true});

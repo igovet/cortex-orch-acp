@@ -200,7 +200,7 @@ async fn execute_as(
     let k = key.clone();
     let h = hash.clone();
     let n = name.clone();
-    let (mode,incoming,saved,who)=recv(executor.write(move|db|{
+    let (mode,incoming,saved,who,ru)=recv(executor.write(move|db|{
         let i=writer(db,&c)?;
         // Assignment scope grants project-relative targets only. No mode or
         // outside consent can widen it for a managed Codex channel.
@@ -219,7 +219,7 @@ async fn execute_as(
             if op!=n || d!=h {return Err(CoreError::Refused("request_key_conflict"));}
             let saved:Value=serde_json::from_str(&result)?;
             if saved["complete"]!=true {return Err(CoreError::Refused("outside_outcome_unknown"));}
-            return Ok((mode,None,Some(saved["reply"].clone()),who));
+            return Ok((mode,None,Some(saved["reply"].clone()),who,false));
         }
         let sessions=db.prepare("SELECT session_id FROM acp_host_sessions WHERE task_id=? AND json_extract(client_info,'$.name')='cortex-rust-acp'")?
             .query_map([&i.task],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
@@ -227,20 +227,26 @@ async fn execute_as(
         db.execute("INSERT INTO runtime_requests VALUES (?,?,?,?,?,?)",
             (&i.task,&k,&c.channel_id,&n,&h,json!({"complete":false,"mode":mode}).to_string()))?;
         lifecycle::event_tx(db,&i.task,"NATIVE_OUTSIDE_REQUESTED",json!({"channel_id":c.channel_id,"operation":n,"request_key":k,"mode":mode}))?;
-        Ok((mode,sessions.into_iter().next(),None,who))
+        let ru = lifecycle::domain::task_language_tx(db, &i.task)? == "ru";
+        Ok((mode,sessions.into_iter().next(),None,who,ru))
     })?).await?;
     if let Some(saved) = saved {
         return Ok(saved);
     }
-    let title = match rerouted.as_ref().and_then(|n| n["reason"].as_str()) {
-        Some("privilege") => "Run on the host: the command uses sudo",
-        Some("sandbox_unavailable") => "Run on the host: the command sandbox could not start",
-        _ if write => "Write outside the project",
-        _ => "Run outside the sandbox",
+    let cause = rerouted.as_ref().and_then(|n| n["reason"].as_str());
+    let title = match (cause, write, ru) {
+        (Some("privilege"), _, false) => "Run on the host: the command uses sudo",
+        (Some("privilege"), _, true) => "Запуск на компьютере: команда использует sudo",
+        (Some("sandbox_unavailable"), _, false) => "Run on the host: the command sandbox could not start",
+        (Some("sandbox_unavailable"), _, true) => "Запуск на компьютере: не удалось запустить песочницу",
+        (_, true, false) => "Write outside the project",
+        (_, true, true) => "Запись за пределами проекта",
+        (_, false, false) => "Run outside the sandbox",
+        (_, false, true) => "Запуск вне песочницы",
     };
     let request = json!({"toolCall":{"toolCallId":key,"title":title,
         "kind":if write {"edit"} else {"execute"},"rawInput":args},
-        "options":[{"optionId":"allow","name":"Allow once","kind":"allow_once"},{"optionId":"deny","name":"Deny","kind":"reject_once"}]});
+        "options":cortex_engine::permission::one_shot_options(ru)});
     let selected_control_plane = protected_roots.iter().any(|root| {
         root.canonicalize()
             .map(|p| path.starts_with(p))
@@ -271,8 +277,14 @@ async fn execute_as(
     } else if mode == "auto" {
         (true, format!("mode:{mode}"))
     } else {
-        let card = cortex_engine::permission::owner_card(&request, &who, rule);
-        let details = crate::native_owner_decisions::details(&request, &who, rule, &mode);
+        let mut card = cortex_engine::permission::owner_card(&request, &who, rule, ru);
+        // Preserve the actual reason this command was rerouted, even when cwd is present.
+        if matches!(cause, Some("privilege" | "sandbox_unavailable")) {
+            let prompt = card["toolCall"]["title"].as_str().unwrap_or_default();
+            let separator = if ru { " " } else { ". " };
+            card["toolCall"]["title"] = json!(format!("{prompt}{separator}{title}."));
+        }
+        let details = crate::native_owner_decisions::details(&request, &who, rule, &mode, ru);
         match crate::native_owner_decisions::ask(
             &executor,
             &credential,
