@@ -64,7 +64,7 @@ function Card(props: { view: TaskView; named: boolean; showProject?: boolean }) 
     else if (a.kind === "resume") ws.run({ type: "continue_task", taskId: task, now: ws.store.clock() });
     else if (a.kind === "retry") ws.run({ type: "retry_task", taskId: task, now: ws.store.clock() });
   };
-  return <article class={cls()} aria-current={ws.selected() === v().id ? "true" : undefined} data-task={v().id}>
+  return <article class={cls()} draggable={false} aria-current={ws.selected() === v().id ? "true" : undefined} data-task={v().id}>
     <A draggable={false} class="card-link" to={taskRoute(v())} onKeyDown={e => { if (e.key === " ") { e.preventDefault(); ws.select(v().id); } }}>
       <div class="card-m">
         <div class="card-t"><span data-tooltip-cut="">{v().task.title}</span></div>
