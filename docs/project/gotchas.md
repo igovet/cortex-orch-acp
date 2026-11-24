@@ -805,14 +805,11 @@ directory bound.
   for them. Unattributed or overlapping native work may yield only an advisory
   hint. Read-only/review scopes are not writers; prior plan revisions do not
   claim this revision's paths.
-- **LFS clean filters write even during a read-only diff.** Modified LFS files
-  need temporary files and object storage. Read-only git observations and
-  command/engine sandboxes redirect `lfs.storage` to disposable scratch without
-  disabling filters or writing local config. The redirect itself grants no
-  metadata writes. This is diff/status support, not a persistent LFS cache
-  for smudge, text conversion or downloads; whole-project writing grants keep
-  their existing persistent storage in engine/Guarded sandboxes. Development/Auto
-  commands use scratch only without a whole-repository write grant; whole-project
+- **LFS filters can write even during a read-only diff.** Ordinary live commands
+  without a whole-repository writer grant default `lfs.storage` to scratch
+  without granting metadata writes. This is not a persistent LFS cache.
+  Main-checkout `project_git` instead disables detected filter drivers; do not
+  assume it normalizes LFS files to pointers. Whole-project live
   writers keep persistent LFS objects so a successful commit cannot lose them
   when scratch ends. Development/Auto writing commands with
   `.`, `**` or `**/*` grants can now stage/commit and update repository data in

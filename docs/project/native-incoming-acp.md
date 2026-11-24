@@ -390,6 +390,9 @@ drive one task, and a process with an unfinished (running, waiting or paused)
 task keeps the lease. Concurrent active tasks in separate processes are not
 supported.
 Writable unadopted legacy projects and linked-worktree ingress still refuse here.
+Workspace's [separate worktrees](../cortex-workspace/local-task-execution.md#separate-worktrees)
+are provisioned by the desktop service. They do not authorize an external ACP
+client to use a linked checkout as its incoming `cwd`.
 Workspace-service recovery can explicitly adopt legacy tasks under its scheduler fence
 (see [native recovery](../cortex-workspace/local-task-execution.md#legacy-task-adoption));
 loaded legacy sessions remain display-only and reject prompts/configuration.
@@ -852,12 +855,18 @@ cannot approve a non-read/search native request; Cortex gateway and attached ext
 still pass because their own channel checks apply. See the
 [permission contract](../../SECURITY.md#current-acp-boundary-106).
 
-The `outside_write` and `outside_command` routes require a current writing
-worker, nonempty scope and no pending assignment wait. Eligible operations
-ask in Guarded and Development; Auto answers automatically. These are
-same-user host routes subject to their own authorization checks, not a way to
-bypass a denial. Symlink aliases and inside-project
-outside-write targets refuse. Writes use held no-follow parent descriptors,
+Both `outside_command` and `outside_write` are available to eligible writing
+workers in the main checkout in all three modes. Guarded and Development ask
+the owner for the specific action; Auto decides eligible requests automatically.
+A missing or refused approval blocks the effect. Coordinators and read-only
+roles (including reviewers and build-verification workers) do not receive these
+routes. Workspace-linked writers can see the tools, but dispatch refuses them.
+
+The broker refuses Cortex private targets and symlink aliases. Inside-project
+`outside_write` targets are refused; eligible credential and control-plane
+targets are classified, not categorically denied. `outside_command` is an
+unsandboxed owner-trust route: checking the cwd does not contain the payload.
+Writes use held no-follow parent descriptors,
 private temporary files, fsync and atomic replacement. Request identities bind
 complete payloads before effects; acknowledged retries return saved results,
 conflicting keys refuse, denied requests do not rerun and unfinished effects
@@ -1128,8 +1137,8 @@ the current hash; edits accept a partial text read but still require unchanged
 whole-file bytes. Missing-path observations allow creation with parents.
 No-follow descriptors, regular-file checks, owner denials, atomic replacement
 and durable request identities protect ordinary cooperative edits. Successful
-writes advance that channel's read evidence; runtime-augmented root .gitignore
-writes leave it incomplete until reread. Overlapping edit matches count as
+writes advance that channel's read evidence; root `.gitignore` writes leave it
+incomplete until reread. Overlapping edit matches count as
 ambiguous unless replace_all is selected. Mutation acknowledgements retain
 byte_count and edits_applied alongside hashes and sizes. Before replacement, an intent binds
 old/new hashes and the exact bounded acknowledgement. Restart recovery observes
@@ -1327,10 +1336,16 @@ Whole-project writer grants reopen Git data (objects, refs, index, logs and
 state), including the current linked worktree. Config, hooks and pointer files
 remain read-only. Development also guards info and module/worktree containers,
 reopens existing submodule data and disables hooks/fsmonitor through inherited
-Git configuration. Absent Git controls are swept periodically and at settlement;
-this is not an atomic barrier against hostile same-user code. Narrow grants
-never reopen Git data. Inspecting read-only repositories redirects LFS storage
-to private scratch.
+Git configuration. The supervisor sweeps watched Git controls that were absent
+at launch, periodically and at settlement. Removals add a generic notice without changing the payload status; the sweep is neither
+atomic nor persistent. Narrow live grants never reopen Git data and default
+LFS storage to disposable scratch.
+
+Main-checkout `project_git` instead runs fixed status/diff observations with
+global/system configuration, optional locks, hooks and fsmonitor disabled.
+Diff disables external diff and textconv. The broker probes for repository
+filter keys and disables discovered drivers; it does not use the live-command
+LFS redirect. See the [Git path and command boundary](../features/permissions-and-containment/index.md#git-and-tool-state).
 
 Guarded HOME exposes existing non-sensitive tool-state directories, creating
 `.cache` and `.npm` where absent. Read-only HOME exposes only explicit caches;

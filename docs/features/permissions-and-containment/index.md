@@ -70,9 +70,11 @@ task-stop and outward notification tools from the model's context;
 relay and the owner-registered external servers attached to that channel);
 `plugins` and `skills` are empty; hooks and auto-memory are off. Native `Read`,
 `Grep`, `Glob`, `WebFetch` and `WebSearch` remain. Claude Code reads and searches
-inside the project without asking; session deny rules keep `.cortex/**`,
-`.cortex-dev/**` and the dev state files out of those reads. Every other native
-request reaches the runtime.
+inside the project without asking. Cortex supplies four project-root deny rules:
+`Read(./.cortex/**)`, `Read(./.cortex-dev/**)`,
+`Read(./.cortex-dev-owner.json)` and `Read(./.cortex-workspace-dev.json)`.
+These are `Read` rules, not separate `Grep` or `Glob` rules or a guarantee about
+all search behavior. Requests that the engine does send are evaluated by Cortex.
 
 **Codex.** The native Codex launcher forces `shell_tool` and `view_image` off,
 with subagents, plugins, hooks and apps, verified with `codex features list`
@@ -243,15 +245,20 @@ are discarded in a private overlay where supported, or refused. The owner tool
 path, including NVM if present, is visible under the existing read-only rules.
 A setup failure does not retry on the host. See [the tool search path boundary](../../../SECURITY.md#host-effects-and-tool-search-path).
 
-A missing, refused, cancelled or timed-out answer to a consent card blocks the
-effect. Protected control-plane paths for `outside_write` are the
-`control_plane_paths` locations (Cortex, Paseo, Codex, Claude and
-OpenCode state and configuration, `~/.gitconfig`, `~/.git-credentials`, the
-installed runtime, the project's `.cortex` and an external hooks directory),
-existing or not, and anything beneath them, including through a symlinked parent. The
-worktree's own git metadata directories (its gitdir and, for a linked worktree, the common
-directory) are protected too. An outside-write target whose resolved real path lands inside
-the project is refused as `outside_path_inside_project`, even when its literal path does not.
+Both `outside_command` and `outside_write` are available to eligible writing
+workers in the main checkout in all three modes. Guarded and Development ask
+the owner for the specific action; Auto decides eligible requests automatically.
+A missing or refused approval blocks the effect. Coordinators and read-only
+roles (including reviewers and build-verification workers) do not receive these
+routes. Workspace-linked writers can see the tools, but dispatch refuses them.
+
+The broker checks the command's working directory or the write target. It refuses
+Cortex private paths and symlink aliases; `outside_write` also refuses a target
+inside the project. Credential and control-plane classifications are not blanket
+refusals for `outside_write`: otherwise eligible targets follow the decision
+for the current mode. `outside_command` runs on the host without the command
+sandbox. Its working-directory check and action decision do not constrain
+the payload's filesystem effects; this is an owner-trust route, not containment.
 
 Development is trusted local development, **not a hostile-code sandbox**.
 `development_command` uses `--bind / /`, real HOME and /var/tmp,
@@ -428,7 +435,7 @@ writer `project_write` uses. An append replaces a unique tail anchor with itself
 plus the added text. The result carries `edits_applied`, the new `sha256`, the
 size and line receipt, and a bounded unified diff (`diff`, `diff_truncated`;
 small before and after texts are included when they fit). Presentation uses the
-exact committed content, including the final root `.gitignore` protection rule;
+exact committed content, including any active-channel rule appended to the root `.gitignore`;
 an edit whose removed rule is restored therefore reports no deletion. Before
 calling the diff matcher, combined input is capped at 32,000 characters and the
 before/after line-count product at 250,000. Above either budget the edit still
@@ -725,43 +732,28 @@ owner code or an explicit command-line override. Engine/Guarded behavior is unch
 | `core.hooksPath` when it names a directory inside the project (e.g. husky) | read-only | ordinary project file rules |
 | Other linked worktrees' metadata; `modules/` containers | read-only; existing submodule data writable only in Development/Auto | denied |
 | The project's `.git` for reviewers and read-only roles | read-only | denied |
-| `.cortex` | hidden | denied |
-| The project's `.codex`, `.claude` | writable | allowed (ordinary project files; see also [Project skill links](#project-skill-links)) |
+| `.cortex`, `.cortex-dev` and the Dev state files | hidden | denied |
+| The project's `.codex`, `.claude`, `.agents`, `.github` | writable subject to grants and masks | ordinary project file rules (see also [Project skill links](#project-skill-links)) |
 | Tool state in the project (`.venv`, `node_modules/.cache`, `.pytest_cache`, `__pycache__`, `.mypy_cache`, `target/`, `build/`, ...) | writable | allowed (ordinary project files) |
 
-Those protected git entries configure or redirect git runs the owner makes later,
-outside any sandbox (hooks, fsmonitor, editor, pager, filters, credential helpers,
-includes). An existing one is mounted read-only. An absent one cannot be covered
-by a mount without creating it in the owner's repository, so a guard
-(`GitGuard`) checks every half second while the sandbox lives and once more when
-it ends, removes any that appeared and, for `command_run`, reports them and fails
-the command with `git_configuration_protected`. A process that deliberately
-detaches from a `command_run` and outlives it is no longer swept (see
-[SECURITY.md](../../../SECURITY.md#git-and-tool-state-in-the-project)). Changing git
-configuration, installing hooks or adding worktrees/submodules is done by the
-owner, or with `outside_command`, which the owner confirms. The read-only
-`project_git` status/diff observation remains read-only.
+Existing protected Git entries are mounted read-only. For watched entries that
+are absent at launch, GitGuard attempts removal every 500 ms during the command
+and again at settlement. If it removes anything, the supervisor appends a
+generic notice to the output without changing the payload's exit status. The
+sweep is neither atomic nor persistent after the command, and is not proof that
+a watched entry never existed or that every attempt at removal succeeded.
 
-Read-only git observations (`sandboxed_git` and `project_git`) and command/engine
-sandboxes that expose git metadata without a repository write grant, plus
-Development/Auto commands without a whole-repository write grant, redirect
-`lfs.storage` to `<scratch>/lfs` through inherited Git command configuration.
-Git LFS clean/process filters remain enabled: modified LFS files are compared
-as valid LFS pointers, not as pointer-versus-binary content. Temporary files and
-new LFS objects stay in disposable command/session scratch, never the real
-`.git/lfs` by default; linked worktrees use the same redirect. The redirect
-does not grant metadata writes and does not change local Git configuration.
-Development/Auto repository writes described above are a separate permission decision.
+`project_git` is a status/diff observation, not a Git write route or a command
+verification receipt. In the main checkout it clears inherited environment and
+disables global/system Git configuration, optional locks, hooks and fsmonitor;
+diff also disables external diff and text conversion. It probes repository
+filter keys and disables detected filter drivers, including Git LFS when
+detected. Expect no LFS pointer normalization from this view.
 
-This redirect is not a write permission or an enforcement boundary: explicit
-`git -c` options can override it, but cannot change metadata mount permissions.
-The scratch is not a persistent LFS cache and does not contain the repository's
-existing objects; smudge/checkout, text conversion or downloads needing those
-objects are not promised by this read-only observation support. Whole-project
-engine/Guarded writing grants retain their existing repository-data behavior and persistent
-LFS storage; protected config and hooks remain protected. Whole-project
-Development/Auto writers also retain persistent repository LFS storage: staging
-must not leave committed pointers whose objects disappear with command scratch.
+Ordinary live `command_run` is different: without a whole-repository writer
+grant it keeps Git metadata read-only and defaults `lfs.storage` to disposable
+scratch. That default is not a write grant or a persistent cache. Whole-project
+writing commands do not use this redirect.
 
 Tool state needs no list: a writing worker's grant is the whole project, and only
 the private names above are withheld. A regular file with more than one hard link
@@ -913,42 +905,24 @@ See [verification status](../../project/verification.md),
 
 ## Runtime store ignore protection
 
-Gateway `project_write` of the task root `.gitignore` preserves supplied entries
-and appends a final `/.cortex/` rule unless it is already the last line. This
-directory exclusion defeats preceding negations, including descendant rules.
-Returned hashes describe the actual protected bytes; stale expected hashes
-still refuse writes. A confirmed `project_delete` of the root ignore file
-replaces it with only the required rule and returns `deleted: false`.
+A writable store initialization creates the missing `<store>/.gitignore`
+with `*` and leaves an existing file alone. Initialization does not edit the
+project root `.gitignore` or `.git/info/exclude`.
 
-`command_run` and consent-backed `outside_command` compare that task root ignore
-file before and after execution and repair changes before returning a receipt,
-including nonzero command exits. Repair failure makes the receipt incomplete
-with `gitignore_guard_failed`; revoked authority never authorizes a repair.
-Before a fresh writable worker `result_submit` publishes its report, the runtime
-reconciles observed root ignore-file changes, recreating removed files.
-The revision manifest includes root `.gitignore` even if it ignores itself.
-Without a complete start/current manifest the runtime conservatively ensures
-the rule, creating `.gitignore` if missing; unchanged observed tasks do not
-create an ignore file. Read-only roles and already recorded result replays do not mutate it.
-This uses the current task root, not an arbitrary outside command target.
+When `project_write` or `project_edit` writes the checkout root `.gitignore`,
+the gateway appends the active channel's rule (`/.cortex/` or `/.cortex-dev/`)
+only if no line already equals it. An existing match is not moved to the end,
+so review later patterns for negations. The returned hash describes the bytes
+actually written. An allowed `project_delete` of this file replaces it with
+just the active channel's rule and returns `deleted: false`.
 
-Repair snapshots are exact full UTF-8 text and its raw-byte digest, not public
-`project_read` display pages. They retain every unrelated rule, including files
-with more than 2000 lines or long lines, without numbering or truncation. Already
-protected files are not rewritten. The internal reader keeps the same 16 MB,
-no-follow and regular-single-link restrictions.
-
-All repairs recheck live gateway authority and deny-write paths and use the
-normal no-follow, regular-single-link, digest-checked atomic writer. An unsafe
-file, incompatible encoding, denied path or conflicting write blocks repair;
-no bypass grants access. Other entries and file permissions remain unchanged.
-
-Installed hosts have no universal native pre-action hook. Native Edit/Write,
-patches and shell edits are reconciled at result submission, not immediately
-after each action. Interrupted turns without submission can leave an unsafe
-ignore file. A command or native action can stage/commit before reconciliation;
-Git ignores do not protect already tracked content or explicit `git add -f`.
-The guard never deletes runtime data, untracks entries, stages or commits.
+Native edits, patches and shell edits do not get the project gateway's
+`.gitignore` rule handling. The runtime does not repair their changes after a
+command or when a result is submitted. If an edit removes or overrides the rule,
+check and restore it before staging. Ignore rules are not access controls: they
+do not protect files that are already tracked or added with `git add -f`. The
+gateway's ignore handling does not delete runtime data, untrack files, stage, or
+commit.
 
 Focused no-paid checks:
 

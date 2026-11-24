@@ -389,8 +389,9 @@ options (`userProvidedOptions`; its own `disallowedTools` are appended to ours):
 `cortex` relay and the owner-registered external servers the runtime attaches)
 start; empty `plugins` and `skills`; `disableAllHooks` and
 `autoMemoryEnabled: false` in both `settings` and `managedSettings`; deny rules
-`Read(./.cortex/**)`, `Read(./.cortex-dev/**)` and the two dev state files in
-`settings.permissions.deny`, credential and key file `ask` rules in
+`Read(./.cortex/**)`, `Read(./.cortex-dev/**)`,
+`Read(./.cortex-dev-owner.json)` and `Read(./.cortex-workspace-dev.json)` in
+`settings.permissions.deny` (no separate `Grep` or `Glob` rules), credential and key file `ask` rules in
 `settings.permissions.ask`; and `disallowedTools` with native `Bash`,
 `BashOutput`, `KillShell`, `KillBash`, `PowerShell`, `Edit`, `MultiEdit`, `Write`,
 `NotebookEdit`, `Skill`, the subagent and scheduling tools (`Agent`, `Task`,

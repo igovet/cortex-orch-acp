@@ -277,12 +277,9 @@ the project with consent for deletion and every outside action; Development is
 the whole computer with consent for deletion; Auto is the whole computer with
 no question. Auto therefore uses the Development host-writable command profile
 (it previously kept restricted mounts, so its automatic approval could not reach
-anything the restricted sandbox refused without a card). In Development an
-`outside_write` is routine except to a protected control-plane path, which keeps
-its card; `outside_command` runs outside every sandbox mask and keeps its card
-in Development. Read-only roles, review, verification, engine jails, `.cortex`
-and `.git` configuration/hooks protection are unchanged in every mode. The
-deletion classifier remains lexical, not a semantic guarantee.
+anything the restricted sandbox refused without a card). For the current
+outside-tool decisions and role limits, see the [access-mode reference](../features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
+The deletion classifier remains lexical, not a semantic guarantee.
 
 ## 2026-10-12 brokered Development command capability
 
