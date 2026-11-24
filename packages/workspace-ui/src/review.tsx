@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, createUniqueId, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import type { Check, FileDiff, GitFile } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
+import { REQUESTING, RequestLabel } from "./request-feedback";
 import { Counts, Diff, GitLetter, type HunkActions } from "./diff";
 import { A, I, Keyed, MenuItem, Pop } from "./kit";
 import { ActionBar, Page, Region, Row, SectionHead, Strip, Toolbar, Whole } from "./layout";
@@ -66,7 +67,7 @@ export function CheckRows(props: { checks: Check[]; taskId?: string; all?: boole
   const detail = (c: Check) => c.detail || c.technicalReason ? <>{c.detail}<Show when={c.technicalReason}>{c.detail ? " " : ""}{c.kind === "policy" ? "Not run: " : "Could not check: "}{c.technicalReason}</Show></> : undefined;
   const source = (c: Check) => `${OUTCOME_WORD[c.outcome]}, ${sourceLabel(c, ws.t("unsourcedCheck")).toLowerCase()}`;
   return <>
-    <Show when={advisory().length > 0}><details class="rv-checks rv-advisory"><summary><SectionHead title="Informational evidence" count={advisory().length} /></summary>
+    <Show when={advisory().length > 0}><details class="rv-checks rv-advisory"><summary class="rv-adv-h"><SectionHead lead={<I n="chevron-right" s={12} class="faint rv-adv-chev" />} title="Informational evidence" count={advisory().length} /></summary>
       <Keyed each={advisory()} by={key}>{c => <Row lead={icon(c())} title={c().name} detail={detail(c()) || "Recorded as advisory evidence; it does not block the accepted result."} end={<span>{source(c())}</span>} />}</Keyed>
     </details></Show>
     <Show when={manual().length > 0}><section class="rv-checks" aria-label="Check manually"><SectionHead title="Check manually" count={manual().length} />
@@ -209,7 +210,7 @@ export function AcceptButton(props: { m: SessionModel; small?: boolean; line?: b
   const ws = useWs();
   const t = () => props.m.view.task;
   const blocked = () => acceptBlocked(t());
-  return <button class={`btn ${props.line ? "btn-line" : "btn-primary"}${props.small ? " btn-sm" : ""}`} aria-describedby={blocked() ? props.describedBy : undefined} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("accept_result")} onClick={() => { if (!blocked()) ws.accept(t().id); }}>Accept v{t().result?.version ?? ""}</button>;
+  return <button class={`btn ${props.line ? "btn-line" : "btn-primary"}${props.small ? " btn-sm" : ""}`} aria-describedby={blocked() ? props.describedBy : undefined} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("accept_result")} onClick={() => { if (!blocked()) ws.accept(t().id); }}><RequestLabel pending={ws.store.pendingTask("accept_result", t().id)} text={REQUESTING.accept_result}>Accept v{t().result?.version ?? ""}</RequestLabel></button>;
 }
 
 /** What the result says: the summary, cut to a few lines until asked for the whole, and where its changes are without Git. */
@@ -326,7 +327,7 @@ export function ChangesPanel(props: { m: SessionModel; route: TaskRoute; viewSta
     return { stage: i => ws.run({ type: "git_stage", checkoutId: c.id, path, staged: !file.hunks[i]?.staged, hunk: i }), revert: i => ws.open({ kind: "revert", checkoutId: c.id, path, hunk: i }), staged: i => !!file.hunks[i]?.staged };
   };
   const pick = (path: string) => { setCurrent(path); document.getElementById(`diff-${path}`)?.scrollIntoView?.({ block: "start" }); };
-  const blockedMerge = () => mergeBlocked(t());
+  const blockedMerge = () => t().checkout.kind === "worktree" && !checkout() ? ws.t("worktreeUnavailable") : mergeBlocked(t());
   const noGit = () => props.m.view.project.hasGit === false;
   const bounded = createMemo(() => !noGit() && files().length > 0);
   const rememberPageScroll = (el: HTMLDivElement) => {

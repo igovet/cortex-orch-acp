@@ -766,6 +766,20 @@ input.chk { margin-top: 1px; }
 .evid-b { display: block; padding: 0 0 4px; max-height: none; overflow: visible; }
 .evid summary { padding: 0 12px; }
 .evid .rv-checks:first-child { border-top: 0; }
+/* Informational evidence folds under a head like its siblings': no browser marker, a chevron on the rows' icon column and the
+   title on their text edge, all on one line. The whole head is the toggle. Beats `.evid summary`, which styles the panel's own head. */
+.rv-checks.rv-advisory > summary.rv-adv-h { display: block; height: auto; padding: 0; gap: 0; font-size: inherit; list-style: none; cursor: pointer; user-select: none; }
+.rv-checks.rv-advisory > summary.rv-adv-h::-webkit-details-marker { display: none; }
+.rv-checks.rv-advisory > summary.rv-adv-h::marker { content: ""; }
+.rv-checks.rv-advisory > summary.rv-adv-h:hover { background: var(--bg-hover); }
+.rv-checks.rv-advisory > summary.rv-adv-h:focus { outline: none; }
+.rv-checks.rv-advisory > summary.rv-adv-h:focus-visible { outline: var(--focus-line); outline-offset: -2px; }
+.rv-adv-h .l-sect-lead { width: var(--row-lead, 16px); justify-content: center; margin-inline-start: 0; }
+.rv-adv-chev { transition: transform .12s; }
+.rv-advisory[open] > summary .rv-adv-chev { transform: rotate(90deg); }
+/* Inside the open Evidence panel, its own `.evid[open] .i-chevron-right` turn must not reach a closed fold's chevron. */
+.rv-advisory:not([open]) > summary .rv-adv-chev { transform: none; }
+.rv-advisory:not([open]) { padding-bottom: 0; }
 /* A file's path in its head shortens, and a press shows the whole of it. */
 .fhead .fhead-path { flex: 0 1 auto; color: var(--fg); font-size: 12px; }
 .fhead .r { flex: none; }

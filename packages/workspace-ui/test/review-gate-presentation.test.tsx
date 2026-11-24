@@ -109,6 +109,43 @@ it("a used card action is offered again when a new hold arrives", async () => {
   port.emit(projection("2", again)); await settle();
   expect(buttons("Let the agent fix it")[0].getAttribute("aria-disabled")).toBeNull();
 });
+it("sends Try again on the first click of each missing-branch hold, despite a late receipt for the old hold", async () => {
+  const state = withResult("ready_to_merge");
+  state.tasks[0].sprintId = "sp";
+  state.tasks[0].acceptance = { version: 1, digest: "digest", automatic: false, at: 1 };
+  const reason = "The target branch must exist locally.";
+  state.sprints = [{
+    id: "sp", projectId: "p", title: "Release", description: "Release", runMode: "automatic", targetBranch: "later",
+    planning: "created", conversation: [], plan: null, materializedVersion: 1, taskIds: ["t"], queueState: "paused", pauseReason: reason,
+    automaticQueue: {
+      kind: "settlement_blocked", taskId: "t", code: "unknown_branch", reason, needsOwner: true, nextActor: "owner",
+      ownerActions: ["retry", "close_as_is"], asks: ["Fix the cause named above, then let Automatic try again."], holdId: "first",
+    },
+  }];
+  const port = await mount(state, taskPath);
+  const retry = buttons("Try again")[0];
+  expect(retry.closest(".chat-review-hold")?.textContent).toContain(reason);
+  retry.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+  port.emit(projection("2", structuredClone(state))); await settle();
+  expect(buttons("Try again")[0]).toBe(retry);
+  retry.click(); retry.click();
+  expect(port.commands.map(c => c.payload)).toEqual([expect.objectContaining({ type: "run_sprint", sprintId: "sp" })]);
+
+  // A fast recheck can publish a new hold before the queue-patch reply arrives.
+  const again = structuredClone(state);
+  again.sprints[0].automaticQueue!.holdId = "second";
+  port.emit(projection("3", again)); await settle();
+  expect(buttons("Try again")).toHaveLength(1);
+  port.receipt(true); await settle();
+  expect(buttons("Try again")).toHaveLength(1);
+  expect(buttons("Try again")[0].getAttribute("aria-disabled")).toBeNull();
+  buttons("Try again")[0].click();
+  expect(port.commands.map(c => c.payload)).toEqual([
+    expect.objectContaining({ type: "run_sprint", sprintId: "sp" }),
+    expect.objectContaining({ type: "run_sprint", sprintId: "sp" }),
+  ]);
+  port.receipt(true); await settle();
+});
 it("an agent or runtime hold asks nothing of the owner", async () => {
   const s = withResult("review");
   s.tasks[0].sprintId = "sp";
@@ -141,6 +178,25 @@ it("puts optional skipped evidence under a collapsed informational section after
   expect(document.querySelector('[aria-label="Not passed"]')).toBeNull();
   expect(text()).toContain("Informational evidence");
   expect(text()).toContain("Paid live check not requested by the owner");
+  // One head row: the chevron, the heading and its count share the summary's single section head, with no bare marker beside it.
+  const fold = document.querySelector<HTMLDetailsElement>("details.rv-advisory")!;
+  const summary = fold.querySelector<HTMLElement>(":scope > summary")!;
+  expect(fold.open).toBe(false);
+  expect(summary.children).toHaveLength(1);
+  const head = summary.firstElementChild!;
+  expect(head.classList.contains("l-sect")).toBe(true);
+  expect(head.querySelector(".l-sect-lead .i-chevron-right[aria-hidden='true']")).toBeTruthy();
+  expect(head.querySelector("h3")?.textContent).toBe("Informational evidence");
+  expect(head.querySelector(".n")?.textContent).toBe("1");
+  expect(summary.textContent?.trim()).toBe("Informational evidence1");
+  // The rows sit after the head, inside the fold, and the head toggles them.
+  const row = [...fold.querySelectorAll<HTMLElement>(":scope > .l-row")];
+  expect(row).toHaveLength(1);
+  expect(row[0].textContent).toContain("Paid live check");
+  summary.click();
+  expect(fold.open).toBe(true);
+  summary.click();
+  expect(fold.open).toBe(false);
 });
 it("explains an Automatic owner hold in the conversation before offering its actions", async () => {
   const s = withResult("ready_to_merge");
