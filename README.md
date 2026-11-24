@@ -19,6 +19,8 @@
   <strong>Recommended client: <a href="https://github.com/getpaseo/paseo">Paseo</a></strong>
 </p>
 
+In Workspace, open [Board](docs/cortex-workspace/SCREENS.md#conversation-adoption) just below Home to see the selected machine’s tasks by status and project. Select a card to open its task.
+
 In Workspace Code, the [File actions menu](docs/cortex-workspace/ide-and-git.md#code-file-actions) opens the file palette, opens the current file in an external editor, or shows it in the file manager.
 
 A Workspace task waiting for another task’s files shows the holder’s board title on its card and the wait reason on its opened page.

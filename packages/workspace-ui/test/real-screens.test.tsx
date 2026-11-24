@@ -541,7 +541,7 @@ describe("Git on real data", () => {
     expect(actions.map(c => (c.message as {params:{action:string}}).params.action)).toEqual(["commit"]);
     expect(finish).toBeDefined();
     // Reopen the tab before Git has answered. The last known checkout is immediately usable.
-    all<HTMLAnchorElement>("a").find(a => a.textContent?.trim() === "Board")!.click();
+    all<HTMLAnchorElement>('[role="tablist"][aria-label="View"] a').find(a => a.textContent?.trim() === "Board")!.click();
     await settled();
     all<HTMLAnchorElement>("a").find(a => a.textContent?.trim() === "Git")!.click();
     expect($('[aria-label="Status"]')?.textContent).toContain("a.txt");

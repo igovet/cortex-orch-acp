@@ -4,6 +4,10 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Added: Workspace **Board**, just below Home, shows live task status across projects on the selected machine. Each card names its project and opens the task. Archived work remains in Archive.
+
+- Fixed: Workspace file waits name the task as it appears on the board. The opened task shows the wait and affected files without hovering, and links to the task holding them when it is available. Scheduling and task controls are unchanged.
+
 - Fixed: On the local Workspace desktop, video and subtitle file links on the Result card offer **Open in default app** without leaving the result, and show a reason if the handoff fails. The original reported link destinations were not identified, and a successful handoff does not confirm playback.
 
 - Changed: Workspace Code puts **Go to file** and **Open in VS Code** in one **File actions** menu and adds **Show in file manager**. On a local Linux desktop it selects the file when supported, or opens its containing folder.

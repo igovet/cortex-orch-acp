@@ -948,6 +948,15 @@ html[data-hidden] *, html[data-hidden] *::after { animation-play-state: paused !
 :root { --ws-edge: 6px; }
 .d-scroll, .sp-scroll, .cf-scroll, .ws-read-b, .inspector, .ebody, .dview, .hist, .cdetail, .terminal-screen { margin-right: var(--ws-edge); }
 .board-wrap { margin-right: var(--ws-edge); }
+.card-project { margin-top: 5px; color: var(--fg-2); font-size: var(--t-cap); overflow-wrap: anywhere; }
+
+/* The machine board reads in status order in a narrow pane, with one vertical scroller. */
+@container page (max-width: 600px) {
+  .machine-board { flex-direction: column; overflow: hidden auto; }
+  .machine-board > .col { flex: none; min-width: 0; max-width: none; border-right: 0; }
+  .machine-board > .col.strip { display: none; }
+  .machine-board .col-b { overflow: visible; }
+}
 .board-wrap, .ebody, .dview { margin-bottom: var(--ws-edge); }
 .ws-list, .ws-pal-b, .term-body { margin-bottom: 0; }
 ::-webkit-scrollbar-thumb { min-height: 32px; min-width: 32px; }

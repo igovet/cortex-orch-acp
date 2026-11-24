@@ -62,6 +62,21 @@ async function mount(shell: PhoneShell) {
   return app;
 }
 
+it("opens the machine Board from the phone drawer and keeps the drawer available", async () => {
+  const f = fakeShell({ active: "m1", machines: [machine("m1", "Desk")] });
+  await mount(f.shell);
+  button("Menu")!.click();
+  const board = all(".ws-drawer a.nav").find(a => a.textContent?.trim() === "Board")!;
+  expect(board.previousElementSibling?.textContent?.trim()).toBe("Home");
+  board.click();
+  await settle();
+  expect(document.querySelector(".ws-phonebar-t")?.textContent).toBe("Board");
+  expect(text()).toContain("No projects on this machine yet");
+  expect(document.querySelector(".ws-drawer")).toBeNull();
+  button("Menu")!.click();
+  expect(all(".ws-drawer a.nav").find(a => a.textContent?.trim() === "Board")?.getAttribute("aria-current")).toBe("page");
+});
+
 describe("first run on a phone", () => {
   it("pastes a link, shows the fingerprint, waits for Allow and opens Home on the machine's own transport", async () => {
     const f = fakeShell();

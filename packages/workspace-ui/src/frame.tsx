@@ -97,7 +97,7 @@ export function TitleBar() {
   const route = () => ws.router.route();
   const crumb = (): string => {
     const r = route();
-    return r.name === "home" ? "Home" : r.name === "inbox" ? "Inbox" : r.name === "archive" ? "Archive" : r.name === "new" ? (r.kind === "sprint" ? "New sprint" : "New task") : r.name === "settings" ? "Settings" : r.name === "notfound" ? "Not found" : "";
+    return r.name === "home" ? "Home" : r.name === "board" ? "Board" : r.name === "inbox" ? "Inbox" : r.name === "archive" ? "Archive" : r.name === "new" ? (r.kind === "sprint" ? "New sprint" : "New task") : r.name === "settings" ? "Settings" : r.name === "notfound" ? "Not found" : "";
   };
   const areaName = () => { const r = route(); return r.name !== "project" ? null : r.view === "code" ? "Code" : r.view === "git" || r.view === "worktrees" ? "Git" : null; };
   const connection = () => ws.machine().connection === "connected" ? { text: "Connected", tone: "st-ok" } : { text: "Offline", tone: "st-idle" };
@@ -331,6 +331,7 @@ function Sidebar() {
       <A class="nav" to={{ name: "inbox", machine: m() }} aria-current={route().name === "inbox" ? "page" : undefined}><I n="inbox" />Inbox<Show when={inbox() > 0}><span class="count" data-tooltip={`${inbox()} items need you`}>{inbox()}</span></Show></A>
       <button class="nav ws-nav-btn" onClick={() => ws.openPalette()}><I n="search" />Search<Show when={ws.keys("Ctrl+K")}>{k => <span class="kbd">{k()}</span>}</Show></button>
       <A class="nav" to={{ name: "home", machine: m() }} aria-current={route().name === "home" ? "page" : undefined}><I n="home" />Home</A>
+      <A class="nav" to={{ name: "board", machine: m() }} aria-current={route().name === "board" ? "page" : undefined}><I n="board" />Board</A>
       <A class="nav" to={{ name: "archive", machine: m() }} aria-current={route().name === "archive" ? "page" : undefined}><I n="archive" />Archive<Show when={index().archive.length > 0}><span class="count" data-tooltip={`${index().archive.length} archived tasks`}>{index().archive.length}</span></Show></A>
     </div>
     <div class="sb-scroll">
@@ -625,7 +626,7 @@ export function FrameMenus() {
 }
 
 /** Pages the drawer opens from. Anywhere else the band offers Back, when there is somewhere to go back to. */
-const PHONE_TOP = new Set<Route["name"]>(["root", "home", "inbox", "archive", "settings", "notfound"]);
+const PHONE_TOP = new Set<Route["name"]>(["root", "home", "board", "inbox", "archive", "settings", "notfound"]);
 /**
  * The phone's title band: the menu or Back, the page's title, and its one primary action. No tabs, window controls or drag
  * region; everything else a desktop band holds is in the drawer or the page itself.

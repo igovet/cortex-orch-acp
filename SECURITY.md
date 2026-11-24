@@ -4,6 +4,8 @@ Workspace reserves a shared checkout for independent review and final verificati
 
 Execution baselines record the project checkout’s resolved Git HEAD, or null for an unborn branch or a plain folder. Ignored-file evidence is a separate metadata comparison, not a content check. If its bounded listing or metadata pass cannot finish, the ignored digest is absent and cannot support a review waiver; a complete deliverable manifest is still usable. An incomplete deliverable observation does not become complete as a result.
 
+Workspace’s machine Board groups task data already loaded for the selected machine. Opening the Board does not send task commands or expand access; its inherited card actions use the existing task capability checks.
+
 Workspace file-wait notices link only to a loaded task in the same project. The notice and link are read-only: they do not change leases, scheduling or task-control permissions.
 
 Workspace desktop tooltips show text already available to the client. Showing or dismissing a tooltip does not call a service, change permissions, or enable an unavailable control. Disabled reasons remain available independently of tooltips.

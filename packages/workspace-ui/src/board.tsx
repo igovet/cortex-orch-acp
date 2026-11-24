@@ -7,10 +7,10 @@ import { REQUESTING, RequestStatus } from "./request-feedback";
 import { onScreen } from "./freshness";
 import { CheckoutButton, GitView } from "./git";
 import { A, Count, FactLine, I, MenuItem, Pop, RowList } from "./kit";
-import { Page, StatusLane, Toolbar, type StripItem } from "./layout";
+import { Page, StatusLane, Strip, Toolbar, type StripItem } from "./layout";
 import { defaultCheckout, repoOf, taskCheckout, unavailableCheckout } from "./review-model";
 import type { ProjectView, Route, Scope } from "./router";
-import { age, automaticAcceptanceHold, awaitsOwner, bySprint, cardFact, clock, columnsOf, COLUMNS, decisionRoute, inScope, nothingToCommit, planningNeedsOwner, rowIcon, sameBranch, sprintRoute, sprintTitle, sprintView, type ColumnId, type GroupedRow, type ProjectSummary, type TaskView } from "./selectors";
+import { age, automaticAcceptanceHold, awaitsOwner, bySprint, cardFact, clock, columnsOf, COLUMNS, decisionRoute, inScope, nothingToCommit, planningNeedsOwner, projectsOn, rowIcon, sameBranch, sprintRoute, sprintTitle, sprintView, type ColumnId, type GroupedRow, type ProjectSummary, type TaskView } from "./selectors";
 import { archiveBlocked } from "./git-actions-model";
 import { closeBlocked, REWORK_LABEL, resumeState, reworkBinding, sessionModel } from "./session-model";
 import { KnowledgePage, ProjectSettingsPage } from "./project-pages";
@@ -49,7 +49,7 @@ function primaryAction(v: TaskView, startable: boolean): { label: string; kind: 
 const manuallyMovable = (v: TaskView) => !v.unknown && v.task.status !== "done" && v.column !== "closed_unverified";
 const startable = (v: TaskView) => v.task.status === "draft" && !v.unknown && v.fact.icon !== "hourglass";
 
-function Card(props: { view: TaskView; named: boolean }) {
+function Card(props: { view: TaskView; named: boolean; showProject?: boolean }) {
   const ws = useWs();
   const v = () => props.view;
   const action = () => primaryAction(v(), startable(v()));
@@ -65,9 +65,9 @@ function Card(props: { view: TaskView; named: boolean }) {
     else if (a.kind === "resume") ws.run({ type: "continue_task", taskId: task, now: ws.store.clock() });
     else if (a.kind === "retry") ws.run({ type: "retry_task", taskId: task, now: ws.store.clock() });
   };
-  return <article class={cls()} draggable={manuallyMovable(v()) && ws.can(capabilityOf("close_task"))}
+  return <article class={cls()} draggable={!props.showProject && manuallyMovable(v()) && ws.can(capabilityOf("close_task"))}
     onDragStart={e => {
-      if (!manuallyMovable(v()) || (e.target as Element).closest("button")) { e.preventDefault(); return; }
+      if (props.showProject || !manuallyMovable(v()) || (e.target as Element).closest("button")) { e.preventDefault(); return; }
       e.dataTransfer?.setData("application/x-workspace-task", v().id);
       if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
       setDragPreview(e);
@@ -75,6 +75,7 @@ function Card(props: { view: TaskView; named: boolean }) {
     <A class="card-link" to={taskRoute(v())} onKeyDown={e => { if (e.key === " ") { e.preventDefault(); ws.select(v().id); } }}>
       <div class="card-m">
         <div class="card-t"><span data-tooltip-cut="">{v().task.title}</span></div>
+        <Show when={props.showProject}><div class="card-project">{v().project.name}</div></Show>
         <Show when={v().task.checkout.branch}><div class="card-b"><I n={v().task.checkout.kind === "worktree" ? "branch" : "folder"} s={12} /><span data-tooltip-cut="" class="mono trunc">{v().task.checkout.branch}</span><span class="type">{v().task.checkout.kind === "worktree" ? "Worktree" : "Project folder"}</span></div></Show>
         <div class="card-s"><FactLine fact={cardFact(v())} cutHint /></div>
       </div>
@@ -116,20 +117,21 @@ const SprintHead = (props: { row: Extract<GroupedRow, { kind: "sprint" }>; machi
   <I n="layers" s={12} /><span data-tooltip-cut="" class="trunc">{sprintTitle(props.row.sprint)}</span><span class="n">{props.row.count}</span>
 </A>;
 
-function Board(props: { summary: ProjectSummary; views: TaskView[]; onQuick: () => void; machine: string; grouped: boolean }) {
+function Board(props: { summary?: ProjectSummary; views: TaskView[]; onQuick?: () => void; machine: string; grouped?: boolean }) {
   const ws = useWs();
   const [dropHint, setDropHint] = createSignal("");
   const columns = createMemo(() => columnsOf(props.views));
   const columnLabel = (id: ColumnId, label: string) => id === "merge" && columns().merge.some(v => sameBranch(v.task, v.target)) ? "Ready to finish" : label;
+  const quick = () => props.summary && !props.summary.offline && props.onQuick;
   const rows = (id: ColumnId): GroupedRow[] => props.grouped ? bySprint(columns()[id]) : columns()[id].map(view => ({ kind: "task", view }));
-  return <><Show when={dropHint()}><div class="strip info" role="status">{dropHint()}</div></Show><div class="board-wrap" onKeyDown={moveOnBoard}>
+  return <><Show when={dropHint()}><div class="strip info" role="status">{dropHint()}</div></Show><div class="board-wrap" classList={{ "machine-board": !props.summary }} onKeyDown={moveOnBoard}>
     <For each={COLUMNS.filter(col => col.id !== "closed_unverified" || columns()[col.id].length > 0)}>{col => {
-      const open = () => columns()[col.id].length > 0 || (col.id === "todo" && !props.summary.offline);
+      const open = () => columns()[col.id].length > 0 || (col.id === "todo" && !!quick());
       return <section class={`col${open() ? "" : " strip"}`} data-col={col.id}
-        onDragOver={e => { if (e.dataTransfer?.types.includes("application/x-workspace-task")) { e.preventDefault(); e.dataTransfer.dropEffect = col.id === "done" ? "move" : "none"; } }}
+        onDragOver={e => { if (props.summary && e.dataTransfer?.types.includes("application/x-workspace-task")) { e.preventDefault(); e.dataTransfer.dropEffect = col.id === "done" ? "move" : "none"; } }}
         onDrop={e => {
           const id = e.dataTransfer?.getData("application/x-workspace-task");
-          if (!id || !props.views.some(v => v.id === id && manuallyMovable(v))) return;
+          if (!props.summary || !id || !props.views.some(v => v.id === id && manuallyMovable(v))) return;
           e.preventDefault();
           if (col.id !== "done") { setDropHint("Only Done accepts manual moves. Other columns follow the task's actual progress."); return; }
           setDropHint(""); ws.closeTask(id, "external");
@@ -137,13 +139,27 @@ function Board(props: { summary: ProjectSummary; views: TaskView[]; onQuick: () 
         <Show when={open()} fallback={<><I n={col.icon} s={14} class="faint" /><span class="v">{columnLabel(col.id, col.label)}</span></>}>
           <div class={`col-h ${col.tone}`}><I n={col.icon} s={14} class={col.tone ? undefined : "faint"} />{columnLabel(col.id, col.label)}<Count n={columns()[col.id].length} /></div>
           <RowList class="col-b" label={columnLabel(col.id, col.label)} items={rows(col.id)} keyOf={rowKey} gap={CARD_GAP}
-            render={r => <Show when={r().kind === "sprint"} fallback={<Card view={(r() as Extract<GroupedRow, { kind: "task" }>).view} named={props.grouped} />}><SprintHead row={r() as Extract<GroupedRow, { kind: "sprint" }>} machine={props.machine} /></Show>}
-            header={col.id === "todo" && !props.summary.offline ? <button class="quick" onClick={() => props.onQuick()}><I n="plus" s={14} />Describe the task…</button> : undefined} />
+            render={r => <Show when={r().kind === "sprint"} fallback={<Card view={(r() as Extract<GroupedRow, { kind: "task" }>).view} named={!!props.grouped} showProject={!props.summary} />}><SprintHead row={r() as Extract<GroupedRow, { kind: "sprint" }>} machine={props.machine} /></Show>}
+            header={col.id === "todo" && quick() ? <button class="quick" onClick={() => props.onQuick?.()}><I n="plus" s={14} />Describe the task…</button> : undefined} />
         </Show>
       </section>;
     }}</For>
-    <Show when={ws.store.mode === "demo" || props.summary.archived > 0}><A class="col archive" to={{ name: "archive", machine: props.machine }}><I n="archive" s={14} /><span class="v">Archive{props.summary.archived ? ` ${props.summary.archived}` : ""}</span></A></Show>
+    <Show when={props.summary && (ws.store.mode === "demo" || props.summary.archived > 0) && props.summary}>{summary => <A class="col archive" to={{ name: "archive", machine: props.machine }}><I n="archive" s={14} /><span class="v">Archive{summary().archived ? ` ${summary().archived}` : ""}</span></A>}</Show>
   </div></>;
+}
+
+export function MachineBoard() {
+  const ws = useWs();
+  const projects = createMemo(() => projectsOn(ws.store.index(), ws.machine().id));
+  const views = createMemo(() => projects().flatMap(p => p.views));
+  return <Page class="l-work" scroll="none" status={<Show when={ws.shell.kind !== "phone" && ws.machine().connection !== "connected"}>
+    <Strip tone="info">Last known state. {ws.machine().name} is offline, last confirmed {clock(ws.machine().lastConfirmedAt)}.</Strip>
+  </Show>}>
+    <Show when={views().length > 0} fallback={<div class="note-panel"><span class="w500">{projects().length ? "No tasks to show on this machine" : "No projects on this machine yet"}</span>
+      <A class="lnk" to={{ name: "home", machine: ws.machine().id }}>Back to Home</A></div>}>
+      <Board views={views()} machine={ws.machine().id} />
+    </Show>
+  </Page>;
 }
 
 type ListRow = { kind: "head"; id: ColumnId; count: number } | GroupedRow;

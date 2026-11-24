@@ -1,6 +1,6 @@
 import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch, untrack, type Accessor, type JSX } from "solid-js";
 import { capabilityOf, FEATURES, type WorkspaceCommand, type WorkspacePort, type WorkspaceState } from "@cortex/workspace-domain";
-import { ProjectPage, TaskMenu } from "./board";
+import { MachineBoard, ProjectPage, TaskMenu } from "./board";
 import { UnsavedOnClose } from "./code";
 import { ReviewDialogs, type WsDialog } from "./dialogs";
 import { createBuffers } from "./editor-buffers";
@@ -70,6 +70,7 @@ function Content() {
   return <Show when={ws.store.ready()} fallback={<NotLoaded />}><Show when={knownMachine()} fallback={<NotFound message="This machine is not connected to this Workspace" />}>
     <Switch fallback={<NotFound message="This page does not exist" />}>
       <Match when={route().name === "home"}><Home /></Match>
+      <Match when={route().name === "board"}><MachineBoard /></Match>
       <Match when={route().name === "inbox"}><Inbox /></Match>
       <Match when={route().name === "archive"}><Archive /></Match>
       <Match when={route().name === "new" && (route() as Extract<Route, { name: "new" }>)}>{r => <NewPage route={r()} />}</Match>
@@ -513,7 +514,7 @@ export function Workspace(props: WorkspaceProps) {
     const projectId = "project" in r ? r.project
       : r.name === "task" ? store.index().byId.get(r.task)?.task.projectId : null;
     return store.state().projects.filter(p => store.savedView(p) && (projectId ? p.id === projectId
-      : (r.name === "home" || r.name === "root") && p.machineId === ws.machine().id));
+      : (r.name === "home" || r.name === "root" || r.name === "board") && p.machineId === ws.machine().id));
   };
   const savedProjectIssue = () => savedOnScreen().some(p => !!p.issue);
   // The frame is built whole, in the same update that ends the logo, so no partial interface is ever painted.

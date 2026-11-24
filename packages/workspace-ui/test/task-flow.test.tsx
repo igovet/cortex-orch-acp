@@ -7,6 +7,7 @@ import { emptyWorkspace, LOCAL_MACHINE_ID, type PlanItem, type Project, type Spr
 import { Workspace } from "../src";
 import { conversationOf, type FeedRow } from "../src/port/history";
 import { createRealPort } from "../src/port/real";
+import { hrefOf, parseRoute } from "../src/router";
 import { capabilitiesWire, draftTask, flush, projection, scriptedPort, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
 
 let dispose: (() => void) | undefined;
@@ -43,6 +44,80 @@ function world(tasks: Task[], sprints: Sprint[] = []): WorkspaceState {
 }
 const everything = () => scriptedPort({ capabilities: { everything: true, operations: [] } });
 const BOARD = `/m/${LOCAL_MACHINE_ID}/p/p`;
+
+describe("machine Board", () => {
+  const href = `/m/${LOCAL_MACHINE_ID}/board`;
+  const card = (id: string) => $(`.machine-board .card[data-task="${id}"]`);
+  const column = (id: string) => card(id)?.closest(".col")?.getAttribute("data-col");
+
+  it("round-trips a machine Board without changing the project Board route", () => {
+    const route = { name: "board" as const, machine: "Desk / remote" };
+    expect(hrefOf(route)).toBe("/m/Desk%20%2F%20remote/board");
+    expect(parseRoute(hrefOf(route))).toEqual(route);
+    expect(parseRoute(`${BOARD}/board`)).toMatchObject({ name: "project", view: "board" });
+    expect(parseRoute(`${href}/extra`).name).toBe("notfound");
+  });
+
+  it("opens from Home, groups both projects by live status, and opens the selected task", async () => {
+    const s = everything();
+    await mount(s.port, `/m/${LOCAL_MACHINE_ID}`);
+    const snapshot = (running: boolean) => {
+      const state = world([
+        task("a", running ? { status: "working", process: "live" } : {}),
+        task("b", { projectId: "q", status: "working", process: "live" }),
+        task("done", { projectId: "q", status: "done" }),
+        task("closed", { status: "closed_unverified", closedAs: "unconfirmed" }),
+        task("archived", { status: "done", archive: { at: 1, previousStatus: "done" } }),
+        task("elsewhere", { projectId: "r" }),
+      ]);
+      state.machines.push({ ...state.machines[0], id: "other", name: "Other machine", kind: "remote" });
+      state.projects.push({ ...project, id: "q", name: "Birch" }, { ...project, id: "r", name: "Remote", machineId: "other" });
+      return state;
+    };
+    s.emit(projection("1", snapshot(false)));
+    await settled();
+    const home = all(".sidebar .nav").find(a => a.textContent?.trim() === "Home")!;
+    const nav = home.nextElementSibling as HTMLAnchorElement;
+    expect(nav.textContent?.trim()).toBe("Board");
+    expect(nav.getAttribute("href")).toBe(href);
+    expect(nav.getAttribute("aria-current")).toBeNull();
+    nav.click();
+    expect(location.pathname).toBe(href);
+    expect(nav.getAttribute("aria-current")).toBe("page");
+    expect($(".titlebar")?.textContent).toContain("Board");
+    expect(column("a")).toBe("todo");
+    expect(column("b")).toBe("work");
+    expect(column("done")).toBe("done");
+    expect(column("closed")).toBe("closed_unverified");
+    expect(card("archived")).toBeNull();
+    expect(card("elsewhere")).toBeNull();
+    expect(card("a")?.querySelector(".card-project")?.textContent).toBe("Cedar");
+    expect(card("b")?.querySelector(".card-project")?.textContent).toBe("Birch");
+    expect(card("b")?.querySelector(".card-s")?.textContent).toContain("Working");
+
+    const unchanged = card("b");
+    s.emit(projection("2", snapshot(true)));
+    await settled();
+    expect(column("a")).toBe("work");
+    expect(card("b")).toBe(unchanged);
+    card("a")!.querySelector<HTMLAnchorElement>(".card-link")!.click();
+    expect(location.pathname).toBe(`/m/${LOCAL_MACHINE_ID}/t/a`);
+    expect(nav.getAttribute("aria-current")).toBeNull();
+  });
+
+  it("distinguishes an empty machine from one with no board tasks", async () => {
+    const s = everything();
+    await mount(s.port, href);
+    const empty = emptyWorkspace();
+    empty.machines[0].connection = "connected";
+    s.emit(projection("1", empty));
+    await settled();
+    expect($(".note-panel")?.textContent).toContain("No projects on this machine yet");
+    s.emit(projection("2", world([])));
+    await settled();
+    expect($(".note-panel")?.textContent).toContain("No tasks to show on this machine");
+  });
+});
 
 /** A planning run on the real port, with the machine answering as the service does. */
 function planning(options: { decisions: ReturnType<typeof wireDecision>[]; plan?: PlanItem[] | null; conversation?: Sprint["conversation"] }) {
@@ -429,81 +504,69 @@ describe("sprints on All work", () => {
   });
 });
 
-describe("a card changing column", () => {
-  const places: Record<string, number> = { needs: 0, todo: 300, work: 600, review: 900, merge: 1200, done: 1500 };
-  const rect = (el: Element) => {
-    const column = el.closest<HTMLElement>(".col")?.dataset.col ?? "", left = places[column] ?? 0, wide = !el.closest(".strip");
-    return new DOMRect(left + (el.matches(".card") ? 10 : 0), el.matches(".card") ? 40 : 0, wide ? 280 : 34, el.matches(".card") ? 100 : 800);
-  };
-  function motion() {
-    const animate = vi.fn(function (this: Element) { return { finished: Promise.resolve(), cancel() {} }; });
-    Object.defineProperty(Element.prototype, "animate", { value: animate, configurable: true, writable: true });
-    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) { return rect(this); });
-    return animate;
-  }
-  const worked = () => world([task("a", { status: "working", process: "live" }), task("b")]);
+it("puts a background column change straight into normal layout", async () => {
+  const s = everything();
+  await mount(s.port, BOARD);
+  s.emit(projection("1", world([task("a"), task("b")])));
+  await settled();
+  const destination = $('.col[data-col="work"]')!;
+  expect(destination.classList.contains("strip")).toBe(true);
+  const neighbor = $('.card[data-task="b"]');
+  const animate = vi.fn(() => ({ finished: Promise.resolve() }));
+  Object.defineProperty(Element.prototype, "animate", { value: animate, configurable: true });
+  s.emit(projection("2", world([task("a", { status: "working", process: "live" }), task("b")])));
+  const card = $<HTMLElement>('.card[data-task="a"]')!;
+  expect(card.closest(".col")).toBe(destination);
+  expect(destination.classList.contains("strip")).toBe(false);
+  expect($('.card[data-task="b"]')).toBe(neighbor);
+  expect(card.style.visibility).toBe("");
+  expect($(".ws-fly, [data-flying]")).toBeNull();
+  expect(animate).not.toHaveBeenCalled();
+});
 
-  it("flies from where it was to where it lands, then the real card is back", async () => {
-    const s = everything();
-    await mount(s.port, BOARD);
-    s.emit(projection("1", world([task("a"), task("b")])));
-    await settled();
-    const animate = motion();
-    s.emit(projection("2", worked()));
-    const ghost = $(".ws-fly")!;
-    expect(ghost.getAttribute("aria-hidden")).toBe("true");
-    expect(ghost.style.left).toBe("610px");
-    expect($<HTMLElement>('.card[data-task="a"]')?.style.visibility).toBe("hidden");
-    const frames = animate.mock.calls.flatMap(call => (call as unknown[])[0] as Keyframe[]).map(f => f.transform);
-    expect(frames).toContain("translate(-300px, 0px)");
-    await settled();
-    expect($(".ws-fly")).toBeNull();
-    expect($<HTMLElement>('.card[data-task="a"]')?.style.visibility).toBe("");
-    expect($(".board-wrap")?.hasAttribute("data-flying")).toBe(false);
-  });
+it.each([
+  { view: "project Board", path: BOARD },
+  { view: "machine Board", path: `/m/${LOCAL_MACHINE_ID}/board` },
+])("labels a displayed preview on the $view only until the matching live presentation arrives", async ({ path }) => {
+  const s = everything();
+  await mount(s.port, path);
+  s.emit({ kind: "preview", slice: { project, tasks: [task("saved")], sessions: [] },
+    facts: { projectId: project.id, openBranch: "main", defaultBranch: "main", repo: null, workers: [], reviews: [], overlays: {}, sprints: [] } });
+  expect($('.card[data-task="saved"]')).not.toBeNull();
+  expect(document.body.textContent).toContain("Saved view; checking live state");
+  s.emit({ kind: "connection", connection: { state: "disconnected", reason: "Connection lost", at: Date.now() } });
+  expect(document.body.textContent).toContain("Saved view; live state unavailable");
+  expect(document.body.textContent).not.toContain("Saved view; checking live state");
+  expect($('.card[data-task="saved"]')).not.toBeNull();
+  s.emit({ kind: "connection", connection: { state: "connected", reason: null, at: Date.now() } });
+  s.emit(projection("1", world([task("live")])));
+  await settled();
+  expect($('.card[data-task="live"]')).not.toBeNull();
+  expect(document.body.textContent).not.toContain("Saved view;");
+});
 
-  it("opens the folded column around it instead of jumping", async () => {
-    const s = everything();
-    await mount(s.port, BOARD);
-    s.emit(projection("1", world([task("a"), task("b")])));
-    await settled();
-    expect($('.col[data-col="work"]')?.classList.contains("strip")).toBe(true);
-    const column = $('.col[data-col="work"]');
-    const animate = motion();
-    s.emit(projection("2", worked()));
-    expect($('.col[data-col="work"]')).toBe(column);
-    expect(animate.mock.contexts).toContain(column);
-    await settled();
-  });
-
-  it("moves at once under reduced motion", async () => {
-    const s = everything();
-    await mount(s.port, BOARD);
-    s.emit(projection("1", world([task("a"), task("b")])));
-    await settled();
-    const animate = motion();
-    Object.defineProperty(window, "matchMedia", { value: () => ({ matches: true }), configurable: true });
-    s.emit(projection("2", worked()));
-    await settled();
-    expect(animate).not.toHaveBeenCalled();
-    expect($(".ws-fly")).toBeNull();
-    expect($('.col[data-col="work"] .card[data-task="a"]')).toBeTruthy();
-  });
-
-  it("plays nothing when a read leaves every card where it is", async () => {
-    const s = everything();
-    await mount(s.port, BOARD);
-    s.emit(projection("1", worked()));
-    await settled();
-    const animate = motion();
-    s.emit(projection("2", worked()));
-    await settled();
-    expect(animate).not.toHaveBeenCalled();
-  });
+it("labels creation in its composer until the real reply arrives", async () => {
+  const s = everything();
+  await mount(s.port, BOARD);
+  s.emit(projection("1", world([task("a")])));
+  await settled();
+  $(".quick")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await settled();
+  const field = $<HTMLTextAreaElement>('textarea[aria-label="Describe the task"]')!;
+  write(field, "Make a new task");
+  button("Save draft").click();
+  expect(s.commands.at(-1)?.operation).toBe("create_task");
+  expect($(".create .ws-request-status")?.textContent).toBe("Requesting task creation…");
+  s.receipt(false, undefined, "refused", "Task creation refused.");
+  await settled();
+  expect($(".create .ws-request-status")?.textContent).toBe("");
+  expect(field.value).toBe("Make a new task");
+  expect(document.body.textContent).toContain("Task creation refused.");
+  expect(s.commands).toHaveLength(1);
 });
 
 describe("the one loading system", () => {
-  const draft = () => world([task("a")]);
+  const draft = () => world([task("a"), task("b")]);
   const onBoard = async () => { const s = everything(); await mount(s.port, BOARD); s.emit(projection("1", draft())); await settled(); return s; };
 
   it("marks the pressed button and takes no second press until its action ends", async () => {
@@ -513,7 +576,13 @@ describe("the one loading system", () => {
     expect(s.commands).toHaveLength(1);
     expect(start.hasAttribute("data-busy")).toBe(true);
     expect(start.getAttribute("aria-busy")).toBe("true");
+    const status = $('.card[data-task="a"] .ws-request-status')!;
+    expect(status.textContent).toBe("Requesting start…");
+    expect($('.card[data-task="b"] .ws-request-status')?.textContent).toBe("");
+    expect(start.closest(".col")?.getAttribute("data-col")).toBe("todo");
     s.receipt(); await settled();
+    expect($('.card[data-task="a"] .ws-request-status')).toBe(status);
+    expect(status.textContent).toBe("");
     expect(start.hasAttribute("data-busy")).toBe(false);
     expect(start.hasAttribute("aria-busy")).toBe(false);
     start.click();
@@ -524,7 +593,11 @@ describe("the one loading system", () => {
     const s = await onBoard();
     const start = all(".card-a button").find(b => b.textContent === "Start")!;
     start.click();
+    expect($('.card[data-task="a"] .ws-request-status')?.textContent).toBe("Requesting start…");
     s.receipt(false); await settled();
+    expect($('.card[data-task="a"] .ws-request-status')?.textContent).toBe("");
+    expect($('.card[data-task="a"] [role="alert"]')?.textContent).toContain("Refused");
+    expect(s.commands).toHaveLength(1);
     expect(start.hasAttribute("data-busy")).toBe(false);
     start.click();
     expect(s.commands).toHaveLength(2);

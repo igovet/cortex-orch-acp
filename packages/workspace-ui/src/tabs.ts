@@ -89,6 +89,7 @@ export function startTabs(stored: StoredTabs | null, href: string): TabList {
 export function tabTitle(route: Route, names: TabNames): string {
   switch (route.name) {
     case "root": case "home": return "Home";
+    case "board": return "Board";
     case "inbox": return "Inbox";
     case "archive": return "Archive";
     case "new": return route.kind === "sprint" ? "New sprint" : "New task";
