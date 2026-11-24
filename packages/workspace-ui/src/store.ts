@@ -1,9 +1,10 @@
+import { CODE_LANGUAGE, type LocalCodePort } from "./code-support";
 import { batch, createMemo, createSignal, onCleanup } from "solid-js";
 import { applyFacts, applyMachineFacts, applyProjection, applySprintDeletion, capabilityOf, compareVersions, emptyWorkspace, FEATURES, hasCapability, noCapabilities, projectionKey } from "@cortex/workspace-domain";
-import type { Attachment, AttachmentInput, AttachmentRef, CommandEnvelope, CommandReceipt, FileRead, GitInterest, FileSaveResult, FolderListing, FolderListRequest, IntegrationText, IntegrationTextRequest, MachineFacts, RemoteOperation, RemoteRequests, RemoteStatus, PortCapabilities, PortConnection, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectSkills, WorkspaceCommand, WorkspacePort, WorkspaceState } from "@cortex/workspace-domain";
+import type { Attachment, AttachmentInput, AttachmentRef, CommandEnvelope, CommandReceipt, FileRead, GitInterest, FolderListing, FolderListRequest, IntegrationText, IntegrationTextRequest, MachineFacts, RemoteOperation, RemoteRequests, RemoteStatus, PortCapabilities, PortConnection, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectSkills, WorkspaceCommand, WorkspacePort, WorkspaceState } from "@cortex/workspace-domain";
 import type { OwnerActionVerb } from "@cortex/workspace-domain";
 import { downloadAttachment } from "./attachments";
-import { COPY } from "./copy";
+import { COPY, REQUESTING } from "./copy";
 import { buildIndex, stableIndex, type WorkspaceIndex } from "./selectors";
 import { share } from "./stable";
 import { createSends } from "./sends";
@@ -57,7 +58,7 @@ function withConnection(state: WorkspaceState, connection: PortConnection): Work
  * The screens' only view of a backend. Versioned projections and acknowledged rename/queue patches change the display.
  * A command receipt settles before its background reconciliation. A failure stays a failure; no requested effect is guessed.
  */
-export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions = {}) {
+export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, options: StoreOptions = {}) {
   const now = options.now ?? Date.now();
   const opened = Date.now();
   const versions = new Map<string, string>();
@@ -103,10 +104,20 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
   const [syncing, setSyncing] = createSignal(false);
   const [rejected, setRejected] = createSignal(0);
   const [receipt, setReceipt] = createSignal<CommandReceipt | null>(null);
+  // Presentation only: one entry per dispatched request, never per click or per reconciliation read.
+  const [pendingRequests, setPendingRequests] = createSignal<ReadonlyMap<string, WorkspaceCommand>>(new Map());
+  const [savedProjects, setSavedProjects] = createSignal<ReadonlyMap<string, string>>(new Map());
   const [acceptanceIssue, setAcceptanceIssue] = createSignal<{ taskId: string; message: string } | null>(null);
   const state = createMemo(() => port.mode === "real" ? withConnection(projected(), connection()) : projected());
   // Unchanged task views and summaries stay the same objects across reads, so rows built from them are not rebuilt.
   const index = createMemo<WorkspaceIndex>(prev => stableIndex(prev, buildIndex(state(), now)));
+  // The projects whose tasks a confirmed read delivered in this run. A cached first frame is not one, and neither is the empty
+  // stand-in (version zero) of a project whose Cortex is away or not activated: neither says what the project holds.
+  const [readProjects, setReadProjects] = createSignal<ReadonlySet<string>>(new Set(options.initial?.state.projects.map(p => p.id) ?? []));
+  const confirmRead = (update: ProjectionUpdate) => {
+    const ids = update.scope === "workspace" ? update.state.projects.map(p => p.id) : update.version === "0" ? [] : [update.slice.project.id];
+    if (ids.some(id => !readProjects().has(id))) setReadProjects(held => new Set([...held, ...ids]));
+  };
 
   const install = (update: ProjectionUpdate, coherent = false) => {
     if (update.scope === "project" && registered && !registered.has(update.slice.project.id)) { setRejected(n => n + 1); return false; }
@@ -125,6 +136,13 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
       const next = applyProjection(current, update), held = !coherent && update.scope === "project" ? facts.get(update.slice.project.id) : undefined;
       return held ? applyFacts(next, held) : next;
     });
+    confirmRead(update);
+    // Even an empty replacement (for example, a deactivated project) stops showing the saved board.
+    if (update.scope === "workspace") {
+      if (savedProjects().size) setSavedProjects(new Map());
+    } else if (savedProjects().has(update.slice.project.id)) {
+      setSavedProjects(held => { const next = new Map(held); next.delete(update.slice.project.id); return next; });
+    }
     return true;
   };
   // Facts sit over a projection, so a newer one never wipes what the machine said about Git or the owner's decisions.
@@ -348,6 +366,8 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
       // Cached data paints the first frame but cannot seed command versions,
       // capabilities or a native event generation.
       if (!registered && !versions.size) batch(() => {
+        const p = update.slice.project;
+        setSavedProjects(held => new Map(held).set(p.id, p.repository));
         setProjected(current => applyFacts(applyProjection(current,{kind:"projection",scope:"project",version:"0",slice:update.slice}),update.facts));
         setReady(true);
       });
@@ -426,7 +446,11 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
   const sends = createSends(state, (command: WorkspaceCommand): Promise<CommandReceipt> => self.dispatch(command));
   const self = {
     sends,
-    mode: port.mode, state, index, ready, readIssue, machineLoaded, machineIssue, modelsPending, modelsIssue,
+    pendingRequest: (command: WorkspaceCommand) => pendingRequests().has(commandKey(command)),
+    pendingTask: (type: "start_task" | "close_task" | "accept_result", taskId: string) =>
+      [...pendingRequests().values()].some(c => c.type === type && c.taskId === taskId),
+    savedView: (project: Pick<WorkspaceState["projects"][number], "id" | "repository">) => savedProjects().get(project.id) === project.repository,
+    mode: port.mode, state, index, ready, readProjects, readIssue, machineLoaded, machineIssue, modelsPending, modelsIssue,
     /** The composer's lists are known: the machine answered and is not still fetching the models. Until then an empty list means "not yet". */
     optionsKnown: () => machineLoaded() && !modelsPending(),
     /** Storage, retention, worktrees, the version and GitHub CLI have arrived. Until then a screen that shows them says they are loading. */
@@ -496,10 +520,11 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
       if (!port.readWorkerActivity) return Promise.reject(new Error("Older activity is not available on this machine."));
       return track(port.readWorkerActivity(taskId, workerId, cursor));
     },
+    readCommandOutput: port.readCommandOutput?.bind(port),
     /** Reads a task's conversation again after a read that did not complete. */
     retryHistory: (taskId: string) => port.retryHistory?.(taskId),
     /** Reads the next older part of a conversation of which only the latest part is held. */
-    loadEarlierHistory: (taskId: string) => port.loadEarlierHistory?.(taskId),
+    loadEarlierHistory: (taskId: string, showAllTools?: () => boolean) => port.loadEarlierHistory?.(taskId, showAllTools),
     readReport: (taskId: string, reportId: string, cursor?: string) => {
       if (!port.readReport) return Promise.reject(new Error("Reports are not available on this machine."));
       return track(port.readReport(taskId, reportId, cursor));
@@ -511,10 +536,14 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
     },
     rememberSource,
     /** A port with no writes has no editor, and Code stays a viewer. */
-    canEdit: () => port.saveFile !== undefined && can(FEATURES.editFiles),
+    codeLease: withheld.has(FEATURES.editFiles) ? undefined : port.codeLease,
+    codeLanguage: () => can(CODE_LANGUAGE) ? port.codeLanguage : undefined,
+    canEdit: () => !!port.codeLease && can(FEATURES.editFiles),
     readFile: (checkoutId: string, file: string): Promise<FileRead> => port.readFile?.(checkoutId, file) ?? Promise.resolve({ text: null }),
     /** A commit or pull request text written from the task's changes, or null when this port has none. */
     draftIntegrationText: (request: IntegrationTextRequest): Promise<IntegrationText | null> => port.draftIntegrationText?.(request).catch(() => null) ?? Promise.resolve(null),
+    draftCheckoutCommit: (request: Parameters<NonNullable<WorkspacePort["draftCheckoutCommit"]>>[0]) => port.draftCheckoutCommit?.(request).catch(() => null) ?? Promise.resolve(null),
+    draftPushSummary: (request: Parameters<NonNullable<WorkspacePort["draftPushSummary"]>>[0]) => port.draftPushSummary?.(request).catch(() => null) ?? Promise.resolve(null),
     /** Bytes of one picture, video or sound; a port without them shows the file as not viewable. */
     readMedia: (checkoutId: string, file: string): Promise<FileRead> => port.readMedia?.(checkoutId, file) ?? Promise.resolve({ text: null, reason: "Viewing this file is not available here." }),
     /** The project's own skills for a composer's `/` list; null when this port has no such read or it failed. */
@@ -524,7 +553,6 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
       const read = await port.listFolders?.(checkoutId, request);
       return { overview: read?.overview ?? null, folders: Array.isArray(read?.folders) ? read.folders : [] };
     },
-    saveFile: (checkoutId: string, file: string, text: string, revision: string | null): Promise<FileSaveResult> => track(port.saveFile?.(checkoutId, file, text, revision) ?? Promise.resolve({ outcome: "refused", message: COPY.notOffered })),
     dispatch(command: WorkspaceCommand, opts: { quiet?: boolean } = {}): Promise<CommandReceipt> {
       const settle = (result: CommandReceipt) => {
         if (command.type === "accept_result") setAcceptanceIssue(result.ok ? null : { taskId: command.taskId, message: result.message });
@@ -544,6 +572,10 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
         if (held) installFacts(held);
       }
       const envelope: CommandEnvelope = { requestId: id, operation: command.type, expectedVersion: latest, payload: command };
+      const runFromHold = command.type === "run_sprint"
+        ? projected().sprints.find(s => s.id === command.sprintId)?.automaticQueue?.holdId
+        : undefined;
+      const showPending = Object.hasOwn(REQUESTING, command.type);
       const work = port.command(envelope).catch((): CommandReceipt => ({ requestId: id, ok: false, outcome: "unknown_outcome", message: UNKNOWN_OUTCOME })).then(result => {
         // A title job only starts: it changes nothing a read could confirm now. The task shows its description label until
         // the job ends, and then the port rereads that project (an ordinary refresh, never "Updating confirmed state").
@@ -554,7 +586,12 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
           sprints: state.sprints.map(s => {
             if (!("sprintId" in command) || s.id !== command.sprintId) return s;
             if (command.type === "rename_sprint") return {...s,title:command.title};
-            if (command.type === "run_sprint") return {...s,queueState:"running",pauseReason:null};
+            if (command.type === "run_sprint") {
+              // The patch receipt acknowledges a start, not a hold published by a later scheduler pass.
+              const hold = s.automaticQueue?.holdId;
+              if (s.queueState === "paused" && hold && hold !== runFromHold) return s;
+              return {...s,queueState:"running",pauseReason:null};
+            }
             if (command.type === "pause_sprint") return {...s,queueState:"paused",pauseReason:"Paused by you"};
             if (command.type === "set_run_mode") return {...s,runMode:command.runMode};
             return s;
@@ -578,8 +615,12 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
         }
         sends.settle(id, result);
         return settle(result);
-      }).finally(() => { running.delete(key); });
+      }).finally(() => {
+        running.delete(key);
+        if (showPending) setPendingRequests(held => { const next = new Map(held); next.delete(key); return next; });
+      });
       running.set(key, work);
+      if (showPending) setPendingRequests(held => new Map(held).set(key, command));
       return track(work);
     },
   };

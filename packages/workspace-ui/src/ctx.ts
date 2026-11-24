@@ -53,7 +53,7 @@ export type WindowChrome = {
 };
 
 /** What a phone knows of the one machine its workspace shows. The phone has no machine of its own. */
-export type PhoneMachineView = { name: string; state: "connecting" | "connected" | "offline"; path: "direct" | "relay" | "unknown" | null; lastConnectedAt: number | null };
+export type PhoneMachineView = Omit<import("./phone-shell").PhoneMachine, "id">;
 /**
  * A phone around the shared interface: no tabs, no window controls, a drawer for the sidebar, and touch sizes. The machine
  * sheet and the phone's own settings belong to the phone shell, so the workspace only asks it to open them.
@@ -78,11 +78,15 @@ export type PhoneWorkspace = {
 export type Shell = { kind: "desktop" } | PhoneFrame;
 
 export type Ws = {
+  /** The local host's explicit handoff for links in rendered text. */
+  openResultTarget?: (target: import("./result-links").ResultTarget) => Promise<void>;
   /** The shell around the interface. A phone has no tab strip, terminal, editor or shortcut hints. */
   shell: Shell;
   /** A keyboard hint, or nothing where there is no keyboard to speak of. */
   keys: (hint: string) => string | undefined;
   notify?: import("./notification-target").Notify;
+  /** Which sidebar rows changed since the owner last opened them. Absent where no workspace keeps track (a lone screen in a test). */
+  unseen?: import("./unseen").Unseen;
   store: WorkspaceStore; router: Router; panels: Panels; theme: Theme;
   /** Open files and the owner's unsaved text, above every screen. */
   buffers: Buffers;
@@ -98,6 +102,9 @@ export type Ws = {
   settings: SettingsState;
   /** Screens with nothing to inspect turn the Inspector off, with the reason on its toggle. */
   inspectable: Accessor<boolean>;
+  reworkIntent: Accessor<{ taskId: string } | null>;
+  returnForRework: (taskId: string) => void;
+  dismissRework: () => void;
   /** Archive a Done task: straight to the Archive, with its work kept and no question. */
   archiveTask: (taskId: string) => void;
   run: (command: WorkspaceCommand) => Promise<CommandReceipt>;
