@@ -78,12 +78,6 @@ html:not([data-keyboard]) [data-placed-focus] { --focus-line: 1px solid var(--fg
 .ws-card-age { display: inline-flex; align-items: center; gap: 5px; }
 .ws-card-age .i { flex: none; }
 
-/* A card crossing to another column. Motion is off for those who ask, and then the card is simply there. */
-.ws-fly { position: fixed; z-index: 30; margin: 0; pointer-events: none; }
-.board-wrap[data-flying] { overflow: hidden; }
-.board-wrap[data-flying] .col { overflow: hidden; }
-.board-wrap[data-flying] .col[style*="--col-w"] .col-b { min-width: var(--col-w); }
-
 /*
  * The pressed control carries its own loading state. Its box never changes, and a quick action shows nothing at all.
  * The label and icon stay readable, so the button never seems to vanish: a short bar sweeps along its lower edge instead.
@@ -110,6 +104,7 @@ html:not([data-keyboard]) [data-placed-focus] { --focus-line: 1px solid var(--fg
 .v-inner { position: relative; flex: none; display: flex; flex-direction: column; }
 .ws-list { display: block; flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: 0 12px; }
 .ws-list .lrow { border-top: 0; box-shadow: inset 0 1px 0 var(--line); }
+.lrow-shell { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
 .lrow[aria-current="true"] { background: var(--bg-selected); }
 .ws-list-h { display: flex; align-items: center; gap: 8px; height: 42px; margin: 0; padding-top: 14px; font-size: var(--t-sec); font-weight: 500; }
 .ws-list-h .n { font-weight: 400; color: var(--fg-3); }
@@ -120,6 +115,13 @@ html:not([data-keyboard]) [data-placed-focus] { --focus-line: 1px solid var(--fg
 
 .ws-filter { width: 200px; height: 28px; }
 .ws-slot { min-height: 16px; margin-top: -8px; }
+.ws-request-status { min-block-size: 1lh; font-size: var(--t-sec); line-height: 1.35; color: var(--fg-2); }
+.card > .ws-request-status { padding-inline: 12px; }
+dialog > .ws-request-status { padding-inline: 16px; }
+.ws-request-label { display: inline-grid; }
+.ws-request-label > span { grid-area: 1 / 1; overflow-wrap: anywhere; }
+.ws-request-label > :is([data-hidden], .ws-request-size) { visibility: hidden; }
+.ws-request-size::before { content: attr(data-label); }
 
 /* Palette */
 dialog.ws-palette { margin: 12vh auto auto; max-height: 64vh; }
@@ -149,7 +151,7 @@ dialog.ws-picker { height: min(460px, 64vh); border: 1px solid var(--line-strong
 
 /* Rejected actions float above the layout, so nothing moves, and they never take focus. */
 .ws-receipt { position: fixed; left: 50%; bottom: 20px; z-index: 40; transform: translateX(-50%); max-width: min(560px, calc(100vw - 48px)); padding: 8px 12px; border-radius: var(--r-menu); background: var(--bg-raised); box-shadow: var(--shadow-menu); font-size: var(--t-sec); line-height: 18px; color: var(--fg); }
-.ws-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.ws-live, .ws-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 /* Task session. The mockups keep state in body data attributes; the app sets the same ones, so their layout rules apply as is. */
 .note-panel.task-panel { align-items: center; justify-content: center; }
@@ -196,6 +198,10 @@ input.chk { display: inline-block; min-height: 0; }
 .dc.dc-done > .qa { border: 1px solid var(--warn-line); border-radius: var(--r-card); background: var(--warn-tint); }
 .dc-send { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 8px 8px; }
 .dc-opts .opt .t { flex: 1 1 auto; min-width: 0; }
+.dc-opts .ws-ask-option { position: relative; cursor: pointer; }
+.ws-ask-option .ws-ask-radio { position: absolute; inset: 0; width: 100%; border: 0; border-radius: inherit; background: transparent; cursor: inherit; }
+.ws-ask-option a { position: relative; z-index: 1; }
+.dc-opts .ws-ask-option.ws-ask-disabled { cursor: default; }
 /* Answers that explain what they do: one full-width row each, the label over its consequence, wrapping as text does and never
    wider than the card. Block flow, not grid or flex: WebKit sizes a wrapping button from its label's narrowest form, one word a line. */
 .dc-opts.dc-opts-rows { display: block; }
@@ -291,6 +297,11 @@ textarea[data-grow] { max-height: 40vh; }
 .ws-flush { padding: 0; }
 /* The editor scrolls itself, so its frame never does. */
 .ws-editor { overflow: hidden; }
+.ws-code-diagnostics { flex: none; max-height: min(25vh, 180px); overflow: auto; padding: 4px 10px; border-bottom: 1px solid var(--line); color: var(--fg-2); font-size: var(--t-cap); }
+.ws-code-diagnostics summary { cursor: pointer; }
+.ws-code-diagnostics ul { list-style: none; margin: 4px 0 0; padding: 0; }
+.ws-code-diagnostics .res-hit { width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.ws-cm .cm-content[contenteditable="false"]:focus-visible { outline: var(--focus-line); outline-offset: -1px; }
 .ws-cm, .ws-cm .cm-editor { height: 100%; }
 /* The caret is the focus mark here, also for keyboard movement, which every arrow key in a file is. */
 .ws-cm .cm-content:focus, .ws-cm .cm-content:focus-visible { outline: none; }
@@ -439,8 +450,6 @@ textarea[data-grow] { max-height: 40vh; }
 .gv-map .m-unknown { fill: none; stroke: var(--idle); stroke-width: 1; }
 .gv-map .m-match { fill: var(--fg); }
 .gv-map .mv { fill: var(--bg-hover); stroke: var(--fg-2); stroke-width: 1; vector-effect: non-scaling-stroke; }
-.gv-tip { position: absolute; z-index: 3; max-width: 340px; padding: 5px 8px; border-radius: 6px; background: var(--bg-raised); box-shadow: var(--shadow-float); font-size: var(--t-cap); line-height: 16px; color: var(--fg); pointer-events: none; white-space: normal; overflow-wrap: anywhere; }
-.gv-tip .s { display: block; color: var(--fg-2); }
 
 .gv-band.l-bar { border-top: 1px solid var(--line); font-size: var(--t-cap); }
 .gv-band .tx { flex: none; color: var(--fg); font-variant-numeric: tabular-nums; }
@@ -691,6 +700,11 @@ input, textarea, [contenteditable="true"] { -webkit-user-select: text; user-sele
 .proj, .task-row { min-width: 0; max-width: 100%; }
 .proj > .trunc { flex: 1 1 0; min-width: 0; }
 .proj .sig { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A change the owner has not opened yet: a stronger title and a small accent mark after the status, never colour alone.
+   The row's name says "new update" too. It goes once the row is opened. */
+.task-row.unseen > .trunc, .task-row.unseen .sb-row-title > .trunc:first-child, .proj.unseen > .trunc { font-weight: 600; color: var(--fg); }
+.sb-new { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--accent-bright); }
+@media (forced-colors: active) { .sb-new { background: CanvasText; } }
 .sb-foot { padding: 0 8px; }
 
 /* A path or a name is one piece: it is cut, never broken across lines. */
@@ -783,6 +797,10 @@ input.chk { margin-top: 1px; }
 
 .ev-detail .args { max-height: 280px; overflow: auto; }
 .ws-step-detail { display: grid; gap: 8px; min-width: 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r-ctl); overflow-wrap: anywhere; }
+.ws-step-detail > section { min-width: 0; }
+.ws-step-detail > section .ev-dh { padding: 0 0 4px; color: var(--fg-2); }
+.ws-step-detail > section .ws-step-acts { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 8px; }
+.ws-step-detail > section .ws-copy-btn { opacity: 1; margin: 0; color: var(--fg-2); }
 .ws-step-detail pre { margin: 0; white-space: break-spaces; }
 .ws-step-detail .args { margin: 0; white-space: pre-wrap; max-height: 280px; overflow: auto; }
 .ws-step-path { text-align: left; overflow-wrap: anywhere; }
@@ -800,7 +818,18 @@ input.chk { margin-top: 1px; }
 .d-goal.ws-goal-open { max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; }
 .ws-goal-toggle { display: block; margin: 2px 0 4px; font-size: var(--t-sec); }
 .card-error { padding: 8px 12px; color: var(--warn); overflow-wrap: anywhere; }
-.ws-drag-card { position: fixed !important; left: 0; top: 0; margin: 0 !important; box-sizing: border-box; pointer-events: none; z-index: -1; transform: none !important; contain: layout paint; }
+/* The snapshot layer never takes up room or receives input. The GTK fallback
+   shows the same clone above the workspace instead of handing GTK its pixels. */
+.ws-drag-layer, .ws-drag-blank { position: fixed; left: 0; top: 0; pointer-events: none; z-index: -1; }
+.ws-drag-layer { width: 0; height: 0; }
+.ws-drag-blank { width: 1px; height: 1px; }
+.ws-drag-layer.ws-drag-overlay { z-index: 50; }
+.ws-drag-layer > .ws-drag-preview {
+  position: absolute; left: 0; top: 0; margin: 0; box-sizing: border-box;
+  min-width: 0; min-height: 0; max-width: none; max-height: none;
+  transform: none; transition: none; contain: layout paint;
+}
+.ws-drag-preview.ws-tab:not([data-on]) { background: var(--bg-sidebar); }
 /* Semantic report blocks reuse the workspace type, spacing and neutral boundaries. */
 .ws-result-copy { min-width: 0; overflow-wrap: anywhere; }
 .ws-result-copy :is(h1, h2, h3, h4, h5, h6, p, pre, ul, ol, blockquote) { margin: 0; }
@@ -814,8 +843,27 @@ input.chk { margin-top: 1px; }
 .ws-result-copy ol { list-style: decimal outside; }
 .ws-result-copy li + li { margin-top: 4px; }
 .ws-result-copy pre { white-space: pre-wrap; }
-.ws-result-copy blockquote { display: grid; gap: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r-ctl); }
-.ws-result-copy a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
+/* Markdown reads the same in the conversation and in the writing area: these tokens serve both. Tints mix the text colour
+   into whatever surface holds them, so a code panel, an inline code chip or a quote reads on a bubble, a card and a composer alike. */
+.ws-result-copy, .mc-field { --md-tint: color-mix(in srgb, var(--fg) 5%, transparent); --md-chip: color-mix(in srgb, var(--fg) 9%, transparent); --md-line: color-mix(in srgb, var(--fg) 14%, transparent); }
+.ws-result-copy blockquote { display: grid; gap: 8px; padding: 8px 12px; border: 1px solid var(--md-line); border-radius: var(--r-ctl); color: var(--fg-2); }
+.ws-result-copy :not(pre) > code { padding: 0 .3em; border-radius: 4px; background: var(--md-chip); }
+.ws-result-copy del { color: var(--fg-2); text-decoration-color: var(--fg-3); }
+.ws-result-copy hr { height: 0; margin: 12px 0; border: 0; border-top: 1px solid var(--md-line); }
+.ws-result-copy > hr:nth-child(n+2), .ws-result-copy > hr + * { margin-top: 12px; }
+/* A code block is one panel: a header line with the fence's language and the block's own Copy, then the lines as written. */
+.ws-code { min-width: 0; border: 1px solid var(--md-line); border-radius: var(--r-ctl); background: var(--md-tint); overflow: hidden; white-space: normal; }
+.ws-code-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; padding: 0 4px 0 10px; border-bottom: 1px solid var(--md-line); font-size: var(--t-cap); line-height: 16px; color: var(--fg-3); white-space: nowrap; }
+.ws-code-lang { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); }
+.ws-code-tools { display: inline-flex; align-items: center; gap: 2px; flex: none; margin-left: auto; }
+.ws-code-copy { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 6px; border-radius: var(--r-ctl); font-size: var(--t-cap); line-height: 16px; font-weight: 400; color: var(--fg-2); white-space: nowrap; }
+.ws-code-copy:hover { background: var(--bg-hover); color: var(--fg); }
+.ws-code pre { margin: 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/20px var(--mono); color: var(--fg); }
+.ws-result-copy a, .ws-ask-option a, .dc-answer a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
+.ws-path-pop { width: max-content; max-width: min(360px, calc(100vw - 16px)); box-sizing: border-box; margin: 0; padding: 10px; }
+.ws-path-pop > div { display: grid; gap: 8px; }
+.ws-path-value { overflow-wrap: anywhere; user-select: text; }
+.ws-path-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 /* An image reference is a labelled chip: the window never loads a picture from a message. */
 .ws-result-copy .ws-img-ref { display: inline-block; max-width: 100%; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--r-ctl); background: var(--bg-raised); font-size: var(--t-cap); color: var(--fg-2); text-decoration: none; overflow-wrap: anywhere; vertical-align: baseline; }
 .ws-result-copy a.ws-img-ref { color: var(--primary); }
@@ -823,8 +871,8 @@ input.chk { margin-top: 1px; }
 /* A table keeps its columns readable and scrolls sideways inside its own box instead of squeezing cells: words break only
    between words, a column is as wide as its content, from its longest word up to a reading width, and a table wider than the message scrolls. */
 .ws-result-table table { width: max-content; min-width: 100%; border-collapse: collapse; text-align: left; }
-.ws-result-table :is(th, td) { padding: 6px 8px; border: 1px solid var(--line); vertical-align: top; min-width: 4ch; max-width: 60ch; overflow-wrap: break-word; word-break: normal; }
-.ws-result-table th { font-weight: 600; background: var(--bg-input); }
+.ws-result-table :is(th, td) { padding: 6px 8px; border: 1px solid var(--md-line, var(--line)); vertical-align: top; min-width: 4ch; max-width: 60ch; overflow-wrap: break-word; word-break: normal; }
+.ws-result-table th { font-weight: 600; background: var(--md-tint, var(--bg-input)); }
 /* A message's copy control keeps its own caption row under received text, or sits on the message's meta line, so the
    message text never moves. It shows on hover or keyboard focus (rule below). The 24px button keeps the caption line's height with negative block margins. */
 /* The note opens on the side away from the edge the button keeps, so "Copied" never moves the button. */
@@ -939,7 +987,18 @@ button.step-t { text-align: left; font: inherit; }
 .ecrumb .ws-save-state { min-width: 64px; }
 /* A narrow editor gives up the file's folder before its name, then the words of its open-elsewhere button, which keeps its icon
    and its name. */
+.code-body > .ed { container: code-editor / inline-size; }
 .ecrumb.l-toolbar { container: ecrumb / inline-size; }
+@container code-editor (max-width: 390px) {
+  .ecrumb.l-toolbar[data-bar="toolbar-sm"] { height: auto; min-height: var(--toolbar-h-sm); flex-wrap: wrap; gap: 4px; padding-block: 4px; }
+  .ecrumb .l-z-mid { flex: 1 0 100%; }
+  .ecrumb .l-z-end { width: 100%; flex-wrap: wrap; gap: 4px; }
+  .ecrumb .ws-save-state { min-width: 0; text-align: left; }
+}
+@media (max-width: 600px) {
+  .code-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 140px) minmax(0, 1fr); }
+  .code-body > .side-pane { border-right: 0; border-bottom: 1px solid var(--line); }
+}
 .ws-ext > .i { display: none; }
 @container ecrumb (max-width: 639px) { .ws-crumb > :is(.i, .ws-crumb-d) { display: none; } }
 @container ecrumb (max-width: 459px) { .ws-ext > .i { display: inline-block; } .ws-ext > .ws-ext-t { display: none; } .ecrumb .ws-ext { width: var(--ctl-h) !important; padding: 0; justify-content: center; } }
@@ -1071,6 +1130,11 @@ button.step-t { text-align: left; font: inherit; }
   .tb-actions > .tb-state, .tb-fixed > .ws-hide, .tb-main > .tb-facts { display: none; }
   .tb-actions { gap: 4px; }
   .crumbs > .cur { min-width: 48px; }
+  .tb-actions > .tb-rework { width: 28px; padding-inline: 0; }
+  .tb-rework > span { display: none; }
+}
+@container tb (max-width: 420px) {
+  .tb-rework + .tb-archive { display: none; }
 }
 /* The band's two split buttons, Open and Git: a fixed main half and a chevron for the menu that lists everything else. Their
    words give way to icons as the band narrows, then the ahead, behind and uncommitted counts beside Git; the controls themselves
@@ -1165,8 +1229,14 @@ button.step-t { text-align: left; font: inherit; }
    or the keyboard reaches it; a touch screen has neither and shows the queue itself. */
 .mc-delivery { position: relative; display: inline-flex; flex: none; }
 .mc .c-bar .mc-delivery > .ib[aria-pressed="true"] { background: var(--bg-selected); color: var(--fg); box-shadow: inset 0 0 0 1px var(--line-strong); }
-.mc-delivery > .mc-hint { position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 5; padding: 4px 8px; border-radius: var(--r-ctl); background: var(--bg-raised); box-shadow: var(--shadow-menu); color: var(--fg); font-size: var(--t-cap); font-weight: 400; line-height: 16px; white-space: nowrap; opacity: 0; pointer-events: none; }
-.mc-delivery > .ib:hover + .mc-hint, .mc-delivery > .ib:focus-visible + .mc-hint { opacity: 1; }
+.ws-tooltip-host { display: contents; }
+.ws-tooltip[popover] {
+  position: fixed; inset: auto; z-index: 60; margin: 0; box-sizing: border-box;
+  width: max-content; min-width: 0; max-width: min(320px, calc(100vw - 16px)); padding: 4px 8px;
+  border-radius: var(--r-ctl); background: var(--bg-raised); color: var(--fg); box-shadow: var(--shadow-menu);
+  font-size: 12px; line-height: 16px; overflow-wrap: anywhere; pointer-events: none;
+}
+.ws-tooltip[hidden], html[data-shell="phone"] .ws-tooltip { display: none; }
 .i-send{--m:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z'/%3E%3Cpath d='m21.854 2.147-10.94 10.939'/%3E%3C/svg%3E")}
 
 /* The shared message composer. Every control in its tools row has one box: 32 px at every width and with every pointer (a
@@ -1175,7 +1245,36 @@ button.step-t { text-align: left; font: inherit; }
 .mc { --ctl-h: 32px; container: mc / inline-size; }
 .mc > .mc-effect { padding: 12px 12px 0; font-size: var(--t-cap); line-height: 16px; color: var(--fg-2); overflow-wrap: anywhere; }
 .mc > .mc-effect strong { font-weight: 500; color: var(--fg); }
-.mc > textarea { min-height: 46px; padding: 12px 12px 0; }
+.mc > .mc-field > textarea { min-height: 46px; padding: 12px 12px 0; }
+/* The writing area shows its Markdown as it is typed. The field keeps the text, the caret, selection, input methods, undo and
+   paste; its own glyphs are transparent over a layer drawn from the same reading as the conversation (markdown-field.tsx),
+   which holds the same characters in the same places. Nothing in the layer may change a glyph's advance: bold is a stroke,
+   italic the face's synthesized slant, kerning and ligatures are off in both, and a panel reaches into the field's padding
+   with a matching negative margin, so every line wraps where the field wraps it. Sizes and the code face stay as the field's. */
+.mc-field { position: relative; min-width: 0; }
+.mc-field > textarea { position: relative; color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--fg); }
+.mc-field > textarea::placeholder { color: var(--fg-3); -webkit-text-fill-color: var(--fg-3); }
+.mc-field > textarea::selection { background: color-mix(in srgb, var(--run) 30%, transparent); }
+.mc-field > textarea, .mc-mirror { font-kerning: none; font-variant-ligatures: none; font-feature-settings: "kern" 0, "liga" 0, "calt" 0; }
+.mc-mirror { position: absolute; inset: 0; margin: 0; overflow: hidden; border: 0 solid transparent; white-space: pre-wrap; overflow-wrap: break-word; color: var(--fg); pointer-events: none; user-select: none; -webkit-user-select: none; }
+.mc-field[data-composing] > textarea { color: var(--fg); -webkit-text-fill-color: var(--fg); }
+.mc-field[data-composing] > .mc-mirror, .mc-field[data-composing] > .mc-mirror * { -webkit-text-fill-color: transparent; -webkit-text-stroke-color: transparent; text-decoration-color: transparent; }
+.mc-mirror .md-mark { color: var(--fg-3); }
+.mc-mirror :is(.md-bullet, .md-lang) { color: var(--fg-2); }
+.mc-mirror :is(.md-strong, .md-h, .md-th) { -webkit-text-stroke: .035em currentColor; }
+.mc-mirror .md-em { font-style: italic; }
+.mc-mirror .md-del { text-decoration: line-through; text-decoration-color: var(--fg-3); }
+.mc-mirror .md-del.md-mark { text-decoration: none; }
+.mc-mirror .md-code-span { border-radius: 4px; background: var(--md-chip); }
+.mc-mirror .md-link { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
+.mc-mirror .md-hr { background: linear-gradient(var(--md-line), var(--md-line)) center / 100% 1px no-repeat; }
+.mc-mirror .md-box { margin-inline: -6px; padding-inline: 6px; --md-edge: inset 1px 0 0 var(--md-line), inset -1px 0 0 var(--md-line); box-shadow: var(--md-edge); }
+.mc-mirror .md-box.md-first { border-top-left-radius: var(--r-ctl); border-top-right-radius: var(--r-ctl); box-shadow: var(--md-edge), inset 0 1px 0 var(--md-line); }
+.mc-mirror .md-box.md-last { border-bottom-left-radius: var(--r-ctl); border-bottom-right-radius: var(--r-ctl); box-shadow: var(--md-edge), inset 0 -1px 0 var(--md-line); }
+.mc-mirror .md-box.md-first.md-last { box-shadow: var(--md-edge), inset 0 1px 0 var(--md-line), inset 0 -1px 0 var(--md-line); }
+.mc-mirror .md-box-code { background: var(--md-tint); }
+.mc-mirror .md-box-quote { color: var(--fg-2); }
+.mc-mirror .md-box-quote .md-code { background: var(--md-tint); }
 .mc .c-bar { gap: 8px; row-gap: 8px; min-height: 0; padding: 8px 12px 12px; font-size: var(--t-sec); }
 .mc .mc-tools, .mc .c-bar > .c-route, .mc .c-bar > .c-end { gap: 8px; }
 .mc .mc-tools { display: flex; align-items: center; flex: none; }
@@ -1196,12 +1295,12 @@ button.step-t { text-align: left; font: inherit; }
 .mc-inline { box-shadow: none; }
 /* A comment being written is the shared composer itself, not a composer inside a comment box. */
 .cmt.cmt-edit { border: 0; background: none; }
-.mc-inline > textarea { min-height: 64px; font-size: var(--t-sec); }
+.mc-inline > .mc-field > textarea { min-height: 64px; font-size: var(--t-sec); }
 .dc-answer { margin: 0 8px 8px; box-shadow: none; }
-.dc-answer > textarea { min-height: 46px; font-size: var(--t-sec); }
+.dc-answer > .mc-field > textarea { min-height: 46px; font-size: var(--t-sec); }
 /* The answer line is always there and one line high, so choosing a long option never moves the page. The option shows it whole. */
 .dc-answer > .mc-effect { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.opt[aria-checked="true"] { border-color: var(--warn-line); background: var(--bg-raised); }
+.opt[aria-checked="true"], .opt.ws-ask-selected { border-color: var(--warn-line); background: var(--bg-raised); }
 .mc-fold { display: flex; justify-content: center; }
 .mc-fold .btn { height: 32px; background: var(--bg-raised); box-shadow: var(--shadow-float); }
 /* A narrow pane keeps every control, on two deliberate rows: model, effort and Settings, then the tools and the plane. */
@@ -1212,7 +1311,7 @@ button.step-t { text-align: left; font: inherit; }
   .mc .c-bar > .l-reason { order: 3; flex: 1 0 100%; margin: 0; text-align: start; }
 }
 /* A composer that cannot send now says why once, in its writing area; its tools stay in their row at their size. */
-.mc > textarea:disabled { min-height: 0; }
+.mc > .mc-field > textarea:disabled { min-height: 0; }
 
 /* A queued message is one row of same-size controls; on a narrow pane its text takes its own line above them. */
 .qrow { --ctl-h: 28px; gap: 8px; height: auto; min-height: 40px; padding: 5px 6px; }

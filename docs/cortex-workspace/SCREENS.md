@@ -18,7 +18,7 @@ Each screen needs loading, empty, offline/stale, permission denied, conflict and
 
 Built: a never-started task has **Edit task…** in its task menu ("…" in the title band) and its board/list menu. The dialog uses the shared composer (Attach, Voice, model/effort/settings and the plane labelled Save changes), plus title and checkout. Saved attachments must load first; a failed read has Retry. A stale save retains the draft and explains the refusal. Starting, pausing or failing a task never makes its original request editable again.
 
-A created sprint has **New task** and **Close sprint…** in its title band; a narrow title band moves both into the sprint's actions menu, so the queue control and the window's own controls stay in view. New task adds to the current sprint without starting work. Closing confirms that the sprint moves to Archive and its queue stops, while unfinished tasks stay in the project and running tasks continue; nothing is accepted, merged, cancelled or deleted. Archive has a Closed sprints section with retained summaries. Until it is closed, a sprint stays in the sidebar under its project; once its queue is complete it reads Done there, while its tasks may still wait to be finished. Running and paused queues also appear in Active work, with their Working, Review and Ready to merge tasks indented under the sprint. The project list also indents tasks under their sprint and shows at most five task and sprint rows combined, before the All link. See [the behavior and error contract](local-task-execution.md#editing-saved-tasks-and-closing-sprints).
+A created sprint has **New task** and **Close sprint…** in its title band; a narrow title band moves both into the sprint's actions menu, so the queue control and the window's own controls stay in view. New task adds to the current sprint without starting work. Closing confirms that the sprint moves to Archive and its queue stops, while unfinished tasks stay in the project and running tasks continue; nothing is accepted, merged, cancelled or deleted. Close sprint refuses while a member returned for rework is still open. Archive has a Closed sprints section with retained summaries. Until it is closed, a sprint stays in the sidebar under its project; once its queue is complete it reads Done there, while its tasks may still wait to be finished. Running and paused queues also appear in Active work, with their Working, Review and Ready to merge tasks indented under the sprint. The project list also indents tasks under their sprint and shows at most five task and sprint rows combined, before the All link. See [the behavior and error contract](local-task-execution.md#editing-saved-tasks-and-closing-sprints).
 
 ### Task Conversation
 
@@ -56,11 +56,12 @@ A created sprint has **New task** and **Close sprint…** in its title band; a n
 - Batch questions: questions asked together are one form. Every question is on view under "Question N of M" with its own options and answer box, and one Send answers button sends every answer at once as the one answer of their batch; it stays unavailable, with "Answer every question first: N of M answered", until each question has an answer. Once the service records the answers the form reads as answered and never offers the same questions again; a refused send keeps every chosen and typed answer and shows the reason, so the owner can send again. The answers read as given from the press, with "Sending the answers…", while their fields stay behind them; a refusal brings the fields back as they were, with the reason and Retry.
 - Long conversations open on their latest part. The Conversation opens at its end with the newest rows,
   read in at most four requests however long the task ran, and new rows keep arriving below as before.
-  While earlier conversation is not read, the top of the feed, below the task description, reads "Earlier
-  conversation is not shown." with Show earlier. Scrolling up to within one screen of the top does the
-  same. "Loading earlier…" stands there while the next part is read. The rows read are put above what is
-  on screen, and the row the reader looks at does not move. A failed read reads "Earlier conversation
-  could not be read:" with its reason and Retry. Once the first row is read the line is gone and the
+  If the boundary below the task description is on screen or within one screen above it, earlier
+  content loads automatically, even while following. This repeats as needed on opening, resizing or
+  scrolling up. **Show earlier** remains a fallback. "Loading earlier…" stays until there is more
+  conversation to show or the beginning is reached. The earlier content goes above the held rows
+  without shifting the reader's position. A failed read shows "Earlier conversation could not be
+  read:" with its reason and **Retry**; it does not keep retrying by itself. Once the first row is read the line is gone and the
   conversation reads exactly as a complete read shows it. Until then a message or a "Worked …" line that
   may have begun before the rows read is not shown. A settled question from before them is not shown at
   their top, and the follow pill does not count rows read above as new. A short conversation reads in one
@@ -106,7 +107,7 @@ A created sprint has **New task** and **Close sprint…** in its title band; a n
 
 | Area | Adoption |
 | --- | --- |
-| Startup, title band, sidebar, menus | One attention selector. Separate from it, Active work is a status list above Pinned and Projects, with no row limit. It shows this machine’s Working, Review and Ready to merge tasks across projects, grouped by status or under their in-progress sprint, never twice within the block. It is absent when there are no rows. One recovery message per incident. One next action in the title band; the state reads in the strip under the tabs, the sidebar and the Inspector, and the run is controlled from the composer. Repeated phase and resource strips are removed. |
+| Startup, title band, sidebar, menus | One attention selector. Separate from it, Active work is a status list above Pinned and Projects, with no row limit. It shows this machine’s Working, Review and Ready to merge tasks across projects, grouped by status or under their in-progress sprint, never twice within the block, and a Finished group for tasks and sprints that finished since the owner last opened them. It is absent when there are no rows. One recovery message per incident. One next action in the title band; the state reads in the strip under the tabs, the sidebar and the Inspector, and the run is controlled from the composer. Repeated phase and resource strips are removed. |
 | Inspector and detail panels | Closed by default in a task Conversation, behind one Details entry. Duplicate Accept and progress summaries are removed while the current item is visible. Details dock beside the conversation or replace it; they never overlay it. |
 | Home | Built: one "Needs you" list in which each task waiting on the owner appears once, first its question, permission or conflict, then a result to review (with its check counts), then accepted work to finish; each line opens the task. The title band counts the same list. Projects follow. Engine limits are in the sidebar and the machine's Connections, no longer on Home. |
 | Inbox | Built: Home's Needs you list for every connected machine, in the same order: a question, permission or conflict, and each sprint planning question; then a result to review, with its check counts; then accepted work to finish. Each task appears once. A question, permission or result opens the task's conversation, where it is answered or accepted inline; a conflict opens its resolution; a planning question its sprint's planning. No separate answering interface. The sidebar's Inbox count is this list. |
@@ -154,6 +155,7 @@ when the service clears the diagnostic, and the warning strip disappears on reco
 | About 390 px | The same conversation, decision and result logic at full width. 16 px gutters, full-width question choices, and the desktop's compact controls (28 px, 32 px in a composer or dialog) with 8 px gaps: a narrow desktop window is not enlarged for touch. Larger touch controls apply only in the phone shell (see Phone shell below). No sideways page scroll. | Full-width replacement view, or a true modal for confirmations. Back and Escape return to the exact task or item. |
 
 - Active work fits the 260 px sidebar and uses the same layout in the phone drawer. A long title and the project name on its own secondary line truncate independently; the short status stays beside them.
+- Unseen changes: a sidebar row whose task or sprint reached a state the owner has not opened since reads as new, with a semibold title, a small accent mark after its status word and "new update" in its accessible name. That state is a question, permission, result, acceptance, conflict or queue hold waiting on the owner; a run that ended (Done, closed, failed or cancelled), whoever ended it and wherever, in another window or client too, and whichever column it sits in; a sprint's planning question, ready plan (its row reads Plan ready) or planning failure; or a finished sprint. Another question, permission or hold in place of the one opened is a new change even when its words repeat. Opening the task or sprint clears the mark; its next such change brings it back. Whatever is open on screen is seen as it changes. A finished task stays listed in its project and in a Finished group of Active work until it is opened, and while it is open; a finished sprint listed there holds its tasks under it, so none of them is listed again on its own. A sprint row also carries the mark for its tasks whose rows are not listed, and a project row for the changes in it that are not on view, all of them while it is folded. Only a change the app observed reads as new: on the first run and for a project the app has not taken in before, the present state counts as seen. Once a project has been taken in, a task or sprint that appears in it later reads as new when it waits on the owner or has finished, also one created and finished or waiting while the app was closed, and so does a row that changed while the app was closed. What was seen is kept in this app's local storage across reloads as row and project ids with fixed-size state codes, never task text, for at most 1000 rows (those changed longest ago go first) and 200 projects. A row that bound drops leaves a short fixed-size code of its id with its project (at most 10000 codes in all), so after a reload it still counts as seen rather than new; a project whose codes do not fit, or one the project bound drops, takes its unremembered rows as seen once more, so the bounds never flood the sidebar. A task or sprint gone from a project whose read confirmed what it holds, an empty one too, takes its record along; an unreadable project keeps them.
 - Fit is measured from the pane width. A space-driven collapse never overwrites the remembered panel preference, and the panel the owner opened last wins.
 - Long check commands and diffs scroll inside their own box; prose wraps. On a phone, tables become labelled rows (built for the settings and orchestration tables: below 560 px of table width each row stacks its cells, each under its column's name, and the header row goes; the tool-access matrix keeps its columns and scrolls in its own box).
 - Labels: a control's, tab's, chip's, badge's or table head's label stays on one line and its capitals sit in the middle of its box within 1 px. A bar whose left group and actions do not fit on a phone puts the group on its own line. The title band's counts are shown whole or not at all, least needed first.
@@ -294,7 +296,7 @@ The local desktop slice connects these conversation controls to the real service
 - All work names sprints on the board and the list: each column and status group shows standalone tasks, then each sprint under its name, and a card repeats the sprint's name in its footer. The heading leads to that sprint.
 - A task waiting for the owner, in Needs you or Review, is tinted on the board and the list and marked in the sidebar. Same-branch and non-Git results use Finish in the sidebar; the inspector describes committing or closing, not merging. Review the diff opens the result-bound Accept control before the separate commit or merge confirmation.
 - Status and reason text is plain language everywhere (sidebar, board, task header, queue strip, notifications, check rows): a recorded reason code reads as a sentence, a code the app does not recognise reads as a generic sentence, and no internal code or underscore is ever shown. A sidebar row always keeps the task title and shows its short status in a separate word beside it; the longer reason is read in the task itself. Ready to merge is a group heading; its rows still read Finish or Merge. The current sprint is highlighted in both places it appears, instead of its project. The project is highlighted in All work and Standalone scopes. On a task page, the visible links for that task are highlighted instead of the sprint. One table (`packages/workspace-ui/src/status-text.ts`) holds the wording. A code with a machine detail (`coordinator_prompt_failed:RuntimeError`, compared without regard to case) reads as its code's sentence and never shows the detail. Inside the task, the generic sentence never adds "Open the task for details".
-- A card that changes status crosses to its new column instead of vanishing, and a folded column opens around it. Reduced motion moves it at once. A manual drag uses the card’s measured size. Start stays on the pressed card through background reads and shows a refusal there, with a retry path; sprint queue mode does not silently disable an otherwise startable draft.
+- A card that changes status crosses to its new column instead of vanishing, and a folded column opens around it. Reduced motion moves it at once. A manual drag keeps the card, queued message or workspace tab at its on-screen size. In the Linux desktop app the preview follows the pointer inside the window; elsewhere supported browsers use native drag feedback. Start stays on the pressed card through background reads and shows a refusal there, with a retry path; sprint queue mode does not silently disable an otherwise startable draft.
 - Every action shows its loader on the control that was pressed, after a short delay so a quick action shows nothing, and that control takes no second press until the action ends. Enter in a composer counts as pressing its send button, and an action from a menu shows on the control that opened the menu.
 - A machine-persisted queue, sent by the service at the coordinator's next step. Edit removes an unsent item and restores the composer; Send now captures steering even during a running turn. Captured text is not replayed automatically after a lost response. Each queued row is one line: its text shortens and opens whole on a press or Enter, and Edit, Send now and remove keep their own box. The row shows no attachment chips; the message keeps its files, which show again in Edit and open from the conversation once sent.
 - Live and finished workers from retained runtime rows, including prose retained at tool boundaries, result summaries, the whole public report when it is opened (retrieved in bounded pages, never shown in part) and all available combined task/command/guidance history automatically loaded by attempt using byte-bounded continuation pages, including older guidance attachments and delivery status. There is no Load older control; a failed read retains history and offers Retry. Following and the reader's scroll anchor stay unchanged while pages arrive. Checkout locations say Project folder or Worktree separately from the branch; the project title chip shows the current open branch, not the Git default.
@@ -426,7 +428,11 @@ Live worker view:
   previews, while inline and fenced code retain their real backslashes. Character references (`&amp;`,
   `&#32;`, `&#x20;`) read as the characters they stand for, as text, and stay literal in code; an image
   reference reads as an "Image: <name> (<host · file>)" chip, a link only for an http(s) address, and no
-  picture is loaded from a message. Worker notes span the content columns; internal message prefixes are
+  picture is loaded from a message. Messages, results and reports read Markdown headings, bold, italic
+  (`*x*`, `_x_`), strikethrough (`~~x~~`), inline code, links, lists, quotes, tables and rules (`---`). A
+  fenced code block is one panel with a header naming the fence's language, when it names one, and its own
+  Copy, which copies the block's lines exactly as written, without the fences, and then says "Copied" or
+  "Not copied"; the message's own Copy still copies the whole Markdown source. Worker notes span the content columns; internal message prefixes are
   not displayed. Tool labels, icons, Worked summaries and which calls appear reuse the Paseo integration’s
   presentation functions, so both clients show the same rows; an engine's raw tool name never reaches the
   screen, and an unknown tool gets Paseo's humanized name. Every tool the runtime advertises has its own
@@ -523,11 +529,25 @@ A composer at the bottom of a running worker's view reads "Message <role>…". I
   the group named "Task composer". The title band has no state chip and no Start, Stop or Resume (the
   strip under the tabs, the sidebar and the Inspector say the state; the Inspector names the next step);
   it keeps the one next step that is on the screen nowhere else (Answer, Review changes, Continue, the
-  closing in Ready to merge, Close task… for a failed or cancelled run, Archive for a closed task), the
+  closing in Ready to merge, Close task… for a failed or cancelled run, Archive for a closed task,
+  and Return for rework where eligible), the
   Git and Open buttons and the task menu, which keeps Start, Stop, Resume and Continue. A machine with no
   message composer keeps Start, Stop and Resume in the title band. A sprint's planning composer works the
   same way: Stop cancels planning and Resume continues it. Stop opens the stop dialog, which offers Stop
   and Continue, Close as is, and Cancel task; see [CW-U08](backlog/CW-U08.md).
+
+### Return for rework
+
+For eligible closed tasks, including Done and **Closed, not verified**, choose **Return for rework**
+from the title band, task menu, or Board or List card menu. Dragging a card out of Done does not reopen it.
+The action opens the shared message composer in Chat and focuses the message box. Its effect line
+reads “Sending reopens this task for rework”. Enter a message (attachments are optional), then choose
+**Send and reopen**. This is not ordinary **Request changes** or a late chat message.
+
+If the app knows a dependent sprint task already started on the old result, it asks you to confirm with
+**Cancel** or **Send and reopen**. Reopening does not stop or change those dependent tasks. Cancel or
+a refusal keeps your draft. An archived task has no rework action: restore it first. See
+[rework eligibility and behavior](local-task-execution.md#return-for-rework).
 
 ## Voice input
 
@@ -615,16 +635,16 @@ Several cards stack, oldest first. They are read every 5 seconds while the machi
 - No focus or press highlight. A click, a press, a route change or a dialog opening leaves no outline, ring, border change, fill or accent on any control, and a text field shows only its caret. Selection that means something (the current page, the open task) stays: it uses a neutral fill, a visible text or icon marker and `aria-selected`; a fill alone does not meet the contrast needed for selection. Selected labels never change font weight or size, and selection never shifts layout ([CW-R34](requirements.md)). There are no coloured side stripes. Only the running marker pulses, and it is static under reduced motion.
 - Keyboard position: moving with Tab or an arrow key draws one quiet 1 px neutral line around the focused control (`--focus-line`), and a text field shows only its caret. The only focus mark is that line, and the next pointer press clears it. A control that a dialog or panel focused as it opened shows the same line, where the keys act, until the next press. A row that fills its scroller or list draws the line just inside itself, so nothing cuts it. The app records the last way of moving in `data-keyboard` on the root element, because the engine's `:focus-visible` also matches after a click that opens a dialog. Checkboxes and radios are drawn by the stylesheet, so no native focus ring can appear on them.
 - Panel toggles: each icon that opens a panel (sidebar, worker pane, terminal, inspector) shows that panel's real state by colour alone: lighter while the panel is open (`--panel-on`), darker while it is closed (`--panel-off`), in both themes. Hover and click add no fill or outline, the icon never moves, and a closed panel always reopens from the same icon. On a screen with no such panel the toggle is not shown and its place stays empty, so the band never shifts. The worker pane toggle is shown only where it controls the pane: the Dialog tab at 1800 px and wider.
-- Hover titles: no element uses a native title, so nothing pops up under the pointer. A control that cannot be used says why in visible text: in its bar's reason slot beside the controls or, where the bar has no slot, in a box that a press or keyboard focus opens beside the control. A composer has no reason slot: nothing is written beside its send button, and each of its controls (send, Attach, Voice, model, effort, Settings) says why in its own box. The reason is never drawn inside the control and never opens on hover. A control that nothing could ever use on this screen is not offered at all.
+- [Desktop tooltips](#desktop-tooltip-inventory) are selective; they never use native titles. A control that cannot be used says why in visible text: in its bar's reason slot beside the controls or, where the bar has no slot, in a box that a press or keyboard focus opens beside the control. A composer has no reason slot: nothing is written beside its send button, and each of its controls (send, Attach, Voice, model, effort, Settings) says why in its own box. The reason is never drawn inside the control and never opens on hover. A control that nothing could ever use on this screen is not offered at all.
 - Window edges: the frameless window keeps the outer 5 logical pixels of every edge (multiplied by the display scale) for edge resizing. Scrollers at the right and bottom edge stop short of that zone, so a scrollbar can always be grabbed and dragged and the window can still be resized from its edges.
 - Shadows: none, or so faint that they are barely visible. No card, popover, queue or composer uses a visible shadow.
 - Interface words: a label never names the program, because the whole program is Cortex: "Use", not "Use in Cortex". The agent you talk to reads as Coordinator where a name is needed. Labels and hints are English only.
 - Task state: a same-branch (or no-Git) review points to Ready to finish, not Ready to merge, in the
   header and the review bar alike (Accept moves the task to Ready to finish), and so does the New task
   form's hint for a project-folder task on the branch it would merge into ("The task stops at Ready to
-  finish for your confirmation."). A task working again after Request changes shows no result and no
-  Accept until its next result exists, and its Inspector counts only the current version's worker checks,
-  never the previous version's. A closed task offers no Request changes. A worker check the runtime kept
+  finish for your confirmation."). A task working again after Request changes or Return for rework shows
+  no result and no Accept until its next result exists, and its Inspector counts only the current version's
+  worker checks, never the previous version's. A worker check the runtime kept
   unverified says why in words (run before the final files, or a command that tests nothing), never that a
   tool was unavailable: every reason code the runtime records reads as what it means, also inside a
   reviewer's own sentence, and an unknown code is named as recorded, never as a missing tool or service.
@@ -650,7 +670,8 @@ Several cards stack, oldest first. They are read every 5 seconds while the machi
   its Accept waits for the task to finish. Finish chosen on the runtime's stop question closes the task as
   is, so it leaves Needs you, the Inbox and Home at once. The machine presents that close as a saved close
   as is (not verified), so the task archives like any closed task, by Archive or automatically after its
-  days in Done, and a sprint counts it as closed and moves on; a saved disposition always wins. The
+  days in Done, and a sprint counts it as closed and moves on. Returning it for rework takes it out of
+  Done and stops the Done-days archive countdown. The
   runtime's stop question card shows its full explanation (what happened, what each answer does), each
   option's consequence under its label, a Recommended mark on the recommended one, and buttons for what it
   names: Open review findings (the reviewer's page with its report), Open task “<title>” (the task holding
@@ -659,8 +680,8 @@ Several cards stack, oldest first. They are read every 5 seconds while the machi
   for another task's files reads "Waiting for the task “<title>” to release <files>" and starts that step
   by itself. A paused task waits in Needs you (Paused, with Resume), never in Working; a failed or
   cancelled run there reads as its outcome. Its title band offers Close task…, whose dialog closes it as
-  is or cancels it and offers no Stop; its composer says so. A closed task's title band offers Archive,
-  one command with no question. A runtime result that can never be accepted (its evidence is unavailable,
+  is or cancels it and offers no Stop; its composer says so. A closed task can be archived without a
+  question. A runtime result that can never be accepted (its evidence is unavailable,
   or it comes from an earlier version) offers Close as is… beside the reason Accept is off. The sprint
   Summary counts Needs you apart from Working. A project-folder task whose record names no target branch
   reads Ready to finish, not Ready to merge. An answer that changed no files reads Nothing to commit with
@@ -672,10 +693,26 @@ Several cards stack, oldest first. They are read every 5 seconds while the machi
 - Titles and names are edited by clicking them. There is no separate Rename or Edit control. A click opens the name as a field with Save and Cancel beside it; an unchanged name also closes when focus leaves it. A task's title stays editable after Start, review, finishing and closing, because it is presentation, not lifecycle; only a cleared task's title is read-only. Edit task… (the saved request and its settings) remains for a never-started task only.
 - Text is saved only by Save, or Enter in a one-line field; Cancel or Escape puts the saved text back. Nothing saves on leaving a field or after a pause in typing, and a read of the machine never replaces text still being edited. This holds for the project name in project settings, the machine name, task and sprint titles, connection and profile names, and the new task's title. A refused save keeps the typed text with its reason below the field. The rules are in [editing text](DESIGN.md#editing-text).
 - Selection: text can be selected and copied everywhere, with Ctrl+C. Buttons, links, the title band, the sidebar and draggable cards are excluded.
-- One piece of text, such as a path, is cut with an ellipsis and never broken across lines. Anything cut shows whole in a box beside it when it is pressed, or when keyboard focus reaches it and Enter or Space opens it. It never opens on hover, and no native tooltip is used.
+- One piece of text, such as a path, is cut with an ellipsis and never broken across lines. Text with a full-text box still opens it on press, Enter or Space. On desktop, marked text that is actually cut also has a delayed hover and keyboard-focus tooltip. Text that fits has none.
 - Absent values: a value Cortex does not have is not rendered. No dash (—) or placeholder glyph stands in for it, and an unknown value is never shown as zero or as success. When a whole panel has no data, the panel carries one state line with its reason, not a placeholder in each field.
 - Diff colours are always paired with `+` and `−` text. Every icon has a text label.
 - A polite live region announces real transitions only, such as "Implementer finished with 1 issue". Polling never announces.
+
+## Desktop tooltip inventory
+
+The shared desktop tooltip opens after 500 ms on pointer hover or keyboard focus, and closes on leave, blur, press or Esc. It is linked with `aria-describedby`, has no native title, and is at most 320 px wide. It flips or shifts away from the trigger and surrounding controls; if no position fits, it stays hidden. It adds no tab stop of its own. The phone shell does not mount this layer.
+
+| Where | Triggers |
+| --- | --- |
+| Desktop frame and sidebar | Sidebar (Ctrl+B), Back, Forward, Project actions, Terminal (Ctrl+J), Inspector (Ctrl+Alt+B), show/hide a project's tasks, Sort projects, Settings (Ctrl+,), Help and shortcuts, and New shell in this checkout. The connection chip explains Connected or Offline; numeric Inbox and Archive badges say what they count. |
+| Workspace and editor | New tab (Ctrl+T); Close shell and Hide terminal (Ctrl+J); Refresh files, Collapse all and Match case (Aa). |
+| Composer | Attach files, Voice input (Ctrl+D), composer Settings, the send/save/queue or run-action icon, the queue reorder grip and the Queue delivery toggle. The send action shows the writing field's Enter or Ctrl/Cmd+Enter shortcut where it applies; Start, Stop and Resume do not. The Queue tooltip describes the current switch position without changing it. |
+| Git and conflicts | Refresh Git status, Fetch, Pull/Pull…, Push; Stage/Unstage/Revert; commit options and branch action menus; Open the project folder; previous/next conflict. Git letters expand to the status word; the ahead/behind summary explains the counts. |
+| Task and sprint views | Task/card action menus, icon-only Sprint planning and Sprint summary, More queue options, Filter and Sprint actions. The graph's previous/next match, zoom (−/+), minimap (M) and overflow have hints; graph task nodes show the full name and status or dependency summary. Labelled graph buttons and tabs do not repeat their labels. |
+| Archive, settings and dialogs | Archive and settings row menus; Remove list entries, variables and windows where shown as icons; the settings `?` (About…) still opens its help on press. Icon-only close/cancel controls in task, sprint, Git, Archive, code, machine, worker and Help surfaces say what pressing them does, with Esc where applicable. |
+| Marked cut text | Existing full-text targets (such as paths, title-band crumbs, branch names and row text) and marked cut names in cards, board rows, sidebar titles, workspace tabs and the file tree, including cut board warnings and check summaries. Uncut text and full breadcrumb names have no tooltip. |
+
+No tooltip repeats a clear text action such as Save, Add project, New task, Search, New branch, Fit, or Full view, and menu items with printed shortcuts already show their keys. Essential information remains available without hovering: the controls keep their accessible names and visible state, marked text keeps its press box where provided, and disabled reasons keep their existing visible slots or press/focus boxes.
 
 ## Theme (desktop)
 
@@ -683,7 +720,7 @@ Several cards stack, oldest first. They are read every 5 seconds while the machi
 
 ## Worktree settings (desktop)
 
-- Settings › Worktrees is a per-machine page. The real service reports both the current folder and its absolute default. The default is `$XDG_DATA_HOME/cortex-workspace/worktrees` in the service environment (fallback `~/.local/share/cortex-workspace/worktrees`); the dev service isolates XDG data under `<channel-state>/data`, so its default is `<channel-state>/data/cortex-workspace/worktrees`. The field, "Use default" tooltip/action and example all use that reported path; reset is unavailable until it is known. New worktrees use `<root>/<project-key>/<task-id>`, where project-key is the 16-character hash of the common Git directory. The folder is typed in the built page. Saving changes only future worktrees and never moves existing checkouts.
+- Settings › Worktrees is a per-machine page. The real service reports both the current folder and its absolute default. The default is `$XDG_DATA_HOME/cortex-workspace/worktrees` in the service environment (fallback `~/.local/share/cortex-workspace/worktrees`); the dev service isolates XDG data under `<channel-state>/data`, so its default is `<channel-state>/data/cortex-workspace/worktrees`. The field, "Use default" action and example all use that reported path; reset is unavailable until it is known. New worktrees use `<root>/<project-key>/<task-id>`, where project-key is the 16-character hash of the common Git directory. The folder is typed in the built page. Saving changes only future worktrees and never moves existing checkouts.
 - A new path is checked before it is saved. It must be absolute, writable and outside every registered project checkout. A failed check is shown beside the field with its reason, and the saved path does not change. An offline, stale or unsupported save shows "Not saved", as in machine settings.
 - Task creation offers two checkout choices: the project folder on its open branch, or a dedicated worktree under the saved root. If the saved root is unavailable when a task starts, the task does not start in another folder; it shows the reason.
 - Project worktree options (branch prefix, setup script, files copied into new worktrees, removal after merge) stay in the project's Worktree settings.
@@ -856,7 +893,7 @@ The existing Connections page, rendered inside the orchestration shell so that i
 - **Absent values** are omitted. No dash or "None" stands in for them. Selecting anything changes no font weight, size or layout.
 - **Advanced** blocks are closed by default and open by themselves when they hold a non-default value or an error.
 - **Help**: every editable row shows its one-sentence description; a row with a recommendation shows "Recommended: …" beneath it; the longer help stays behind "?". The help text is in `orch-help.ts`.
-- **Names**: labels are English only and never name the program. No route, connection or task identifier appears; pickers show names. No native `title` tooltip is used.
+- **Names**: labels are English only and never name the program. No route, connection or task identifier appears; pickers show names. Only the listed desktop [tooltips](#desktop-tooltip-inventory) are used, never native `title`.
 
 ### States
 
@@ -901,7 +938,7 @@ The section, page and group names are the labels above. Recommendations use the 
 - Models, Engines and models, Routing and Route preview share one routing draft, and their edits are never lost when moving between them.
 - A save over a surface that changed elsewhere writes nothing until the owner has reviewed the changes.
 - Offline, every write and profile action is off with its reason, and nothing is queued.
-- No interface text shows a route, connection or task identifier, the program name, a dash for an absent value, or a native tooltip.
+- No interface text shows a route, connection or task identifier, the program name or a dash for an absent value. Use the shared [desktop tooltip](#desktop-tooltip-inventory), not native `title`.
 - At about 390, 820 and 1440 px wide, in light and dark, no page scrolls sideways and labels stay on one line.
 - Every section can be operated from the keyboard alone.
 - Evidence: the rendered statements in this section need screenshots of every section, Route preview and Files and sources at those widths, in light and dark. None is recorded yet.
@@ -955,8 +992,9 @@ These are not decided by this section. Each stays open until the owner or a late
 - Before Ready to merge, a check the system skipped runs automatically. A failed or not-run check offers a forced re-run. A result with an unpassed check can be accepted only when that check cannot complete for a technical reason, and only with an explicit confirmation ([CW-R40](requirements.md), [CW-U04](backlog/CW-U04.md)).
 - The review's comment bar appears only in a project with Git. A comment needs a line of a diff, so a project without Git hides the bar rather than showing it disabled.
 - A conflict shows "Conflict with <branch>" in words and an icon on the card and the project row. The Changes tab lists conflicts first.
-- "Resolve automatically" hands the conflict to the task. The result returns as a normal diff and goes through Ready to merge for owner review; Cortex never merges it itself ([CW-R35](requirements.md), [CW-G07](backlog/CW-G07.md)).
-- "Abort merge" stays visible in every conflict state. No automatic stash or reset is performed.
+- For a saved source merge in live mode, **Hand to the app…** opens an owner confirmation. A recorded handoff shows **Stop resolution**; an unconfirmed outcome offers **Inspect merge state** without resending. **Finish merge** and **Abort merge** appear only where the saved Git state and writer status permit them.
+- A saved merge from an earlier version without a verified identity shows **Clear saved merge…** instead of the normal merge controls. Its confirmation tells the owner to finish or abort in the original checkout using Git first. A refusal stays in the dialog; clearing leaves Git unchanged and earlier checks do not qualify the checkout.
+- After either manual or Cortex resolution, the card links to the diff and offers **Request fresh checks** before separately confirmed integration. See [Integration and conflicts](local-task-execution.md#integration-and-conflicts).
 
 ## Add project
 

@@ -1,95 +1,17 @@
-import { createMemo, For, type JSX } from "solid-js";
+import { createMemo, For, useContext, type JSX } from "solid-js";
 import { Dynamic } from "solid-js/web";
+import { WsContext } from "./ctx";
+import { fileReference, ResultLink, ResultScope } from "./result-links";
+import { parse, tokenize, type Block, type Token } from "./markdown";
+import { CopyCode } from "./message-copy";
+
+export type { Block } from "./markdown";
 
 /** Render supplied Markdown as text nodes and known elements, never executable HTML. */
 const unescape = (text: string) => text.replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\]\\^_`{|}~])/g, "$1");
 /** Plain snippets share prose unescaping without changing literal code. */
 export const resultPreview = (text: string) => text.split(/(```[\s\S]*?```|`[^`]+`)/g).map(part => part.startsWith("`") ? part : decodeEntities(unescape(part))).join("");
 
-export type Block =
-  | { kind: "heading"; level: number; text: string }
-  | { kind: "text" | "code"; text: string }
-  | { kind: "quote"; blocks: Block[] }
-  | { kind: "list"; ordered: boolean; start: number; items: Block[][] }
-  | { kind: "table"; header: string[]; align: ("left" | "center" | "right" | undefined)[]; rows: string[][] };
-
-/** Pipes inside escaped text or code spans are not column separators. */
-function cells(line: string) {
-  const parts: string[] = [];
-  let cell = "", fence = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (c === "\\" && i + 1 < line.length) { cell += c + line[++i]; continue; }
-    if (c === "`") {
-      const run = line.slice(i).match(/^`+/)![0];
-      if (!fence) fence = run;
-      else if (fence === run) fence = "";
-      cell += run; i += run.length - 1; continue;
-    }
-    if (c === "|" && !fence) { parts.push(cell.trim()); cell = ""; }
-    else cell += c;
-  }
-  parts.push(cell.trim());
-  if (parts[0] === "") parts.shift();
-  if (parts.at(-1) === "") parts.pop();
-  return parts;
-}
-/** GFM: a delimiter cell is one or more hyphens with an optional colon at either end; the colons set the column's alignment. */
-const DELIMITER = /^:?-+:?$/;
-const alignOf = (cell: string) => cell.startsWith(":") ? (cell.endsWith(":") ? "center" : "left") : cell.endsWith(":") ? "right" : undefined;
-/** A table row is any line up to a blank line or the start of another block; a row may hold no pipe at all (GFM). */
-const endsTable = (line: string) => !line.trim() || /^\s*(`{3,}|~{3,})/.test(line) || /^\s{0,3}#{1,6}\s/.test(line) || /^>\s?/.test(line) || (!line.includes("|") && !!listItem(line));
-const listItem = (line: string) => line.match(/^(\s*)([-+*]|\d+[.)])\s+(.*)$/);
-/** Owner and plan text means its line breaks; a report's wrapped lines are one paragraph. */
-function parse(text: string, breaks = false): Block[] {
-  const lines = text.replace(/\r\n?/g, "\n").split("\n"), out: Block[] = [];
-  for (let i = 0; i < lines.length;) {
-    const line = lines[i];
-    if (!line.trim()) { i++; continue; }
-    const fence = line.match(/^\s*(`{3,}|~{3,})/);
-    if (fence) {
-      const code: string[] = [], marker = fence[1];
-      i++;
-      while (i < lines.length && !(lines[i].trim().startsWith(marker) && new RegExp("^" + marker[0] + "+$").test(lines[i].trim()))) code.push(lines[i++]);
-      i++; out.push({ kind: "code", text: code.join("\n") }); continue;
-    }
-    const heading = line.match(/^(#{1,6})\s+(.+?)(?:\s+#+)?$/);
-    if (heading) { out.push({ kind: "heading", level: heading[1].length, text: heading[2] }); i++; continue; }
-    if (/^>\s?/.test(line)) {
-      const quote: string[] = [];
-      while (i < lines.length && /^>\s?/.test(lines[i])) quote.push(lines[i++].replace(/^>\s?/, ""));
-      out.push({ kind: "quote", blocks: parse(quote.join("\n"), breaks) }); continue;
-    }
-    const first = listItem(line);
-    if (first) {
-      const ordered = /^\d/.test(first[2]), indent = first[1].length, items: Block[][] = [];
-      while (i < lines.length) {
-        const item = listItem(lines[i]);
-        if (!item || item[1].length !== indent || /^\d/.test(item[2]) !== ordered) break;
-        const body = [item[3]]; i++;
-        while (i < lines.length && lines[i].trim() && /^\s+/.test(lines[i]) && (listItem(lines[i])?.[1].length ?? lines[i].search(/\S/)) > indent) {
-          body.push(lines[i++].slice(indent + 2));
-        }
-        items.push(parse(body.join("\n"), breaks));
-      }
-      out.push({ kind: "list", ordered, start: ordered ? parseInt(first[2]) : 1, items }); continue;
-    }
-    const header = cells(line), separator = i + 1 < lines.length ? cells(lines[i + 1]) : [];
-    if (line.includes("|") && separator.length === header.length && separator.every(cell => DELIMITER.test(cell))) {
-      i += 2; const rows: string[][] = [];
-      // Rows are padded or cut to the header's width; an empty cell is a cell.
-      while (i < lines.length && !endsTable(lines[i])) {
-        const row = cells(lines[i++]); rows.push(header.map((_, n) => row[n] ?? ""));
-      }
-      out.push({ kind: "table", header, align: separator.map(alignOf), rows }); continue;
-    }
-    const previous = out.at(-1);
-    if (previous?.kind === "text" && i > 0 && lines[i - 1].trim()) previous.text += (breaks ? "\n" : " ") + line;
-    else out.push({ kind: "text", text: line });
-    i++;
-  }
-  return out;
-}
 /** Named character references a model writes in Markdown; any other name stays as written, as CommonMark leaves unknown ones. */
 const NAMED: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: "\u00a0", ensp: "\u2002", emsp: "\u2003", thinsp: "\u2009",
   copy: "\u00a9", reg: "\u00ae", trade: "\u2122", hellip: "\u2026", mdash: "\u2014", ndash: "\u2013", laquo: "\u00ab", raquo: "\u00bb", ldquo: "\u201c", rdquo: "\u201d",
@@ -106,44 +28,100 @@ export const decodeEntities = (text: string) => text.replace(/&(?:#([0-9]{1,7})|
 });
 const safeHref = (raw: string) => {
   const url = decodeEntities(unescape(raw)).trim();
-  // Relative documentation links are fine; unknown/executable schemes are text only.
-  return !/[\u0000-\u0020\u007f\\]/.test(url) && (!/^[a-z][a-z\d+.-]*:/i.test(url) || /^(https?:|mailto:)/i.test(url)) ? url : undefined;
+  if (!url || /[\u0000-\u0020\u007f\\]/.test(url) || url.startsWith("//")) return;
+  if (/^(https?:\/\/|mailto:)/i.test(url) || url.startsWith("#")) return url;
+  if (/^[a-z][a-z\d+.-]*:/i.test(url) && !/^[\w-]+\.[\w.-]+:\d+(?::\d+)?$/.test(url)) return;
+  return fileReference(url, true) ? url : undefined;
 };
-/** An image reference names a picture; nothing is loaded from it (the window loads no remote content). */
-function imageRef(alt: string, raw: string): JSX.Element {
-  const href = safeHref(raw), target = decodeEntities(unescape(raw)).trim();
-  const place = href && /^https?:/i.test(href) ? (() => { try { const u = new URL(href); return `${u.host}${u.pathname.split("/").filter(Boolean).length ? " · " + u.pathname.split("/").filter(Boolean).pop() : ""}`; } catch { return href; } })() : target.split("/").filter(Boolean).pop() ?? target;
-  const label = <>Image: {decodeEntities(unescape(alt)).trim() || place}{alt.trim() && place ? ` (${place})` : ""}</>;
-  return href && /^https?:/i.test(href) ? <a class="ws-img-ref" href={href} rel="noreferrer">{label}</a> : <span class="ws-img-ref">{label}</span>;
+function markdownFile(href: string) {
+  if (/^(https?:\/\/|mailto:|#)/i.test(href)) return;
+  try { return fileReference(decodeURIComponent(href), true); }
+  catch { return; }
 }
-function inline(text: string): JSX.Element {
-  const tokens = /\\[!"#$%&'()*+,\-./:;<=>?@[\]\\^_`{|}~]|(`+)([\s\S]*?[^`])\1(?!`)|\*\*(.+?)\*\*|!\[([^\]]*)\]\(([^()\s]+)\)|\[([^\]]+)\]\(([^()\s]+)\)|\n/g;
+/** An image reference names a picture; nothing is loaded from it (the window loads no remote content). */
+function imageRef(alt: string, raw: string, links: Links): JSX.Element {
+  const href = safeHref(raw), target = decodeEntities(unescape(raw)).trim();
+  const place = href && /^https?:/i.test(href) ? (() => { try { const u = new URL(href); return [u.host, u.pathname.split("/").filter(Boolean).pop()].filter(Boolean).join(" · "); } catch { return href; } })() : target.split("/").filter(Boolean).pop() ?? target;
+  const label = <>Image: {decodeEntities(unescape(alt)).trim() || place}{alt.trim() && place ? " (" + place + ")" : ""}</>;
+  return href && /^https?:/i.test(href) && !links.label ? renderLink(links, { class: "ws-img-ref", href, inert: links.inert, children: label }) : <span class="ws-img-ref">{label}</span>;
+}
+type Links = { paths: boolean; inert?: boolean; label?: boolean; markLink?: () => void };
+function renderLink(links: Links, props: Parameters<typeof ResultLink>[0]) {
+  links.markLink?.();
+  return <ResultLink {...props} />;
+}
+function prose(text: string, links: Links): JSX.Element {
+  if (!links.paths) return text;
+  // Don't pick a suffix out of an already-tokenized URI or a different path.
+  const candidates = /(?<![\p{L}\d_./:@%\\-])(?:\/|(?:\.\.?\/)+)?[\p{L}\d_./-]+(?::\d+(?::\d+)?|#L\d+)?/gu;
   const out: JSX.Element[] = [];
-  let at = 0, match: RegExpExecArray | null;
-  while ((match = tokens.exec(text))) {
-    out.push(decodeEntities(text.slice(at, match.index)));
-    if (match[0] === "\n") out.push(<br />);
-    else if (match[0].startsWith("\\")) out.push(match[0].slice(1));
-    else if (match[1]) out.push(<code>{match[2]}</code>);
-    else if (match[3]) out.push(<strong>{inline(match[3])}</strong>);
-    else if (match[5] !== undefined) out.push(imageRef(match[4], match[5]));
-    else {
-      const href = safeHref(match[7]);
-      out.push(href ? <a href={href} rel="noreferrer">{inline(match[6])}</a> : inline(match[6]));
-    }
-    at = tokens.lastIndex;
+  let at = 0;
+  for (const match of text.matchAll(candidates)) {
+    const token = match[0].replace(/\.+$/, ""), start = match.index!;
+    const ref = fileReference(token);
+    if (!ref) continue;
+    out.push(text.slice(at, start), renderLink(links, { href: "#", reference: ref, children: token }));
+    at = start + token.length;
   }
-  out.push(decodeEntities(text.slice(at)));
+  out.push(text.slice(at));
   return out;
 }
-function Blocks(props: { blocks: Block[] }) {
+/** Inline Markdown from the shared tokens (`markdown.ts`), the same ones the writing area paints under the owner's text. */
+function render(text: string, tokens: Token[], links: Links): JSX.Element[] {
+  return tokens.map((k): JSX.Element => {
+    const part = (a: number, b: number) => text.slice(a, b);
+    switch (k.t) {
+      case "text": return prose(decodeEntities(part(k.s, k.e)), links);
+      case "br": return <br />;
+      case "esc": return part(k.s + 1, k.e);
+      case "code": {
+        const span = part(k.a, k.b), ref = links.paths ? fileReference(span.trim()) : undefined;
+        return <code>{ref ? renderLink(links, { href: "#", reference: ref, children: span }) : span}</code>;
+      }
+      case "strong": return <strong>{render(text, k.kids, links)}</strong>;
+      case "em": return <em>{render(text, k.kids, links)}</em>;
+      case "del": return <del>{render(text, k.kids, links)}</del>;
+      case "image": return imageRef(part(k.a, k.b), part(k.u, k.v), links);
+      case "link": {
+        const href = safeHref(part(k.u, k.v));
+        const label = render(text, k.kids, { ...links, paths: false, label: true });
+        return href && !links.label ? renderLink(links, { href: /^\w[\w.-]*:\d/.test(href) ? "#" : href, reference: links.paths ? markdownFile(href) : undefined, inert: links.inert, children: label }) : label;
+      }
+    }
+  });
+}
+const inline = (text: string, links: Links): JSX.Element => render(text, tokenize(text), links);
+function useLinks(inert?: boolean): Links {
+  return { paths: !!useContext(WsContext) && !!useContext(ResultScope) && !inert, inert };
+}
+/** Question controls use only phrasing markup and the same link handling as the timeline. */
+export function createInlineResultText(text: () => string) {
+  const links = useLinks();
+  return createMemo(() => {
+    let hasLinks = false;
+    const value = text();
+    // Fences are not inline Markdown. Keep their literal contents and never scan them for paths.
+    const nodes = parse(value, true).some(b => b.kind === "code") ? value : inline(value, { ...links, markLink: () => { hasLinks = true; } });
+    return { nodes, hasLinks };
+  });
+}
+export function InlineResultText(props: { text: string }) {
+  const content = createInlineResultText(() => props.text);
+  return <>{content().nodes}</>;
+}
+function Blocks(props: { blocks: Block[]; links: Links }) {
   return <For each={props.blocks}>{b =>
-    b.kind === "heading" ? <Dynamic component={("h" + b.level) as keyof JSX.IntrinsicElements}>{inline(b.text)}</Dynamic>
-      : b.kind === "code" ? <pre><code>{b.text}</code></pre>
-      : b.kind === "quote" ? <blockquote><Blocks blocks={b.blocks} /></blockquote>
-      : b.kind === "list" ? <Dynamic component={b.ordered ? "ol" : "ul"} start={b.ordered ? b.start : undefined}><For each={b.items}>{item => <li><Blocks blocks={item} /></li>}</For></Dynamic>
-      : b.kind === "table" ? <div class="ws-result-table"><table><thead><tr><For each={b.header}>{(cell, i) => <th scope="col" style={{ "text-align": b.align[i()] }}>{inline(cell)}</th>}</For></tr></thead><tbody><For each={b.rows}>{row => <tr><For each={row}>{(cell, n) => <td style={{ "text-align": b.align[n()] }}>{inline(cell)}</td>}</For></tr>}</For></tbody></table></div>
-      : <p>{inline(b.text)}</p>
+    b.kind === "heading" ? <Dynamic component={("h" + b.level) as keyof JSX.IntrinsicElements}>{inline(b.text, props.links)}</Dynamic>
+      // A code block is a panel: its language, if the fence names one, and its own Copy, which copies the lines as written.
+      : b.kind === "code" ? <div class="ws-code" data-md="code">
+        <div class="ws-code-h"><span class="ws-code-lang">{b.lang ?? ""}</span><CopyCode text={b.text} lang={b.lang} /></div>
+        <pre><code>{b.text}</code></pre>
+      </div>
+      : b.kind === "hr" ? <hr />
+      : b.kind === "quote" ? <blockquote><Blocks links={props.links} blocks={b.blocks} /></blockquote>
+      : b.kind === "list" ? <Dynamic component={b.ordered ? "ol" : "ul"} start={b.ordered ? b.start : undefined}><For each={b.items}>{item => <li><Blocks links={props.links} blocks={item} /></li>}</For></Dynamic>
+      : b.kind === "table" ? <div class="ws-result-table"><table><thead><tr><For each={b.header}>{(cell, i) => <th scope="col" style={{ "text-align": b.align[i()] }}>{inline(cell, props.links)}</th>}</For></tr></thead><tbody><For each={b.rows}>{row => <tr><For each={row}>{(cell, n) => <td style={{ "text-align": b.align[n()] }}>{inline(cell, props.links)}</td>}</For></tr>}</For></tbody></table></div>
+      : <p>{inline(b.text, props.links)}</p>
   }</For>;
 }
 /**
@@ -155,8 +133,9 @@ export function reuseBlocks(next: Block[], previous: Block[]): Block[] {
   for (const b of previous) { const key = JSON.stringify(b), list = pool.get(key); if (list) list.push(b); else pool.set(key, [b]); }
   return next.map(b => pool.get(JSON.stringify(b))?.shift() ?? b);
 }
-export function ResultText(props: { text?: string; breaks?: boolean }) {
+export function ResultText(props: { text?: string; breaks?: boolean; inertLinks?: boolean }) {
+  const links = useLinks(props.inertLinks);
   const text = createMemo(() => props.text ?? "");
   const blocks = createMemo<Block[]>(previous => reuseBlocks(parse(text(), props.breaks), previous), []);
-  return <div class="ws-result-copy"><Blocks blocks={blocks()} /></div>;
+  return <div class="ws-result-copy"><Blocks links={links} blocks={blocks()} /></div>;
 }

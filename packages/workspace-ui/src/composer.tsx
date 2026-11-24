@@ -1,15 +1,18 @@
-import { plainChoice } from "./selectors";
+import { plainChoice, classifiedPlanningFailure, stoppedPlanningComposerText } from "./selectors";
 import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, useContext, type Accessor, type JSX } from "solid-js";
 import { capabilityOf, FEATURES, type Attachment, type AttachmentInput, type AttachmentRef, type Message, type SessionOptions, type TaskSettings, type WorkspaceCommand } from "@cortex/workspace-domain";
 import { attachmentFile, attachmentName, attachmentPreview, attachmentRef, keepBytes, readAttachments, wireAttachments } from "./attachments";
 import { autoGrow } from "./autogrow";
 import { useWs } from "./ctx";
+import { setDragPreview } from "./drag-preview";
+import { REQUESTING, RequestStatus } from "./request-feedback";
 import { createUnsent, onScreen, ScreenActive } from "./freshness";
 import { createLocalDictation } from "./voice";
 import { I, MenuItem, Pop } from "./kit";
 import { Action, Whole } from "./layout";
 import { createSuggest, SUGGEST_HINT, SuggestList, type SlashCommand, type SuggestOptions } from "./suggest";
-import { duration, resumeState, stopLabel, taskSettings, workingNow, type ComposerMode, type SessionModel } from "./session-model";
+import { MarkdownMirror } from "./markdown-field";
+import { duration, REWORK_LABEL, reworkBinding, resumeState, stopLabel, taskSettings, workingNow, type ComposerMode, type SessionModel } from "./session-model";
 import { PlanningPlace, usePlanningSprint, useTaskRoutes } from "./task-place";
 
 /** Attached files are uploaded once, as they are added; the draft holds their references until an explicit send or queue action. */
@@ -81,7 +84,7 @@ export function AttachButton(props: { a: Attachments; disabled?: string; describ
   const off = () => props.disabled ?? (ws.can(FEATURES.attachments) ? undefined : "Attachments are not available on this machine.");
   return <>
     <Show when={!off()}><input ref={input} type="file" multiple hidden aria-label="Choose files" onChange={e => { props.a.ingest([...(e.currentTarget.files ?? [])]); e.currentTarget.value = ""; }} /></Show>
-    <button type="button" class="ib" aria-label="Attach files" aria-disabled={off() ? "true" : undefined} data-why={off()} aria-describedby={off() ? props.describedBy : undefined} onClick={() => { if (!off()) input.click(); }}><I n="clip" /></button>
+    <button data-tooltip="" type="button" class="ib" aria-label="Attach files" aria-disabled={off() ? "true" : undefined} data-why={off()} aria-describedby={off() ? props.describedBy : undefined} onClick={() => { if (!off()) input.click(); }}><I n="clip" /></button>
   </>;
 }
 function AttachChip(props: { file: AttachmentInput; onRemove?: (name: AttachmentInput) => void; open?: boolean }) {
@@ -172,7 +175,7 @@ export function RouteBar(props: { id: string; settings: TaskSettings; onChange: 
     {trigger("model", "Coordinator model", "cpu", () => options().models, () => props.settings.model)}
     {trigger("effort", "Reasoning effort", "gauge", efforts, () => props.settings.effort)}
     <Show when={!props.compact}>
-      <button type="button" class="ib c-set" popovertarget={settingsOff() ? undefined : `m-set-${props.id}`} aria-disabled={settingsOff() ? "true" : undefined} data-why={settingsOff()} aria-label={`Settings${settingsText() ? `. ${settingsText()}` : ""}`}><I n="sliders" /></button>
+      <button data-tooltip="" type="button" class="ib c-set" popovertarget={settingsOff() ? undefined : `m-set-${props.id}`} aria-disabled={settingsOff() ? "true" : undefined} data-why={settingsOff()} aria-label={`Settings${settingsText() ? `. ${settingsText()}` : ""}`}><I n="sliders" /></button>
     </Show>
     <Show when={!props.needs || !ws.gate(props.needs)}>
     <Pop id={`m-model-${props.id}`} class={cls()} align={align()} label="Coordinator model" style={{ width: "280px" }}>
@@ -280,7 +283,7 @@ export function MicButton(props: { mic: Dictation; disabled?: string; describedB
     document.addEventListener("keydown", key); onCleanup(() => document.removeEventListener("keydown", key));
   });
   // Voice keeps its place beside Attach. Where dictation cannot run, it stays, unusable, with the reason.
-  return <button ref={button} type="button" class="ib" aria-label="Voice input" aria-pressed={!off() && props.mic.on() && props.mic.phase() === "recording"}
+  return <button data-tooltip="" ref={button} type="button" class="ib" aria-label="Voice input" aria-pressed={!off() && props.mic.on() && props.mic.phase() === "recording"}
     aria-disabled={off() ? "true" : undefined} data-why={off()} aria-describedby={off() ? props.describedBy : undefined} onClick={toggle}><I n="mic" /></button>;
 }
 
@@ -288,11 +291,11 @@ export function MicButton(props: { mic: Dictation; disabled?: string; describedB
  * The composer's one action button. Usually the paper plane that sends or saves a draft; where a run is controlled from the
  * composer and the field is empty, it is Start, Stop or Resume. It keeps one size and place whatever it is, named for what it does.
  */
-export function SendButton(props: { label: string; why?: string; needs?: WorkspaceCommand["type"]; onClick: () => void; describedBy?: string; icon?: string }) {
+export function SendButton(props: { label: string; why?: string; needs?: WorkspaceCommand["type"]; onClick: () => void; describedBy?: string; icon?: string; shortcut?: string }) {
   const ws = useWs();
   const gated = () => props.needs ? ws.gate(props.needs) : undefined;
   const why = () => gated() || props.why;
-  return <button type="button" class="ib mc-send c-send" aria-label={props.label} aria-disabled={why() ? "true" : undefined} data-why={why()} aria-describedby={!gated() && why() ? props.describedBy : undefined} onClick={() => { if (!why()) props.onClick(); }}><I n={props.icon ?? "send"} class={props.icon === "loader" ? "spin" : undefined} /></button>;
+  return <button data-tooltip={props.shortcut ? `${props.label} · ${props.shortcut} to send` : ""} type="button" class="ib mc-send c-send" aria-label={props.label} aria-disabled={why() ? "true" : undefined} data-why={why()} aria-describedby={!gated() && why() ? props.describedBy : undefined} onClick={() => { if (!why()) props.onClick(); }}><I n={props.icon ?? "send"} class={props.icon === "loader" ? "spin" : undefined} /></button>;
 }
 
 export type MessageComposerProps = {
@@ -350,6 +353,8 @@ export function MessageComposer(props: MessageComposerProps) {
   const sendWhy = () => props.send ? (props.send.run ? props.send.why : off() ?? props.send.why) : undefined;
   const submit = () => { if (props.send && !sendWhy()) props.send.go(); };
   let field: HTMLTextAreaElement | undefined;
+  // While an input method composes, the field draws its own text (with the composition's underline) over the Markdown layer.
+  const [composing, setComposing] = createSignal(false);
   const suggest = createSuggest({ options: () => off() ? undefined : props.suggest, text: () => props.text, setText: v => props.onText(v), field: () => field });
   const onKey = (e: KeyboardEvent) => {
     // An open list takes the keys it uses, so Enter picks an option instead of sending.
@@ -367,12 +372,16 @@ export function MessageComposer(props: MessageComposerProps) {
     <MicBar mic={props.mic} onInsert={append} onInsertAndSend={insertAndSend()} />
     <AttachChips files={props.files.files()} onRemove={props.files.remove} />
     <Show when={offWithDraft()}><div id={offId} class="mc-effect">{off()}</div></Show>
+    {/* The field is the one source of the text; the layer under it only shows that text's Markdown (markdown-field.tsx). */}
+    <div class="mc-field" data-composing={composing() ? "" : undefined}>
+    <MarkdownMirror text={props.text} field={() => field} />
     <textarea id={fieldId} aria-label={props.label} aria-describedby={offWithDraft() ? offId : undefined} placeholder={off() ?? props.placeholder} disabled={!!off()} value={props.text}
       onInput={e => { props.onText(e.currentTarget.value); suggest.onInput(); }} onKeyDown={onKey}
       onKeyUp={e => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) suggest.onCaret(); }} onClick={() => suggest.onCaret()} onBlur={() => suggest.close()}
-      onCompositionStart={() => suggest.onCompositionStart()} onCompositionEnd={() => suggest.onCompositionEnd()}
+      onCompositionStart={() => { setComposing(true); suggest.onCompositionStart(); }} onCompositionEnd={() => { setComposing(false); suggest.onCompositionEnd(); }}
       aria-autocomplete={props.suggest ? "list" : undefined} aria-controls={suggest.activeId() ? suggest.listId : undefined} aria-activedescendant={suggest.activeId()}
       ref={el => { field = el; autoGrow(el, () => props.text); props.inputRef?.(el); if (props.autofocus) queueMicrotask(() => el.focus()); }} />
+    </div>
     <SuggestList s={suggest} field={() => field} />
     <CBar>
       <div class="mc-tools"><AttachButton a={props.files} disabled={off() ?? props.attachOff} describedBy={said()} /><MicButton mic={props.mic} disabled={off() ?? props.voiceOff} describedBy={said()} /></div>
@@ -380,7 +389,7 @@ export function MessageComposer(props: MessageComposerProps) {
       <div class="c-end">
         {props.delivery}
         {props.extra}
-        <Show when={props.send}>{s => <SendButton label={s().label} why={sendWhy()} needs={s().needs} onClick={submit} describedBy={s().run ? undefined : said()} icon={s().run?.icon} />}</Show>
+        <Show when={props.send}>{s => <SendButton label={s().label} why={sendWhy()} needs={s().needs} onClick={submit} describedBy={s().run ? undefined : said()} icon={s().run?.icon} shortcut={s().run ? undefined : props.sendKey === "mod-enter" ? "Ctrl/Cmd+Enter" : "Enter"} />}</Show>
       </div>
     </CBar>
   </div>;
@@ -402,9 +411,9 @@ function QueueRow(props: { message: Accessor<Message>; ids: Accessor<string[]>; 
     queueMicrotask(() => onScreen().querySelector<HTMLElement>(`[data-q="${id()}"] .grip`)?.focus());
   };
   return <div class="qrow" data-q={id()} draggable={true}
-    onDragStart={e => e.dataTransfer?.setData("text/plain", id())} onDragOver={e => e.preventDefault()}
+    onDragStart={e => { e.dataTransfer?.setData("text/plain", id()); setDragPreview(e); }} onDragOver={e => e.preventDefault()}
     onDrop={e => { e.preventDefault(); const from = e.dataTransfer?.getData("text/plain"); if (from && from !== id()) ws.run({ type: "move_queued", messageId: from, before: id() }); }}>
-    <button type="button" class="ib grip" aria-label={`Reorder: ${props.message().text}`}
+    <button data-tooltip="Drag to reorder" type="button" class="ib grip" aria-label={`Reorder: ${props.message().text}`}
       onKeyDown={e => { const by = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0; if (by) { e.preventDefault(); move(by); } }}><I n="grip" /></button>
     <Whole class="qrow-t" text={props.message().text} />
     {/* One row size: Edit, Send now and remove share the composer's control height, so no control looks smaller than its neighbour. */}
@@ -418,7 +427,7 @@ function QueueRow(props: { message: Accessor<Message>; ids: Accessor<string[]>; 
 
 const CLOSED_TEXT: Partial<Record<ComposerMode, string>> = {
   draft: "Start the task to send a message.",
-  closed: "This task is closed. Nothing more can be sent to it.", ended: "This run has ended and cannot be resumed. Nothing more can be sent to it; Close task moves it to Done.", archived: "This task is archived. Restore it to continue.",
+  closed: "This task is closed. Nothing more can be sent to it.", ended: "This run has ended and cannot be resumed. Nothing more can be sent to it; Close task moves it to Done.", archived: "This task is archived. Restore the task first.",
   offline: "Sending is off because the machine is disconnected. Use Re-check state above to reconnect.",
   unconfirmed: "Sending is off because this task's state is not confirmed. Use Re-check state above.",
 };
@@ -433,11 +442,9 @@ type RunControl = { label: string; icon: string; needs?: WorkspaceCommand["type"
  */
 function Delivery(props: { value: "send_now" | "queue"; onChange: (value: "send_now" | "queue") => void; off?: string }) {
   const queued = () => props.value === "queue";
-  const hintId = createUniqueId();
   return <div class="mc-delivery" role="group" aria-label="Delivery">
-    <button type="button" class="ib" aria-label="Queue" aria-describedby={hintId} aria-pressed={queued() ? "true" : "false"} aria-disabled={props.off ? "true" : undefined} data-why={props.off}
+    <button type="button" class="ib" aria-label="Queue" data-tooltip={queued() ? "Queue is on: messages wait until the coordinator is free" : "Queue messages instead of sending them now"} aria-pressed={queued() ? "true" : "false"} aria-disabled={props.off ? "true" : undefined} data-why={props.off}
       onClick={() => { if (!props.off) props.onChange(queued() ? "send_now" : "queue"); }}><I n="queue" /></button>
-    <span id={hintId} class="mc-hint" role="tooltip">{queued() ? "Queue is on: messages wait until the coordinator is free" : "Queue messages instead of sending them now"}</span>
   </div>;
 }
 
@@ -466,13 +473,18 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
   // approval, and closes once its tasks are created.
   const planning = usePlanningSprint();
   const changingRequest = useContext(PlanningPlace)?.changingRequest ?? (() => false);
+  const binding = () => planning() ? null : reworkBinding(m().view);
+  const [rework, setRework] = createSignal(false);
+  const [reworkPending, setReworkPending] = createSignal(false);
+  const [reworkError, setReworkError] = createSignal("");
+  const reworking = () => rework() && !!binding();
   const routes = useTaskRoutes(() => ({ machine: m().view.machine.id, id: id() }));
   const planningOff = () => {
     const s = planning();
     if (!s) return undefined;
     if (s.planning === "created") return "Tasks are created. Edit them on the Board.";
     if (mode() === "offline" || mode() === "unconfirmed") return CLOSED_TEXT[mode()];
-    if (s.planning === "cancelled") return changingRequest() ? undefined : "Planning is cancelled. Resume it to continue.";
+    if (s.planning === "cancelled") return changingRequest() ? undefined : stoppedPlanningComposerText(s);
     return mode() === "draft" ? "Planning is starting." : undefined;
   };
   const queueIds = createMemo(() => m().queue.map(q => q.id));
@@ -483,6 +495,35 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
   const send = (value: string) => {
     if (!value.trim() || files.busy()) return;
     const attachments = files.files();
+    const target = binding();
+    if (target) {
+      if (!reworking() || reworkPending() || ws.gate("rework_task") || [...value].length > 32_000) return;
+      const taskId = id();
+      const submit = () => {
+        const current = binding();
+        if (reworkPending()) return false;
+        if (!current || current.expectedVersion !== target.expectedVersion || current.executionId !== target.executionId || current.ownerEpoch !== target.ownerEpoch || ws.gate("rework_task")) {
+          setReworkError("The task changed. Recheck it before sending.");
+          return true;
+        }
+        setReworkError("");
+        setReworkPending(true);
+        void ws.run({ type: "rework_task", taskId, ...target, text: value, attachments }).then(receipt => {
+          if (receipt.ok) { if (text() === value && files.files() === attachments) done(); setRework(false); }
+          else setReworkError(receipt.message);
+        }).finally(() => {
+          setReworkPending(false);
+          queueMicrotask(() => { if (shown() && document.activeElement === document.body) input?.focus(); });
+        });
+        return true;
+      };
+      if (m().view.task.reworkWarnings?.includes("dependents_started")) ws.open({ kind: "confirm", title: "Return this task for rework?",
+        note: "Dependent sprint tasks already started using the old result. Sending reopens this task but does not stop or change those tasks.",
+        action: "Send and reopen", go: submit });
+      else submit();
+      return;
+    }
+    if (reworkPending() || (rework() && mode() !== "live")) return;
     const sprint = planning();
     // A finished result has nobody to steer: a message sends it back and reopens the task.
     const command: WorkspaceCommand = sprint ? { type: "plan_message", sprintId: sprint.id, text: value, attachments, now: now() }
@@ -502,7 +543,11 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
     write(text().trim() ? `${text().trimEnd()}\n${back.text}` : back.text); files.add(back.attachments ?? []);
     queueMicrotask(() => input?.focus());
   });
-  const readOnly = () => planning() ? planningOff() : CLOSED_TEXT[mode()];
+  const readOnly = () => planning() ? planningOff()
+    : reworkPending() ? "Sending and reopening…"
+    : mode() === "archived" ? CLOSED_TEXT.archived
+    : binding() ? reworking() ? undefined : `Use ${REWORK_LABEL} to reopen this task.`
+    : rework() && mode() !== "live" ? "Rework is no longer available. Recheck the task before sending." : CLOSED_TEXT[mode()];
   const empty = () => !text().trim() && files.files().length === 0;
   // Something of this task runs now: its coordinator works or a worker does. A task waiting for the owner, or held after an
   // interruption, runs nothing, so it has no Stop here.
@@ -513,7 +558,7 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
   /** The planning task's run control: Stop while it works, Resume once stopped, nothing once its tasks are created. */
   const planningControl = (): RunControl => {
     const s = planning()!;
-    if (s.planning === "created" || changingRequest()) return null;
+    if (s.planning === "created" || changingRequest() || (s.planning === "cancelled" && s.planningFailure)) return null;
     if (mode() === "stopping" && empty()) return { label: "Stopping", icon: "loader", why: STOPPING, go: () => undefined, effect: "Stopping planning. Messages can be sent once the stop is confirmed." };
     if (s.planning === "cancelled" || (mode() === "paused" && empty())) return { label: "Resume", icon: "play", needs: "resume_planning", go: resumePlanning, effect: "Resume continues planning." };
     if (running() && empty()) return { label: "Stop", icon: "stop", needs: "cancel_planning", go: stopPlanning, effect: "Stop pauses planning and keeps the conversation; Resume continues it. Write a message to send it instead." };
@@ -522,6 +567,7 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
   /** The run control the action button is with an empty field, or none: then it sends. */
   const control = (): RunControl =>
     planning() ? planningControl()
+    : reworkPending() || reworking() ? null
     : mode() === "draft" ? { label: "Start", icon: "play", needs: "start_task", go: () => void ws.run({ type: "start_task", taskId: id(), now: now() }), effect: "Start runs this task." }
     : mode() === "stopping" && empty() ? { label: "Stopping", icon: "loader", why: STOPPING, go: () => undefined, effect: "Stopping the task. Messages can be sent once the stop is confirmed." }
     : running() && empty() ? { label: stopLabel(resumable()), icon: "stop", needs: "stop_task", go: () => ws.stopTask(id()),
@@ -531,15 +577,16 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
       // A pause whose stop or process exit is not confirmed cannot be resumed yet: Resume stays off and says why.
       : { label: "Resume", icon: "play", why: resumeState(m().view)?.why || "This task cannot be resumed now", go: () => undefined, effect: resumeState(m().view)?.why || "This task cannot be resumed now" }
     : null;
-  const plane = (): { label: string; needs: WorkspaceCommand["type"] } => planning() ? { label: changingRequest() ? "Send and resume planning" : "Send message now", needs: "plan_message" }
+  const plane = (): { label: string; needs: WorkspaceCommand["type"] } => planning() ? { label: changingRequest() ? (classifiedPlanningFailure(planning()!) ? "Send amendment and retry" : "Send and resume planning") : "Send message now", needs: "plan_message" }
+    : reworking() ? { label: "Send and reopen", needs: "rework_task" }
     : mode() === "review" ? { label: "Send and reopen", needs: "request_changes" }
     : mode() === "paused" ? { label: "Send and resume", needs: "send_message" }
     : delivery() === "queue" && mode() === "live" ? { label: "Queue message", needs: "send_message" }
     : { label: "Send message now", needs: "send_message" };
-  const sendWhy = () => mode() === "stopping" ? STOPPING : files.busy() ? "Attachments are still loading" : text().trim() ? undefined : "Write a message first";
-  const planningEffect = () => control()?.effect ?? (changingRequest() ? "Sending your changes resumes planning." : props.folded ? "To the planner, not an answer to the question."
+  const sendWhy = () => mode() === "stopping" ? STOPPING : files.busy() ? "Attachments are still loading" : text().trim() ? reworking() && [...text()].length > 32_000 ? "Write no more than 32,000 characters" : undefined : "Write a message first";
+  const planningEffect = () => control()?.effect ?? (changingRequest() ? (classifiedPlanningFailure(planning()!) ? "Sending your amendment starts planning again." : "Sending your changes resumes planning.") : props.folded ? "To the planner, not an answer to the question."
     : planning()!.planning === "ready" ? "Sending asks for changes to the plan. Create tasks waits for the revised plan." : undefined);
-  const effect = () => planning() ? planningEffect() : control()?.effect ?? (mode() === "review" ? "Sending requests changes and reopens this task. Acceptance of this result is cleared."
+  const effect = () => planning() ? planningEffect() : reworking() ? "Sending reopens this task for rework" : control()?.effect ?? (mode() === "review" ? "Sending requests changes and reopens this task. Acceptance of this result is cleared."
     : mode() === "paused" ? "Sending resumes the task."
     : props.folded ? "To the coordinator, not an answer to the question." : undefined);
   const placeholder = () => mode() === "stopping" ? "Sending returns once the stop is confirmed" : SUGGEST_HINT;
@@ -551,7 +598,7 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
     // The planning task reads only on its sprint: its Work details are the sprint's Workers tab, and it has no Changes or Code.
     if (s) return [
       ...(s.planning !== "created" && s.planning !== "cancelled" && mode() === "live" ? [{ name: "stop", label: "Stop planning", why: ws.gate("cancel_planning"), run: stopPlanning }] : []),
-      ...(s.planning === "cancelled" ? [{ name: "resume", label: "Resume planning", why: ws.gate("resume_planning"), run: resumePlanning }] : []),
+      ...(s.planning === "cancelled" && !s.planningFailure ? [{ name: "resume", label: "Resume planning", why: ws.gate("resume_planning"), run: resumePlanning }] : []),
       { name: "details", label: "Open Workers", run: () => ws.go(routes.workers()) },
       { name: "new", label: "New task in this project", run: () => ws.go({ name: "new", machine: v.machine.id, kind: "task", project: v.project.id }) },
     ];
@@ -567,9 +614,17 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
     ];
   };
   // A draft in progress is never folded away.
-  const folded = () => props.folded && !changingRequest() && !opened() && !text().trim() && files.files().length === 0;
+  const folded = () => props.folded && !reworking() && !changingRequest() && !opened() && !text().trim() && files.files().length === 0;
   createEffect(() => { if (!props.folded) setOpened(false); });
   let input: HTMLTextAreaElement | undefined;
+  const shown = useContext(ScreenActive);
+  createEffect(() => {
+    if (!shown() || ws.reworkIntent?.()?.taskId !== id() || !binding()) return;
+    setRework(true);
+    setReworkError("");
+    ws.dismissRework();
+    queueMicrotask(() => { if (shown()) input?.focus(); });
+  });
   createEffect(() => { if (planning() ? readOnly() : mode() !== "live" && mode() !== "paused") mic.stop(); });
   return <>
     <Show when={showQueue()}>
@@ -592,6 +647,8 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
     </Show>
     {props.team}
     <Show when={!folded()} fallback={<div class="mc-fold"><button type="button" class="btn btn-line" onClick={() => { setOpened(true); queueMicrotask(() => input?.focus()); }}><I n="message" />Send a separate message</button></div>}>
+      <Show when={mode() === "draft"}><RequestStatus text={ws.store.pendingTask("start_task", id()) ? REQUESTING.start_task : undefined} /></Show>
+      <Show when={reworkError()}><div class="mc-effect st-bad" role="alert">{reworkError()}</div></Show>
       <MessageComposer group="Task composer" label="Message" placeholder={placeholder()} text={text()} onText={write} files={files} mic={mic}
         suggest={{ projectId: m().view.project.id, taskId: id(), commands, skills: true }}
         effect={effect()} off={readOnly()} attachOff={mode() === "stopping" ? STOPPING : undefined} voiceOff={mode() === "stopping" ? STOPPING : undefined}
