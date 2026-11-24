@@ -807,11 +807,10 @@ Accepted adapter versions: Codex exactly `1.12.0`, `1.13.0`, `2.0.1`, `2.1.1`, `
 
 An existing file is left unchanged even when it is malformed or from an older schema; Cortex does not repair it, merge MCP entries into it, or rename/overwrite saved profiles. If the profile registry is absent, `default` is captured only when routing, defaults and MCP usage policy still match the bundled preset; customized settings are never relabeled as an applied default. This also lets an interrupted first install finish on retry. Preset seeding never adds an engine connection.
 
-For technical writers, the preset prefers Haiku/Luna at low complexity,
-Sonnet/Sol/Terra at normal complexity and Sonnet/Sol at high complexity.
-These are preferences, not pins; see the [routing details](#fresh-install-owner-default-snapshot).
+The preset includes the refreshed portable profile, with `sonnet` as the only
+Sonnet model ID. See the [routing details](#fresh-install-owner-default-snapshot).
 
-The MCP examples are `codebase-memory-mcp`, `playwright` (Claude workers only), and `vivaldi` (workers). All start with `enabled: false`; the runtime loader excludes them before launch. Settings lists them as disabled, editable and toggleable. Commands, arguments and filesystem grants contain only `/path/to/...` examples; environment maps are empty. Registering these definitions does not install binaries or browser extensions. Install the corresponding tools, replace example paths and review grants before enabling. The named profile captures only MCP usage policy, never commands, arguments or environment values.
+The MCP examples are `codebase-memory-mcp`, `playwright` (workers, no engine restriction), and `vivaldi` (workers). All start with `enabled: false`; the runtime loader excludes them before launch. Settings lists them as disabled, editable and toggleable. Commands, arguments and filesystem grants contain only `/path/to/...` examples; environment maps are empty. Registering these definitions does not install binaries or browser extensions. Install the corresponding tools, replace example paths and review grants before enabling. The named profile captures only MCP usage policy, never commands, arguments or environment values.
 
 **Reset to default preset** in Settings replaces `routing.json` and `defaults.json` together. It requires a confirmation that names the overwrite, and the machine action re-reads the combined revision of both files before confirmation and checks it again under the owner lock, so a concurrent change after that observation is refused. The machine wrapper ignores a caller-supplied revision; it does not enforce the age of the Settings card's earlier read. Before writing, it keeps a private owner-only backup of each existing file, named `<name>.json.cortex-backup-<time_ns>` in the same configuration directory. Reset overwrites all routing rules, the coordinator default, the language and the owner ceiling. Project and `$CORTEX_ROUTING` overrides are not changed. If an ordinary pre-replacement write fails, completed replacements are rolled back; uncertain durability is reported without replay. A hard process kill between the two replacements can leave the pair mixed; the backups allow manual restoration.
 
@@ -1226,95 +1225,42 @@ Reads never rewrite the source file or profile; the policy version remains 2. Th
 
 ### Fresh-install owner default snapshot
 
-The bundled preset lists Haiku, Luna, Sonnet, Sol and Terra as preferred for
-every work kind except frontend design implementation, whose Opus preference
-is unchanged. Preferences rank eligible models, not the tiers themselves.
-Haiku and Luna serve light work; Sonnet, Sol and Terra serve standard work;
-Sonnet and Sol serve deep work alongside conditionally preferred Opus.
-Haiku and Luna no longer count as standard candidates for testing. Normal
-testing uses the standard pool when available; fallback rules still apply.
+The schema-version-1 install snapshot uses the portable policy of the saved
+`default` profile. It ships `claude-agent-acp/opus` at `thought_level: medium`
+and `language: ru`, without a mode override. The unrestricted user ceiling
+needs no explicit override. Route/connection bindings, account limits and
+machine-specific executable paths, environment values and grants are not copied.
+The disabled MCP examples do not opt out of containment. Existing registrations
+and saved profiles are not replaced by seeding.
 
-Planner, general and technical-writer roles use light, standard and deep for
-low, normal and high complexity respectively. Explorer uses light for low and
-normal, and standard for high. Deep routing targets high effort, subject to
-model-specific constraints. The portable coordinator is `claude-agent-acp/opus`
-at medium effort.
+| Engine / model ID | Automatic tiers | Effort floor → maximum | Preference |
+| --- | --- | --- | --- |
+| Claude `opus` | flagship, deep | medium → xhigh | Design, planning, frontend design implementation, debugging, analysis, backend and frontend implementation, writing, operations, testing and review; conditional |
+| Claude `fable` | flagship | low → high | Design |
+| Claude `haiku` | light | high → max | Investigation only |
+| Claude `sonnet` | standard, light | medium → xhigh | Backend and frontend implementation, operations, debugging, design, planning, analysis, review, testing and writing |
+| Codex `gpt-6.2-sol` | deep, standard | medium → xhigh | All work kinds except frontend design implementation |
+| Codex `gpt-6.2-astra` | flagship, deep | low → high | All work kinds except investigation; conditional |
+| Codex `gpt-6-luna` | light | high → max | Investigation only |
+| Codex `gpt-6.1-terra` | standard, light | medium → high | All work kinds except writing and frontend design implementation |
 
-The public install asset is based on the saved production `default` profile from
-2026-10-12 at 14:23 UTC, with the implementation-kind and tier refinements below. Its routing is a non-secret snapshot, including
-multi-tier memberships, effort floors/ceilings, preferences, request labels and
-quota-window associations. The portable coordinator is
-`claude-agent-acp/opus` with `thought_level: medium`; no mode override is
-added. New `defaults.json` files also set `language: ru`. The install envelope
-remains schema version 1 with optional `language` (`en` or `ru`) and
-`mcp_servers` (disabled installation examples); coordinator
-`mode` is optional, and when present the install template accepts `agent`.
+Claude and Codex are the configured providers. Each listed model is enabled
+and automatic; `opencode/*` is the only deny entry and OpenCode has no enabled
+models. Removing older exact denials does not add models to the allowlists.
+The four exact Claude quota windows remain; `seven_day_sonnet` applies to
+`sonnet`. Haiku and Luna retain their high/xhigh/max ladders and do not stretch
+into standard testing.
 
-This is portable model/settings installation, not cloning the owner's machine:
-route/connection IDs, account bindings and real local paths are excluded. MCP
-installation definitions use only disabled example paths and empty environment maps. The saved unrestricted ceiling needs no override.
-Existing connection session limits and MCP registrations/policies are not changed;
-existing saved `routing-profiles.json` snapshots are never replaced. Fresh installs
-create the applied `default` profile and disabled example MCP registrations as described
-in [Default preset](#default-preset). A fresh host must configure its own MCP executables
-and native engine accounts and resolve the exact coordinator against
-one observed selectable route. Missing or unsupported model/effort observations
-still fail closed; this snapshot is not live qualification.
-
-The preset makes `gpt-6.2-astra` flagship-only, never a deep-tier automatic candidate.
-Only `opus` lists `implementation_frontend_design` in `preferred_for` in the bundled preset.
-Synced from the owner's 2026-10-20 production routing update, Opus's
-`preferred_for` had narrowed to `design`, `planning`,
-`implementation_frontend_design`, `debugging` and `analysis`, dropping
-`implementation_backend`, `implementation_frontend` and `review`; Sonnet-5 also
-gained the `deep` tier alongside `standard` in that sync.
-
-Synced again from the owner's 2026-10-21 production routing update, Opus's
-configured tiers drop `standard` entirely (now only `flagship` and `deep`),
-and `preferred_for` regains `implementation_backend` and
-`implementation_frontend` (now `design`, `planning`,
-`implementation_frontend_design`, `debugging`, `analysis`,
-`implementation_backend`, `implementation_frontend`). Because Opus no longer
-configures the `standard` tier at all, standard-tier work -- including plain
-`design` and `implementation_frontend` -- never reaches Opus by purpose or by
-an explicit hint: the hint is ignored on tier mismatch rather than ranked
-against the owner's preference, and the owner's eligible Sonnet/Sol preferences
-serve that tier instead. Opus still serves `design`, `implementation_backend` and
-`implementation_frontend` through its remaining `deep`/`flagship` tiers once
-work escalates or is otherwise eligible for those tiers. Sol's (`gpt-6.2-sol`)
-`preferred_for` also gained `testing`, `investigation` and `writing` in that
-sync; the 2026-10-27 priority refinement removes testing, debugging and writing again. The latest refresh removes Sol's free-text condition (`preferred_when: null`),
-so its listed `preferred_for` kinds apply without a route hint, including on
-quality retries. With equal quota and no provider preference, unhinted standard
-`design` and `implementation_frontend` now select Sol rather than Sonnet;
-quota pressure can still pass over that preference. The snapshot retains the
-Opus UI/UX and Sonnet complex-backend conditions in `preferred_when`, independent
-of the `preferred_for` enum. For explicit
-`implementation_frontend_design`, structured `preferred_for` selection
-applies independently of that text and survives quality retries/fixes: Opus
-remains selected while eligible (its configured `deep`/`flagship` tiers) and
-not passed over by the existing hot-and-meaningfully-worse quota rule.
-Escalation cannot substitute a different engine or a non-preferred higher-tier
-model while a preferred route remains usable in an eligible fallback tier.
-
-If Opus is unconfigured, unavailable, automatically excluded, outside the task
-ceiling or exhausted, another eligible route on the affinity engine (Claude in
-the preset) serves this work first. Only once Claude has no eligible route at
-all does dispatch fall back to the normal cross-engine selection -- Sol or
-Astra on Codex in the preset -- instead of refusing; while Claude has even one
-eligible route, Codex is never chosen for this work. If no route is eligible on
-any configured engine, dispatch refuses visibly rather than inheriting the
-coordinator. Pins remain strict; a cross-engine pin is refused regardless of
-this fallback. Confirmed user model requests still precede automatic routing.
-No authorization, tier/effort policy or quota-exhaustion rule is weakened.
-
-For models retaining a non-null `preferred_when` (unlike Sol), other work kinds,
-including the role-default `design` kind, still require the coordinator's exact
-offered route hint to satisfy that condition, and ignore conditional hints on
-quality escalation. The `request_names`
-`opus`/`опус` still permit explicit user requests. OpenCode is explicitly denied
-by `opencode/*` and `auto_allow` is empty; dormant OpenCode model policy remains
-preserved. See [affinity-bound frontend design](features/routing-and-fallback/index.md#affinity-bound-frontend-design).
+Planner, general and technical-writer roles still request light, standard and
+deep tiers for low, normal and high complexity; explorer requests light,
+light and standard. These are requested tiers, not guaranteed selections.
+Opus and Astra both list frontend design implementation. Claude affinity
+still comes first, and Opus is its only listed preference for that kind.
+Codex is considered only when no eligible Claude route remains. Other kinds
+use the ordinary conditional-hint rules for Opus and Astra. See
+[affinity-bound frontend design](features/routing-and-fallback/index.md#affinity-bound-frontend-design).
+This snapshot does not qualify availability, effort support or model access on
+a live account.
 
 ### Haiku 5.5 and Luna parity
 
@@ -1328,13 +1274,10 @@ to the upstream install at every start; see
 [catalog refresh lifetime and deployed runtimes](features/claude-engine/index.md#catalog-refresh-lifetime-and-deployed-runtimes).
 
 Both `haiku` and `codex-acp/gpt-6-luna` are light-tier only, with no
-`also_standard_for` testing override. Both have effort floor high, ladder
-high/xhigh/max, maximum max, identical preferred
-work kinds and null request names. The SDK supports all three chosen levels;
-no unsupported effort was substituted. `seven_day_haiku` associates only
-the exact new alias. The deny entry is the exact old
-`claude-agent-acp/claude-haiku-4-5-20251001`, not bare `haiku`.
-Deny matching remains exact; it is not a family rule.
+`also_standard_for` testing override. Both prefer investigation only and have
+effort floor high, ladder high/xhigh/max and maximum max. Neither configures
+request labels. `seven_day_haiku` associates only the exact `haiku` ID; the
+older versioned Haiku model is not enabled by this preset.
 
 The owner's production routing and selected `default` profile were
 deliberately updated together after private backups; unrelated profile

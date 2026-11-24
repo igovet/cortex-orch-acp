@@ -375,34 +375,18 @@ but grant no route: pins, deny, automatic membership, providers, tier,
 availability and quota rules remain controlling. Preferences cannot promote
 a model into a different tier. See [configuration](../../configuration.md#user-routing-profiles).
 
-The current install snapshot follows the refreshed saved default profile:
-explicit OpenCode denial and a `claude-agent-acp/opus` coordinator at medium effort.
-In the current preset, Haiku, Luna, Sonnet, Sol and Terra are preferred for
-all work kinds other than frontend design implementation. The existing Opus,
-Fable and Astra preferences and the Opus condition are unchanged. At the
-requested tier the usual pools are Haiku/Luna for light, Sonnet/Sol/Terra for
-standard, and Sonnet/Sol for deep (where Opus remains eligible). Haiku and Luna
-do not stretch into standard testing. Preferences do not override eligibility,
-usage constraints or fallback.
-The 2026-10-21 production routing refresh removes Opus from the `standard` tier:
-its configured tiers are now `flagship` and `deep` only. Standard-tier generic
-`design` and `implementation_frontend` work cannot select Opus, even with an
-exact coordinator hint (`ignored:tier_mismatch`). The UI/UX wording does not
-create a strict role pin or override tier eligibility.
-
-Opus retains the `opus`/`опус` request labels and its UI/UX condition, including
-frontend layout and styling (`implementation_frontend_design`); its
-`preferred_for` also regains `implementation_backend` and `implementation_frontend`.
-Sol's `preferred_for` gained `testing`, `investigation` and `writing` in that sync;
-the 2026-10-27 priority refinement removes testing, debugging and writing again. The latest
-refresh removes Sol's free-text condition (`preferred_when: null`), so its listed
-preferences apply without a route hint, including on quality retries. At equal
-quota and without a provider preference, unhinted standard-tier generic design
-and frontend work select Sol; quota pressure can still pass over that preference.
-Explicit frontend-design classification uses structured preferences on every
-attempt, independently of the conditional hint, and still prefers eligible Opus
-on its affinity engine. Other kinds require an exact matching hint for models
-that retain a non-null `preferred_when`; Sol is no longer conditional.
+The install snapshot uses the portable `claude-agent-acp/opus` coordinator at
+medium effort and explicitly denies `opencode/*`. Sonnet (`sonnet`) and Terra
+are light and standard candidates; Sol is standard and deep; Opus and Astra are
+deep and flagship. Haiku and Luna are light-only and preferred for investigation,
+with no standard-testing stretch. Sonnet's exact ID is also used for its
+seven-day quota window.
+Opus and Astra list frontend design implementation and review. Their written
+conditions guide ordinary preferences, while frontend-design routing uses the
+structured preference on the affinity engine. Standard-tier plain design or
+frontend work cannot select Opus or Astra at that tier, even with an exact hint.
+Sol's listed preferences, including testing, debugging, investigation and writing,
+are unconditional. Provider, eligibility and quota rules still apply.
 See [affinity-bound frontend design](#affinity-bound-frontend-design) and the
 [fresh-install snapshot](../../configuration.md#fresh-install-owner-default-snapshot).
 
@@ -422,7 +406,8 @@ selects it at `deep` through the configured fallback order (light → standard �
 deep or standard → deep → light, respectively). This promotes the serving tier
 without waiting for a quality retry; it does not give Opus standard-tier membership.
 
-The preset's sole frontend-design preference is Opus. If it is unconfigured,
+Opus is the preset's sole Claude frontend-design preference; Astra lists that
+kind on Codex. If it is unconfigured,
 unavailable, automatically excluded, outside the task ceiling or exhausted,
 fallback first tries another eligible route on the same affinity engine
 (Claude in the preset). Only when that engine has no authorized, available,
@@ -870,12 +855,12 @@ eligibility, not authorization or tier. It is persisted in plan JSON and survive
 retry/fix derivation; absent an override, the actual fix role supplies the default.
 Plan hint previews and route audits report the effective classification.
 
-The default preset places Astra only in flagship and lists frontend-with-design
-only in Opus's `preferred_for`. Opus's conditional preference still requires
-the coordinator's exact route hint; retries, fixes and quality escalation ignore
-such hints and conditions, and the strict work-kind list above still bounds
-their candidates. `preferred_for` is an eligibility rule, not an automatic promotion
-from the light tier. Existing version-2 files and profiles accept legacy
+The default preset places Astra and Opus in flagship and deep. Both list
+frontend-with-design in `preferred_for`; only Opus is on the default Claude
+affinity engine. Frontend design uses the structured preference independently
+of the free-text condition. For ordinary work kinds the condition still
+requires an exact route hint, which is ignored on quality escalation.
+`preferred_for` does not grant tier membership. Existing version-2 files and profiles accept legacy
 `implementation` preferences, stretch allowances and affinity: effective reads
 expand it to all three new kinds without rewriting saved files. Editable source
 rules remain unexpanded so unrelated Settings saves preserve legacy entries.
@@ -1635,9 +1620,9 @@ Model-window associations are optional `quota_windows` settings, never a built-i
 
 ## Short model texts: cheapest model of the least-used connection
 
-Task titles, commit messages and pull request texts are not worker dispatches
-and do not pass through role tiers, consent grants or fallback. Each is written
-by one route: among routes allowed for automatic choice (enabled, not denied,
+Task titles, Commit and squash messages, and outgoing Push summaries are not
+worker dispatches and do not pass through role tiers or role consent grants.
+Each uses at most one model route: among routes allowed for automatic choice (enabled, not denied,
 listed in `auto`, with a tier placement) on Claude or Codex native connections,
 each connection offers its cheapest model by tier (`light`, then `standard`,
 `deep`, `flagship`; equal tiers by model id), and the connection whose plan

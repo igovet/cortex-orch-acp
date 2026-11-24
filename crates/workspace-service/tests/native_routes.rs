@@ -802,39 +802,41 @@ impl Fixture {
     }
 }
 #[test]
-fn preset_preferred_work_kinds_keep_frontend_design_exclusive_to_opus() {
+fn preset_routes_only_the_current_sonnet_and_associates_its_quota() {
     let preset: Value =
         serde_json::from_str(include_str!("../../../policy/model-settings-default.json")).unwrap();
-    let models = preset["routing"]["models"].as_object().unwrap();
-    let expected = BTreeSet::from([
-        "analysis",
-        "debugging",
-        "design",
-        "implementation_backend",
-        "implementation_frontend",
-        "investigation",
-        "operations",
-        "planning",
-        "review",
-        "testing",
-        "writing",
-    ]);
-    for (engine, model) in [
-        ("claude-agent-acp", "haiku"),
-        ("claude-agent-acp", "claude-sonnet-5"),
-        ("codex-acp", "gpt-6-luna"),
-        ("codex-acp", "gpt-6.2-sol"),
-        ("codex-acp", "gpt-6.1-terra"),
-    ] {
-        let preferred = models[engine]["policy"][model]["preferred_for"]
+    let routing = &preset["routing"];
+    assert_eq!(routing["deny"], json!(["opencode/*"]));
+    let claude = "claude-agent-acp";
+    let models = routing["models"].as_object().unwrap();
+    assert_eq!(
+        routing["enabled"][claude],
+        json!(["opus", "fable", "haiku", "sonnet"])
+    );
+    assert_eq!(models[claude]["auto"], routing["enabled"][claude]);
+    assert!(!routing.to_string().contains("claude-sonnet-5"));
+    assert_eq!(
+        models[claude]["tiers"]["sonnet"],
+        json!(["standard", "light"])
+    );
+    assert_eq!(
+        routing["quota_windows"][claude][1],
+        json!({"window":"seven_day_sonnet","models":["sonnet"]})
+    );
+    for (engine, model) in [(claude, "haiku"), ("codex-acp", "gpt-6-luna")] {
+        assert_eq!(
+            models[engine]["policy"][model]["preferred_for"],
+            json!(["investigation"])
+        );
+        assert!(models[engine]["policy"][model]["also_standard_for"].is_null());
+    }
+    for (engine, model) in [(claude, "opus"), ("codex-acp", "gpt-6.2-astra")] {
+        let policy = &models[engine]["policy"][model];
+        assert!(policy["preferred_for"]
             .as_array()
-            .unwrap();
-        let kinds: BTreeSet<_> = preferred
-            .iter()
-            .map(|kind| kind.as_str().unwrap())
-            .collect();
-        assert_eq!(kinds, expected, "{engine}/{model}");
-        assert_eq!(preferred.len(), expected.len(), "{engine}/{model}");
+            .unwrap()
+            .contains(&json!("review")));
+        assert!(policy["preferred_when"].is_string());
     }
 
     let mut frontend_design = Vec::new();
@@ -849,7 +851,10 @@ fn preset_preferred_work_kinds_keep_frontend_design_exclusive_to_opus() {
             }
         }
     }
-    assert_eq!(frontend_design, [("claude-agent-acp", "opus")]);
+    assert_eq!(
+        frontend_design,
+        [(claude, "opus"), ("codex-acp", "gpt-6.2-astra")]
+    );
 }
 
 #[test]
@@ -867,12 +872,17 @@ fn preset_routing_preferences_and_role_tiers_follow_complexity() {
             (
                 "codex-acp",
                 "cn_fixture",
-                models(&["gpt-6-luna", "gpt-6.2-sol", "gpt-6.1-terra"]),
+                models(&[
+                    "gpt-6-luna",
+                    "gpt-6.2-sol",
+                    "gpt-6.1-terra",
+                    "gpt-6.2-astra",
+                ]),
             ),
             (
                 "claude-agent-acp",
                 "cn_claude",
-                models(&["haiku", "claude-sonnet-5", "opus"]),
+                models(&["haiku", "sonnet", "opus", "claude-sonnet-5"]),
             ),
         ],
     );
@@ -895,9 +905,6 @@ fn preset_routing_preferences_and_role_tiers_follow_complexity() {
         menu["roles"]["worker-explorer"],
         json!({"low":"light","normal":"light","high":"standard"})
     );
-    let light = ["claude-agent-acp/haiku", "codex-acp/gpt-6-luna"];
-    let deep = ["claude-agent-acp/claude-sonnet-5", "codex-acp/gpt-6.2-sol"];
-    let standard = [deep[0], deep[1], "codex-acp/gpt-6.1-terra"];
     // Menu tiers alone do not exercise the retry dispatch path.
     for (complexity, tier) in [("low", "light"), ("normal", "light"), ("high", "standard")] {
         for escalated in [false, true] {
@@ -922,11 +929,7 @@ fn preset_routing_preferences_and_role_tiers_follow_complexity() {
         }
     }
     for role in ["worker-technical-writer", "worker-qa-engineer"] {
-        for (complexity, tier, preferred, effort) in [
-            ("low", "light", light.as_slice(), None),
-            ("normal", "standard", standard.as_slice(), Some("medium")),
-            ("high", "deep", deep.as_slice(), Some("high")),
-        ] {
+        for (complexity, tier) in [("low", "light"), ("normal", "standard"), ("high", "deep")] {
             let selected = resolver
                 .choose(
                     role,
@@ -940,36 +943,38 @@ fn preset_routing_preferences_and_role_tiers_follow_complexity() {
             assert_eq!(decision["role_tier"], tier);
             assert_eq!(decision["tier"], tier);
             assert_eq!(decision["purpose"]["status"], "honoured");
-            let expected = preferred.iter().copied().collect::<BTreeSet<_>>();
-            let actual = decision["purpose"]["preferred"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|route| route.as_str().unwrap())
-                .collect::<BTreeSet<_>>();
-            assert_eq!(actual, expected);
+            let expected = match (tier, role) {
+                ("light", "worker-technical-writer") => vec!["claude-agent-acp/sonnet"],
+                ("light", _) => vec!["claude-agent-acp/sonnet", "codex-acp/gpt-6.1-terra"],
+                ("standard", "worker-technical-writer") => {
+                    vec!["claude-agent-acp/sonnet", "codex-acp/gpt-6.2-sol"]
+                }
+                ("standard", _) => vec![
+                    "claude-agent-acp/sonnet",
+                    "codex-acp/gpt-6.1-terra",
+                    "codex-acp/gpt-6.2-sol",
+                ],
+                _ => vec!["codex-acp/gpt-6.2-sol"],
+            };
+            let preferred = decision["purpose"]["preferred"].as_array().unwrap();
+            assert_eq!(
+                preferred
+                    .iter()
+                    .map(|v| v.as_str().unwrap())
+                    .collect::<BTreeSet<_>>(),
+                expected.iter().copied().collect::<BTreeSet<_>>(),
+                "{role}/{tier}"
+            );
             let candidates = decision["candidates"].as_array().unwrap();
             assert!(candidates
                 .iter()
                 .take(expected.len())
-                .all(|candidate| expected.contains(candidate["route"].as_str().unwrap())));
-            if tier == "light" {
-                assert_eq!(candidates.len(), light.len());
-            }
-            if tier == "standard" {
-                assert_eq!(candidates.len(), standard.len());
-            }
-            if tier == "deep" {
-                // The preset does not list testing or writing for Opus, so it is no
-                // candidate for these roles at all (owner store 2026-11-21).
-                assert!(candidates
-                    .iter()
-                    .all(|c| c["route"] != "claude-agent-acp/opus"));
-                assert_eq!(candidates.len(), deep.len());
-            }
-            if let Some(effort) = effort {
-                assert_eq!(selected.parameters["thought_level"], effort);
-            }
+                .all(|c| { expected.contains(&c["route"].as_str().unwrap()) }));
+            assert!(candidates
+                .iter()
+                .all(|c| c["route"] != "claude-agent-acp/claude-sonnet-5"));
+            let effort = if tier == "deep" { "high" } else { "medium" };
+            assert_eq!(selected.parameters["thought_level"], effort);
         }
     }
 }

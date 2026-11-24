@@ -535,7 +535,14 @@ Native Start reaches Core through the ordinary authenticated workspace command.
 Project/actor binding, draft version, owner epoch, saved-input snapshot, runtime
 creation marker, display binding and request receipt are checked/committed together.
 Admission and progress are owned independently of the requesting window. Replays
-return the retained receipt without dispatch; payload changes conflict. Engine
+return the retained receipt without dispatch; payload changes conflict.
+The live steering turn that handles a Send now message during execution has only
+read tools and the two scoped steering tools; steering text never grants an
+assignment, route, approval or write reservation, `steer_plan` is validated against
+the retained plan, role/scope policy and `deny-write` rules, and targeted guidance
+reaches only an exact live attempt. Bounded writer-queue admission (two seconds) for
+sprint creation and live settings keeps request-identity replay and refuses a full
+queue explicitly rather than running a late job. Engine
 effects remain outside the transaction under channel/provisioning authority.
 Only a host-supplied qualified route provider can authorize launch, never desktop
 JSON alone. The production binary binds a read-only configured provider: it checks
@@ -1224,16 +1231,12 @@ checks remain required. Reasoning uses the exact host-derived ID tuple. See
 [history recovery](integrations/paseo/HISTORY.md).
 
 Fresh-install model settings use the owner's refreshed portable default-profile
-routing policy, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
-message language. Within their tiers, Haiku, Luna, Sonnet, Sol and Terra are
-preferred for all work kinds except frontend design implementation, where Opus
-remains preferred. Terra (`codex-acp/gpt-6.1-terra`) is an enabled standard-tier
-automatic candidate with medium-to-high effort. The technical-writer ladder is
-light/standard/deep for low/normal/high complexity, with Haiku/Luna,
-Sonnet/Sol/Terra and Sonnet/Sol preferred at those tiers, respectively. These
-preferences are not pins or proof of live availability. They neither
-grant model access nor bypass provider policy, quotas or hard eligibility. This
-is not live qualification. Existing owner
+routing policy, the portable `claude-agent-acp/opus` coordinator at medium effort,
+and Russian message language. The bundled Sonnet ID is `sonnet`, including for
+its seven-day quota window. Removing legacy deny entries does not enable those
+models: exact enabled and automatic membership, provider policy, quotas and
+other eligibility checks still apply. OpenCode remains explicitly denied.
+Preset preferences do not grant model access or prove live availability. Existing owner
 settings are never replaced. Account/connection
 identities and machine-specific MCP paths/credentials are not cloned. Fresh installs
 register disabled MCP examples with `/path/to/...` placeholders and empty environments,
@@ -1262,8 +1265,13 @@ and owner fences before writable initialization; a busy owner refuses with
 `scheduler_owner_busy`. An incoming agent process hands that lease over only
 while it has no unfinished task and has been idle, so several agents can share a
 project one after another; it never runs beside another holder. It does not
-attach to an existing daemon or adopt a legacy task. Legacy format-12 session/load instead uses a query-only Core reader:
-no native scheduler, recovery, permission grant or task adoption is triggered.
+attach to an existing daemon. A project containing Python-era tasks opens through the same
+fenced recovery/adoption as the Workspace service (unsettled effects are not replayed),
+and a format-11 store is upgraded by the verified backup-first migration; continuing an
+old task from incoming ACP is not implemented. Legacy format-12 session/load instead uses a query-only Core reader:
+no native scheduler, recovery, permission grant or task adoption is triggered, and
+`session/prompt` on such a session is refused with `legacy_session_read_only`. Storage
+refusals return a human-readable message with a stable `reason` and leave files unchanged.
 The Rust entry is the default Paseo/Zed launch. Host setup (Zed registration, the
 Paseo setup launch record) or a Paseo source-root launch selects the fixed
 checkout path `target/debug/cortex-acp`, never model input; an explicit
@@ -1527,6 +1535,12 @@ task creation retains bytes in private SQLite options until Start; prompt, answe
 Sprint creation and planning notes retain references in atomically replaced private product state; their bodies are read when the planning task is created and become that task's own draft attachments, never base64 inside prompt text. A sprint's cumulative planning resources share the eight-file/4-MiB budget. Product-state writes refuse before exceeding the bounded response budget; local frames are capped at 8 MiB. This is a bounded transport, not an unbounded upload service.
 Only the sprint driver can set the draft's `planningSprintId`. The service commits it with the draft before publishing the task. The read-only board field does not grant execution authority, substitute for the sprint's planning-task link, or select the runtime policy at Start.
 Sprint planning diagnostics are written by the service to private product state; owner-facing sprint patches cannot set them. The Workspace displays their text from live data and does not copy it into the offline board cache.
+The sprint service checks recovery against the linked task's execution before accepting an amendment
+or original-request replacement and starting fresh; these are not client-side start overrides.
+When the service detaches a planner during recovery, it records the cancelled presentation (unless
+already closed) and the read-only retirement flag in the same private product write as the changed
+link. The flag only suppresses ordinary Board entries and notifications; it does not grant authority,
+change the runtime execution state, or delete the task.
 Question answers and their resource references commit together. The Linux bridge
 reads clipboard image bytes (PNG, or another image GTK can decode, re-encoded as PNG)
 only on an owner paste with no plain text, and reads no clipboard text or file path.

@@ -8,9 +8,9 @@
 //! project ceiling, catalog refresh, discovery and onboarding) must match
 //! byte-for-byte; only wall-clock timestamps (and, for timestamped
 //! documents, the revisions derived from them) are normalized. The test
-//! needs no Python; the oracle can no longer be re-run. The `preset-fresh`
-//! and `preset-reset` workflow entries were recaptured from Rust for the
-//! intentional change to the bundled writing preferences.
+//! needs no Python; the oracle can no longer be re-run. Preset-dependent
+//! workflow entries were recaptured from Rust for the intentional change
+//! to the bundled routing and MCP usage policy.
 use cortex_paseo_tools::py::{self, Py};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};

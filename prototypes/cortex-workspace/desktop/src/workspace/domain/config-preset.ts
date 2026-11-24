@@ -7,9 +7,9 @@ import type { EngineCatalogue, EngineKey, EngineRules, McpServer, McpTool, Model
  */
 const E4 = ["low", "medium", "high", "xhigh"], E5 = [...E4, "max"];
 const m = (id: string, label: string, efforts = E4, observed = true) => ({ id, label, efforts, observed });
-/** What the engines report in the fixture. It includes models the preset denies, as a real catalogue does. */
+/** What the engines report in the fixture. It includes models outside the preset allowlist, as a real catalogue does. */
 export const CATALOGUE_MODELS = {
-  "claude-agent-acp": [m("opus[1m]", "Opus"), m("claude-fable-5-1[1m]", "Fable"), m("claude-sonnet-5", "Sonnet"), m("haiku", "Haiku", E5), m("claude-opus-4-8", "Opus 4.8"), m("claude-sonnet-4-6", "Sonnet 4.6"), m("claude-haiku-4-5-20251001", "Haiku 4.5", E5)],
+  "claude-agent-acp": [m("opus", "Opus"), m("fable", "Fable"), m("sonnet", "Sonnet"), m("haiku", "Haiku", E5), m("claude-opus-4-8", "Opus 4.8"), m("claude-sonnet-4-6", "Sonnet 4.6"), m("claude-haiku-4-5-20251001", "Haiku 4.5", E5)],
   "codex-acp": [m("gpt-6.2-sol", "GPT-6.2 Sol"), m("gpt-6.2-astra", "GPT-6.2 Astra"), m("gpt-6-luna", "GPT-6 Luna", E5), m("gpt-6.1-terra", "GPT-6.1 Terra"), m("gpt-6-sol", "GPT-6 Sol"), m("gpt-5.6-terra", "GPT-5.6 Terra")],
   opencode: [],
 };
@@ -20,35 +20,32 @@ export const newCatalogue = (): Record<EngineKey, EngineCatalogue> => {
 
 const pol = (p: Partial<ModelPolicy>): ModelPolicy => ({ ...NEUTRAL_POLICY, ...p });
 const emptyEngine = (): EngineRules => ({ enabled: [], auto: [], tiers: {}, policy: {}, quota: [] });
-const OPUS_WHEN = "Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For implementation_backend, use only for very complex, narrowly scoped tasks.";
-const LIGHT_WORK = ["analysis", "writing", "implementation_backend", "implementation_frontend", "debugging", "investigation", "operations"];
-
 export const presetRouting = (): RoutingRules => ({
   version: 2,
-  deny: ["gpt-5.5", "claude-agent-acp/claude-haiku-4-5-20251001", "claude-agent-acp/claude-sonnet-4-6", "claude-agent-acp/claude-opus-4-6", "claude-agent-acp/claude-opus-4-7", "claude-agent-acp/claude-opus-4-8", "claude-agent-acp/claude-opus-5[1m]", "claude-agent-acp/claude-fable-5", "codex-acp/gpt-5.6-luna", "codex-acp/gpt-5.6-sol", "codex-acp/gpt-5.6-terra", "codex-acp/gpt-6-sol", "opencode/*"],
+  deny: ["opencode/*"],
   providers: ["claude-agent-acp", "codex-acp"],
   engines: {
     "claude-agent-acp": {
-      enabled: ["opus[1m]", "claude-fable-5-1[1m]", "claude-sonnet-5", "haiku"],
-      auto: ["opus[1m]", "claude-fable-5-1[1m]", "claude-sonnet-5", "haiku"],
-      tiers: { "claude-fable-5-1[1m]": ["flagship"], "claude-sonnet-5": ["standard", "deep"], haiku: ["light"], "opus[1m]": ["flagship", "deep"] },
+      enabled: ["opus", "fable", "haiku", "sonnet"],
+      auto: ["opus", "fable", "haiku", "sonnet"],
+      tiers: { "fable": ["flagship"], "haiku": ["light"], "opus": ["flagship", "deep"], "sonnet": ["standard", "light"] },
       policy: {
-        "claude-fable-5-1[1m]": pol({ effortFloor: "low", maxEffort: "high", preferredFor: ["design"], requestNames: ["fable", "фейбл", "фэйбл"] }),
-        "claude-sonnet-5": pol({ effortFloor: "medium", maxEffort: "xhigh", preferredFor: ["implementation_backend", "implementation_frontend", "investigation", "review", "analysis", "operations"] }),
-        haiku: pol({ alsoStandardFor: ["testing"], effortFloor: "high", effortLadder: ["high", "xhigh", "max"], maxEffort: "max", preferredFor: LIGHT_WORK }),
-        "opus[1m]": pol({ effortFloor: "medium", maxEffort: "xhigh", preferredFor: ["design", "planning", "implementation_frontend_design", "debugging", "analysis", "implementation_backend", "implementation_frontend"], preferredWhen: OPUS_WHEN, requestNames: ["opus", "опус"] }),
+        "fable": pol({ effortFloor: "low", maxEffort: "high", preferredFor: ["design"], requestNames: ["fable", "фейбл", "фэйбл"] }),
+        "haiku": pol({ effortFloor: "high", maxEffort: "max", effortLadder: ["high", "xhigh", "max"], preferredFor: ["investigation"] }),
+        "opus": pol({ effortFloor: "medium", maxEffort: "xhigh", preferredFor: ["design", "planning", "implementation_frontend_design", "debugging", "analysis", "implementation_backend", "implementation_frontend", "writing", "operations", "testing", "review"], preferredWhen: "Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For other works use only for very complex, narrowly scoped tasks.", requestNames: ["opus", "опус"] }),
+        "sonnet": pol({ effortFloor: "medium", maxEffort: "xhigh", preferredFor: ["implementation_backend", "implementation_frontend", "operations", "debugging", "design", "planning", "analysis", "review", "testing", "writing"] }),
       },
-      quota: [{ window: "seven_day_opus", models: ["opus[1m]"] }, { window: "seven_day_sonnet", models: ["claude-sonnet-5"] }, { window: "seven_day_fable", models: ["claude-fable-5-1[1m]"] }, { window: "seven_day_haiku", models: ["haiku"] }],
+      quota: [{ window: "seven_day_opus", models: ["opus"] }, { window: "seven_day_sonnet", models: ["sonnet"] }, { window: "seven_day_fable", models: ["fable"] }, { window: "seven_day_haiku", models: ["haiku"] }],
     },
     "codex-acp": {
       enabled: ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6-luna", "gpt-6.1-terra"],
       auto: ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6-luna", "gpt-6.1-terra"],
-      tiers: { "gpt-6.2-astra": ["flagship"], "gpt-6-luna": ["light"], "gpt-6.2-sol": ["standard", "deep"], "gpt-6.1-terra": ["standard"] },
+      tiers: { "gpt-6-luna": ["light"], "gpt-6.1-terra": ["standard", "light"], "gpt-6.2-astra": ["flagship", "deep"], "gpt-6.2-sol": ["deep", "standard"] },
       policy: {
-        "gpt-6.2-astra": pol({ effortFloor: "low", maxEffort: "high", preferredFor: ["design"], requestNames: ["astra", "астр"] }),
-        "gpt-6-luna": pol({ alsoStandardFor: ["testing"], effortFloor: "high", effortLadder: ["high", "xhigh", "max"], maxEffort: "max", preferredFor: LIGHT_WORK }),
-        "gpt-6.2-sol": pol({ effortFloor: "medium", maxEffort: "xhigh", preferredFor: ["implementation_backend", "implementation_frontend", "planning", "design", "review", "operations", "analysis", "investigation"] }),
-        "gpt-6.1-terra": pol({ effortFloor: "medium", maxEffort: "high", preferredFor: ["writing", "testing", "debugging"] }),
+        "gpt-6-luna": pol({ effortFloor: "high", maxEffort: "max", effortLadder: ["high", "xhigh", "max"], preferredFor: ["investigation"] }),
+        "gpt-6.1-terra": pol({ effortFloor: "medium", maxEffort: "high", preferredFor: ["testing", "debugging", "implementation_backend", "implementation_frontend", "operations", "investigation", "review", "design", "planning", "analysis"] }),
+        "gpt-6.2-astra": pol({ effortFloor: "low", maxEffort: "high", preferredFor: ["design", "implementation_backend", "implementation_frontend", "planning", "writing", "review", "testing", "debugging", "operations", "analysis", "implementation_frontend_design"], preferredWhen: "For use only for very complex, narrowly scoped tasks.", requestNames: ["astra", "астр"] }),
+        "gpt-6.2-sol": pol({ effortFloor: "medium", maxEffort: "xhigh", preferredFor: ["implementation_backend", "implementation_frontend", "planning", "design", "review", "operations", "analysis", "investigation", "writing", "debugging", "testing"] }),
       },
       quota: [],
     },
@@ -58,7 +55,7 @@ export const presetRouting = (): RoutingRules => ({
 });
 
 export const presetDefaults = (): UserDefaults => ({
-  coordinator: { engine: "claude-agent-acp", model: "opus[1m]", effort: "medium", parameters: {} }, routeDefault: null,
+  coordinator: { engine: "claude-agent-acp", model: "opus", effort: "medium", parameters: {} }, routeDefault: null,
   language: "ru", mode: "development", checkout: "worktree", ceiling: openCeiling(), preserved: [],
 });
 
@@ -72,7 +69,7 @@ export const presetServers = (): McpServer[] => [
   },
   {
     ...newMcpServer(), name: "playwright", command: "/usr/bin/node", args: ["/opt/cortex-tools/playwright/cli.js", "--headless", "--isolated", "--browser", "chromium", "--executable-path", "/opt/chrome/chrome"],
-    roles: ["worker"], engines: ["claude-agent-acp"], network: true, runtimeDirEnv: ["PLAYWRIGHT_MCP_OUTPUT_DIR"], readPaths: ["/usr/bin/node", "/opt/cortex-tools/playwright", "/usr/share/fonts", "/opt/chrome"],
+    roles: ["worker"], network: true, runtimeDirEnv: ["PLAYWRIGHT_MCP_OUTPUT_DIR"], readPaths: ["/usr/bin/node", "/opt/cortex-tools/playwright", "/usr/share/fonts", "/opt/chrome"],
     allowedTools: ["browser_close", "browser_resize", "browser_console_messages", "browser_handle_dialog", "browser_evaluate", "browser_file_upload", "browser_drop", "browser_find", "browser_fill_form", "browser_press_key", "browser_type", "browser_navigate", "browser_navigate_back", "browser_network_requests", "browser_network_request", "browser_take_screenshot", "browser_snapshot", "browser_click", "browser_drag", "browser_hover", "browser_select_option", "browser_tabs", "browser_wait_for", "browser_webmcp_list", "browser_webmcp_call"],
   },
   {

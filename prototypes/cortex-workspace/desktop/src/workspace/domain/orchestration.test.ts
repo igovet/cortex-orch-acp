@@ -27,7 +27,7 @@ const server = (name: string) => structuredClone(cfg(setup()).surfaces.mcp_serve
 const ctx = (p = setup(), usage = {}) => ({ rules: cfg(p).surfaces.routing, ceiling: cfg(p).surfaces.user_defaults.ceiling, catalogue: cfg(p).catalogue, usage });
 
 describe("the bundled preset", () => {
-  it("mirrors policy/model-settings-default.json exactly", () => {
+  it("mirrors the portable policy and defaults in policy/model-settings-default.json", () => {
     const r = rules(), src = preset.routing;
     expect(r.version).toBe(2);
     expect(r.deny).toEqual(src.deny);
@@ -35,7 +35,10 @@ describe("the bundled preset", () => {
     for (const e of ["claude-agent-acp", "codex-acp", "opencode"] as const) {
       expect(r.engines[e].enabled).toEqual(src.enabled[e]);
       expect(r.engines[e].auto).toEqual(src.models[e].auto);
-      expect(r.engines[e].tiers).toEqual(src.models[e].tiers);
+      expect(r.engines[e].tiers).toEqual(Object.fromEntries(
+        Object.entries(src.models[e].tiers).map(([model, tiers]) => [model, [tiers].flat()]),
+      ));
+      expect(Object.keys(r.engines[e].policy)).toEqual(Object.keys(src.models[e].policy));
       for (const [model, want] of Object.entries<Record<string, unknown>>(src.models[e].policy)) {
         const got = r.engines[e].policy[model];
         expect(got.effortFloor).toEqual(want.effort_floor ?? null);
@@ -49,8 +52,11 @@ describe("the bundled preset", () => {
     }
     expect(r.engines["claude-agent-acp"].quota).toEqual(src.quota_windows["claude-agent-acp"]);
     const d = cfg(setup()).surfaces.user_defaults;
-    expect(d.coordinator).toMatchObject({ engine: "claude-agent-acp", model: "opus[1m]", effort: "medium" });
-    expect(d.language).toBe("ru");
+    expect(d.coordinator).toMatchObject({
+      engine: preset.coordinator.engine, model: preset.coordinator.model,
+      effort: preset.coordinator.parameters.thought_level,
+    });
+    expect(d.language).toBe(preset.language);
     for (const [name, want] of Object.entries<Record<string, unknown>>(preset.mcp_servers)) {
       const s = server(name);
       expect(s.allowedTools).toEqual(want.allowed_tools);
@@ -60,6 +66,7 @@ describe("the bundled preset", () => {
       expect(s.roles).toEqual(want.roles ?? null);
       expect(s.engines).toEqual(want.engines ?? null);
       expect(s.network).toBe(want.network);
+      expect(s.runtimeDirEnv).toEqual(want.runtime_dir_env ?? []);
       expect(s.enabled).toBe(false);
     }
     expect(cfg(setup()).profiles.map(x => x.name)).toEqual(["default"]);
@@ -74,9 +81,9 @@ describe("the bundled preset", () => {
     const row = (role: string, escalate: boolean) => (["low", "normal", "high"] as const).map(c => tierFor(role, escalate, c));
     expect(row("worker-architect", false)).toEqual(["standard", "deep", "deep"]);
     expect(row("worker-architect", true)).toEqual(["deep", "flagship", "flagship"]);
-    expect(row("worker-planner", false)).toEqual(["light", "light", "standard"]);
-    expect(row("worker-planner", true)).toEqual(["light", "standard", "deep"]);
-    expect(row("worker-explorer", true)).toEqual(["light", "light", "light"]);
+    expect(row("worker-planner", false)).toEqual(["light", "standard", "deep"]);
+    expect(row("worker-planner", true)).toEqual(["standard", "deep", "flagship"]);
+    expect(row("worker-explorer", true)).toEqual(["light", "light", "standard"]);
     expect(row("worker-backend-dev", false)).toEqual(["light", "standard", "deep"]);
     expect(row("worker-backend-dev", true)).toEqual(["standard", "deep", "flagship"]);
   });
@@ -105,11 +112,11 @@ describe("routing rules", () => {
     expect(routingProblems(rules(), cat)).toEqual([]);
     const at = (r: ReturnType<typeof rules>) => Object.fromEntries(routingProblems(r, cat).map(p => [p.path, p.message]));
     expect(at(setTier(rules(), C, "haiku", "light", false))[`models.${C}.tiers.haiku`]).toBe("Choose a tier.");
-    expect(at(setPolicy(rules(), C, "opus[1m]", { effortFloor: "xhigh", maxEffort: "low" }))[`models.${C}.policy.opus[1m].max_effort`]).toBe("Floor must not be above max.");
+    expect(at(setPolicy(rules(), C, "opus", { effortFloor: "xhigh", maxEffort: "low" }))[`models.${C}.policy.opus.max_effort`]).toBe("Floor must not be above max.");
     expect(at(setPolicy(rules(), C, "haiku", { effortLadder: ["xhigh", "high"] }))[`models.${C}.policy.haiku.effort_ladder`]).toBe("Up to 3 levels, each higher.");
     expect(at(setPolicy(rules(), C, "haiku", { effortLadder: ["low", "medium", "high", "xhigh"] }))[`models.${C}.policy.haiku.effort_ladder`]).toBe("Up to 3 levels, each higher.");
-    expect(at(setModelAuto(rules(), C, "opus[1m]", false))[`models.${C}.policy.opus[1m].preferred_for`]).toBe("Turn on Auto first.");
-    expect(at(setPolicy(rules(), C, "opus[1m]", { preferredWhen: "x".repeat(501) }))[`models.${C}.policy.opus[1m].preferred_when`]).toContain("500");
+    expect(at(setModelAuto(rules(), C, "opus", false))[`models.${C}.policy.opus.preferred_for`]).toBe("Turn on Auto first.");
+    expect(at(setPolicy(rules(), C, "opus", { preferredWhen: "x".repeat(501) }))[`models.${C}.policy.opus.preferred_when`]).toContain("500");
     expect(at(setPolicy(rules(), C, "haiku", { requestNames: ["auto"] }))[`models.${C}.policy.haiku.request_names`]).toContain("auto");
     expect(at(setPolicy(rules(), X, "gpt-6-luna", { requestNames: ["opus"] }))[`models.${X}.policy.gpt-6-luna.request_names`]).toContain("Opus");
     expect(at(setPin(rules(), "worker-debugger", { engine: X, model: "gpt-6-sol", effort: null }))["pin.worker-debugger"]).toBe("This model is off.");
@@ -158,25 +165,29 @@ describe("route preview", () => {
   it("walks tier, preference and lean, and says why the rest are out", () => {
     const r = previewRoute(input, ctx());
     expect(r.tier).toBe("standard");
-    expect(r.rows.map(x => x.model)).toEqual(["gpt-6.1-sol", "claude-sonnet-5", "gpt-6.1-terra"]);
+    expect(r.rows.map(x => x.model)).toEqual(["gpt-6.2-sol", "gpt-6.1-terra", "sonnet"]);
     expect(r.rows[0]).toMatchObject({ tier: "standard", effort: "medium", decidedBy: "Preferred" });
-    expect(r.rows[2].decidedBy).toBe("Lean to Codex");
-    expect(r.excluded.find(x => x.model === "opus[1m]")?.reason).toBe("Not in this tier");
-    expect(r.excluded.find(x => x.model === "gpt-6-luna")?.reason).toBe("Testing only for standard work");
-    expect(r.excluded.find(x => x.model === "claude-opus-4-8")?.reason).toContain("Denied");
+    expect(r.rows[2].decidedBy).toBe("Preferred");
+    expect(r.excluded.find(x => x.model === "opus")?.reason).toBe("Not in this tier");
+    expect(r.excluded.find(x => x.model === "gpt-6-luna")?.reason).toBe("Not in this tier");
+    expect(r.excluded.find(x => x.model === "claude-opus-4-8")?.reason).toBe("Not enabled");
   });
-  it("a stretch model joins standard work for its own kind", () => {
-    expect(previewRoute({ ...input, kind: "testing" }, ctx()).rows.map(x => x.model)).toContain("gpt-6-luna");
+  it("only a configured testing stretch adds Luna to the standard pool", () => {
+    const testing = { ...input, kind: "testing" } as const;
+    const base = ctx();
+    expect(previewRoute(testing, base).rows.map(x => x.model)).not.toContain("gpt-6-luna");
+    const stretched = setPolicy(base.rules, "codex-acp", "gpt-6-luna", { alsoStandardFor: ["testing"] });
+    expect(previewRoute(testing, { ...base, rules: stretched }).rows.map(x => x.model)).toContain("gpt-6-luna");
   });
   it("ranks a hot plan behind cooler routes, and leaves out a full one", () => {
     const hot = previewRoute(input, ctx(setup(), { "claude-agent-acp": 96 }));
-    expect(hot.rows[0].model).toBe("gpt-6.1-sol");
+    expect(hot.rows[0].model).toBe("gpt-6.2-sol");
     const full = previewRoute(input, ctx(setup(), { "claude-agent-acp": 100 }));
     expect(full.rows.map(r => r.engine)).not.toContain("claude-agent-acp");
-    expect(full.excluded.find(x => x.model === "claude-sonnet-5")?.reason).toBe("Plan limit reached");
+    expect(full.excluded.find(x => x.model === "sonnet")?.reason).toBe("Plan limit reached");
   });
   it("reads usage through the rules it previews: saved, draft or project", () => {
-    const m = structuredClone(machine(setup())), X = "codex-acp", sol = "gpt-6.1-sol";
+    const m = structuredClone(machine(setup())), X = "codex-acp", sol = "gpt-6.2-sol";
     m.config.quotaObserved[X] = [{ window: "shared", percent: 100 }, { window: "sol", percent: 10 }];
     m.config.surfaces.routing.engines[X].quota = [{ window: "shared", models: null }];
     const mapped = structuredClone(m.config.surfaces.routing);
@@ -255,24 +266,24 @@ describe("limits", () => {
 describe("coordinator", () => {
   it("feeds new tasks and leaves running work alone", () => {
     const p = setup(), d = cfg(p).surfaces.user_defaults;
-    send(p, { type: "save_surface", machineId: LOCAL, surface: "user_defaults", value: { ...d, coordinator: { ...d.coordinator!, model: "claude-sonnet-5", effort: "high" }, checkout: "main" }, revision: cfg(p).revisions.user_defaults });
-    expect(machineDefaults(machine(p))).toEqual({ settings: { model: "claude-sonnet-5", effort: "high", mode: "development", language: "ru" }, checkout: "main" });
+    send(p, { type: "save_surface", machineId: LOCAL, surface: "user_defaults", value: { ...d, coordinator: { ...d.coordinator!, model: "sonnet", effort: "high" }, checkout: "main" }, revision: cfg(p).revisions.user_defaults });
+    expect(machineDefaults(machine(p))).toEqual({ settings: { model: "sonnet", effort: "high", mode: "development", language: "ru" }, checkout: "main" });
   });
   it("offers the model's observed levels, or a marked fallback", () => {
     const c = cfg(setup()).catalogue;
-    expect(coordinatorEfforts(c, "claude-agent-acp", "opus[1m]")).toEqual({ levels: ["low", "medium", "high", "xhigh"], observed: true });
+    expect(coordinatorEfforts(c, "claude-agent-acp", "opus")).toEqual({ levels: ["low", "medium", "high", "xhigh"], observed: true });
     expect(coordinatorEfforts(c, "codex-acp", "nothing")).toEqual({ levels: ["low", "medium", "high"], observed: false });
   });
   it("resolves to a route, or says why not", () => {
     const m = machine(setup());
     expect(coordinatorResolution(m)).toMatchObject({ ok: true });
     const off = structuredClone(m);
-    off.config.surfaces.routing = setModelEnabled(off.config.surfaces.routing, "claude-agent-acp", "opus[1m]", false);
+    off.config.surfaces.routing = setModelEnabled(off.config.surfaces.routing, "claude-agent-acp", "opus", false);
     expect(coordinatorResolution(off)).toMatchObject({ ok: false, code: "coordinator_model_disabled" });
   });
   it("refuses both a portable coordinator and an exact route", () => {
     const p = setup(), d = cfg(p).surfaces.user_defaults;
-    const value = { ...d, routeDefault: { routeId: "xr_0123456789abcdef", connectionId: "cn_0123456789ab", model: "opus[1m]", parameters: {} } };
+    const value = { ...d, routeDefault: { routeId: "xr_0123456789abcdef", connectionId: "cn_0123456789ab", model: "opus", parameters: {} } };
     expect(refuse(p, { type: "save_surface", machineId: LOCAL, surface: "user_defaults", value, revision: cfg(p).revisions.user_defaults })).toContain("Clear the exact route first");
     send(p, { type: "save_surface", machineId: LOCAL, surface: "user_defaults", value: { ...value, coordinator: null }, revision: cfg(p).revisions.user_defaults });
     expect(machineDefaults(machine(p)).settings.model).toBe("xr_0123456789abcdef");
@@ -341,7 +352,7 @@ describe("MCP tool access", () => {
     expect(got(s, "coordinator").reason).toBeNull();
     expect(got(s, "worker-senior-consultant")).toEqual({ tools: [], granted: [], reason: "The consultant gets no external servers." });
     const pw = on("playwright");
-    expect(got(pw, "worker-frontend-dev", "codex-acp")).toMatchObject({ tools: [], reason: "Not offered on Codex." });
+    expect(got(pw, "worker-frontend-dev", "codex-acp")).toMatchObject({ reason: null });
     expect(got(pw, "worker-frontend-dev", "codex-acp").granted).toHaveLength(25);
     expect(got(pw, "worker-frontend-dev").tools).toHaveLength(25);
     expect(got(pw, "coordinator")).toMatchObject({ tools: [], reason: "For workers only." });

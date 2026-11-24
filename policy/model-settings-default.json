@@ -3,26 +3,14 @@
   "routing": {
     "model_policy_version": 2,
     "deny": [
-      "gpt-5.5",
-      "claude-agent-acp/claude-haiku-4-5-20251001",
-      "claude-agent-acp/claude-sonnet-4-6",
-      "claude-agent-acp/claude-opus-4-6",
-      "claude-agent-acp/claude-opus-4-7",
-      "claude-agent-acp/claude-opus-4-8",
-      "claude-agent-acp/claude-opus-5",
-      "claude-agent-acp/claude-fable-5",
-      "codex-acp/gpt-5.6-luna",
-      "codex-acp/gpt-5.6-sol",
-      "codex-acp/gpt-5.6-terra",
-      "codex-acp/gpt-6-sol",
       "opencode/*"
     ],
     "enabled": {
       "claude-agent-acp": [
         "opus",
         "fable",
-        "claude-sonnet-5",
-        "haiku"
+        "haiku",
+        "sonnet"
       ],
       "codex-acp": [
         "gpt-6.2-sol",
@@ -32,7 +20,6 @@
       ],
       "opencode": []
     },
-    "auto_allow": [],
     "providers": [
       "claude-agent-acp",
       "codex-acp"
@@ -42,30 +29,24 @@
         "auto": [
           "opus",
           "fable",
-          "claude-sonnet-5",
-          "haiku"
+          "haiku",
+          "sonnet"
         ],
         "tiers": {
-          "fable": [
-            "flagship"
-          ],
-          "claude-sonnet-5": [
-            "standard",
-            "deep"
-          ],
-          "haiku": [
-            "light"
-          ],
+          "fable": "flagship",
+          "haiku": "light",
           "opus": [
             "flagship",
             "deep"
+          ],
+          "sonnet": [
+            "standard",
+            "light"
           ]
         },
         "policy": {
           "fable": {
-            "also_standard_for": null,
             "effort_floor": "low",
-            "effort_ladder": null,
             "max_effort": "high",
             "preferred_for": [
               "design"
@@ -76,54 +57,20 @@
               "фэйбл"
             ]
           },
-          "claude-sonnet-5": {
-            "also_standard_for": null,
-            "effort_floor": "medium",
-            "effort_ladder": null,
-            "max_effort": "xhigh",
-            "preferred_for": [
-              "implementation_backend",
-              "implementation_frontend",
-              "operations",
-              "debugging",
-              "testing",
-              "investigation",
-              "review",
-              "design",
-              "writing",
-              "planning",
-              "analysis"
-            ],
-            "request_names": null
-          },
           "haiku": {
-            "also_standard_for": null,
             "effort_floor": "high",
+            "max_effort": "max",
             "effort_ladder": [
               "high",
               "xhigh",
               "max"
             ],
-            "max_effort": "max",
             "preferred_for": [
-              "implementation_backend",
-              "implementation_frontend",
-              "operations",
-              "debugging",
-              "testing",
-              "investigation",
-              "review",
-              "design",
-              "writing",
-              "planning",
-              "analysis"
-            ],
-            "request_names": null
+              "investigation"
+            ]
           },
           "opus": {
-            "also_standard_for": null,
             "effort_floor": "medium",
-            "effort_ladder": null,
             "max_effort": "xhigh",
             "preferred_for": [
               "design",
@@ -132,12 +79,32 @@
               "debugging",
               "analysis",
               "implementation_backend",
-              "implementation_frontend"
+              "implementation_frontend",
+              "writing",
+              "operations",
+              "testing",
+              "review"
             ],
-            "preferred_when": "Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For implementation_backend, use only for very complex, narrowly scoped tasks.",
+            "preferred_when": "Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For other works use only for very complex, narrowly scoped tasks.",
             "request_names": [
               "opus",
               "опус"
+            ]
+          },
+          "sonnet": {
+            "effort_floor": "medium",
+            "max_effort": "xhigh",
+            "preferred_for": [
+              "implementation_backend",
+              "implementation_frontend",
+              "operations",
+              "debugging",
+              "design",
+              "planning",
+              "analysis",
+              "review",
+              "testing",
+              "writing"
             ]
           }
         }
@@ -150,94 +117,86 @@
           "gpt-6.1-terra"
         ],
         "tiers": {
-          "gpt-6.2-astra": [
-            "flagship"
-          ],
-          "gpt-6-luna": [
+          "gpt-6-luna": "light",
+          "gpt-6.1-terra": [
+            "standard",
             "light"
           ],
-          "gpt-6.2-sol": [
-            "standard",
+          "gpt-6.2-astra": [
+            "flagship",
             "deep"
           ],
-          "gpt-6.1-terra": [
+          "gpt-6.2-sol": [
+            "deep",
             "standard"
           ]
         },
         "policy": {
-          "gpt-6.2-astra": {
-            "also_standard_for": null,
-            "effort_floor": "low",
-            "effort_ladder": null,
-            "max_effort": "high",
-            "preferred_for": [
-              "design"
-            ],
-            "request_names": [
-              "astra",
-              "астр"
-            ]
-          },
           "gpt-6-luna": {
-            "also_standard_for": null,
             "effort_floor": "high",
+            "max_effort": "max",
             "effort_ladder": [
               "high",
               "xhigh",
               "max"
             ],
-            "max_effort": "max",
             "preferred_for": [
-              "implementation_backend",
-              "implementation_frontend",
-              "operations",
-              "debugging",
-              "testing",
-              "investigation",
-              "review",
-              "design",
-              "writing",
-              "planning",
-              "analysis"
-            ],
-            "request_names": null
-          },
-          "gpt-6.2-sol": {
-            "also_standard_for": null,
-            "effort_floor": "medium",
-            "effort_ladder": null,
-            "max_effort": "xhigh",
-            "preferred_for": [
-              "implementation_backend",
-              "implementation_frontend",
-              "operations",
-              "debugging",
-              "testing",
-              "investigation",
-              "review",
-              "design",
-              "writing",
-              "planning",
-              "analysis"
-            ],
-            "preferred_when": null,
-            "request_names": null
+              "investigation"
+            ]
           },
           "gpt-6.1-terra": {
             "effort_floor": "medium",
             "max_effort": "high",
             "preferred_for": [
+              "testing",
+              "debugging",
               "implementation_backend",
               "implementation_frontend",
               "operations",
-              "debugging",
-              "testing",
               "investigation",
               "review",
               "design",
-              "writing",
               "planning",
               "analysis"
+            ]
+          },
+          "gpt-6.2-astra": {
+            "effort_floor": "low",
+            "max_effort": "high",
+            "preferred_for": [
+              "design",
+              "implementation_backend",
+              "implementation_frontend",
+              "planning",
+              "writing",
+              "review",
+              "testing",
+              "debugging",
+              "operations",
+              "analysis",
+              "implementation_frontend_design"
+            ],
+            "preferred_when": "For use only for very complex, narrowly scoped tasks.",
+            "request_names": [
+              "astra",
+              "астр"
+            ]
+          },
+          "gpt-6.2-sol": {
+            "effort_floor": "medium",
+            "max_effort": "xhigh",
+            "preferred_for": [
+              "implementation_backend",
+              "implementation_frontend",
+              "planning",
+              "design",
+              "review",
+              "operations",
+              "analysis",
+              "investigation",
+              "writing",
+              "debugging",
+              "testing"
             ]
           }
         }
@@ -251,31 +210,32 @@
     "quota_windows": {
       "claude-agent-acp": [
         {
-          "window": "seven_day_opus",
           "models": [
             "opus"
-          ]
+          ],
+          "window": "seven_day_opus"
         },
         {
-          "window": "seven_day_sonnet",
           "models": [
-            "claude-sonnet-5"
-          ]
+            "sonnet"
+          ],
+          "window": "seven_day_sonnet"
         },
         {
-          "window": "seven_day_fable",
           "models": [
             "fable"
-          ]
+          ],
+          "window": "seven_day_fable"
         },
         {
-          "window": "seven_day_haiku",
           "models": [
             "haiku"
-          ]
+          ],
+          "window": "seven_day_haiku"
         }
       ]
-    }
+    },
+    "auto_allow": []
   },
   "coordinator": {
     "engine": "claude-agent-acp",
@@ -323,7 +283,6 @@
         "--browser", "chromium", "--executable-path", "/path/to/chrome"
       ],
       "roles": ["worker"],
-      "engines": ["claude-agent-acp"],
       "enabled": false,
       "allowed_tools": [
         "browser_close", "browser_resize", "browser_console_messages",
@@ -335,6 +294,7 @@
         "browser_select_option", "browser_tabs", "browser_wait_for",
         "browser_webmcp_list", "browser_webmcp_call"
       ],
+      "read_only_tools": [],
       "read_paths": ["/path/to/node", "/path/to/playwright", "/path/to/fonts", "/path/to/chrome"],
       "network": true,
       "runtime_dir_env": ["PLAYWRIGHT_MCP_OUTPUT_DIR"]
@@ -352,7 +312,8 @@
       ],
       "read_only_tools": ["get_windows_and_tabs", "chrome_get_web_content"],
       "read_paths": ["/path/to/vivaldi", "/path/to/node"],
-      "network": true
+      "network": true,
+      "runtime_dir_env": []
     }
   }
 }

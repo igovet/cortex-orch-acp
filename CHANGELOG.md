@@ -4,6 +4,8 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Changed: The bundled routing preset uses `sonnet` and its seven-day quota window, limits Haiku and Luna preferences to investigation, and includes Astra for deep work. The portable Opus coordinator stays at medium effort. Fresh installs and explicit routing/defaults resets use the new policy; existing settings and saved profiles are not automatically replaced.
+
 - Added: Workspace **Board**, just below Home, shows live task status across projects on the selected machine. Each card names its project and opens the task. Archived work remains in Archive.
 
 - Fixed: Workspace file waits name the task as it appears on the board. The opened task shows the wait and affected files without hovering, and links to the task holding them when it is available. Scheduling and task controls are unchanged.

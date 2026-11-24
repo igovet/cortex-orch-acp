@@ -373,6 +373,12 @@ runtime task/epoch, display execution, saved-input event and request receipt com
 together before engine effects. Fake-engine command-path tests exercise plan,
 worker, independent review, bounded host verification, completion and versioned
 UI deltas with no Python controller. Exact Start retries never redispatch.
+A Send now steer is handled by the coordinator at once while workers run: it can
+reply, amend only unclaimed plan nodes, or instruct one live worker, without
+restarting the others (see [steering](docs/features/steering-and-questions/index.md)).
+Sprint draft creation and live model/effort changes wait up to two seconds for a
+writer-queue slot instead of failing at once (see [storage](docs/project/storage.md)).
+Commands default to 1800 seconds (`outside_command` 600), overridable per call.
 The production service now binds the configured native route provider by default.
 Projects whose stores contain tasks written by the former Python runtime are not adopted automatically (see [native recovery](docs/cortex-workspace/local-task-execution.md#legacy-task-adoption)); the retained controller and the `CORTEX_WORKSPACE_NATIVE=0` opt-out were removed.
 Missing, untrusted, ambiguous or unsupported routes fail visibly without a Python
@@ -1108,7 +1114,10 @@ no in-app updates. See the [release steps](docs/project/packaging.md#manual-work
 and [SECURITY.md](SECURITY.md) for its trust boundary.
 
 Sprint planning failures appear in the sprint conversation and Inbox, with Retry planning and Change
-request in the conversation. A planning warning does not stop planning. See
+request in the conversation. If the planner never started, retry starts a fresh planning task.
+Replaced planners stay in task history but do not appear as ordinary Board work or send separate
+notifications. An overlong original request can be shortened in place without losing saved answers or files. A planning
+warning does not stop planning. See
 [read-only sprint planning](docs/cortex-workspace/SCREENS.md#read-only-sprint-planning).
 
 Workspace sidebar rows mark changes you have not opened yet: a task or sprint that came to wait on you, a run that ended, or a finished sprint. Opening the row clears the mark. A task created while the app was closed is marked too once it waits on you or ends; what was already there on the first run is not. What was seen stays in the app's local storage as task, sprint and project ids with fixed-size codes, never task text, bounded to 1000 rows and 200 projects. See [Unseen changes](docs/cortex-workspace/SCREENS.md#responsive-layout).
@@ -1214,14 +1223,11 @@ See [adapter following and rollback](docs/configuration.md#approved-adapter-foll
 for private backups and `CORTEX_ENGINE_FOLLOW=off`.
 
 The [fresh-install preset](docs/configuration.md#fresh-install-owner-default-snapshot)
-prefers Haiku, Luna, Sonnet, Sol and Terra within their tiers for all work kinds
-except frontend design implementation, where Opus remains preferred. Terra
-(`codex-acp/gpt-6.1-terra`) is a standard-tier candidate at medium-to-high effort.
-Technical writers route by complexity: light (Haiku/Luna), standard
-(Sonnet/Sol/Terra), or deep (Sonnet/Sol at higher effort). These are preset
-preferences, not pins; provider
-choices, eligibility and availability still apply. The portable coordinator is
-`claude-agent-acp/opus` at medium effort, in place of the earlier Fable coordinator.
+uses `sonnet` for light and standard work, with its own Claude quota window.
+Haiku and Luna are preferred only for investigation. Opus and Astra list frontend
+design and review, and both can serve deep or flagship work. Claude remains the
+frontend-design affinity engine. These are routing preferences, not pins.
+The portable coordinator is `claude-agent-acp/opus` at medium effort.
 Existing owner settings are unchanged; the preset is not live model qualification.
 The **Default preset** card in Settings' User defaults section shows all four preset files. It
 can seed missing files without replacing existing settings or saved profiles, or reset
