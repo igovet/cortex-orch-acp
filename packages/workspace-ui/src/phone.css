@@ -46,6 +46,8 @@ html[data-shell="phone"] .proj { height: 44px; font-size: 15px; }
 html[data-shell="phone"] .proj-wrap { grid-template-columns: minmax(0, 1fr) 44px; }
 html[data-shell="phone"] .proj-x { width: 44px; height: 44px; }
 html[data-shell="phone"] .task-row { height: 40px; font-size: 14px; }
+/* The unseen-change mark grows with the phone's type, so it still reads at arm's length. */
+html[data-shell="phone"] .sb-new { width: 8px; height: 8px; }
 html[data-shell="phone"] .inp, html[data-shell="phone"] select { height: 44px; font-size: 15px; }
 html[data-shell="phone"] textarea { font-size: 15px; }
 html[data-shell="phone"] .mi { min-height: 44px; font-size: 15px; }
@@ -114,7 +116,5 @@ html[data-shell="phone"] .mc .c-bar > .c-route > .sel { flex: none; max-width: n
 html[data-shell="phone"] .mc .c-bar > .mc-tools { flex: none; }
 html[data-shell="phone"] .mc .c-bar > .c-end { position: sticky; right: 0; z-index: 1; flex: none; flex-wrap: nowrap; margin-inline-start: auto; padding: 0 12px 0 4px; background: var(--mc-bg, var(--bg-raised)); }
 html[data-shell="phone"] .mc .c-bar > .c-end::before { content: ""; position: absolute; top: 0; bottom: 0; right: 100%; width: 28px; pointer-events: none; background: linear-gradient(to right, transparent, var(--mc-bg, var(--bg-raised))); }
-/* The Queue hint is read with a resting pointer; a phone has none. */
-html[data-shell="phone"] .mc-hint { display: none; }
 /* The menu section head holds a phone-size button: it is as tall as that button, never cutting it. */
 html[data-shell="phone"] .ws-drawer .sb-h { height: auto; min-height: 44px; padding-top: 0; padding-bottom: 0; }

@@ -132,7 +132,7 @@ function Quota(props: { c: Ctx }) {
                 <span class="ws-quota"><Seg label={`${q.window} applies to`} value={mode()} disabled={props.c.off()} options={[{ id: "all", label: "All models" }, { id: "exact", label: "Exact models" }, { id: "none", label: "No models" }] as const} onChange={x => edit(e.id, list => list.map((w, n) => n === i() ? { ...w, models: x === "all" ? null : x === "none" ? [] : (w.models?.length ? w.models : r().engines[e.id].enabled.slice(0, 1)) } : w))} />
                   <Show when={mode() === "exact"}><Tags label={`${q.window} models`} mono items={q.models ?? []} disabled={props.c.off()} onChange={items => edit(e.id, list => list.map((w, n) => n === i() ? { ...w, models: items } : w))} /></Show></span>
                 <span class="u-used"><Show when={used() !== undefined}><span class="bar"><i style={{ width: `${used()}%` }}></i></span><span class="tnum">{used()}%</span></Show></span>
-                <button class="ib ws-ib" aria-label={`Remove window ${q.window}`} aria-disabled={props.c.off() ? "true" : undefined} data-why={props.c.off()} onClick={() => { if (!props.c.off()) edit(e.id, list => list.filter((_, n) => n !== i())); }}><I n="x" s={14} /></button>
+                <button data-tooltip="" class="ib ws-ib" aria-label={`Remove window ${q.window}`} aria-disabled={props.c.off() ? "true" : undefined} data-why={props.c.off()} onClick={() => { if (!props.c.off()) edit(e.id, list => list.filter((_, n) => n !== i())); }}><I n="x" s={14} /></button>
               </div>;
             }}</For>
           </div></div>

@@ -141,7 +141,7 @@ const KEYS: [string, string][] = [
 ];
 export function Help(props: { open: boolean; onClose: () => void }) {
   return <Modal open={props.open} onClose={props.onClose} label="Help and shortcuts">
-    <div class="dlg-h"><h2>Help and shortcuts</h2><button class="ib" data-autofocus aria-label="Close" onClick={() => props.onClose()}><I n="x" /></button></div>
+    <div class="dlg-h"><h2>Help and shortcuts</h2><button data-tooltip="Close · Esc" class="ib" data-autofocus aria-label="Close" onClick={() => props.onClose()}><I n="x" /></button></div>
     <div class="dlg-b"><dl class="kv ws-keys"><For each={KEYS}>{([keys, what]) => <><dt>{keys}</dt><dd>{what}</dd></>}</For></dl></div>
   </Modal>;
 }

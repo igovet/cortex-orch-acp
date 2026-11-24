@@ -131,7 +131,7 @@ Capture timing notes: the `t200-*` captures predate the breadcrumb "…" collaps
 - **Shortcuts in a headed browser and on GNOME.** Only headless Chromium was used. `Alt+←` did not navigate there; `Ctrl+Alt+N`, `Ctrl+Alt+3`, `Ctrl+K`, `` Ctrl+` `` and `?` reached the page. F6 region cycling is not implemented; skip links are the path.
 - **Screen readers.** Not run. ARIA was inspected through DOM queries only.
 - **Board semantics.** The board uses labelled lists with a single roving Tab stop instead of `role="grid"`, because independently scrolling virtualised columns cannot form a row-major grid. Positions are announced as "Backlog, 3 of 212".
-- **Tooltips** use native `title` attributes, so the 500 ms delay and Esc dismissal from the direction are not implemented; no essential information depends on them.
+- **Tooltips** in the shared desktop UI open after 500 ms on hover or keyboard focus, link with `aria-describedby` and close on Esc. See the [screen inventory](../SCREENS.md#desktop-tooltip-inventory). No essential information depends on them.
 - **Rendered contrast** was judged visually only; computed token ratios are in the direction document.
 - **Not exercised:** 125% and 150% presets, reduce-motion setting, forced colours, `prefers-contrast: more`, pointer drag of the resize handles, Prototype → Next step, and the simulated phone answer.
 - **Wording.** "Offline" marks a disconnected machine in the sidebar (as the direction specifies) and also the device-offline scenario in the sidebar footer.

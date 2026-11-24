@@ -8,7 +8,7 @@ import { A, Count, createFollow, I, Loading, MenuItem, Modal, Pop } from "./kit"
 import { ActionBar } from "./layout";
 import type { Route } from "./router";
 import { clock, refusalLine, refusalReason } from "./selectors";
-import { displayStep, feedOf, isHiddenActivity, oneRowPerCall, stepFailed, viewOfActivity, type FeedItem, type FeedRun } from "./tool-names";
+import { displayStep, feedOf, hasRecordedDetail, isHiddenActivity, oneRowPerCall, stepFailed, viewOfActivity, type FeedItem, type FeedRun } from "./tool-names";
 import { contextLine, duration, elapsedOf, isFinished, recordedCoordinatorRoute, reviewLine, tokens, verificationFace, workerModel, workerState, type SessionModel } from "./session-model";
 
 import { ResultText } from "./result-text";
@@ -111,20 +111,20 @@ function commandStatus(a: Activity): { tone: string; icon?: string; spin?: boole
 const hasInput = (args?: string) => !!args && !/^(?:\{\s*\}|\[\s*\]|null)$/.test(args.trim());
 
 /** What a step that carries no selected detail shows when opened: its recorded input and output, rows, diff and command tail. */
-function StepExtra(props: { a: Activity; w: Worker; onStopCommand: (a: Activity) => void }) {
+function StepExtra(props: { a: Activity; w: Worker; onStopCommand: (a: Activity) => void; recorded: boolean }) {
   const ws = useWs();
   const a = () => props.a;
   const detail = createMemo(() => displayStep(a().args));
   const canStop = () => a().command?.state === "running" && props.w.status === "working";
   return <>
-    <Show when={!detail() && (hasInput(a().args) || a().output)}><div class="card2 ev-detail">
+    <Show when={!props.recorded && !detail() && (hasInput(a().args) || a().output)}><div class="card2 ev-detail">
       <Show when={hasInput(a().args)}><div class="ev-dh">Input</div><div class="args">{a().args}</div></Show>
       <Show when={a().output}>{out => <><div class="ev-dh">Output</div><OutputBox label="Output">{out()}</OutputBox></>}</Show>
     </div></Show>
     {/* By place, not by object: a refreshed record of the step rebuilds its rows, and they must not redraw under a reader selecting text. */}
     <Show when={a().rows}>{rows => <div class="card2"><div class="toolrows"><Index each={rows()}>{r => <div><I n={r().icon} s={12} class="faint" /><code>{r().code}</code><span class="r">{r().note}</span></div>}</Index></div></div>}</Show>
     <Show when={!detail() && a().diff}>{d => <DiffBox label="Diff" lines={d().lines} />}</Show>
-    <Show when={!detail() && (a().command?.tail || a().command?.state === "running")}>
+    <Show when={!props.recorded && !detail() && (a().command?.tail || a().command?.state === "running")}>
       <OutputBox label="Command output" class="tail">{a().command!.tail || "Waiting for output…"}</OutputBox>
     </Show>
     <Show when={canStop()}><div class="ws-step-acts"><button class="btn btn-sm" {...ws.needs("stop_command")} onClick={() => { if (!ws.gate("stop_command")) props.onStopCommand(a()); }}>Stop command…</button></div></Show>
@@ -139,7 +139,10 @@ function ActivityStep(props: { a: Activity; w: Worker; state: OpenState; onStopC
   // An edit with no recorded lines is its path and counts on one plain row: it opens on nothing.
   const hasExtra = () => !!a().rows || a().command?.state === "running" || (!displayStep(a().args) && !!(hasInput(a().args) || a().output || a().diff?.lines.length || a().command?.tail));
   const status = () => a().command ? commandStatus(a()) : null;
-  return <StepRow view={view()} taskId={props.w.taskId} tone={failed() ? "st-bad" : a().command?.state === "running" ? "st-run" : undefined} icon={failed() ? "alert" : undefined} hasExtra={hasExtra()} state={props.state} stateKey={`step:${a().sequence}`} extra={<StepExtra a={a()} w={props.w} onStopCommand={props.onStopCommand} />}
+  return <StepRow view={view()} taskId={props.w.taskId} tone={failed() ? "st-bad" : a().command?.state === "running" ? "st-run" : undefined} icon={failed() ? "alert" : undefined} hasExtra={hasExtra()} state={props.state} stateKey={`step:${a().sequence}`} args={a().args} output={a().output}
+    tail={a().command?.tail || undefined} pending={a().command?.state === "running" || a().command?.state === "stopping"}
+    commandRef={a().commandOutputRef} fallbackCommand={a().command ? view().target || undefined : undefined}
+    extra={<StepExtra a={a()} w={props.w} onStopCommand={props.onStopCommand} recorded={hasRecordedDetail(view())} />}
     status={<>
       <Show when={a().note}><span class="st st-ok"><I n="check-circle" s={12} />{a().note}</span></Show>
       <Show when={a().refusal}>{code => <span class="st st-bad">Refused: {refusalReason(code())}</span>}</Show>
@@ -164,8 +167,9 @@ function Row(props: { item: Activity; w: Worker; message: (id: string) => Messag
   const message = () => a().messageId ? props.message(a().messageId!) : undefined;
   return <Switch fallback={<div class="ev-note"><div class="tx ai">{a().text}<Show when={a().code}>{" "}<code>{a().code}</code></Show></div></div>}>
     <Match when={a().kind === "note"}>{(() => {
-      const text = () => a().text.replace(/^.*?\[(?:worker message|final response)\] /, "");
-      return <><div class="ev-note"><div class="tx ai"><ResultText text={text()} /></div></div><MessageTools text={text()} /></>;
+      const prefix = () => a().text.match(/^.*?\[(worker message|final response)\] /);
+      const text = () => a().text.slice(prefix()?.[0].length ?? 0);
+      return <><div class="ev-note"><div class="tx ai"><ResultText breaks={prefix()?.[1] === "worker message"} text={text()} /></div></div><MessageTools text={text()} /></>;
     })()}</Match>
     <Match when={a().kind === "divider"}><div class="divide">{a().text}</div></Match>
     <Match when={message()}>{m => <MessageBubble m={m} item={a()} workerActive={props.w.status === "working"} attempt={props.w.attempt?.n ?? null} />}</Match>
@@ -251,7 +255,7 @@ export function StopCommand(props: { target: { worker: Worker; item: Activity } 
   };
   return <Modal open={!!props.target} onClose={props.onClose} label="Stop this command?">
     <Show when={props.target}>{t => <>
-      <div class="dlg-h"><h2>Stop this command?</h2><button class="ib" aria-label="Keep it running" onClick={() => props.onClose()}><I n="x" /></button></div>
+      <div class="dlg-h"><h2>Stop this command?</h2><button data-tooltip="" class="ib" aria-label="Keep it running" onClick={() => props.onClose()}><I n="x" /></button></div>
       <div class="dlg-b">
         <div class="card2"><div class="card2-h"><I n="terminal" s={12} /><code>{t().item.text}</code><span class="r"><span class="st st-run"><I n="loader" s={12} class="spin" />Running</span></span></div></div>
         <div class="cap muted">{t().worker.role} keeps working and will not repeat this command. The task stays in Working.</div>
@@ -270,7 +274,7 @@ function StopWorker(props: { worker: Worker | null; onClose: () => void }) {
   createEffect(on(workerKey, key => { if (key) setReason(""); }));
   return <Modal open={!!props.worker} onClose={props.onClose} label="Stop this worker?">
     <Show when={props.worker}>{w => <>
-      <div class="dlg-h"><h2>Stop {w().role}?</h2><button class="ib" aria-label="Keep working" onClick={() => props.onClose()}><I n="x" /></button></div>
+      <div class="dlg-h"><h2>Stop {w().role}?</h2><button data-tooltip="" class="ib" aria-label="Keep working" onClick={() => props.onClose()}><I n="x" /></button></div>
       <div class="dlg-b">
         <div class="cap muted">Only this worker stops. The task keeps running, and its messages that have not arrived are marked as not delivered.</div>
         <ReasonField label="Reason, optional" value={reason()} onText={setReason} />
@@ -489,7 +493,7 @@ function Finished(props: { w: Worker; onAsk?: () => void }) {
   };
   return <>
     <Modal open={reportOpen()} onClose={closeReport} label="Worker report">
-      <div class="dlg-h"><h2>{page()?.title ?? "Worker report"}</h2><button class="ib" aria-label="Close report" onClick={closeReport}><I n="x" /></button></div>
+      <div class="dlg-h"><h2>{page()?.title ?? "Worker report"}</h2><button data-tooltip="Close report · Esc" class="ib" aria-label="Close report" onClick={closeReport}><I n="x" /></button></div>
       <div class="dlg-b">
         <Show when={loading()}><Loading text="Loading report…" /></Show>
         <Show when={error()}><div role="alert">{error()} <button class="lnk" onClick={() => read()}>Retry</button></div></Show>

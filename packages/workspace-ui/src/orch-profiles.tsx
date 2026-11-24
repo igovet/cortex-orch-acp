@@ -31,7 +31,7 @@ export function Profiles() {
           <span class="cap">{matches() ? "Matches" : ""}</span>
           <span class="row ws-gap4">
             <Show when={!isActive()}>{btn("Activate…", () => switchTo(p().id))}</Show>
-            <button class="ib ws-ib" popovertarget={off() ? undefined : `m-prof-${p().id}`} aria-label={`More for ${p().name}`} aria-disabled={off() ? "true" : undefined} data-why={off()}><I n="more" s={14} /></button>
+            <button data-tooltip="" class="ib ws-ib" popovertarget={off() ? undefined : `m-prof-${p().id}`} aria-label={`More for ${p().name}`} aria-disabled={off() ? "true" : undefined} data-why={off()}><I n="more" s={14} /></button>
             <Pop id={`m-prof-${p().id}`} class="pop-right" align="right" label={p().name}>
               <MenuItem icon="pencil" label="Edit description…" onSelect={() => ws.open({ kind: "prompt", title: `Describe ${p().name}`, label: "Description", value: p().description, optional: true, action: "Save", go: description => run({ type: "describe_profile", machineId: m().id, profileId: p().id, description }) })} />
               <Show when={isActive()}><MenuItem icon="x" label="Detach" sub="Keeps the settings, with no active profile" needs="deactivate_profile" onSelect={() => run({ type: "deactivate_profile", machineId: m().id })} /></Show>

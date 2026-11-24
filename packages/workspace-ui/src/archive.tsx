@@ -2,6 +2,7 @@ import { createMemo, createSignal, For, Show } from "solid-js";
 import { previewPurge } from "@cortex/workspace-domain";
 import { archiveRow, archiveView, daysLeft, nextCleanup, NO_FILTER, OUTCOME_FILTERS, sizeText, type ArchiveFilter, type ArchiveRow } from "./archive-model";
 import { useWs } from "./ctx";
+import { createRequestFeedback, RequestStatus } from "./request-feedback";
 import { A, I, Keyed, Loading, MenuItem, Modal, OverviewShown, Pop, useOverviewWait, useWantOverview } from "./kit";
 import { ActionBar, SectionHead, Toolbar } from "./layout";
 import { sprintTitle } from "./selectors";
@@ -23,7 +24,7 @@ const Row = (props: { row: ArchiveRow; checked: boolean; onCheck: (on: boolean) 
     </span>
     <span class="cap muted tnum">{r().size === null ? "" : sizeText(r().size!)}</span>
     <span class="row ws-gap2"><button class="btn btn-line btn-sm" data-why={v().machine.connection === "connected" ? undefined : `${v().machine.name} is offline`} aria-disabled={v().machine.connection === "connected" ? undefined : "true"} {...ws.needs("restore_task")} onClick={() => props.onRestore()}><I n="undo" s={12} />Restore</button></span>
-    <button class="ib ws-ib" aria-label={`More for ${v().task.title}`} onClick={e => props.onMenu(e.currentTarget)}><I n="more" s={14} /></button>
+    <button data-tooltip="" class="ib ws-ib" aria-label={`More for ${v().task.title}`} onClick={e => props.onMenu(e.currentTarget)}><I n="more" s={14} /></button>
   </div>;
 };
 
@@ -33,18 +34,22 @@ const LATER_LIMIT = 8;
 /** A preview first: counts and size, and what is skipped because cleanup is blocked. Merged commits are not touched. */
 export function PurgeDialog(props: { ids: string[]; onClose: () => void; onDone?: () => void }) {
   const ws = useWs();
+  const request = createRequestFeedback();
   const preview = createMemo(() => previewPurge(ws.store.state(), props.ids));
   const n = () => preview().deletable.length;
   const noun = () => `${n()} task${n() === 1 ? "" : "s"}`;
   const size = () => preview().sizeMb > 0 ? `, ${preview().sizeKnown ? "" : "at least "}${sizeText(preview().sizeMb)} freed` : "";
-  const go = () => { if (n()) ws.ok({ type: "purge_many", taskIds: props.ids, confirmed: true, now: ws.store.clock() }, () => { props.onDone?.(); props.onClose(); }); };
+  const go = () => { if (n()) void request.run({ type: "purge_many", taskIds: props.ids, confirmed: true, now: ws.store.clock() }).then(receipt => { if (receipt.ok) { props.onDone?.(); props.onClose(); } }); };
   return <>
-    <div class="dlg-h"><h2>Delete from the Archive now?</h2><button class="ib" aria-label="Cancel" onClick={() => props.onClose()}><I n="x" /></button></div>
+    <div class="dlg-h"><h2>Delete from the Archive now?</h2><button data-tooltip="" class="ib" aria-label="Cancel" onClick={() => props.onClose()}><I n="x" /></button></div>
     <div class="dlg-b"><ul class="conseq">
       <Show when={n() > 0}><li><I n="trash" s={14} /><span>{noun()} and their saved history{size()}</span></li></Show>
       <For each={preview().skipped}>{s => <li><I n="alert" s={14} /><span>Skipped: {s.title}. {s.reason}</span></li>}</For>
+      <Show when={ws.store.state().tasks.some(t => preview().deletable.includes(t.id) && t.checkout.kind === "worktree")}>
+        <li><I n="folder" s={14} /><span>Deleting a task also deletes its clean worktree folder if it was created for the task. Unsafe folders are kept; the main project folder is never deleted.</span></li>
+      </Show>
       <li><I n="branch" s={14} /><span>Merged commits, remote branches and pull requests stay in Git</span></li>
-    </ul></div>
+    </ul><RequestStatus text={request.text()} /></div>
     <ActionBar place="dialog"><button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Keep them</button>
       <button class="btn btn-danger btn-lg" aria-disabled={n() ? undefined : "true"} data-why={n() ? undefined : "Nothing here can be deleted"} {...ws.needs("purge_many")} onClick={go}>Delete {noun()} permanently</button></ActionBar>
   </>;
@@ -56,7 +61,7 @@ function BlockedDialog(props: { row: ArchiveRow; onClose: () => void }) {
   const t = () => props.row.view.task;
   const clearable = () => t().unexpectedChanges && t().process === "stopped" && props.row.view.machine.connection === "connected";
   return <>
-    <div class="dlg-h"><h2>Cleanup of {t().title} is blocked</h2><button class="ib" aria-label="Decide later" onClick={() => props.onClose()}><I n="x" /></button></div>
+    <div class="dlg-h"><h2>Cleanup of {t().title} is blocked</h2><button data-tooltip="" class="ib" aria-label="Decide later" onClick={() => props.onClose()}><I n="x" /></button></div>
     <div class="dlg-b"><div>{props.row.sub}.</div><div class="cap muted">It stays in the Archive until you decide. Nothing is deleted on its own.</div></div>
     <ActionBar place="dialog"><button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Decide later</button>
       <button class="btn btn-line btn-lg" {...ws.needs("restore_task")} onClick={() => { ws.ok({ type: "restore_task", taskId: t().id, now: ws.store.clock() }, () => { props.onClose(); }); }}>Restore to Done</button>

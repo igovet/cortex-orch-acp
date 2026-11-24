@@ -2,11 +2,14 @@ import { createEffect, createMemo, createSignal, createUniqueId, For, lazy, on, 
 import type { FolderListing, FolderOverview, ProjectRepo, RepoCheckout } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { Code, Counts, Diff, GitLetter, type HunkActions } from "./diff";
-import { bufferKey, hasUnsaved, saveWord, UNCONFIRMED_WRITER, type FileBuffer } from "./editor-buffers";
+import type { CodeLspPosition, CodeLspSnapshot } from "@cortex/workspace-contract";
+import { diagnosticSeverity, openLanguageDocument, supportsCodeLanguage } from "./code-lsp";
+import { COPY } from "./copy";
+import { bufferKey, hasUnsaved, saveWord, type FileBuffer } from "./editor-buffers";
 import { FilePreview, ViewSwitch, viewKind, viewPlan, type FileViewMode } from "./file-view";
 import { ScreenActive } from "./freshness";
 import { languageOf } from "./highlight";
-import { A, I, Keyed, Modal } from "./kit";
+import { A, I, Keyed, MenuItem, Modal, Pop } from "./kit";
 import { ActionBar, revealCutIn, Toolbar } from "./layout";
 import { addedLines, allDirs, checkoutFiles, codeTree, dirName, fileName, searchFiles, sourceOf, splitMatch, treeRows, type FolderView } from "./review-model";
 import { same } from "./stable";
@@ -20,8 +23,8 @@ const DISK_POLL_MS = 3000;
 /** Why Save does nothing right now, or nothing when it would save. */
 function saveBlocked(b: FileBuffer) {
   if (b.readOnly) return b.readOnly;
-  if (b.writer) return "Saving waits until the task stops. Your text stays here.";
   if (b.conflict) return "Choose what to keep first.";
+  if (b.lease !== "held") return b.leaseNotice ?? COPY.codeEditRequired;
   if (b.saving) return "Saving…";
   return hasUnsaved(b) ? undefined : "No changes to save";
 }
@@ -30,7 +33,7 @@ function saveBlocked(b: FileBuffer) {
 function CloseFile(props: { buffer: FileBuffer | null; onCancel: () => void; onDiscard: () => void; onSave: () => void }) {
   return <Modal open={!!props.buffer} onClose={props.onCancel} label="Unsaved changes">
     <Show when={props.buffer}>{b => <>
-      <div class="dlg-h"><h2>Save changes to {fileName(b().path)}?</h2><button class="ib" aria-label="Cancel" onClick={() => props.onCancel()}><I n="x" /></button></div>
+      <div class="dlg-h"><h2>Save changes to {fileName(b().path)}?</h2><button data-tooltip="" class="ib" aria-label="Cancel" onClick={() => props.onCancel()}><I n="x" /></button></div>
       <div class="dlg-b"><p>Closing this file without saving drops the text you typed.</p></div>
       <ActionBar place="dialog" start={<button class="btn" onClick={() => props.onCancel()}>Cancel</button>}><button class="btn btn-line" onClick={() => props.onDiscard()}>Discard changes</button><button class="btn btn-primary" data-autofocus aria-disabled={saveBlocked(b()) ? "true" : undefined} data-why={saveBlocked(b())} onClick={() => { if (!saveBlocked(b())) props.onSave(); }}>Save</button></ActionBar>
     </>}</Show>
@@ -46,12 +49,12 @@ export function UnsavedOnClose(props: { open: boolean; onClose: () => void }) {
     setSaving(true);
     for (const b of files()) await ws.buffers.save(b.key);
     setSaving(false);
-    if (!files().length) ws.chrome?.closeNow();
+    if (!files().length) { await ws.buffers.releaseAll(); ws.chrome?.closeNow(); }
   };
   return <Modal open={props.open} onClose={props.onClose} label="Unsaved files">
-    <div class="dlg-h"><h2>{files().length === 1 ? "1 file has" : `${files().length} files have`} unsaved changes</h2><button class="ib" aria-label="Keep working" onClick={() => props.onClose()}><I n="x" /></button></div>
-    <div class="dlg-b"><ul class="ws-unsaved"><For each={files()}>{b => <li><span class="mono trunc">{b.path}</span><span class="cap faint">{b.conflict || b.writer || b.refusal ? saveBlocked(b) ?? b.refusal : saveWord(b)}</span></li>}</For></ul></div>
-    <ActionBar place="dialog" start={<button class="btn" onClick={() => props.onClose()}>Keep working</button>}><button class="btn btn-line" onClick={() => ws.chrome?.closeNow()}>Close without saving</button><button class="btn btn-primary" data-autofocus aria-disabled={saving() ? "true" : undefined} data-why={saving() ? "Saving…" : undefined} onClick={() => { if (!saving()) void saveAll(); }}>Save all and close</button></ActionBar>
+    <div class="dlg-h"><h2>{files().length === 1 ? "1 file has" : `${files().length} files have`} unsaved changes</h2><button data-tooltip="" class="ib" aria-label="Keep working" onClick={() => props.onClose()}><I n="x" /></button></div>
+    <div class="dlg-b"><ul class="ws-unsaved"><For each={files()}>{b => <li><span class="mono trunc">{b.path}</span><span class="cap faint">{saveBlocked(b) ?? b.refusal ?? saveWord(b)}</span></li>}</For></ul></div>
+    <ActionBar place="dialog" start={<button class="btn" onClick={() => props.onClose()}>Keep working</button>}><button class="btn btn-line" onClick={() => void ws.buffers.releaseAll().then(() => ws.chrome?.closeNow())}>Close without saving</button><button class="btn btn-primary" data-autofocus aria-disabled={saving() ? "true" : undefined} data-why={saving() ? "Saving…" : undefined} onClick={() => { if (!saving()) void saveAll(); }}>Save all and close</button></ActionBar>
   </Modal>;
 }
 
@@ -79,7 +82,6 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
   const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
   const [query, setQuery] = createSignal("");
   const [matchCase, setMatchCase] = createSignal(false);
-  const [edit, setEdit] = createSignal(false);
   const [goTo, setGoTo] = createSignal(false);
   const [asking, setAsking] = createSignal<string | null>(null);
   const left = () => ws.codeLeft();
@@ -127,16 +129,16 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
     }
   };
   /** Code's own refresh: on open, on the owner's refresh and after the owner's save here. Never on a timer. */
-  const refreshTree = () => { const kept = [...untrack(opened)].filter(dir => untrack(folders).has(dir)); void list(kept, true, dir => kept.includes(dir)); };
+  const refreshTree = () => {
+    const kept = [...untrack(opened)].filter(dir => untrack(folders).has(dir));
+    // Worktrees have their own directory listing; the repository snapshot tree is main-only.
+    if (props.checkout.kind === "worktree" && !props.repo.mock) kept.unshift("");
+    void list(kept, true, dir => kept.includes(dir));
+  };
   const open = () => props.file ?? null;
   const bufferOf = (path: string) => ws.buffers.list().find(b => b.key === bufferKey(props.checkout.id, path)) ?? null;
   const buffer = createMemo(() => open() ? bufferOf(open()!) : null);
-  const task = createMemo(() => props.checkout.taskId ? ws.store.index().byId.get(props.checkout.taskId) ?? null : null);
-  const live = () => task()?.task.process === "live";
-  // The machine's answer outranks the task list: it is what a save will meet, and it also covers a main-checkout task.
-  const writer = () => { const b = buffer(); return b?.loaded && !b.missing ? b.writer : live() ? task()!.id : null; };
-  const writerTask = () => { const id = writer(); return !id || id === UNCONFIRMED_WRITER ? null : ws.store.index().byId.get(id) ?? task(); };
-  const locked = (b: FileBuffer) => !!b.readOnly || (!!writer() && !edit() && !hasUnsaved(b));
+  const locked = (b: FileBuffer) => b.lease !== "held" || !!b.readOnly;
   const source = createMemo(() => open() ? sourceOf(props.repo, props.checkout, data().diffs, open()!) : null);
   const added = createMemo(() => addedLines(open() ? diffOf(open()!) : undefined));
   // Each file keeps the owner's last choice of preview or source; a new one opens as its type suggests.
@@ -168,13 +170,18 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
     void list([dir], false);
   };
   const collapseAll = () => { setOpened(new Set<string>()); setCollapsed(new Set(rows().filter(r => r.kind === "dir").map(r => r.path).concat(allDirs(paths())))); };
-  const show = (file: string, line?: number) => ws.go(props.at(file, line));
+  const [jump, setJump] = createSignal<{ path: string; line: number; column: number }>();
+  const show = (file: string, line?: number, column?: number) => {
+    setJump(column === undefined || line === undefined ? undefined : { path: file, line, column });
+    ws.go(props.at(file, line));
+  };
   const ensure = (path: string, preview: boolean) => setTabs(list => {
     if (list.some(t => t.path === path)) return preview || !list.some(t => t.path === path && t.preview) ? list : list.map(t => t.path === path ? { ...t, preview: false } : t);
     return [...list.filter(t => !t.preview), { path, preview }];
   });
   const drop = (path: string) => {
     const b = bufferOf(path);
+    if (b?.saving) return;
     if (b) ws.buffers.close(b.key);
     const next = tabs().filter(t => t.path !== path);
     setTabs(next);
@@ -185,7 +192,7 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
   const saveAndDrop = async (path: string) => {
     const b = bufferOf(path);
     setAsking(null);
-    if (!b) return;
+    if (!b || saveBlocked(b)) return;
     await ws.buffers.save(b.key);
     refreshTree();
     const after = bufferOf(path);
@@ -195,11 +202,49 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
   createEffect(() => {
     const f = props.file;
     if (!f) return;
-    if (editable()) void ws.buffers.open(props.repo.projectId, props.checkout.id, f);
+    if (editable() || ws.store.codeLanguage()) void ws.buffers.open(props.repo.projectId, props.checkout.id, f);
     else if (ws.store.mode === "real") void ws.store.loadSource(props.repo.projectId, props.checkout.id, f);
   });
   // Only the open file is compared; any other is checked by its own save, which never overwrites.
   const shown = useContext(ScreenActive);
+  const activeFile = createMemo(() => shown() && props.file && editable() ? bufferKey(props.checkout.id, props.file) : null);
+  createEffect(on(activeFile, key => { if (key) onCleanup(() => ws.buffers.release(key)); }));
+
+  const [language, setLanguage] = createSignal<CodeLspSnapshot | null>(null);
+  const [languageUnavailable, setLanguageUnavailable] = createSignal(false);
+  const [noDefinition, setNoDefinition] = createSignal(false);
+  let languageDoc: ReturnType<typeof openLanguageDocument> | undefined;
+  let definitionSeq = 0;
+  const languageKey = createMemo(() => {
+    const b = buffer();
+    return shown() && mode() === "file" && view() === "source" && b?.loaded && !b.missing && supportsCodeLanguage(b.path) ? b.key : null;
+  });
+  const languageIo = createMemo(ws.store.codeLanguage);
+  createEffect(on([languageKey, languageIo], ([key, io]) => {
+    setLanguage(null);
+    setLanguageUnavailable(false);
+    setNoDefinition(false);
+    const b = key && ws.buffers.find(key);
+    if (!b || !io) return;
+    const doc = languageDoc = openLanguageDocument(io, b, ws.buffers.text(b.key), (snapshot, unavailable) => {
+      setLanguage(snapshot);
+      setLanguageUnavailable(!!unavailable);
+    });
+    const stop = ws.buffers.subscribeText(changed => {
+      if (changed === b.key) { setNoDefinition(false); doc.changed(ws.buffers.text(b.key)); }
+    });
+    onCleanup(() => { ++definitionSeq; stop(); doc.dispose(); languageDoc = undefined; });
+  }));
+  const definition = async (position: CodeLspPosition) => {
+    const doc = languageDoc, seq = ++definitionSeq;
+    if (!doc) return;
+    setNoDefinition(false);
+    const targets = await doc.definition(position);
+    if (languageDoc !== doc || seq !== definitionSeq || !targets) return;
+    const target = targets.find(t => t.checkoutId === props.checkout.id);
+    if (target) show(target.file, target.range.start.line + 1, target.range.start.character);
+    else setNoDefinition(true);
+  };
   let parked = false;
   createEffect(() => {
     const f = props.file;
@@ -255,19 +300,16 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
   const diff = () => open() ? diffOf(open()!) : undefined;
   // The crumb bar has no room for words: the file's saved state beside Save is what says why Save is off.
   const saveState = createUniqueId();
+  const fileActions = createUniqueId();
   return <>
-    <Show when={writer()}>
-      <div class="strip warn"><I n="alert" s={14} class="st-warn" /><span>{writer() === UNCONFIRMED_WRITER ? ws.t("writerUnconfirmed") : edit() ? ws.t("writerChosen") : ws.t("writerWorking")}</span>
-        <Show when={!edit() && writerTask()}>{t => <span class="acts"><button class="btn btn-line btn-sm" {...ws.needs("stop_task")} onClick={() => ws.stopTask(t().id)}>Stop the task first</button><button class="btn btn-sm" onClick={() => setEdit(true)}>Edit anyway</button></span>}</Show></div>
-    </Show>
     <div class="code-body">
       <aside class="side-pane" aria-label="Files" ref={revealCutIn}>
         <Toolbar small class="side-h" start={<div class="seg" role="group" aria-label="Left pane"><button aria-current={left() === "files" ? "true" : "false"} onClick={() => ws.setCodeLeft("files")}>Files</button><button aria-current={left() === "search" ? "true" : "false"} onClick={() => ws.setCodeLeft("search")}>Search</button></div>}
-          end={<><button class="ib" aria-label="Refresh files" onClick={() => { refreshTree(); void ws.store.refreshProjectFacts(props.repo.projectId, true); }}><I n="refresh" s={14} /></button><button class="ib" aria-label="Collapse all" onClick={collapseAll}><I n="chevrons-v" s={14} /></button></>} />
+          end={<><button data-tooltip="" class="ib" aria-label="Refresh files" onClick={() => { refreshTree(); void ws.store.refreshProjectFacts(props.repo.projectId, true); }}><I n="refresh" s={14} /></button><button data-tooltip="" class="ib" aria-label="Collapse all" onClick={collapseAll}><I n="chevrons-v" s={14} /></button></>} />
         <Show when={left() === "files"} fallback={<div class="tree" aria-label="Search results">
           <div class="ws-search"><input class="inp ws-find-in" aria-label="Search files" placeholder="Search in files" value={query()} onInput={e => setQuery(e.currentTarget.value)} ref={el => queueMicrotask(() => el.focus())} />
             <div class="row ws-mt6"><span class="cap faint">{query() ? `${found().total} match${found().total === 1 ? "" : "es"} in ${found().files.length} file${found().files.length === 1 ? "" : "s"}` : "Type to search"}</span><span class="grow"></span>
-              <button class="ib cap ws-aa" aria-label="Match case" aria-pressed={matchCase()} onClick={() => setMatchCase(!matchCase())}>Aa</button></div></div>
+              <button data-tooltip="" class="ib cap ws-aa" aria-label="Match case" aria-pressed={matchCase()} onClick={() => setMatchCase(!matchCase())}>Aa</button></div></div>
           {/* Kept by path and line: a read that changes the checkout searches again, and a result still found keeps its row. */}
           <Keyed each={found().files} by={f => f.path}>{f => <>
             <div class="res-file"><I n="file" s={12} class="faint" /><span class="trunc">{f().path}</span><span class="faint ws-res-n">{f().hits.length}</span></div>
@@ -281,8 +323,8 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
             <Keyed each={rows()} by={r => `${r.kind}:${r.path}`}>{row => row().kind === "more"
               ? <div class="tn ws-tree-note" role="treeitem" style={{ "--d": row().depth }}><span class="trunc">{row().name}</span></div>
               : row().kind === "dir"
-              ? <button class="tn" classList={{ "ws-ignored": !!row().ignored }} role="treeitem" style={{ "--d": row().depth }} aria-label={row().ignored ? `${row().name}, ignored` : undefined} aria-expanded={!shut().has(row().path)} onClick={() => toggleDir(row().path, row().lazy)}><I n={shut().has(row().path) ? "chevron-right" : "chevron-down"} s={14} /><span class="trunc">{row().name}</span></button>
-              : <button class="tn" classList={{ "ws-ignored": !!row().ignored }} role="treeitem" style={{ "--d": row().depth }} aria-label={row().ignored ? `${row().name}, ignored` : undefined} aria-current={open() === row().path ? "true" : undefined} onClick={() => show(row().path)}><I n={row().link ? "link" : "file"} s={14} /><span class="trunc">{row().name}</span><Show when={diffOf(row().path)}>{d => <GitLetter status={d().status} />}</Show></button>}</Keyed>
+              ? <button class="tn" classList={{ "ws-ignored": !!row().ignored }} role="treeitem" style={{ "--d": row().depth }} aria-label={row().ignored ? `${row().name}, ignored` : undefined} aria-expanded={!shut().has(row().path)} onClick={() => toggleDir(row().path, row().lazy)}><I n={shut().has(row().path) ? "chevron-right" : "chevron-down"} s={14} /><span data-tooltip-cut="" class="trunc">{row().name}</span></button>
+              : <button class="tn" classList={{ "ws-ignored": !!row().ignored }} role="treeitem" style={{ "--d": row().depth }} aria-label={row().ignored ? `${row().name}, ignored` : undefined} aria-current={open() === row().path ? "true" : undefined} onClick={() => show(row().path)}><I n={row().link ? "link" : "file"} s={14} /><span data-tooltip-cut="" class="trunc">{row().name}</span><Show when={diffOf(row().path)}>{d => <GitLetter status={d().status} />}</Show></button>}</Keyed>
           </div>
         </Show>
       </aside>
@@ -302,18 +344,35 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
               <Show when={diff()}>{d => <span class="tnum trunc ws-against l-compact-hide"><Counts add={d().add} del={d().del} /> against <span class="mono">{props.checkout.base}</span></span>}</Show></span>}
             end={<>
               <Show when={switchable()}><ViewSwitch view={view()} onView={setView} /></Show>
-              <Show when={buffer()?.loaded && !buffer()?.missing && buffer()}>{b => <><span id={saveState} class="ws-save-state" role="status">{saveWord(b()) || "No changes"}</span>
+              <Show when={(editable() || !!buffer()?.dirty) && buffer()?.loaded && !buffer()?.missing && buffer()}>{b => <><span id={saveState} class="ws-save-state" role="status">{b().lease === "acquiring" ? COPY.codeEditPending : saveWord(b()) || (b().lease === "held" ? "No changes" : "Read-only")}</span>
+                <Show when={editable() && !b().readOnly}>
+                  <button class="btn btn-sm" aria-disabled={b().lease === "acquiring" ? "true" : undefined} data-why={b().lease === "acquiring" ? COPY.codeEditPending : undefined} onClick={() => {
+                    if (b().lease === "held") ws.buffers.release(b().key);
+                    else if (b().lease === "idle") { ws.setCodeMode("file"); setView("source"); void ws.buffers.acquire(b().key); }
+                  }}>{ws.t(b().lease === "held" ? "codeStopEditing" : "codeEdit")}</button>
+                </Show>
                 <button class="btn btn-sm" aria-label={`Save ${fileName(path())}`} aria-disabled={saveBlocked(b()) ? "true" : undefined} data-why={saveBlocked(b())} aria-describedby={saveBlocked(b()) ? saveState : undefined} onClick={saveNow}>Save</button></>}</Show>
-              <button class="btn btn-sm" onClick={() => setGoTo(true)}>Go to file</button>
-              <button class="btn btn-sm ws-ext" aria-label={ws.externalLabel()} aria-disabled={ws.noOpener("workspace.open_editor", "noExternal") ? "true" : undefined} data-why={ws.noOpener("workspace.open_editor", "noExternal")} onClick={() => { if (!ws.noOpener("workspace.open_editor", "noExternal")) ws.run({ type: "open_editor", projectId: props.repo.projectId, checkoutId: props.checkout.id, file: path(), line: props.line }); }}><I n="external" s={14} /><span class="ws-ext-t">{ws.externalLabel()}</span></button>
+              <button data-tooltip="" class="ib" popovertarget={fileActions} aria-haspopup="menu" aria-label="File actions"><I n="more" /></button>
             </>} />
+          <Pop id={fileActions} class="pop-right" align="right" label="File actions" role="menu">
+            <MenuItem icon="search" label="Go to file" keys="Ctrl+P" onSelect={() => setGoTo(true)} />
+            <MenuItem icon="external" label={ws.externalLabel()} disabled={ws.noOpener("workspace.open_editor", "noExternal")} onSelect={() => ws.run({ type: "open_editor", projectId: props.repo.projectId, checkoutId: props.checkout.id, file: path(), line: props.line })} />
+            <MenuItem icon="folder" label="Show in file manager" disabled={ws.noOpener("workspace.reveal_file", "noFileManager")} onSelect={() => ws.run({ type: "reveal_file", projectId: props.repo.projectId, checkoutId: props.checkout.id, file: path() })} />
+          </Pop>
           <Show when={buffer()}>{b => <>
-            <Show when={b().conflict}>{c => <div class="strip warn" role="alert"><I n="alert" s={14} class="st-warn" /><span>{c().text === null ? "This file is no longer on disk." : "This file changed on disk after you opened it."} Your text is kept here.</span>
-              <span class="acts"><Show when={c().text !== null} fallback={<button class="btn btn-sm" onClick={() => setAsking(b().path)}>Close file</button>}><button class="btn btn-sm" onClick={() => ws.buffers.reload(b().key)}>Reload from disk</button></Show><button class="btn btn-line btn-sm" onClick={() => void ws.buffers.keepMine(b().key)}>Keep mine</button></span></div>}</Show>
+            <Show when={b().leaseNotice}>{message => <div class="strip warn" role="alert"><I n="alert" s={14} class="st-warn" /><span>{message()}</span></div>}</Show>
+            <Show when={b().conflict}>{c => <div class="strip warn" role="alert"><I n="alert" s={14} class="st-warn" /><span>{c().revision === null ? "This file is no longer on disk. Your draft is kept." : ws.t("codeDiskChanged")}</span>
+              <span class="acts"><Show when={c().text !== null} fallback={<button class="btn btn-sm" onClick={() => setAsking(b().path)}>Close file</button>}><button class="btn btn-sm" onClick={() => ws.buffers.reload(b().key)}>Reload from disk</button></Show><button class="btn btn-line btn-sm" aria-disabled={locked(b()) ? "true" : undefined} data-why={locked(b()) ? b().readOnly ?? COPY.codeEditRequired : undefined} onClick={() => { if (!locked(b())) void ws.buffers.keepMine(b().key); }}>Keep mine</button></span></div>}</Show>
             <Show when={b().unconfirmed}><div class="strip warn" role="alert"><I n="alert" s={14} class="st-warn" /><span>The machine did not confirm this save. Your text is kept here, and Save asks again.</span></div></Show>
             <Show when={b().refusal}>{message => <div class="strip bad" role="alert"><I n="alert" s={14} /><span>{message()}</span></div>}</Show>
             <Show when={b().readOnly}>{message => <div class="strip info"><I n="lock" s={14} class="faint" /><span>{message()}</span></div>}</Show>
           </>}</Show>
+          <Show when={languageUnavailable() || noDefinition()}><div class="strip info" role="status"><span>{languageUnavailable() ? ws.t("codeLanguageUnavailable") : ws.t("codeNoDefinition")}</span></div></Show>
+          <Show when={(language()?.diagnostics?.length ?? 0) > 0 ? language()?.diagnostics : undefined}>{items =>
+            <details class="ws-code-diagnostics"><summary>{ws.t("codeDiagnostics")} ({items().length})</summary>
+              <ul><For each={items()}>{item => <li><button class="res-hit" onClick={() => show(path(), item.range.start.line + 1, item.range.start.character)}><span class="n">{item.range.start.line + 1}</span><span>{diagnosticSeverity(item.severity)}: {item.message}</span></button></li>}</For></ul>
+            </details>
+          }</Show>
           <Show when={working(path())?.filter}>{driver => <div class="strip info"><span>{driver() === "lfs" ? "Git LFS" : `Git filter: ${driver()}`} · Content comparison is unavailable; no filter is run.</span></div>}</Show>
           <Show when={mode() === "file"} fallback={<div class="ebody ws-flush"><Show when={diff()} fallback={<div class="note-panel"><span class="w500">No changes in this file</span><span>It matches {props.checkout.base}.</span></div>}>{d => <Diff file={d()} layout={mode() === "split" ? "split" : "unified"} actions={actions(path())} />}</Show></div>}>
             <Show when={view() === "source"} fallback={<FilePreview path={path()} plan={plan()} text={previewText()} reason={previewReason()} readMedia={() => ws.store.readMedia(props.checkout.id, path())} onSource={() => setView("source")} />}>
@@ -323,7 +382,7 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
                 <Show when={buffer()?.missing}>{reason => <div class="cap faint ws-pad">{reason()}</div>}</Show>
                 <div class="code"><For each={s().lines}>{(line, i) => <div id={`code-line-${i() + 1}`} class={`cl${added().has(i() + 1) ? " chg" : ""}${props.line === i() + 1 ? " hit" : ""}`}><span class="n">{i() + 1}</span><span class="m"></span><span class="c"><Code path={path()} text={line} /></span></div>}</For></div>
               </>}</Show></div>
-            </Show>}>{b => <div class="ebody ws-flush ws-editor"><Suspense fallback={<div class="note-panel"><span>Opening…</span></div>}><CodeEditor buffer={b()} locked={locked(b())} line={props.line} changed={added()} onSave={saveNow} /></Suspense></div>}</Show>
+            </Show>}>{b => <div class="ebody ws-flush ws-editor"><Suspense fallback={<div class="note-panel"><span>Opening…</span></div>}><CodeEditor buffer={b()} locked={locked(b())} line={props.line} changed={added()} onSave={saveNow} diagnostics={language()?.diagnostics ?? undefined} jump={jump()?.path === path() && jump()?.line === props.line ? jump() : undefined} onDefinition={languageKey() && languageIo() ? definition : undefined} /></Suspense></div>}</Show>
             </Show>
           </Show>
         </>}</Show>

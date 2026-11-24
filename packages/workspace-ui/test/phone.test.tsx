@@ -58,6 +58,7 @@ async function mount(shell: PhoneShell) {
   const app = mountPhone(root, shell);
   disposers.push(app.dispose);
   await settle();
+  expect(root.querySelector(".ws-tooltip-host")).toBeNull();
   return app;
 }
 
@@ -101,6 +102,20 @@ describe("first run on a phone", () => {
       expect(f.shell.select).not.toHaveBeenCalled();
     });
   }
+
+  it.each([
+    ["unsupported_pairing_link_version", "This pairing link was made by an incompatible version."],
+    ["remote_incompatible_version", "The computer and this app are different versions."],
+  ])("explains a pairing version refusal (%s) instead of treating it as invalid or offline", async (code, message) => {
+    const f = fakeShell();
+    await mount(f.shell);
+    button("Paste pairing link")!.click(); await settle();
+    type("Pairing link", "cortex-pair:abc"); button("Continue")!.click(); await settle();
+    f.begins[0].d.reject(new Error(code)); await settle();
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe(`${message} Update the app or the computer so both match.`);
+    expect(button("Paste pairing link")).toBeTruthy();
+    expect(f.finishes).toHaveLength(0);
+  });
 
   it("refuses text that is not a pairing link before anything is sent", async () => {
     const f = fakeShell();
@@ -182,6 +197,24 @@ describe("machines on a phone", () => {
     expect(text()).toContain("Connect to your machine");
   });
 
+  it("shows revocation and update-needed as distinct states in the machine list", async () => {
+    const f = fakeShell({ active: "a", machines: [machine("a", "Workstation"), machine("b", "Laptop")] });
+    await mount(f.shell);
+    f.publish({ active: "a", machines: [
+      machine("a", "Workstation", { state: "rejected", path: null }),
+      machine("b", "Laptop", { state: "update_needed", path: null }),
+    ] });
+    await settle();
+    const rejected = "This phone is no longer paired with this machine. Pair it again on the machine.";
+    expect(document.querySelector(".ws-phone-conn")?.textContent).toContain(rejected);
+    button("Menu")!.click(); await settle();
+    button("Settings")!.click(); await settle();
+    const rows = all(".ph-row").map(row => row.textContent ?? "");
+    expect(rows.find(row => row.includes("Workstation"))).toContain(`Not paired${rejected}`);
+    expect(rows.find(row => row.includes("Laptop"))).toContain("Update neededThe computer and this app are different versions. Update the app or the computer so both match.");
+    expect(rows.some(row => row.includes("Offline"))).toBe(false);
+  });
+
   it("shows the phone's own settings, with app lock only where the phone says it is available", async () => {
     const f = fakeShell({ active: "a", machines: [machine("a", "Workstation", { state: "offline", path: null, lastConnectedAt: Date.now() - 86_400_000 })] });
     const app = await mount(f.shell);
@@ -221,12 +254,14 @@ describe("the phone shell of the shared interface", () => {
     const { PHONE_WITHHELD } = await import("../src/workspace");
     const { createWorkspaceStore } = await import("../src/store");
     const picked = vi.fn(async () => "/somewhere");
-    const make = (withhold?: readonly string[]) => createRoot(dispose => { disposers.push(dispose); const p = scriptedPort({ capabilities: { everything: true, operations: [] } }); return createWorkspaceStore({ ...p.port, saveFile: async () => ({ outcome: "saved", revision: "1" }) as never, pickFolder: picked }, { withhold }); });
+    const make = (withhold?: readonly string[]) => createRoot(dispose => { disposers.push(dispose); const p = scriptedPort({ capabilities: { everything: true, operations: [] } }); return createWorkspaceStore({ ...p.port, codeLease: { acquire: vi.fn(), renew: vi.fn(), release: vi.fn(), save: vi.fn() }, codeLanguage: { open: vi.fn(), change: vi.fn(), status: vi.fn(), definition: vi.fn(), close: vi.fn(), subscribe: vi.fn() }, pickFolder: picked }, { withhold }); });
     const desktop = make(), phone = make(PHONE_WITHHELD);
     await settle();
     expect(desktop.canEdit()).toBe(true);
     expect(desktop.can("workspace.terminal")).toBe(true);
     expect(phone.canEdit()).toBe(false);
+    expect(desktop.codeLanguage()).toBeDefined();
+    expect(phone.codeLanguage()).toBeUndefined();
     expect(phone.can("workspace.terminal")).toBe(false);
     expect(phone.canSaveAttachment()).toBe(false);
     expect(await phone.pickFolder()).toBeNull();

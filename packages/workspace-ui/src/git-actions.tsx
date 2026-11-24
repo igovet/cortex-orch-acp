@@ -2,10 +2,11 @@ import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from
 import { capabilityOf, type RepoCheckout } from "@cortex/workspace-domain";
 import { useWs, type Ws } from "./ctx";
 import { A, I, Keyed, MenuItem, place, Pop } from "./kit";
+import { draftNotice, WRITING_CHANGES } from "./copy";
 import { autoGrow } from "./autogrow";
 import { ActionBar, Strip } from "./layout";
 import { DIRTY, gitItems, gitPrimary, LIVE_WRITER, operationWord, syncCounts, trackedChanges, updateBlocked, type GitFacts, type GitItemId } from "./git-actions-model";
-import { behindTarget, repoOf, taskCheckout } from "./review-model";
+import { behindTarget, repoOf, taskCheckout, unavailableCheckout } from "./review-model";
 import type { Route } from "./router";
 import type { ProjectSummary, TaskView } from "./selectors";
 import { sessionModel } from "./session-model";
@@ -30,22 +31,29 @@ function useScope(props: Scope) {
   const ws = useWs();
   const projectId = () => props.view?.project.id ?? props.summary.project.id;
   const repo = createMemo(() => repoOf(ws.store.state(), projectId()));
-  const checkout = createMemo(() => props.view ? taskCheckout(ws.store.state(), props.view.task) : repo()?.checkouts.find(c => c.kind === "main") ?? null);
-  return { projectId, repo, checkout };
+  const selected = () => { const r = ws.router.route(); return r.name === "project" && r.project === projectId() && ["code", "git", "worktrees"].includes(r.view ?? "") ? r.checkout : undefined; };
+  const checkout = createMemo(() => {
+    const state = ws.store.state(), id = selected();
+    if (props.view) return taskCheckout(state, props.view.task);
+    if (id) return unavailableCheckout(state, projectId(), id) ? null : repo()?.checkouts.find(c => c.id === id) ?? null;
+    return repo()?.checkouts.find(c => c.kind === "main") ?? null;
+  });
+  return { projectId, repo, checkout, selected };
 }
 
 export function OpenInButton(props: Scope) {
   const ws = useWs();
   const s = useScope(props);
-  const worktree = () => props.view?.task.checkout.kind === "worktree";
+  const worktree = () => props.view?.task.checkout.kind === "worktree" || (!!s.selected() && s.checkout()?.kind !== "main");
   const targets = createMemo(() => openTargets(ws, s.checkout(), worktree()));
   const primary = () => targets().find(t => t.id === lastOpen()) ?? targets()[0];
-  const codeRoute = (): Route => props.view ? { name: "task", machine: props.view.machine.id, task: props.view.id, tab: "code" } : { name: "project", machine: props.summary.machine.id, project: props.summary.project.id, view: "code", scope: { kind: "all" } };
+  const codeRoute = (): Route => props.view ? { name: "task", machine: props.view.machine.id, task: props.view.id, tab: "code" } : { name: "project", machine: props.summary.machine.id, project: props.summary.project.id, view: "code", scope: { kind: "all" }, checkout: s.selected() };
   const open = (t: OpenTarget) => {
     setLastOpen(t.id);
     if (t.id === "code") return ws.go(codeRoute());
     if (t.id === "terminal") { if (!ws.panels.terminalOpen()) ws.toggleTerminal(); return; }
     const c = s.checkout();
+    if (!c && worktree()) return;
     void ws.run({ type: "open_editor", projectId: s.projectId(), ...(c ? { checkoutId: c.id } : {}) });
   };
   return <span class="split hs hs-open" role="group" aria-label="Open">
@@ -96,24 +104,22 @@ export function GitButton(props: Scope & { whyId?: string }) {
   };
   const command = async (c: Parameters<Ws["run"]>[0], retry: () => void) => {
     const r = await ws.run(c);
-    if (!r.ok) fail(r.message, retry);
+    if (!r.ok) fail(r.message, c.type === "git_push" && ["push_summary_unsaved", "push_witness_unsaved", "unknown_outcome"].includes(r.outcome) ? undefined : retry);
     return r.ok;
   };
   const fetch = () => void step("fetch", () => command({ type: "git_fetch", projectId: s.projectId(), now: ws.store.clock() }, fetch));
   const pull = () => { const c = s.checkout(); if (c) void step("pull", () => command({ type: "git_pull", checkoutId: c.id, now: ws.store.clock() }, pull)); };
-  const target = () => { const c = s.checkout(), r = s.repo(); return c && r ? { remote: r.remote, branch: c.branch } : null; };
   // Pull first, fast-forward only. If it cannot, nothing is pushed and the pull's own reason is what the owner reads.
   const pullAndPush = () => {
-    const c = s.checkout(), to = target();
-    if (!c || !to) return;
-    ws.open({ kind: "confirm", title: `Pull and push ${to.branch}?`, action: "Pull and push",
-      note: `Pulls with fast-forward only, then pushes ${to.branch} to ${to.remote}. If the pull cannot fast-forward, nothing is pushed. ${ws.t("pushNote")}`,
-      go: () => step("pull_push", async () => {
+    const c = s.checkout();
+    if (!c || !s.repo()) return;
+    ws.open({ kind: "push", checkoutId: c.id,
+      pullFirst: push => step("pull_push", async () => {
         setProgress("Pulling…");
         const pulled = await ws.run({ type: "git_pull", checkoutId: c.id, now: ws.store.clock() });
         if (!pulled.ok) { fail(`Nothing was pushed. ${pulled.message}`, pullAndPush); return true; }
         setProgress("Pushing…");
-        return command({ type: "git_push", checkoutId: c.id, remote: to.remote, branch: to.branch, confirmed: true }, pullAndPush).then(() => true);
+        return command(push, pullAndPush).then(() => true);
       }) });
   };
   const gitPage = (checkout: string): Route => ({ name: "project", machine: props.view?.machine.id ?? props.summary.machine.id, project: s.projectId(), view: "git", scope: { kind: "all" }, checkout });
@@ -215,26 +221,26 @@ export function CommitDialog(props: { checkoutId: string; taskId?: string; onClo
   const files = () => c()?.files ?? [];
   const count = (stage: string) => files().filter(f => f.stage === stage).length;
   const staged = () => count("staged");
-  const fallback = () => { const n = staged() || files().length; return n ? `Update ${n} file${n === 1 ? "" : "s"}` : ""; };
-  let edited = !!c()?.draft.trim();
-  // While the message is being written from the changes the field stays empty and Commit stays off: a placeholder
-  // message is never what gets committed. The file-list fallback appears only once writing has finished without text.
-  const drafting = !edited && !!props.taskId && files().length > 0;
-  const [message, setMessage] = createSignal(edited ? c()!.draft : drafting ? "" : fallback());
-  const [writing, setWriting] = createSignal<"writing" | "model" | "fallback" | null>(edited ? null : drafting ? "writing" : "fallback");
-  // Offered once as the dialog opens, written from these files for the task they belong to. Typed text is never replaced.
+  const saved = c()?.draft ?? "";
+  let edited = false;
+  onCleanup(() => { edited = true; });
+  const drafting = !saved.trim() && files().length > 0;
+  const [message, setMessage] = createSignal(saved);
+  const [note, setNote] = createSignal(drafting ? WRITING_CHANGES : saved.trim() ? "Your saved draft" : "");
   if (drafting) {
-    const v = ws.store.index().byId.get(props.taskId!);
-    void ws.store.draftIntegrationText({ taskId: props.taskId!, method: "commit", targetBranch: c()!.branch, paths: files().map(f => f.path), summary: v?.task.result?.summary })
-      .catch(() => null)
-      .then(text => {
-        if (edited) return;
-        setMessage(text?.message || fallback());
-        setWriting(text?.message ? text.source : "fallback");
-      });
+    const branch = c()!.branch;
+    const taskId = props.taskId;
+    const request = taskId
+      ? ws.store.draftIntegrationText({ taskId, method: "commit", targetBranch: branch, paths: files().map(f => f.path), summary: ws.store.index().byId.get(taskId)?.task.result?.summary })
+      : ws.store.draftCheckoutCommit({ checkoutId: props.checkoutId });
+    void request.then(text => {
+      if (edited) return;
+      if (c()?.branch !== branch) { setNote("The checkout changed. Enter a message manually or reopen Commit."); return; }
+      if (text?.message) setMessage(text.message);
+      setNote(draftNotice(text, !!text?.message, "Written from the changes. You can edit it."));
+    });
   }
-  const note = () => writing() === "writing" ? "Writing from the changes…" : writing() === "model" ? "Written from the changes, you can edit it" : writing() === "fallback" ? "Listed from the changed files, you can edit it" : "Your saved draft";
-  const why = () => !c() ? "This checkout is no longer in the last Git read" : !files().length ? "Nothing to commit" : writing() === "writing" ? "The commit message is still being written" : !message().trim() ? "Write a commit message first" : writer() && !anyway() ? `${LIVE_WRITER} Stop it first, or choose Commit anyway.` : ws.gate("git_commit");
+  const why = () => !c() ? "This checkout is no longer in the last Git read" : !files().length ? "Nothing to commit" : writer() && !anyway() ? `${LIVE_WRITER} Stop it first, or choose Commit anyway.` : !message().trim() ? "Write a commit message first" : ws.gate("git_commit");
   let working = false;
   const commit = (e: MouseEvent) => {
     if (why() || working) return;
@@ -244,7 +250,7 @@ export function CommitDialog(props: { checkoutId: string; taskId?: string; onClo
   const gitPage = (): Route | null => { const r = found()?.repo; const m = ws.store.state().projects.find(p => p.id === r?.projectId); return r && m ? { name: "project", machine: m.machineId, project: r.projectId, view: "git", scope: { kind: "all" } } : null; };
   const shown = () => files().slice(0, 8);
   return <>
-    <div class="dlg-h"><h2>Commit in <span class="mono">{c()?.branch ?? ""}</span></h2><button class="ib" aria-label="Cancel" onClick={() => props.onClose()}><I n="x" /></button></div>
+    <div class="dlg-h"><h2>Commit in <span class="mono">{c()?.branch ?? ""}</span></h2><button data-tooltip="" class="ib" aria-label="Cancel" onClick={() => props.onClose()}><I n="x" /></button></div>
     <div class="dlg-b">
       <Show when={writer()}>{w => <Strip tone="warn" icon={<I n="alert" s={14} class="st-warn" />} action={<Show when={!anyway()}><span class="acts"><button class="btn btn-line btn-sm" {...ws.needs("stop_task")} onClick={() => ws.stopTask(w().id)}>Stop the task first</button><button class="btn btn-sm" onClick={() => setAnyway(true)}>Commit anyway</button></span></Show>}>
         {anyway() ? `“${w().task.title}” is still working here. Its later changes stay uncommitted.` : `“${w().task.title}” is working in this checkout and may still change these files.`}</Strip>}</Show>
@@ -252,8 +258,8 @@ export function CommitDialog(props: { checkoutId: string; taskId?: string; onClo
       <Show when={!staged() && files().length}><div class="cap muted">Nothing is staged, so Commit includes all {files().length} change{files().length === 1 ? "" : "s"}.</div></Show>
       <div class="pre"><For each={shown()}>{f => <div class="mono trunc">{f.status} {f.path}</div>}</For>
         <Show when={files().length > shown().length}><div class="cap faint">{files().length - shown().length} more</div></Show></div>
-      <label class="fld"><span class="lab">Commit message <span class="faint">{note()}</span></span>
-        <textarea class="inp" rows="3" data-autofocus ref={el => autoGrow(el, message)} value={message()} placeholder={writing() === "writing" ? "Writing the message from the changes…" : undefined} onInput={e => { edited = true; setWriting(null); setMessage(e.currentTarget.value); }} /></label>
+      <label class="fld"><span class="lab">Commit message <span class="faint" role="status">{note()}</span></span>
+        <textarea class="inp" rows="3" data-autofocus ref={el => autoGrow(el, message)} value={message()} onInput={e => { edited = true; setNote(""); setMessage(e.currentTarget.value); }} /></label>
     </div>
     <ActionBar place="dialog" start={<Show when={gitPage()}>{to => <A class="lnk" to={to()} onClick={() => props.onClose()}>Stage files in Git</A>}</Show>} hint="Nothing is committed until you confirm. Nothing is pushed.">
       <button class="btn btn-line btn-lg" onClick={() => props.onClose()}>Cancel</button>
@@ -292,7 +298,7 @@ export function PullDialog(props: { checkoutId: string; taskId?: string; onClose
     void ws.busy(ws.run({ type: "git_pull", checkoutId: props.checkoutId, mode: mode(), now: ws.store.clock() }).then(r => { if (r.ok) props.onClose(); else setFailure(r.message); }).finally(() => { working = false; }), e.currentTarget as HTMLElement);
   };
   return <>
-    <div class="dlg-h"><h2>Pull into <span class="mono">{c()?.branch ?? ""}</span></h2><button class="ib" aria-label="Cancel" onClick={() => props.onClose()}><I n="x" /></button></div>
+    <div class="dlg-h"><h2>Pull into <span class="mono">{c()?.branch ?? ""}</span></h2><button data-tooltip="" class="ib" aria-label="Cancel" onClick={() => props.onClose()}><I n="x" /></button></div>
     <div class="dlg-b">
       <Show when={c()}>{x => <div class="cap muted">The histories diverged: this branch has {n(x().ahead, "commit")} that <span class="mono">{upstream()}</span> does not, and <span class="mono">{upstream()}</span> has {n(x().behind, "commit")} that this branch does not. {fetched()}</div>}</Show>
       <div class="ws-fields" role="radiogroup" aria-label="How to bring in the remote commits">
@@ -334,7 +340,7 @@ export function UpdateDialog(props: { taskId: string; onClose: () => void }) {
     }).finally(() => { working = false; }), e.currentTarget as HTMLElement);
   };
   return <Show when={view()}>{v => <>
-    <div class="dlg-h"><h2>Update <span class="mono">{v().task.checkout.branch}</span> from <span class="mono">{target()}</span>?</h2><button class="ib" aria-label="Cancel" onClick={() => props.onClose()}><I n="x" /></button></div>
+    <div class="dlg-h"><h2>Update <span class="mono">{v().task.checkout.branch}</span> from <span class="mono">{target()}</span>?</h2><button data-tooltip="" class="ib" aria-label="Cancel" onClick={() => props.onClose()}><I n="x" /></button></div>
     <div class="dlg-b">
       <ul class="conseq">
         <li><I n="merge" s={14} /><span>Merges {behind() ? n(behind()!, "new commit") : "the new commits"} of <span class="mono">{target()}</span> into <span class="mono">{v().task.checkout.branch}</span>, in the task's worktree. <span class="mono">{target()}</span> is not changed, and no commit is rewritten.</span></li>

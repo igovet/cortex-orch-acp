@@ -149,8 +149,8 @@ export function LiveTerminal(props: { projectId: string; repository: string; por
       mid={<><span class="mono trunc" data-whole="">{props.repository}</span><span role="status" class="terminal-status trunc" data-whole="">{status()}</span></>}
       end={<>
         <Show when={!running()}><button class="btn btn-sm" disabled={busy()} onClick={() => void open()}>Reconnect terminal</button></Show>
-        <button class="ib" aria-label="Close shell" disabled={busy() || !session} onClick={() => void close()}><I n="x" s={14} /></button>
-        <button class="ib" aria-label="Hide terminal" onClick={ws.toggleTerminal}><I n="minus" s={14} /></button>
+        <button data-tooltip="" class="ib" aria-label="Close shell" disabled={busy() || !session} onClick={() => void close()}><I n="x" s={14} /></button>
+        <button data-tooltip="Hide terminal · Ctrl+J" class="ib" aria-label="Hide terminal" onClick={ws.toggleTerminal}><I n="minus" s={14} /></button>
       </>} />
     <Show when={error()}><div class="terminal-error" role="alert">{error()}</div></Show>
     <div class="terminal-screen" ref={host} />

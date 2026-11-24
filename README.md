@@ -19,9 +19,17 @@
   <strong>Recommended client: <a href="https://github.com/getpaseo/paseo">Paseo</a></strong>
 </p>
 
+In Workspace Code, the [File actions menu](docs/cortex-workspace/ide-and-git.md#code-file-actions) opens the file palette, opens the current file in an external editor, or shows it in the file manager.
+
+Workspace desktop shows [selective tooltips](docs/cortex-workspace/SCREENS.md#desktop-tooltip-inventory) after hover or keyboard focus. Press Esc to dismiss them.
+
 Conversation waits explain when decision details are unavailable and point to Answer in the header. Open decisions also render before their timeline reference arrives. In Workspace, a pinned decision stays above the message box even when **Latest** appears over the conversation. If a draft becomes read-only, the composer keeps the text and displays the reason separately. Sent attachment chips tolerate the whitespace normalization used by runtime history.
 
-In Workspace, Changes excludes target-only changes after **Update from target**, including when **Finish merge** confirms an update you committed in Git. For a stopped source merge, Cortex is involved only if you confirm **Hand to the app…**. After resolution, review the diff and use **Request fresh checks** before confirming integration. On a separate branch, **Git → Commit…** keeps an accepted result current when the commit contains exactly the accepted files; push it before choosing **Finish → Create a pull request**. Workspace drafts editable commit, squash, Push and pull-request text from fixed English templates and Git metadata, without calling a model. A confirmed Push summary can prefill the PR description. See [IDE and Git](docs/cortex-workspace/ide-and-git.md).
+In Workspace, Changes excludes target-only changes after **Update from target**, including when **Finish merge** confirms an update you committed in Git. For a stopped source merge, Cortex is involved only if you confirm **Hand to the app…**. After a merge finished in Workspace, review the diff and use **Request fresh checks** before confirming integration. For a [saved merge from an earlier version](docs/cortex-workspace/local-task-execution.md#saved-merges-from-an-earlier-version), finish or abort in Git first, then clear the saved record in Workspace; old checks do not carry over. On a separate branch, **Git → Commit…** keeps an accepted result current when the commit contains exactly the accepted files; push it before choosing **Finish → Create a pull request**. Workspace uses a configured model to draft editable commit and squash messages from bounded diffs, and Push summaries from outgoing commit messages and change counts. Manual entry remains available if drafting fails. A confirmed Push summary can prefill the PR description, not the title. See [IDE and Git](docs/cortex-workspace/ide-and-git.md).
+
+In Workspace, **Return for rework** reopens eligible closed tasks with a new
+plan and keeps earlier results in history. Restore archived tasks first. See
+[Return for rework](docs/cortex-workspace/local-task-execution.md#return-for-rework).
 
 In Workspace, you can add a comment to a route choice without changing the selected route. Explicit refusals still apply. See [routing and consent](docs/project/native-incoming-acp.md#native-routing-and-retained-consent).
 
@@ -366,7 +374,7 @@ Projects whose stores contain tasks written by the former Python runtime are not
 Missing, untrusted, ambiguous or unsupported routes fail visibly without a Python
 mutation fallback. A built-binary socket test covers native create/start through
 completion with PATH fake engines and private HOME/XDG state; it does not qualify
-real engine accounts or a released application. Native worktree execution still fails closed rather than being ignored. Owner attachments (new task, follow-up and Request-changes messages, and question answers) are retained as private source bodies and delivered to the engine; the native service advertises `attachments: true` in its capabilities, and worker guidance carries no files.
+real engine accounts or a released application. In Workspace, choose **Separate worktree** to start from committed HEAD in a dedicated checkout. Execution, review, verification, Changes, Code and Git use that checkout; the terminal still opens in the registered project folder. Without Git the choice is disabled, and Start never falls back to the project folder. See [separate worktrees](docs/cortex-workspace/local-task-execution.md#separate-worktrees). Owner attachments (new task, follow-up and Request-changes messages, and question answers) are retained as private source bodies and delivered to the engine; the native service advertises `attachments: true` in its capabilities, and worker guidance carries no files.
 
 The runtime normally continues work on its own. Work failures use a strategy
 ladder (repair, escalated routes, the senior consultant, another role and
@@ -499,12 +507,12 @@ natively for materialized checkout options, retaining existing replies and Start
 close/archive, automatic-ready/merged presentation updates and conflict handoff now also run in Rust with
 offline Python-oracle reply/state comparisons. External closure rechecks execution/session/owner evidence
 and live workers under Start arbitration; these overlays never complete the runtime or certify checks.
-Integration admission now refuses unconfirmed/stale overlays, observed already-landed content and absent
+Earlier native integration coverage refused unconfirmed/stale overlays, observed already-landed content and absent
 or non-result runtime bindings natively, with exact offline Python reply comparisons and no saved-state or
 Git mutations. Completed bound results now use the existing native result/source validator for a narrow
-local squash: a clean, already-committed project-folder source into an existing clean target worktree,
+local squash in that comparison: a clean, already-committed project-folder source into an existing clean target worktree,
 with the target already an ancestor and no
-checkout cleanup. Reply/state/Git comparisons include real commit-hook failure and changed-HEAD uncertainty. Unsupported evidence, source staging, same-branch commit, target updates, temporary targets, PRs and cleanup still delegate before any effect. Remaining machine config.action variants, task/review actions and receipt-backed worker withdrawals still use the explicit migration provider; this is not the completed all-Rust product or an installed-app upgrade. See [the native machine boundary](docs/cortex-workspace/local-task-execution.md#native-machine-boundary).
+checkout cleanup. Reply/state/Git comparisons include real commit-hook failure and changed-HEAD uncertainty. That earlier comparison did not cover the current bound-worktree path. For a dedicated worktree, confirmed local squash uses committed source and a safe target; **Delete worktree folder** defaults on when safe, removes only the clean owned folder, and keeps the branch. A fresh confirmed close-and-delete request can retry cleanup after a dirty or busy worktree has been corrected. See [the native machine boundary](docs/cortex-workspace/local-task-execution.md#native-machine-boundary).
 
 Owner task deletion (`product.task` actions `purge` and `clear_old`) now uses Rust Core for materialized
 checkouts, with unchanged reply and saved-state shapes compared against 117 offline Python cases.
@@ -623,7 +631,10 @@ Removing and re-adding a project restores its retained history even when the pro
 New task worktrees use readable description-based names instead of transport ids;
 existing checkouts keep their saved paths when the default root changes. Work waiting
 for merge confirmation keeps its owner-action highlight. Result cards separate headings,
-paragraphs, quotes and code, and omit empty outcome counters.
+paragraphs, quotes and code, and omit empty outcome counters. On the local desktop,
+video and subtitle file links offer **Open in default app** without leaving the result.
+If the handoff fails, the file popup shows why and lets you copy the path or retry.
+See [Result links](docs/cortex-workspace/local-task-execution.md#result-links).
 Plain project folders support tasks and result acceptance without Git: a folder in no repository is observed by walking it (same hashing, exclusions and bounds as a repository; nothing is ignored), so baseline, review change lists, verification and completion work there, while a repository Git cannot read still stops the task with a stop question naming that cause. Opening plain folders and reading files or snapshots does not require an installed Git executable. Git initialization is explicit and requires Git;
 local Commit, squash merge and task closure need no remote. Local-only repositories omit network controls and push/PR wording; generated commit messages are English independently of conversation language. Task actions open the actual checkout in the detected editor, with a visible reason when unavailable. Worktree settings allow writable external `.cortex/worktrees` folders, retain refused drafts with a persistent reason, and never move existing checkouts. Diagnostics list each failing check and its recovery steps, including in Copy report. Accept binds the reviewed runtime-evidence version while displaying its result number; late progress/transcript updates do not invalidate unchanged work. Refused or unconfirmed acceptance stays beside the result with a Refresh action, even after its toast closes;
 withdrawn probes do not count as failed worker checks. Check programs are probed in the real verification
@@ -669,7 +680,8 @@ close for conflicting records does not enable Archive or satisfy a dependency. S
 Pointer and keyboard focus keep their behavior without adding decorative outlines or shifting controls.
 
 A sprint is planned by its own read-only planning task in the project folder,
-shown inside the sprint with its conversation and workers. It studies the
+shown inside the sprint with its conversation and workers. The board identifies
+the planning task from creation, before the sprint links it. It studies the
 project (read-only specialists only, no file changes), submits a plan of any size
 through a runtime-validated tool (in parts when large), and every plan gets an independent review before the
 sprint shows it for approval. Ask for changes in the sprint conversation; Create
@@ -1064,6 +1076,14 @@ Cortex-owned roots, your project files, or Git history. See
 
 ## Cortex Workspace desktop (in development)
 
+Local desktop [Code](docs/cortex-workspace/ide-and-git.md#code-editing-and-write-leases)
+opens read-only until you select **Edit**. Saves require a file lease and a
+matching disk revision. The lease coordinates with this project's structured
+worker file tools; it does not lock out Git, shells, native engine writes or
+other external writers. Local [language tools](docs/cortex-workspace/ide-and-git.md#language-tools)
+provide Rust and TypeScript/JavaScript diagnostics and go-to-definition. Remote
+and Android Code do not offer leased editing or language tools.
+
 Starting a task is independent of other tasks in the same project, including retained waiting or recovering ACP tasks. Pending, unknown or running Workspace starts also do not block new ordinary ACP tasks. A duplicate start is refused only for that already-started task; a crashed start remains unknown without replay. Sprint queues still select tasks by dependency order and pause for attention. Manual Start does not enforce that order on the server. See [local task execution](docs/cortex-workspace/local-task-execution.md#choices-and-checkout).
 
 Cortex Workspace is a desktop application being built alongside Cortex. Its local slice is built and
@@ -1087,13 +1107,13 @@ Sprint planning failures appear in the sprint conversation and Inbox, with Retry
 request in the conversation. A planning warning does not stop planning. See
 [read-only sprint planning](docs/cortex-workspace/SCREENS.md#read-only-sprint-planning).
 
-Workspace sidebar rows mark changes you have not opened yet: a task or sprint that came to wait on you, a run that ended, or a finished sprint. Opening the row clears the mark. What was seen stays in the app's local storage as task, sprint and project ids with fixed-size state codes, never task text, bounded to 1000 rows. See [Unseen changes](docs/cortex-workspace/SCREENS.md#responsive-layout).
+Workspace sidebar rows mark changes you have not opened yet: a task or sprint that came to wait on you, a run that ended, or a finished sprint. Opening the row clears the mark. A task created while the app was closed is marked too once it waits on you or ends; what was already there on the first run is not. What was seen stays in the app's local storage as task, sprint and project ids with fixed-size codes, never task text, bounded to 1000 rows and 200 projects. See [Unseen changes](docs/cortex-workspace/SCREENS.md#responsive-layout).
 
 Workspace task spend shows reported tokens by configured engine and model.
 Sent task prompts without a valid final token report remain unknown, not zero;
 the totals are not a cost estimate. See [token and plan usage](docs/features/token-and-plan-usage/index.md).
 
-The merge card shows the recorded pull request address, and **View PR** (on the card and in the Git menu) opens it in your browser where `/usr/bin/xdg-open` or `/usr/bin/gio` is installed. When a branch and its upstream have diverged, **Pull…** asks whether to merge or rebase the remote commits. **Update from <target>…** merges the target's new commits into a task's own branch when that task has a worktree of its own on another branch and the machine offers the update; the native host runs every task in the project folder, so its tasks have no such item. See [IDE and Git](docs/cortex-workspace/ide-and-git.md).
+The merge card shows the recorded pull request address, and **View PR** (on the card and in the Git menu) opens it in your browser where `/usr/bin/xdg-open` or `/usr/bin/gio` is installed. When a branch and its upstream have diverged, **Pull…** asks whether to merge or rebase the remote commits. **Update from <target>…** merges the target's new commits into a task's own branch when that task has a worktree of its own on another branch and the machine offers the update. See [IDE and Git](docs/cortex-workspace/ide-and-git.md).
 
 Desktop container builds derive their Rust source inputs from the root Cargo workspace membership and preserve `Cargo.lock`; new crates do not require a separate staging allowlist entry. See [local desktop builds](docs/project/packaging.md#local-desktop-debian-builds).
 
@@ -1266,10 +1286,12 @@ See [SECURITY.md](SECURITY.md#attack-surface-review-and-limits) for the current
 boundaries and [PRIVACY.md](PRIVACY.md) for data handling. Report vulnerabilities
 privately as described in SECURITY.md.
 
-An eligible writing worker's command that requests recognized privilege
-escalation (`sudo`, `pkexec` or `doas`) uses the `outside_command` route. A
-sandbox launch can be retried once through that route only if the supervisor
-proves the payload never started. Started or uncertain commands are not
+In every access mode, eligible writing workers in the main checkout can
+request `outside_command`. It runs outside the command sandbox, with the
+owner's host access. Workspace-linked writers, coordinators and read-only roles
+cannot use it. Recognized privilege requests (`sudo`, `pkexec` or `doas`) use
+this route, too. A sandbox launch can be retried once through that route only
+if the supervisor proves the payload never started. Started or uncertain commands are not
 replayed. Both direct and rerouted host actions get an action-specific decision:
 Auto answers it automatically; Guarded and Development ask you. If an approved host command needs
 a sudo password, the desktop or a paired phone shows a "Password for sudo"

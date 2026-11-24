@@ -2,13 +2,14 @@ import { createEffect, createMemo, createSignal, For, on, Show, type JSX } from 
 import { capabilityOf, taskRenamable, type Task } from "@cortex/workspace-domain";
 import { asOf, automaticAcceptanceHold, checkCounts, clock, dayClock, engineLimits, humanStatus, nothingToCommit, ownerHold, reviewDeadEnd, sameBranch, windowTitle, sprintModeLabel, sprintTitle, type TaskView } from "./selectors";
 import { useWs } from "./ctx";
+import { REQUESTING, RequestLabel, RequestStatus } from "./request-feedback";
 import { FieldEdit } from "./field-edit";
 import { onScreen } from "./freshness";
 import { scrollIntoFeed } from "./follow";
 import { A, FactLine, I, Keyed, Modal, Pop } from "./kit";
 import { ActionBar, revealWhenCut } from "./layout";
-import { behindTarget, conflictLine, finishBlocked, taskCheckout } from "./review-model";
-import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, languageLabel, modeLabel, resumeState, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
+import { behindTarget, conflictLine, finishBlocked, mergeControls, taskCheckout } from "./review-model";
+import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, languageLabel, modeLabel, REWORK_LABEL, resumeState, reworkBinding, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
 import { CHECK_ICON, VERIFICATION } from "./worker";
 import { archiveBlocked } from "./git-actions-model";
 import { spendRows, StallBadge } from "./task-spend";
@@ -41,7 +42,7 @@ export function BranchChip(props: { view: TaskView }) {
   const worktree = () => t().checkout.kind === "worktree";
   const uncommitted = () => taskCheckout(ws.store.state(), t())?.files.length ?? m()?.session.changes?.files;
   return <>
-    <button class="chip branch-chip" popovertarget="m-wt" aria-label={`${worktree() ? "Worktree" : "Project folder"}${t().checkout.branch ? ` ${t().checkout.branch}` : ""}`}><I n="branch" s={12} /><span class="w-wide">{worktree() ? "Worktree" : "Project folder"}</span><Show when={t().checkout.branch}><span class="mono trunc" style={{ "max-width": "170px" }}>{t().checkout.branch}</span></Show></button>
+    <button class="chip branch-chip" popovertarget="m-wt" aria-label={`${worktree() ? "Worktree" : "Project folder"}${t().checkout.branch ? ` ${t().checkout.branch}` : ""}`}><I n="branch" s={12} /><span class="w-wide">{worktree() ? "Worktree" : "Project folder"}</span><Show when={t().checkout.branch}><span data-tooltip-cut="" class="mono trunc" style={{ "max-width": "170px" }}>{t().checkout.branch}</span></Show></button>
     <Pop id="m-wt" class="pop-anchor" align="left" label="Checkout" style={{ width: "300px", padding: "10px 12px" }}>
       <div class="st st-idle" style={{ "margin-bottom": "8px" }}><I n="branch" s={12} />{worktree() ? "Separate worktree" : "Project folder"}</div>
       <dl class="kv">
@@ -116,9 +117,12 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
     <Show when={mode() === "ended"}>
       <button class="btn btn-primary" aria-describedby={blocked() ? why() : undefined} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("close_task")} onClick={() => { if (!blocked()) ws.closeTask(props.view.id); }}>Close task…</button>
     </Show>
-    {/* A closed task's next step is the Archive: one command, with its work, and nothing asks. */}
+    <Show when={reworkBinding(props.view)}>
+      <button class="btn btn-line tb-rework" aria-label={REWORK_LABEL} {...ws.needs("rework_task")} onClick={() => ws.returnForRework(props.view.id)}><I n="message" s={14} /><span>{REWORK_LABEL}</span></button>
+    </Show>
+    {/* Archiving keeps the closed task and its work without another prompt. */}
     <Show when={mode() === "closed"}>
-      <button class="btn btn-line" aria-describedby={archiveWhy() ? why() : undefined} aria-disabled={archiveWhy() ? "true" : undefined} data-why={archiveWhy()} {...ws.needs("archive_task")} onClick={() => { if (!archiveWhy()) ws.archiveTask(props.view.id); }}><I n="archive" s={12} />Archive</button>
+      <button class="btn btn-line tb-archive" aria-describedby={archiveWhy() ? why() : undefined} aria-disabled={archiveWhy() ? "true" : undefined} data-why={archiveWhy()} {...ws.needs("archive_task")} onClick={() => { if (!archiveWhy()) ws.archiveTask(props.view.id); }}><I n="archive" s={12} />Archive</button>
     </Show>
     {/* A queue hold decided for the owner: its actions are on the pinned card above the message box; this brings it into view. */}
     {/* It is offered only where its target is on the page: the pinned card, or (the card stays away while a question or a
@@ -134,10 +138,10 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
     <Show when={!ws.can(capabilityOf("send_message"))}>
       <Show when={mode() === "live" && props.view.task.status === "working"}><button class="btn btn-line" {...ws.needs("stop_task")} onClick={() => ws.stopTask(props.view.id)}><I n="stop" s={12} class="st-bad" />{stopLabel(ws.can(capabilityOf("continue_task")))}</button></Show>
       <Show when={run()?.action === "continue_task"}><button class="btn btn-primary" {...ws.needs("continue_task")} onClick={() => ws.run({ type: "continue_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Resume</button></Show>
-      <Show when={mode() === "draft"}><button class="btn btn-primary" {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Start</button></Show>
+      <Show when={mode() === "draft"}><button class="btn btn-primary" {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} /><RequestLabel pending={ws.store.pendingTask("start_task", props.view.id)} text={REQUESTING.start_task}>Start</RequestLabel></button></Show>
     </Show>
     {props.git}
-    <button class="ib" aria-label="Task actions" onClick={e => props.onMenu(e.currentTarget)}><I n="more" /></button>
+    <button data-tooltip="" class="ib" aria-label="Task actions" onClick={e => props.onMenu(e.currentTarget)}><I n="more" /></button>
   </>;
 }
 
@@ -179,6 +183,12 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
   const checkout = createMemo(() => taskCheckout(ws.store.state(), t()));
   const blocks = () => ws.store.state().tasks.filter(x => x.dependencies.includes(t().id)).length;
   const note = () => {
+    if (ws.store.mode === "real" && t().conflict !== "none") {
+      const a = mergeControls(t());
+      return a.uncertain || (a.inspect && !a.finish) ? "Inspect the merge before making changes."
+        : a.active ? "Handoff recorded. Stop requests cancellation; manual actions wait for confirmation."
+        : "Open Changes for the available merge actions.";
+    }
     if (m().view.automaticFact) return "";
     if (m().view.ownerIntegration) return humanStatus(m().view.ownerIntegration!.reason);
     if (t().conflict === "resolving") return `Handed over by you${t().merge?.handedAt != null ? ` at ${clock(t().merge!.handedAt)}` : ""}. You can stop it and take over at any time.`;
@@ -217,7 +227,7 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
       <Kv rows={[["Worker", w().role], ["State", workerFace(w().status).label], ["Model", workerModel(w(), ws.route)], ...(w().scope.length ? [["Scope", w().scope.join(", "), true] as [string, string, boolean]] : []), ["Edited", `${editedFiles(w()).files} files, +${editedFiles(w()).add} −${editedFiles(w()).del}`], ["Commands", `${w().activity.filter(a => a.command).length} run`]]} /></div>}</Show>
     <div class="ins-sec">
       <div class="ins-h"><span>{t().checkout.kind === "worktree" ? "Worktree" : "Checkout"}</span></div>
-      <Kv rows={[...(t().checkout.kind === "worktree" ? [["Path", (t().checkout as { path: string }).path, true] as [string, string, boolean]] : []), ["Branch", t().checkout.branch, true], ...base(), [sameBranch(t(), m().view.target) ? "Target branch" : "Merge into", m().view.target, true], ...uncommitted(), ["Conflicts", t().merge && t().conflict !== "none" ? conflictLine(t().merge!) : "None"]]} />
+      <Kv rows={[...(t().checkout.kind === "worktree" ? [["Path", (t().checkout as { path: string }).path, true] as [string, string, boolean]] : []), ["Branch", t().checkout.branch, true], ...base(), [sameBranch(t(), m().view.target) ? "Target branch" : "Merge into", m().view.target, true], ...uncommitted(), ["Conflicts", t().merge && t().conflict !== "none" ? (ws.store.mode === "real" && !t().merge!.files.length ? "No paths displayed" : conflictLine(t().merge!)) : "None"]]} />
     </div>
     <Show when={m().view.sprint}>{s => <div class="ins-sec"><div class="ins-h"><span>Sprint</span></div>
       <Kv rows={[["Sprint", sprintTitle(s())], ["Run mode", sprintModeLabel[s().runMode]], ["Blocks", `${blocks()} task${blocks() === 1 ? "" : "s"}`]]} /></div>}</Show>
@@ -272,10 +282,11 @@ export function ExternalDoneDialog(props: { taskId: string | null; how: "externa
   };
   const confirm = () => { if (!reason() && props.taskId) ws.ok({ type: "close_task", taskId: props.taskId, choice: props.how, confirmed: true, now: ws.store.clock() }, props.onClose); };
   return <Modal open={!!props.taskId} onClose={props.onClose} label="Done outside the app">
-    <div class="dlg-h"><h2>Done outside the app</h2><button class="ib" aria-label="Keep working" onClick={props.onClose}><I n="x" /></button></div>
+    <div class="dlg-h"><h2>Done outside the app</h2><button data-tooltip="" class="ib" aria-label="Keep working" onClick={props.onClose}><I n="x" /></button></div>
     <div class="dlg-b"><p>{props.how === "already_in_target" ? `Already in ${m()?.view.task.integrationFacts?.targetBranch ?? "the target branch"}. ` : ""}Close this task as completed outside the app?</p>
       <p>No acceptance, merge or passing checks will be recorded. Your files and existing check evidence stay unchanged. Finished dependencies can continue in the sprint queue.</p>
     </div>
+    <RequestStatus text={props.taskId && ws.store.pendingTask("close_task", props.taskId) ? REQUESTING.close_task : undefined} />
     <ActionBar place="dialog"><button class="btn btn-line btn-lg" onClick={props.onClose}>Keep working</button>
       <button class="btn btn-primary btn-lg" aria-disabled={reason() ? "true" : undefined} data-why={reason() ?? undefined} {...ws.needs("close_task")} onClick={confirm}>Close task</button>
     </ActionBar>
@@ -338,7 +349,7 @@ export function CloseDialog(props: { taskId: string | null; onClose: () => void;
   };
   return <Modal open={!!props.taskId && !!m()} onClose={props.onClose} label="Close task">
     <Show when={m()}>{model => <>
-      <div class="dlg-h"><h2>Close “{model().view.task.title}”?</h2><button class="ib" aria-label="Keep working" onClick={() => props.onClose()}><I n="x" /></button></div>
+      <div class="dlg-h"><h2>Close “{model().view.task.title}”?</h2><button data-tooltip="" class="ib" aria-label="Keep working" onClick={() => props.onClose()}><I n="x" /></button></div>
       <div class="dlg-b">
         <ul class="conseq"><Keyed each={closeConsequences(model())} by={l => `${l.icon}:${l.text}`}>{l => <li><I n={l().icon} s={14} /><span>{l().text}</span></li>}</Keyed></ul>
         <Show when={!records()}><div style={{ display: "grid", gap: "6px" }}>
@@ -350,6 +361,7 @@ export function CloseDialog(props: { taskId: string | null; onClose: () => void;
         </Show></Show>
         <Show when={refusal()}>{r => <div class="note-box st-bad" role="alert"><I n="alert" s={14} /><span>{r().message}</span></div>}</Show>
       </div>
+      <RequestStatus text={props.taskId && ws.store.pendingTask("close_task", props.taskId) ? REQUESTING.close_task : undefined} />
       <ActionBar place="dialog" hint={blocked() ?? (automaticHold() || records() ? undefined : "Closing keeps the work. Deleting it is a separate, explicit step in the Archive.")}>
         <button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>{paused() ? "Keep it paused" : ended() || records() ? "Keep it open" : "Keep working"}</button>
         <Show when={records() || choice() === "as_is"} fallback={<button class="btn btn-danger btn-lg" disabled={closing()} aria-disabled={blocked() ? "true" : undefined} data-why={blocked() ?? undefined} onClick={close}>Cancel task</button>}><button class="btn btn-primary btn-lg" disabled={closing()} aria-disabled={blocked() ? "true" : undefined} data-why={blocked() ?? undefined} onClick={close}>{records() ? "Close as is" : automaticHold() ? "Close as is and continue" : "Close task"}</button></Show>

@@ -1,6 +1,7 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
 import { DAY, FEATURES, previewClear, type EngineId } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
+import { createRequestFeedback, RequestStatus } from "./request-feedback";
 import type { WsDialog } from "./dialogs";
 import { I, Modal } from "./kit";
 import { ActionBar } from "./layout";
@@ -8,7 +9,7 @@ import { ProjectPicker } from "./project-picker";
 import { Seg, Stepper } from "./settings-kit";
 
 type Of<K extends WsDialog["kind"]> = Extract<WsDialog, { kind: K }>;
-const Head = (props: { title: string; onClose: () => void }) => <div class="dlg-h"><h2>{props.title}</h2><button class="ib" aria-label="Cancel" onClick={() => props.onClose()}><I n="x" /></button></div>;
+const Head = (props: { title: string; onClose: () => void }) => <div class="dlg-h"><h2>{props.title}</h2><button data-tooltip="" class="ib" aria-label="Cancel" onClick={() => props.onClose()}><I n="x" /></button></div>;
 const FINGERPRINT = "4F2A 91C7 D03E", OTHER_FINGERPRINT = "4F2A 91C7 77B1";
 
 /** Pairing keeps its shape: nothing is sent, and no machine appears, until both sides show the same fingerprint. */
@@ -118,13 +119,14 @@ export function AddConnection(props: { onClose: () => void }) {
 /** Date first, then a preview, then the delete. Never runs by itself, and unmerged work is out of its reach. */
 function ClearOld(props: { onClose: () => void }) {
   const ws = useWs();
+  const request = createRequestFeedback();
   const [days, setDays] = createSignal(7);
   const [date, setDate] = createSignal("");
   const [force, setForce] = createSignal(false);
   const cutoff = () => date() ? Date.parse(date() + "T00:00:00Z") : ws.store.now - days() * DAY;
   const preview = createMemo(() => previewClear(ws.store.state(), ws.machine().id, cutoff(), force()));
   const n = () => preview().remove.length;
-  const go = () => { if (n()) ws.ok({ type: "clear_old", machineId: ws.machine().id, taskIds: preview().remove, cutoff: cutoff(), force: force(), confirmed: true, now: ws.store.clock() }, () => { props.onClose(); }); };
+  const go = () => { if (n()) void request.run({ type: "clear_old", machineId: ws.machine().id, taskIds: preview().remove, cutoff: cutoff(), force: force(), confirmed: true, now: ws.store.clock() }).then(receipt => { if (receipt.ok) props.onClose(); }); };
   return <>
     <Head title="Clear old tasks" onClose={props.onClose} />
     <div class="dlg-b">
@@ -137,6 +139,7 @@ function ClearOld(props: { onClose: () => void }) {
       </ul>
       <label class="ck"><input type="checkbox" disabled={ws.store.mode === "real"} checked={force()} onChange={e => setForce(e.currentTarget.checked)} /><span>Include stale protected tasks<span class="hint ws-block">Desktop always protects active and unknown executions. Stop or resolve them before deleting.</span></span></label>
     </div>
+    <RequestStatus text={request.text()} />
     <ActionBar place="dialog"><button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Keep them</button>
       <button class="btn btn-danger btn-lg" aria-disabled={n() ? undefined : "true"} data-why={n() ? undefined : "No old task can be cleared"} {...ws.needs("clear_old")} onClick={go}>Delete {n()} task{n() === 1 ? "" : "s"}</button></ActionBar>
   </>;

@@ -6,13 +6,15 @@ import { ReviewDialogs, type WsDialog } from "./dialogs";
 import { createBuffers } from "./editor-buffers";
 import { QuestionNotifications } from "./notifications";
 import { NewPage } from "./newtask";
-import { COPY, type CopyKey } from "./copy";
+import { CODE_LANGUAGE } from "./code-support";
+import { workspaceCopy, type CopyKey } from "./copy";
 import { useWs, WsContext, type DemoSlot, type Shell, type WindowChrome, type Ws } from "./ctx";
 import { FrameMenus, Inspector, Nav, PhoneBar, PhoneConnection, PhoneDrawerHead, Terminal, TitleBar } from "./frame";
 import { onScreen, ScreenActive, UnsentRegistry } from "./freshness";
 import { Home } from "./home";
 import { I, place } from "./kit";
 import { ReasonTip, Strip } from "./layout";
+import { Tooltip } from "./tooltip";
 import { StartupScreen } from "./startup";
 import { humanStatus, planningPlace, planningSprintOf, planningTaskOf } from "./selectors";
 
@@ -31,7 +33,7 @@ import { createPress } from "./press";
 import { acceptNeedsTick } from "./review-model";
 import { parseRoute, type Route, type Router } from "./router";
 import { TaskPage } from "./session";
-import { routeLabel, sessionModel } from "./session-model";
+import { reworkBinding, routeLabel, sessionModel } from "./session-model";
 import { SettingsPage } from "./settings";
 import { createSettingsState } from "./settings-state";
 import { SprintPage } from "./sprint";
@@ -42,6 +44,7 @@ import { tabTitle } from "./tabs";
 import { createTheme, type Theme } from "./theme";
 import { dropHover } from "./touch";
 import { createTabs, parkPane, TabStrip } from "./workspace-tabs";
+import { createUnseen } from "./unseen";
 import "./fonts.css";
 import "./mockup-styles.css";
 import "./workspace.css";
@@ -104,7 +107,7 @@ function Receipt() {
   // Ordinary messages expire; retained worktree paths stay readable until dismissed or replaced.
   createEffect(on(ws.store.receipt, r => {
     clearTimeout(timer);
-    if (r && !r.keptPaths?.length) timer = setTimeout(() => ws.store.clearReceipt(), r.ok ? 3000 : 8000);
+    if (r && !r.keptPaths?.length && !r.worktreeCleanupNotice) timer = setTimeout(() => ws.store.clearReceipt(), r.ok ? 3000 : 8000);
   }));
   createEffect(on(() => ws.router.route(), () => { if (ws.store.receipt()?.ok === false) ws.store.clearReceipt(); }, { defer: true }));
   const dismiss = () => { if (ws.store.receipt()) ws.store.clearReceipt(); };
@@ -115,7 +118,7 @@ function Receipt() {
   onCleanup(() => { clearTimeout(timer); document.removeEventListener("pointerdown", onPointer, true); document.removeEventListener("keydown", onKey, true); });
   return <>
     <div class="ws-live" role="status" aria-live="polite">{ws.store.receipt()?.message ?? ""}</div>
-    <Show when={ws.store.receipt()?.ok === false || ws.store.receipt()?.keptPaths?.length}><div class="ws-receipt">{ws.store.receipt()!.message}<Show when={ws.store.receipt()?.keptPaths?.length}><button class="btn btn-sm" onClick={dismiss}>Dismiss</button></Show></div></Show>
+    <Show when={ws.store.receipt()?.ok === false || ws.store.receipt()?.keptPaths?.length || ws.store.receipt()?.worktreeCleanupNotice}><div class="ws-receipt">{ws.store.receipt()!.message}<Show when={ws.store.receipt()?.keptPaths?.length || ws.store.receipt()?.worktreeCleanupNotice}><button class="btn btn-sm" onClick={dismiss}>Dismiss</button></Show></div></Show>
   </>;
 }
 
@@ -126,7 +129,7 @@ function ConnectionNotice() {
   return <Show when={lost()}><Strip class="ws-conn" role="alert" tone="info" icon={<I n="wifi-off" s={14} class="faint" />} action={<button class="btn btn-sm" onClick={() => void ws.store.reload()}>Retry</button>}>{ws.t("disconnected")}</Strip></Show>;
 }
 
-export type WorkspaceProps = StoreOptions & { notify?: import("./notification-target").Notify;
+export type WorkspaceProps = StoreOptions & { notify?: import("./notification-target").Notify; openResultTarget?: Ws["openResultTarget"];
   /** Clicks on the host's desktop notifications, each opening its place. */
   notificationClicks?: import("./notification-target").NotificationClicks;
   /** The machine service's own notifications, when the host reaches a service that raises them. */
@@ -141,11 +144,12 @@ export type WorkspaceProps = StoreOptions & { notify?: import("./notification-ta
   theme?: Theme };
 /** What a phone never offers, whatever the machine can do: a terminal, editing files, the system folder chooser, programs on the
  *  computer's own screen, and saving a file to disk. Code stays a viewer. */
-export const PHONE_WITHHELD: readonly string[] = [FEATURES.terminal, FEATURES.editFiles, FEATURES.pickFolder, SAVE_ATTACHMENT, "workspace.open_editor", "workspace.open_vscode", "workspace.open_logs"];
+export const PHONE_WITHHELD: readonly string[] = [FEATURES.terminal, FEATURES.editFiles, CODE_LANGUAGE, FEATURES.pickFolder, SAVE_ATTACHMENT, "workspace.open_editor", "workspace.open_vscode", "workspace.open_logs", "workspace.reveal_file"];
 /** Words for a control that needs the machine while it is not connected. Nothing is queued, so nothing looks sent. */
 export const OFFLINE_REASON = "Not connected to the machine. Nothing is sent until it is reachable again.";
 /** What a tab keeps to itself besides its route. */
 type TabLocal = {
+  reworkIntent: Accessor<{ taskId: string } | null>; setReworkIntent: (value: { taskId: string } | null) => void;
   selected: Accessor<string | null>; select: (taskId: string | null) => void;
   codeLeft: Accessor<"files" | "search">; setCodeLeft: (left: "files" | "search") => void;
   codeMode: Accessor<"file" | "inline" | "split">; setCodeMode: (mode: "file" | "inline" | "split") => void;
@@ -154,9 +158,10 @@ function createTabLocal(): TabLocal {
   const [selected, select] = createSignal<string | null>(null);
   const [codeLeft, setCodeLeft] = createSignal<"files" | "search">("files");
   const [codeMode, setCodeMode] = createSignal<"file" | "inline" | "split">("file");
-  return { selected, select, codeLeft, setCodeLeft, codeMode, setCodeMode };
+  const [reworkIntent, setReworkIntent] = createSignal<{ taskId: string } | null>(null);
+  return { selected, select, codeLeft, setCodeLeft, codeMode, setCodeMode, reworkIntent, setReworkIntent };
 }
-type TabScoped = Pick<Ws, "router" | "machine" | "go" | "terminalAvailable" | "toggleTerminal" | "inspectable" | "selected" | "select" | "codeLeft" | "setCodeLeft" | "codeMode" | "setCodeMode" | "newItem">;
+type TabScoped = Pick<Ws, "router" | "machine" | "go" | "terminalAvailable" | "toggleTerminal" | "inspectable" | "selected" | "select" | "codeLeft" | "setCodeLeft" | "codeMode" | "setCodeMode" | "newItem" | "reworkIntent" | "returnForRework" | "dismissRework">;
 
 /** One screen's content. Its body runs only once the tab has been shown, so a restored tab costs nothing until it is opened. */
 function TabBody(props: { make: () => Ws; shown: Accessor<boolean>; unsent: (check: () => boolean) => () => void }) {
@@ -227,6 +232,8 @@ export function Workspace(props: WorkspaceProps) {
   }
   const [drawer, setDrawer] = createSignal(false);
   const router = tabs.active;
+  // What is on view in the active tab counts as seen; the sidebar marks every other change until it is opened.
+  const unseen = createUnseen({ index: store.index, ready: store.ready, read: store.readProjects, route: () => router.route() });
   const locals = new Map<number, TabLocal>();
   const localOf = (id: number) => { let held = locals.get(id); if (!held) { held = createTabLocal(); locals.set(id, held); } return held; };
   const panels = createPanels();
@@ -253,11 +260,17 @@ export function Workspace(props: WorkspaceProps) {
   const [menuTask, setMenuTask] = createSignal<string | null>(null);
   const [dialog, setDialog] = createSignal<WsDialog | null>(null);
   const settings = createSettingsState();
-  const buffers = createBuffers({ read: store.readFile, save: store.saveFile, remember: store.rememberSource });
+  const buffers = createBuffers({ read: store.readFile, lease: store.codeLease, taskTitle: id => store.index().byId.get(id)?.task.title, remember: store.rememberSource });
   const [closingWindow, setClosingWindow] = createSignal(false);
   createEffect(() => buffers.setAutosave(panels.autosave()));
   const chrome = props.chrome;
-  chrome?.guardClose(() => { if (!buffers.unsaved().length) return false; setClosingWindow(true); return true; });
+  chrome?.guardClose(() => {
+    if (buffers.unsaved().length) { setClosingWindow(true); return true; }
+    const waiting = buffers.hasPendingLease();
+    const released = buffers.releaseAll();
+    if (waiting && chrome.closeNow) { void released.then(() => chrome.closeNow?.()); return true; }
+    return false;
+  });
   // A browser has no asking dialog of its own to offer, only this.
   const leaving = (e: BeforeUnloadEvent) => { if (buffers.unsaved().length) e.preventDefault(); };
   window.addEventListener("beforeunload", leaving);
@@ -283,6 +296,14 @@ export function Workspace(props: WorkspaceProps) {
       toggleTerminal() { if (terminalAvailable()) panels.toggleTerminal(); },
       inspectable: () => !["sprint", "archive", "settings"].includes(route().name),
       selected: () => local().selected(), select: id => local().select(id),
+      reworkIntent: () => local().reworkIntent(),
+      dismissRework: () => local().setReworkIntent(null),
+      returnForRework(taskId) {
+        const view = store.index().byId.get(taskId);
+        if (!view || !reworkBinding(view) || !store.can(capabilityOf("rework_task"))) return;
+        go({ name: "task", machine: view.machine.id, task: taskId });
+        local().setReworkIntent({ taskId });
+      },
       codeLeft: () => local().codeLeft(), setCodeLeft: left => local().setCodeLeft(left),
       codeMode: () => local().codeMode(), setCodeMode: mode => local().setCodeMode(mode),
       newItem(kind, project = null, sprint = null) {
@@ -294,13 +315,13 @@ export function Workspace(props: WorkspaceProps) {
       },
     };
   };
-  const t = (key: CopyKey) => demo?.copy[key] ?? COPY[key];
+  const t = (key: CopyKey) => demo?.copy[key] ?? workspaceCopy(key);
   const offline = () => { const s = store.connection().state; return s === "unavailable" || s === "disconnected" || (s === "connecting" && store.ready()); };
   const gate = (type: WorkspaceCommand["type"]) => store.can(capabilityOf(type)) ? undefined : offline() ? OFFLINE_REASON : ["pair_machine", "set_remote_access", "revoke_device"].includes(type) ? "Remote pairing is unavailable until the owner selects a relay server. No connection is attempted." : t("notOffered");
   const ws: Ws = {
     shell: around, keys: hint => phone ? undefined : hint,
     ...scopedTo(router, () => localOf(tabs.activeId()), store.state),
-    notify: props.notify, store, panels, theme, buffers, demo, chrome, drafts, terminal: props.terminal, voice: props.voice, settings, t, gate,
+    notify: props.notify, openResultTarget: props.openResultTarget, unseen, store, panels, theme, buffers, demo, chrome, drafts, terminal: props.terminal, voice: props.voice, settings, t, gate,
     can: store.can,
     needs(type) { const reason = gate(type); return reason ? { "aria-disabled": "true", "data-why": reason } : {}; },
     noOpener: (capability, reason) => store.can(capability) ? undefined : store.connection().state === "connected" ? t(reason) : t("notOffered"),
@@ -487,6 +508,14 @@ export function Workspace(props: WorkspaceProps) {
   // The machine's own settings (the composer's models and efforts) are part of the first screen: the logo stays until they are in, or
   // until waiting for them has run out, so the interface is never first shown with its pickers still empty.
   const framed = createMemo<boolean>(was => was || store.loaded() || unreachable(), false);
+  const savedOnScreen = () => {
+    const r = router.route();
+    const projectId = "project" in r ? r.project
+      : r.name === "task" ? store.index().byId.get(r.task)?.task.projectId : null;
+    return store.state().projects.filter(p => store.savedView(p) && (projectId ? p.id === projectId
+      : (r.name === "home" || r.name === "root") && p.machineId === ws.machine().id));
+  };
+  const savedProjectIssue = () => savedOnScreen().some(p => !!p.issue);
   // The frame is built whole, in the same update that ends the logo, so no partial interface is ever painted.
   return <WsContext.Provider value={ws}><Show when={framed()} fallback={<StartupScreen logo={props.logo} notice={props.notice} />}>
     <div class="ws-app" data-shell={phone ? "phone" : undefined} data-drawer={phone ? (drawer() ? "open" : "closed") : undefined} data-sidebar={panels.sidebarShown() ? "shown" : "hidden"} data-inspector={panels.inspectorHidden() || !inspectable() || !store.ready() ? "hidden" : "shown"}
@@ -498,6 +527,9 @@ export function Workspace(props: WorkspaceProps) {
           <main class="main" ref={main} tabindex="-1">
             <Show when={!phone}><TabStrip tabs={tabs} title={titleOf} onSelect={selectTab} onClose={askClose} /></Show>
             <Show when={phone} fallback={<ConnectionNotice />}><PhoneConnection /></Show>
+            <Show when={savedOnScreen().length > 0}>
+              <div class="strip info" role="status">{unreachable() || store.readIssue() || savedProjectIssue() ? "Saved view; live state unavailable" : "Saved view; checking live state"}</div>
+            </Show>
             <Show when={store.ready() && store.syncing()}>
               <div class="ws-sync" role="status">Updating confirmed state…</div>
             </Show>
@@ -539,6 +571,7 @@ export function Workspace(props: WorkspaceProps) {
         <TaskMenu taskId={menuTask()} ref={el => { taskMenu = el; }} />
       </div>
       <ReasonTip />
+      <Show when={!phone}><Tooltip /></Show>
       <Palette open={paletteOpen()} onClose={() => setPaletteOpen(false)} />
       <Help open={helpOpen()} onClose={() => setHelpOpen(false)} />
       <Show when={externalClose()} fallback={<CloseDialog taskId={closing()} onClose={() => setClosing(null)} onRefused={message => closeRefused?.(message)} />}>

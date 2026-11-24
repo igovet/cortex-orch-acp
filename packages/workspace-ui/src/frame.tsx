@@ -1,9 +1,9 @@
 import { createMemo, For, Match, Show, Switch } from "solid-js";
 import { LiveTerminal } from "./terminal";
-import { FEATURES, queueDrivenMode } from "@cortex/workspace-domain";
+import { FEATURES, queueDrivenMode, type Sprint } from "@cortex/workspace-domain";
 import { ArchiveFacts, DeleteArchive } from "./archive";
 import { useWs, type PhoneFrame, type WindowChrome } from "./ctx";
-import { machineLine } from "./phone-words";
+import { machineLine, machineRefusal } from "./phone-words";
 import { Confirmed } from "./freshness";
 import { CodePanel } from "./code";
 import { GitPanel } from "./git";
@@ -11,7 +11,7 @@ import { A, FactLine, I, Keyed, MenuItem, OverviewShown, Pop, useWantOverview } 
 import { revealCutIn, Strip, Whole } from "./layout";
 import { SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN } from "./prefs";
 import { APP_SECTIONS, MACHINE_SECTIONS, ORCHESTRATION_LABELS, ORCHESTRATION_SECTIONS, orchestrationSection, type OrchestrationSection, type Route, type SettingsSection } from "./router";
-import { defaultCheckout, repoOf } from "./review-model";
+import { defaultCheckout, repoOf, unavailableCheckout } from "./review-model";
 import { asOf, awaitsOwner, humanStatus, checkCounts, clock, dayClock, engineLimits, limitsText, newestObserved, homeView, inboxItems, planningNeedsOwner, projectsOn, rowIcon, sameBranch, sideRows, sideWord, sprintModeLabel, sprintRoute, sprintView, topWorkRows, type EngineLimit, type LimitWindow, type ProjectSummary, type SideRow, type TaskView } from "./selectors";
 import { workerFace } from "./session-model";
 import { same } from "./stable";
@@ -102,16 +102,16 @@ export function TitleBar() {
   const areaName = () => { const r = route(); return r.name !== "project" ? null : r.view === "code" ? "Code" : r.view === "git" || r.view === "worktrees" ? "Git" : null; };
   const connection = () => ws.machine().connection === "connected" ? { text: "Connected", tone: "st-ok" } : { text: "Offline", tone: "st-idle" };
   return <header ref={revealCutIn} class="titlebar" {...bandHandlers(ws.chrome)}>
-    <button class="ib panel-t tb-toggle" aria-label="Sidebar" aria-pressed={ws.panels.sidebarShown()} onClick={() => ws.panels.toggleSidebar()}><I n="panel-left" /></button>
+    <button data-tooltip="Sidebar · Ctrl+B" class="ib panel-t tb-toggle" aria-label="Sidebar" aria-pressed={ws.panels.sidebarShown()} onClick={() => ws.panels.toggleSidebar()}><I n="panel-left" /></button>
     <div class="tb-side">
       <button class="machine" popovertarget="m-machine">
         <I n={ws.machine().kind === "local" ? "laptop" : "server"} /><span class="trunc">{ws.machine().name}</span>
-        <span class={`st ${connection().tone}`} style={{ "margin-left": "auto" }}>{connection().text}</span><I n="chevrons-v" s={12} class="faint" />
+        <span data-tooltip={connection().text === "Connected" ? "Connected to this machine" : "This machine is not reachable; actions are unavailable"} class={`st ${connection().tone}`} style={{ "margin-left": "auto" }}>{connection().text}</span><I n="chevrons-v" s={12} class="faint" />
       </button>
     </div>
     <div class="tb-main">
-      <button class="ib" classList={{ "tb-nav-off": !ws.router.canBack() }} aria-label="Back" disabled={!ws.router.canBack()} onClick={() => { if (ws.router.canBack()) ws.router.back(); }}><I n="arrow-left" /></button>
-      <button class="ib" classList={{ "tb-nav-off": !ws.router.canForward() }} aria-label="Forward" disabled={!ws.router.canForward()} onClick={() => { if (ws.router.canForward()) ws.router.forward(); }}><I n="arrow-right" /></button>
+      <button data-tooltip="" class="ib" classList={{ "tb-nav-off": !ws.router.canBack() }} aria-label="Back" disabled={!ws.router.canBack()} onClick={() => { if (ws.router.canBack()) ws.router.back(); }}><I n="arrow-left" /></button>
+      <button data-tooltip="" class="ib" classList={{ "tb-nav-off": !ws.router.canForward() }} aria-label="Forward" disabled={!ws.router.canForward()} onClick={() => { if (ws.router.canForward()) ws.router.forward(); }}><I n="arrow-right" /></button>
       <div class="crumbs">
         <Switch fallback={<span class="cur">{crumb()}</span>}>
           <Match when={route().name === "project" && ctx.summary()}>{s => <>
@@ -144,14 +144,14 @@ export function TitleBar() {
             <button class="btn btn-primary" onClick={() => ws.newItem("task")}><I n="plus" s={14} />New task</button>
             <button class="btn btn-primary" popovertarget="m-new" aria-label="New task or sprint"><I n="chevron-down" s={14} /></button>
           </span></Show>
-          <Show when={route().name === "project"}><button class="ib" popovertarget="m-project" aria-label="Project actions"><I n="more" /></button></Show>
+          <Show when={route().name === "project"}><button data-tooltip="" class="ib" popovertarget="m-project" aria-label="Project actions"><I n="more" /></button></Show>
         </>}><DeleteArchive /></Show>}>{s => <SprintActions sprint={s()} tab={(route() as Extract<Route, { name: "sprint" }>).tab} />}</Show>}>{v => <TaskActions view={v()} onMenu={el => ws.openTaskMenu(v().id, el)} git={<Show when={ctx.summary()}>{s => <BandActions view={v()} summary={s()} whyId={taskWhyId(v().id)} />}</Show>} />}</Show>
       </div>
       <div class="tb-fixed">
         {ws.demo?.chip()}
-        <button class="ib panel-t" classList={{ "ws-hide": !ws.terminalAvailable() }} aria-label="Terminal"
+        <button data-tooltip="Terminal · Ctrl+J" class="ib panel-t" classList={{ "ws-hide": !ws.terminalAvailable() }} aria-label="Terminal"
           aria-pressed={ws.terminalAvailable() && ws.panels.terminalOpen()} onClick={() => ws.toggleTerminal()}><I n="panel-bottom" /></button>
-        <button class="ib panel-t" classList={{ "ws-hide": !ws.inspectable() }} aria-label="Inspector" aria-pressed={ws.inspectable() && ws.panels.inspectorVisible()} onClick={() => { if (ws.inspectable()) ws.panels.toggleInspector(); }}><I n="panel-right" /></button>
+        <button data-tooltip="Inspector · Ctrl+Alt+B" class="ib panel-t" classList={{ "ws-hide": !ws.inspectable() }} aria-label="Inspector" aria-pressed={ws.inspectable() && ws.panels.inspectorVisible()} onClick={() => { if (ws.inspectable()) ws.panels.toggleInspector(); }}><I n="panel-right" /></button>
       </div>
       <WindowControls />
     </div>
@@ -163,45 +163,67 @@ function ProjectRow(props: { summary: ProjectSummary; n: number; openByDefault: 
   const id = () => props.summary.project.id;
   const route = () => ws.router.route();
   const current = () => { const r = route(); return r.name === "project" && r.machine === props.summary.machine.id && r.project === id() && r.scope.kind !== "sprint"; };
-  const hasLive = () => sideRows(ws.store.index(), props.summary).length > 0;
+  const rows = () => sideRows(ws.store.index(), props.summary, ws.unseen?.keep);
+  const hasLive = () => rows().length > 0;
   // Never tied to the route: opening a project must not push the rows below it, or they would move under the pointer.
   const open = () => ws.panels.expanded()[id()] ?? props.openByDefault;
+  // The project row speaks for the changes whose own rows are not on view: all of them while it is folded.
+  const cue = () => {
+    const unseen = ws.unseen;
+    if (!unseen) return false;
+    const ids = new Set((open() ? rows() : []).map(r => r.kind === "task" ? `t:${r.view.id}` : `s:${r.sprint.id}`));
+    return props.summary.views.some(v => !ids.has(`t:${v.id}`) && !(v.sprint && ids.has(`s:${v.sprint.id}`)) && unseen.task(v))
+      || props.summary.sprints.some(s => !ids.has(`s:${s.id}`) && unseen.sprint(s));
+  };
   return <>
     <div class="proj-wrap">
-      <A class="proj" to={project(props.summary.machine.id, id())} aria-current={current() ? "page" : undefined}>
+      <A class={`proj${cue() ? " unseen" : ""}`} to={project(props.summary.machine.id, id())} aria-current={current() ? "page" : undefined}>
         <Tile name={props.summary.project.name} n={props.n} /><span class="trunc">{props.summary.project.name}</span>
         <Show when={props.summary.signal}>{s => <span class={`sig ${s().tone}`}>{s().text}</span>}</Show>
+        <Show when={cue()}><NewMark text="new updates" /></Show>
       </A>
-      <button class="ib proj-x" aria-label={`${open() ? "Hide" : "Show"} tasks of ${props.summary.project.name}`}
+      <button data-tooltip={open() ? "Hide tasks" : "Show tasks"} class="ib proj-x" aria-label={`${open() ? "Hide" : "Show"} tasks of ${props.summary.project.name}`}
         aria-expanded={open()} classList={{ "ws-hide": !hasLive() }} onClick={() => { if (hasLive()) ws.panels.setExpanded(id(), !open()); }}>
         <I n={open() ? "chevron-down" : "chevron-right"} s={12} />
       </button>
     </div>
     <Show when={open() && hasLive()}>
       <div class="tasks">
-        <SideRows rows={sideRows(ws.store.index(), props.summary)} machine={props.summary.machine.id} />
+        <SideRows rows={rows()} machine={props.summary.machine.id} />
         <Show when={props.summary.views.length > 0}><A class="task-row all" to={project(props.summary.machine.id, id())}>All {props.summary.views.length}</A></Show>
       </div>
     </Show>
   </>;
 }
 
+/** The mark of a change the owner has not opened yet: beside a stronger title, and said in words to a screen reader. */
+function NewMark(props: { text: string }) {
+  return <><span class="sb-new" aria-hidden="true"></span><span class="ws-sr">, {props.text}</span></>;
+}
+
 function SideRows(props: { rows: (SideRow & { projectName?: string })[]; machine: string }) {
+  const ws = useWs();
+  const listed = createMemo(() => new Set(props.rows.flatMap(r => r.kind === "task" ? [r.view.id] : [])));
+  // A sprint row also speaks for its tasks whose own rows are not in this list.
+  const members = (sprint: Sprint) => {
+    const unseen = ws.unseen;
+    return !!unseen && sprint.taskIds.some(id => { const v = ws.store.index().byId.get(id); return !!v && !listed().has(id) && unseen.task(v); });
+  };
   return <Keyed each={props.rows} by={r => r.kind === "task" ? `t:${r.view.id}` : `s:${r.sprint.id}`}>{row => {
     const task = () => row() as Extract<SideRow, { kind: "task" }>;
     const sprint = () => row() as Extract<SideRow, { kind: "sprint" }>;
     return row().kind === "task" ? <TaskRow view={task().view} nested={task().nested} projectName={row().projectName} />
-      : <SprintSideRow row={sprint()} machine={props.machine} projectName={row().projectName} />;
+      : <SprintSideRow row={sprint()} machine={props.machine} projectName={row().projectName} members={members(sprint().sprint)} />;
   }}</Keyed>;
 }
 
 function SideTitle(props: { title: string; projectName?: string }) {
-  return <Show when={props.projectName} fallback={<span class="trunc">{props.title}</span>}>{name =>
-    <span class="sb-row-title"><span class="trunc">{props.title}</span><span class="trunc sb-row-project">{name()}</span></span>
+  return <Show when={props.projectName} fallback={<span class="trunc" data-tooltip-cut="">{props.title}</span>}>{name =>
+    <span class="sb-row-title"><span class="trunc" data-tooltip-cut="">{props.title}</span><span class="trunc sb-row-project" data-tooltip-cut="">{name()}</span></span>
   }</Show>;
 }
 
-function SprintSideRow(props: { row: Extract<SideRow, { kind: "sprint" }>; machine: string; projectName?: string }) {
+function SprintSideRow(props: { row: Extract<SideRow, { kind: "sprint" }>; machine: string; projectName?: string; members?: boolean }) {
   const ws = useWs();
   const sprint = () => props.row.sprint;
   const current = () => { const r = ws.router.route();
@@ -211,10 +233,12 @@ function SprintSideRow(props: { row: Extract<SideRow, { kind: "sprint" }>; machi
   // The sprint owns its planning task's questions and permissions.
   const asks = () => planningNeedsOwner(ws.store.state(), sprint());
   const word = () => sprint().deletion ? "Deleting" : sprint().planning === "created"
-    ? sprint().queueState === "complete" ? "Done" : `${props.row.started}/${props.row.total}` : asks() ? "Needs you" : "Planning";
-  return <A class="task-row" to={sprintRoute(props.machine, sprint())} aria-current={current() ? "page" : undefined}>
+    ? sprint().queueState === "complete" ? "Done" : `${props.row.started}/${props.row.total}` : asks() ? "Needs you" : sprint().planning === "ready" ? "Plan ready" : "Planning";
+  const own = () => ws.unseen?.sprint(sprint()) ?? false;
+  return <A class={`task-row${own() || props.members ? " unseen" : ""}`} to={sprintRoute(props.machine, sprint())} aria-current={current() ? "page" : undefined}>
     <I n="layers" s={14} class="faint" /><SideTitle title={`Sprint: ${sprintView(ws.store.index(), sprint()).title}`} projectName={props.projectName} />
     <span class={`sig tnum${sprint().deletion || asks() ? " st-warn" : ""}`}>{word()}</span>
+    <Show when={own() || props.members}><NewMark text={own() ? "new update" : "new update in its tasks"} /></Show>
   </A>;
 }
 
@@ -222,9 +246,11 @@ function TaskRow(props: { view: TaskView; nested?: boolean; projectName?: string
   const ws = useWs();
   const current = () => { const r = ws.router.route(); return r.name === "task" && r.machine === props.view.machine.id && r.task === props.view.id; };
   const word = () => sideWord(props.view);
-  const label = () => [taskTitle(props.view.task), props.projectName, word()].filter(Boolean).join(" — ");
-  return <A class={`task-row${props.nested ? " in-sprint" : ""}`} aria-label={label()} to={{ name: "task", machine: props.view.machine.id, task: props.view.id }} aria-current={current() ? "page" : undefined}>
+  const fresh = () => ws.unseen?.task(props.view) ?? false;
+  const label = () => [taskTitle(props.view.task), props.projectName, word(), fresh() ? "new update" : ""].filter(Boolean).join(" — ");
+  return <A class={`task-row${props.nested ? " in-sprint" : ""}${fresh() ? " unseen" : ""}`} aria-label={label()} to={{ name: "task", machine: props.view.machine.id, task: props.view.id }} aria-current={current() ? "page" : undefined}>
     <I n={rowIcon(props.view)} s={14} class={awaitsOwner(props.view) ? "st-warn" : props.view.fact.tone} /><SideTitle title={taskTitle(props.view.task)} projectName={props.projectName} /><span class={`sig${awaitsOwner(props.view) ? " st-warn" : ""}`}>{word()}</span>
+    <Show when={fresh()}><span class="sb-new" aria-hidden="true"></span></Show>
   </A>;
 }
 
@@ -259,8 +285,8 @@ function SidebarFoot() {
     <button class="btn" {...ws.needs("add_project")} aria-describedby={why() ? "sb-why" : undefined} onClick={() => ws.open({ kind: "add-project" })}><I n="folder-plus" s={14} />Add project</button>
     <span class="grow"></span>
     <Show when={ws.shell.kind === "phone" && ws.shell} fallback={<>
-      <A class="ib" to={{ name: "settings", section: "appearance", machine: null }} aria-label="Settings" aria-current={route().name === "settings" ? "page" : undefined}><I n="settings" /></A>
-      <button class="ib" aria-label="Help and shortcuts" onClick={() => ws.openHelp()}><I n="help" /></button>
+      <A data-tooltip="Settings · Ctrl+," class="ib" to={{ name: "settings", section: "appearance", machine: null }} aria-label="Settings" aria-current={route().name === "settings" ? "page" : undefined}><I n="settings" /></A>
+      <button data-tooltip="" class="ib" aria-label="Help and shortcuts" onClick={() => ws.openHelp()}><I n="help" /></button>
     </>}>{phone => <button class="ib" aria-label="Settings" onClick={() => phone().openSettings()}><I n="settings" /></button>}</Show>
   </div>
   </>;
@@ -294,18 +320,18 @@ function Sidebar() {
     if (mode === "activity") return [...list].sort((a, b) => (b.at ?? -1) - (a.at ?? -1));
     return list;
   });
-  const work = createMemo(() => topWorkRows(index(), m()));
-  const firstLive = createMemo(() => projects().find(s => sideRows(index(), s).length > 0)?.project.id);
+  const work = createMemo(() => topWorkRows(index(), m(), ws.unseen?.keep));
+  const firstLive = createMemo(() => projects().find(s => sideRows(index(), s, ws.unseen?.keep).length > 0)?.project.id);
   const pinned = createMemo(() => ws.panels.pins().flatMap(id => { const v = index().byId.get(id); return v && v.machine.id === m() ? [v] : []; }));
   let dragging = false;
   const onMove = (e: PointerEvent) => { if (dragging) ws.panels.setSidebarWidth(e.clientX); };
   return <nav class="sidebar" aria-label="Workspace">
     <div class="sb-top">
       <A class="nav" to={{ name: "new", machine: m(), kind: "task", project: null }} aria-current={route().name === "new" ? "page" : undefined}><I n="plus" />New task<Show when={ws.keys("Ctrl+N")}>{k => <span class="kbd">{k()}</span>}</Show></A>
-      <A class="nav" to={{ name: "inbox", machine: m() }} aria-current={route().name === "inbox" ? "page" : undefined}><I n="inbox" />Inbox<Show when={inbox() > 0}><span class="count">{inbox()}</span></Show></A>
+      <A class="nav" to={{ name: "inbox", machine: m() }} aria-current={route().name === "inbox" ? "page" : undefined}><I n="inbox" />Inbox<Show when={inbox() > 0}><span class="count" data-tooltip={`${inbox()} items need you`}>{inbox()}</span></Show></A>
       <button class="nav ws-nav-btn" onClick={() => ws.openPalette()}><I n="search" />Search<Show when={ws.keys("Ctrl+K")}>{k => <span class="kbd">{k()}</span>}</Show></button>
       <A class="nav" to={{ name: "home", machine: m() }} aria-current={route().name === "home" ? "page" : undefined}><I n="home" />Home</A>
-      <A class="nav" to={{ name: "archive", machine: m() }} aria-current={route().name === "archive" ? "page" : undefined}><I n="archive" />Archive<Show when={index().archive.length > 0}><span class="count">{index().archive.length}</span></Show></A>
+      <A class="nav" to={{ name: "archive", machine: m() }} aria-current={route().name === "archive" ? "page" : undefined}><I n="archive" />Archive<Show when={index().archive.length > 0}><span class="count" data-tooltip={`${index().archive.length} archived tasks`}>{index().archive.length}</span></Show></A>
     </div>
     <div class="sb-scroll">
       <Show when={work().length}>
@@ -319,9 +345,12 @@ function Sidebar() {
       </Show>
       <Show when={pinned().length > 0}>
         <div class="sb-h"><span>Pinned</span></div>
-        <Keyed each={pinned()} by={v => v.id}>{v => <A class="task-row" style={{ "padding-left": "8px" }} to={{ name: "task", machine: v().machine.id, task: v().id }}><I n="pin" s={14} class="faint" /><span class="trunc">{v().task.title}</span></A>}</Keyed>
+        <Keyed each={pinned()} by={v => v.id}>{v => {
+          const fresh = () => ws.unseen?.task(v()) ?? false;
+          return <A class={`task-row${fresh() ? " unseen" : ""}`} style={{ "padding-left": "8px" }} to={{ name: "task", machine: v().machine.id, task: v().id }}><I n="pin" s={14} class="faint" /><span class="trunc">{v().task.title}</span><Show when={fresh()}><NewMark text="new update" /></Show></A>;
+        }}</Keyed>
       </Show>
-      <div class="sb-h"><span>Projects</span><button class="ib" style={{ width: "22px", height: "22px" }} popovertarget="m-sort" aria-label="Sort projects"><I n="chevrons-v" s={14} /></button></div>
+      <div class="sb-h"><span>Projects</span><button data-tooltip="" class="ib" style={{ width: "22px", height: "22px" }} popovertarget="m-sort" aria-label="Sort projects"><I n="chevrons-v" s={14} /></button></div>
       <Show when={projects().length > 0} fallback={<p class="cap faint ws-side-empty">{ws.store.ready() ? "No projects on this machine." : "Not loaded yet."}</p>}>
         <Keyed each={projects()} by={s => s.project.id}>{(s, i) => <ProjectRow summary={s()} n={i()} openByDefault={s().project.id === firstLive()} />}</Keyed>
       </Show>
@@ -475,7 +504,13 @@ export function Inspector() {
       <Match when={repoArea() && ctx.summary()}>{s => {
         const repo = () => repoOf(ws.store.state(), s().project.id)!;
         const r = () => route() as Extract<Route, { name: "project" }>;
-        return <Show when={r().view === "code"} fallback={<GitPanel summary={s()} repo={repo()} checkout={defaultCheckout(repo(), r().checkout)} />}><CodePanel repo={repo()} checkout={defaultCheckout(repo(), r().checkout)} file={r().file} /></Show>;
+        const selected = () => {
+          const id = r().checkout;
+          return id && unavailableCheckout(ws.store.state(), repo().projectId, id) ? null : defaultCheckout(repo(), id);
+        };
+        return <Show when={selected()} fallback={<div class="ins-sec cap muted">Checkout unavailable</div>}>{c =>
+          <Show when={r().view === "code"} fallback={<GitPanel summary={s()} repo={repo()} checkout={c()} />}><CodePanel repo={repo()} checkout={c()} file={r().file} /></Show>
+        }</Show>;
       }}</Match>
       <Match when={scopeSprint()}>{id => <SprintPanel sprintId={id()} />}</Match>
       <Match when={route().name === "project" && ctx.summary()}>{s => <ProjectPanel summary={s()} />}</Match>
@@ -532,7 +567,7 @@ export function Terminal() {
     const repo = !v && s ? repoOf(ws.store.state(), s.project.id) : null;
     if (repo && r.name === "project" && r.checkout) {
       const c = defaultCheckout(repo, r.checkout);
-      return `${c.path} (${c.kind === "main" ? "project folder" : "worktree"}, ${c.branch})`;
+      if (c) return `${c.path} (${c.kind === "main" ? "project folder" : "worktree"}, ${c.branch})`;
     }
     if (v) return `${v.task.checkout.kind === "worktree" ? `${(v.task.checkout as { path: string }).path} (worktree` : `${v.project.repository} (project folder`}, ${v.task.checkout.branch})`;
     return s ? `${s.project.repository} (project folder, ${s.project.openBranch})` : "";
@@ -540,7 +575,7 @@ export function Terminal() {
   return <section class="terminal" aria-label="Terminal">
     <div class="term-h">
       <span class="term-tab" aria-selected="true"><I n="terminal" s={12} />bash</span>
-      <button class="ib" style={{ width: "24px", height: "24px" }} data-why={ws.t("notAvailable")} aria-label="New shell in this checkout" aria-disabled="true"><I n="plus" s={14} /></button>
+      <button data-tooltip="" class="ib" style={{ width: "24px", height: "24px" }} data-why={ws.t("notAvailable")} aria-label="New shell in this checkout" aria-disabled="true"><I n="plus" s={14} /></button>
       <span class="mono faint" style={{ "margin-left": "6px" }}>{where()}</span>
     </div>
     <div class="term-body">{ws.t("terminalBody")}</div>
@@ -633,11 +668,12 @@ export function PhoneDrawerHead(props: { onOpen: () => void }) {
 export function PhoneConnection() {
   const ws = useWs();
   const phone = ws.shell as PhoneFrame;
+  const refusal = () => machineRefusal(phone.machine().state);
   const lost = () => {
     const s = ws.store.connection().state;
-    return s === "disconnected" || s === "unavailable" || (ws.store.ready() && (s === "connecting" || phone.machine().state !== "connected"));
+    return !!refusal() || s === "disconnected" || s === "unavailable" || (ws.store.ready() && (s === "connecting" || phone.machine().state !== "connected"));
   };
   const asOf = () => { const at = ws.store.lastRead(); return at === null ? "" : ` Shown as of ${clock(at)}.`; };
   return <Show when={lost()}><Strip class="ws-conn ws-phone-conn" role="alert" tone="warn" icon={<I n="wifi-off" s={14} />}
-    action={<button class="btn btn-sm" onClick={() => { phone.retry(); void ws.store.reload(); }}>Retry</button>}>{`Reconnecting to ${phone.machine().name}…${asOf()}`}</Strip></Show>;
+    action={phone.machine().state === "rejected" ? undefined : <button class="btn btn-sm" onClick={() => { phone.retry(); void ws.store.reload(); }}>Retry</button>}>{`${refusal() ?? `Reconnecting to ${phone.machine().name}…`}${asOf()}`}</Strip></Show>;
 }

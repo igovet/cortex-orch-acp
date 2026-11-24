@@ -107,7 +107,7 @@ export function Lines(props: { label: string; items: string[]; onChange: (items:
   return <div class="ws-lines">
     <For each={props.items}>{(item, i) => <div class="ws-line">
       <div class="ws-line-r"><input class="inp mono" aria-label={`${props.label} ${i() + 1}`} value={item} disabled={!!props.disabled} onChange={e => at(i(), e.currentTarget.value)} />
-        <Show when={!props.disabled}><button class="ib ws-ib" aria-label={`Remove ${props.label} ${i() + 1}`} onClick={() => props.onChange(props.items.filter((_, n) => n !== i()))}><I n="x" s={14} /></button></Show></div>
+        <Show when={!props.disabled}><button data-tooltip="" class="ib ws-ib" aria-label={`Remove ${props.label} ${i() + 1}`} onClick={() => props.onChange(props.items.filter((_, n) => n !== i()))}><I n="x" s={14} /></button></Show></div>
       <Show when={props.note?.(item)}>{n => <span class="cap st-warn">{n()}</span>}</Show>
       <Show when={props.path}><Err problems={props.problems ?? []} path={`${props.path}[${i()}]`} /></Show>
     </div>}</For>
@@ -122,7 +122,7 @@ export function KeyValues(props: { label: string; values: Record<string, string>
     <For each={rows()}>{([k, v]) => <div class="ws-line-r">
       <input class="inp mono" aria-label={`${props.label} name`} value={k} disabled={!!props.disabled} onChange={e => rename(k, e.currentTarget.value)} />
       <input class="inp mono" aria-label={`${props.label} value: ${k}`} value={v} disabled={!!props.disabled} onChange={e => props.onChange({ ...props.values, [k]: e.currentTarget.value })} />
-      <Show when={!props.disabled}><button class="ib ws-ib" aria-label={`Remove ${k}`} onClick={() => props.onChange(Object.fromEntries(rows().filter(([x]) => x !== k)))}><I n="x" s={14} /></button></Show>
+      <Show when={!props.disabled}><button data-tooltip="" class="ib ws-ib" aria-label={`Remove ${k}`} onClick={() => props.onChange(Object.fromEntries(rows().filter(([x]) => x !== k)))}><I n="x" s={14} /></button></Show>
     </div>}</For>
     <Show when={!props.disabled}><div><button class="btn btn-line btn-sm" onClick={() => props.onChange({ ...props.values, [fresh()]: "" })}><I n="plus" s={12} />Add parameter</button></div></Show>
   </div>;
@@ -133,7 +133,7 @@ let hints = 0;
 export function Hint(props: { text: HelpText; label: string }) {
   const id = `m-hint-${++hints}`;
   return <>
-    <button class="ws-hint" popovertarget={id} aria-label={`About ${props.label}`}>?</button>
+    <button data-tooltip="" class="ws-hint" popovertarget={id} aria-label={`About ${props.label}`}>?</button>
     <Pop id={id} class="pop-anchor ws-hint-pop" align="left" label={`About ${props.label}`}>
       <p class="ws-pre">{props.text}</p>
     </Pop>

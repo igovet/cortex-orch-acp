@@ -999,9 +999,7 @@ button.step-t { text-align: left; font: inherit; }
   .code-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 140px) minmax(0, 1fr); }
   .code-body > .side-pane { border-right: 0; border-bottom: 1px solid var(--line); }
 }
-.ws-ext > .i { display: none; }
 @container ecrumb (max-width: 639px) { .ws-crumb > :is(.i, .ws-crumb-d) { display: none; } }
-@container ecrumb (max-width: 459px) { .ws-ext > .i { display: inline-block; } .ws-ext > .ws-ext-t { display: none; } .ecrumb .ws-ext { width: var(--ctl-h) !important; padding: 0; justify-content: center; } }
 .commit-bar.l-bar, .ws-form-f.l-bar { padding-inline: 0; }
 /* A state in the Inspector's narrow column wraps instead of running past it. */
 .inspector .st { max-width: 100%; white-space: normal; overflow-wrap: anywhere; align-items: flex-start; }

@@ -117,7 +117,7 @@ function EnvRows(props: { items: McpEnv[]; off?: string; set: (items: McpEnv[]) 
         <Show when={v.stored} fallback={<input class="inp mono" type="password" autocomplete="off" aria-label={`Value of ${v.name || "variable"}`} value={v.value} disabled={!!props.off} onChange={e => at(i(), { value: e.currentTarget.value, action: "replace" })} />}>
           <Seg label={`Value of ${v.name}`} value={v.action} disabled={props.off} options={[{ id: "keep", label: "Keep" }, { id: "replace", label: "Replace" }, { id: "remove", label: "Remove" }] as const} onChange={action => at(i(), { action, value: "" })} />
         </Show>
-        <Show when={!v.stored}><button class="ib ws-ib" aria-label={`Remove variable ${i() + 1}`} onClick={() => props.set(props.items.filter((_, n) => n !== i()))}><I n="x" s={14} /></button></Show>
+        <Show when={!v.stored}><button data-tooltip="" class="ib ws-ib" aria-label={`Remove variable ${i() + 1}`} onClick={() => props.set(props.items.filter((_, n) => n !== i()))}><I n="x" s={14} /></button></Show>
       </div>
       <Show when={v.stored && v.action === "keep"}><span class="cap muted">Value stored, never shown</span></Show>
       <Show when={v.stored && v.action === "replace"}><input class="inp mono" type="password" autocomplete="off" aria-label={`New value of ${v.name}`} value={v.value} disabled={!!props.off} onChange={e => at(i(), { value: e.currentTarget.value })} /></Show>
@@ -359,7 +359,7 @@ function ServerList() {
             <span class="cap muted">{s().containment === "none" ? "No sandbox" : s().network ? "On" : "Off"}</span>
             <span class="cap muted tnum">{seen() ? clock(seen()!.at) : ""}</span>
             <span onClick={e => e.stopPropagation()}><Sw label={`${s().name} enabled`} checked={s().enabled} disabled={off()} onChange={enabled => d.set(patchServer(d.value(), s().name, x => ({ ...x, enabled })))} /></span>
-            <span class="row ws-gap4" onClick={e => e.stopPropagation()}><A class="btn btn-line btn-sm" to={orchTo(m().id, "tools", { server: s().name, tab: "tools" })} aria-label={`Edit ${s().name}`}>Edit</A><button class="ib ws-ib" popovertarget={off() ? undefined : `m-srv-${slug(s().name)}`} aria-label={`More for ${s().name}`} aria-disabled={off() ? "true" : undefined} data-why={off()}><I n="more" s={14} /></button>
+            <span class="row ws-gap4" onClick={e => e.stopPropagation()}><A class="btn btn-line btn-sm" to={orchTo(m().id, "tools", { server: s().name, tab: "tools" })} aria-label={`Edit ${s().name}`}>Edit</A><button data-tooltip="" class="ib ws-ib" popovertarget={off() ? undefined : `m-srv-${slug(s().name)}`} aria-label={`More for ${s().name}`} aria-disabled={off() ? "true" : undefined} data-why={off()}><I n="more" s={14} /></button>
               <Pop id={`m-srv-${slug(s().name)}`} class="pop-right" align="right" label={s().name}>
                 <MenuItem icon="refresh" label="Check tools" needs="record_mcp_tools" onSelect={() => check(s())} />
                 <MenuItem icon="copy" label="Duplicate…" onSelect={() => duplicate(s())} />

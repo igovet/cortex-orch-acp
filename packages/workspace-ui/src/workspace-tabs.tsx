@@ -1,4 +1,5 @@
 import { createMemo, createRoot, createSignal, For, getOwner, onCleanup, untrack } from "solid-js";
+import { setDragPreview } from "./drag-preview";
 import { I } from "./kit";
 import { hrefOf, parseRoute, type Route, type Router } from "./router";
 import { activeOf, addTab, closeTab, cycleTab, encodeTabs, hrefIn, isStoredTabs, jumpTab, moveTab, selectTab, startTabs, stepTab, tabOf, visitTab, type StoredTabs, type TabList } from "./tabs";
@@ -92,16 +93,16 @@ export function TabStrip(props: { tabs: Tabs; title: (id: number) => string; onS
     <For each={props.tabs.ids()}>{(id, at) => {
       const on = () => props.tabs.activeId() === id;
       return <div class="ws-tab" data-on={on() ? "" : undefined} draggable={true}
-        onDragStart={e => { setDragged(id); e.dataTransfer?.setData("application/x-cortex-tab", String(id)); }}
+        onDragStart={e => { setDragged(id); e.dataTransfer?.setData("application/x-cortex-tab", String(id)); setDragPreview(e); }}
         onDragEnd={() => setDragged(null)}
         onDragOver={e => { if (dragged() !== null) e.preventDefault(); }}
         onDrop={e => { const from = dragged(); if (from === null) return; e.preventDefault(); setDragged(null); props.tabs.move(from, at()); }}
         onMouseDown={e => { if (e.button === 1) e.preventDefault(); }}
         on:auxclick={e => { if (e.button === 1) { e.preventDefault(); props.onClose(id); } }}>
-        <button id={`ws-tab-${id}`} class="ws-tab-name" role="tab" aria-selected={on()} tabindex={on() ? 0 : -1} onClick={() => props.onSelect(id)} onKeyDown={e => onArrow(e, id)}><span class="trunc">{props.title(id)}</span></button>
+        <button id={`ws-tab-${id}`} class="ws-tab-name" role="tab" aria-selected={on()} tabindex={on() ? 0 : -1} onClick={() => props.onSelect(id)} onKeyDown={e => onArrow(e, id)}><span data-tooltip-cut="" class="trunc">{props.title(id)}</span></button>
         <button class="ws-tab-x" aria-label={`Close ${props.title(id)}`} tabindex={on() ? 0 : -1} onClick={() => props.onClose(id)}><I n="x" s={12} /></button>
       </div>;
     }}</For>
-    <button class="ib ws-tab-new" aria-label="New tab" onClick={() => props.tabs.add()}><I n="plus" s={14} /></button>
+    <button data-tooltip="New tab · Ctrl+T" class="ib ws-tab-new" aria-label="New tab" onClick={() => props.tabs.add()}><I n="plus" s={14} /></button>
   </div>;
 }

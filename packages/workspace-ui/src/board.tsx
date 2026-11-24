@@ -1,17 +1,18 @@
 import { capabilityOf, FEATURES, taskEditable, type WorkspaceCommand } from "@cortex/workspace-domain";
 import { createMemo, createSignal, createUniqueId, For, mapArray, Show } from "solid-js";
-import { createBoardMotion } from "./board-motion";
 import { CodeView } from "./code";
 import { useWs } from "./ctx";
+import { setDragPreview } from "./drag-preview";
+import { REQUESTING, RequestStatus } from "./request-feedback";
 import { onScreen } from "./freshness";
 import { CheckoutButton, GitView } from "./git";
 import { A, Count, FactLine, I, MenuItem, Pop, RowList } from "./kit";
 import { Page, StatusLane, Toolbar, type StripItem } from "./layout";
-import { defaultCheckout, repoOf, taskCheckout } from "./review-model";
+import { defaultCheckout, repoOf, taskCheckout, unavailableCheckout } from "./review-model";
 import type { ProjectView, Route, Scope } from "./router";
 import { age, automaticAcceptanceHold, awaitsOwner, bySprint, cardFact, clock, columnsOf, COLUMNS, decisionRoute, inScope, nothingToCommit, planningNeedsOwner, rowIcon, sameBranch, sprintRoute, sprintTitle, sprintView, type ColumnId, type GroupedRow, type ProjectSummary, type TaskView } from "./selectors";
 import { archiveBlocked } from "./git-actions-model";
-import { closeBlocked, resumeState, sessionModel } from "./session-model";
+import { closeBlocked, REWORK_LABEL, resumeState, reworkBinding, sessionModel } from "./session-model";
 import { KnowledgePage, ProjectSettingsPage } from "./project-pages";
 import { createQueueStrip, QueueButton, QueueHelp, RunMode, SprintTarget, TargetChoices } from "./sprint";
 
@@ -68,34 +69,26 @@ function Card(props: { view: TaskView; named: boolean }) {
     onDragStart={e => {
       if (!manuallyMovable(v()) || (e.target as Element).closest("button")) { e.preventDefault(); return; }
       e.dataTransfer?.setData("application/x-workspace-task", v().id);
-      if (e.dataTransfer) {
-        e.dataTransfer.effectAllowed = "move";
-        const card = e.currentTarget, box = card.getBoundingClientRect();
-        const ghost = card.cloneNode(true) as HTMLElement;
-        ghost.removeAttribute("data-task"); ghost.setAttribute("aria-hidden", "true");
-        ghost.classList.add("ws-drag-card");
-        Object.assign(ghost.style, { width: `${box.width}px`, height: `${box.height}px`, font: getComputedStyle(card).font });
-        card.parentElement!.append(ghost);
-        e.dataTransfer.setDragImage?.(ghost, Math.max(0, e.clientX - box.left), Math.max(0, e.clientY - box.top));
-        setTimeout(() => ghost.remove(), 0);
-      }
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+      setDragPreview(e);
     }} aria-current={ws.selected() === v().id ? "true" : undefined} data-task={v().id}>
     <A class="card-link" to={taskRoute(v())} onKeyDown={e => { if (e.key === " ") { e.preventDefault(); ws.select(v().id); } }}>
       <div class="card-m">
-        <div class="card-t"><span>{v().task.title}</span></div>
-        <Show when={v().task.checkout.branch}><div class="card-b"><I n={v().task.checkout.kind === "worktree" ? "branch" : "folder"} s={12} /><span class="mono trunc">{v().task.checkout.branch}</span><span class="type">{v().task.checkout.kind === "worktree" ? "Worktree" : "Project folder"}</span></div></Show>
-        <div class="card-s"><FactLine fact={cardFact(v())} /></div>
+        <div class="card-t"><span data-tooltip-cut="">{v().task.title}</span></div>
+        <Show when={v().task.checkout.branch}><div class="card-b"><I n={v().task.checkout.kind === "worktree" ? "branch" : "folder"} s={12} /><span data-tooltip-cut="" class="mono trunc">{v().task.checkout.branch}</span><span class="type">{v().task.checkout.kind === "worktree" ? "Worktree" : "Project folder"}</span></div></Show>
+        <div class="card-s"><FactLine fact={cardFact(v())} cutHint /></div>
       </div>
     </A>
     <div class="card-f">
-      <span class="age ws-card-age"><Show when={props.named && v().sprint}>{s => <><I n="layers" s={12} /><span class="trunc">{sprintTitle(s())}</span></>}</Show><span class="ws-none">{age(v().at, ws.store.clock())}</span></span>
+      <span class="age ws-card-age"><Show when={props.named && v().sprint}>{s => <><I n="layers" s={12} /><span data-tooltip-cut="" class="trunc">{sprintTitle(s())}</span></>}</Show><span class="ws-none">{age(v().at, ws.store.clock())}</span></span>
       <span class="card-a">
         <Show when={action()}>{a => a().kind === "go"
           ? <A class={`btn ${a().line ? "btn-line" : "btn-primary"} btn-sm`} to={goTo()}>{a().label}</A>
           : <button class={`btn ${a().line ? "btn-line" : "btn-primary"} btn-sm`} {...(needed() ? ws.needs(needed()!) : {})} onClick={act}>{a().label}</button>}</Show>
-        <button class="ib" aria-label={`Actions for ${v().task.title}`} onClick={e => ws.openTaskMenu(v().id, e.currentTarget)}><I n="more" s={14} /></button>
+        <button data-tooltip="Actions for this task" class="ib" aria-label={`Actions for ${v().task.title}`} onClick={e => ws.openTaskMenu(v().id, e.currentTarget)}><I n="more" s={14} /></button>
       </span>
     </div>
+    <Show when={v().column === "todo"}><RequestStatus text={ws.store.pendingTask("start_task", v().id) ? REQUESTING.start_task : undefined} /></Show>
     <Show when={error()}><div class="card-error" role="alert">{error()} Try Start again after resolving this.</div></Show>
   </article>;
 }
@@ -120,21 +113,18 @@ function moveOnBoard(e: KeyboardEvent) {
 const rowKey = (r: GroupedRow) => r.kind === "sprint" ? `s:${r.sprint.id}` : r.view.id;
 /** A sprint's name over its tasks in a column of mixed work. It leads to that sprint. */
 const SprintHead = (props: { row: Extract<GroupedRow, { kind: "sprint" }>; machine: string }) => <A class="col-grp" to={sprintRoute(props.machine, props.row.sprint)}>
-  <I n="layers" s={12} /><span class="trunc">{sprintTitle(props.row.sprint)}</span><span class="n">{props.row.count}</span>
+  <I n="layers" s={12} /><span data-tooltip-cut="" class="trunc">{sprintTitle(props.row.sprint)}</span><span class="n">{props.row.count}</span>
 </A>;
 
 function Board(props: { summary: ProjectSummary; views: TaskView[]; onQuick: () => void; machine: string; grouped: boolean }) {
   const ws = useWs();
-  let wrap: HTMLDivElement | undefined;
   const [dropHint, setDropHint] = createSignal("");
   const columns = createMemo(() => columnsOf(props.views));
   const columnLabel = (id: ColumnId, label: string) => id === "merge" && columns().merge.some(v => sameBranch(v.task, v.target)) ? "Ready to finish" : label;
-  createBoardMotion(() => wrap, createMemo(() => props.views.map(v => `${v.id}:${v.column}`).join("|")));
   const rows = (id: ColumnId): GroupedRow[] => props.grouped ? bySprint(columns()[id]) : columns()[id].map(view => ({ kind: "task", view }));
-  return <><Show when={dropHint()}><div class="strip info" role="status">{dropHint()}</div></Show><div class="board-wrap" ref={wrap} onKeyDown={moveOnBoard}>
+  return <><Show when={dropHint()}><div class="strip info" role="status">{dropHint()}</div></Show><div class="board-wrap" onKeyDown={moveOnBoard}>
     <For each={COLUMNS.filter(col => col.id !== "closed_unverified" || columns()[col.id].length > 0)}>{col => {
       const open = () => columns()[col.id].length > 0 || (col.id === "todo" && !props.summary.offline);
-      // One element whether it holds cards or sits folded, so a column opening around a card can be animated.
       return <section class={`col${open() ? "" : " strip"}`} data-col={col.id}
         onDragOver={e => { if (e.dataTransfer?.types.includes("application/x-workspace-task")) { e.preventDefault(); e.dataTransfer.dropEffect = col.id === "done" ? "move" : "none"; } }}
         onDrop={e => {
@@ -176,12 +166,12 @@ function List(props: { views: TaskView[]; grouped: boolean; machine: string }) {
       if (row.kind === "head") { const col = COLUMNS.find(c => c.id === row.id)!; return <h2 class={`sec-h ws-list-h ${col.tone}`}><I n={col.icon} s={14} class={col.tone ? undefined : "faint"} />{col.id === "merge" && props.views.some(v => v.column === "merge" && sameBranch(v.task, v.target)) ? "Ready to finish" : col.label} <span class="n">{(r() as typeof row).count}</span></h2>; }
       if (row.kind === "sprint") return <SprintHead row={r() as typeof row} machine={props.machine} />;
       const v = () => (r() as typeof row).view;
-      return <A class={`lrow${awaitsOwner(v()) ? " need-you" : ""}`} to={taskRoute(v())} aria-current={ws.selected() === v().id ? "true" : undefined} onKeyDown={e => { if (e.key === " ") { e.preventDefault(); ws.select(v().id); } }}>
-        <I n={rowIcon(v())} s={14} class={awaitsOwner(v()) ? "st-warn" : v().fact.tone || "faint"} /><span class="trunc w500">{v().task.title}</span>
+      return <div class="lrow-shell"><A class={`lrow${awaitsOwner(v()) ? " need-you" : ""}`} to={taskRoute(v())} aria-current={ws.selected() === v().id ? "true" : undefined} onKeyDown={e => { if (e.key === " ") { e.preventDefault(); ws.select(v().id); } }}>
+        <I n={rowIcon(v())} s={14} class={awaitsOwner(v()) ? "st-warn" : v().fact.tone || "faint"} /><span data-tooltip-cut="" class="trunc w500">{v().task.title}</span>
         <span class="cap faint trunc">{v().sprint ? sprintTitle(v().sprint!) : "Standalone"}</span>
         <span class="mono trunc faint">{!v().task.checkout.branch ? "" : v().task.checkout.kind === "worktree" ? v().task.checkout.branch : `${v().task.checkout.branch} (project folder)`}</span>
-        <span class={`st trunc ${cardFact(v()).tone}`}><span class="trunc">{cardFact(v()).text}</span></span><span class="cap faint">{age(v().at, ws.store.clock())}</span>
-      </A>;
+        <span class={`st trunc ${cardFact(v()).tone}`}><span class="trunc" data-tooltip-cut="">{cardFact(v()).text}</span></span><span class="cap faint">{age(v().at, ws.store.clock())}</span>
+      </A><Show when={reworkBinding(v())}><button data-tooltip="Actions for this task" type="button" class="ib" aria-label={`Actions for ${v().task.title}`} onClick={e => ws.openTaskMenu(v().id, e.currentTarget)}><I n="more" s={14} /></button></Show></div>;
     }} />;
 }
 
@@ -203,9 +193,9 @@ function SprintBar(props: { summary: ProjectSummary; sprintId: string; reason: s
     </>}
     end={<>
       <SprintTarget sprint={sprint()} summary={props.summary} class="l-tight-hide" />
-      <A class="ib l-tight-hide" to={tab("planning")} aria-label="Sprint planning"><I n="pencil" s={14} /></A>
-      <A class="ib l-tight-hide" to={tab("summary")} aria-label="Sprint summary"><I n="list" s={14} /></A>
-      <button class="ib l-tight-only" popovertarget="m-queue-more" aria-label="More queue options"><I n="more" s={14} /></button>
+      <A data-tooltip="" class="ib l-tight-hide" to={tab("planning")} aria-label="Sprint planning"><I n="pencil" s={14} /></A>
+      <A data-tooltip="" class="ib l-tight-hide" to={tab("summary")} aria-label="Sprint summary"><I n="list" s={14} /></A>
+      <button data-tooltip="" class="ib l-tight-only" popovertarget="m-queue-more" aria-label="More queue options"><I n="more" s={14} /></button>
       <Pop id="m-queue-more" class="pop-right" align="right" label="More queue options" style={{ width: "280px" }}>
         <MenuItem icon="pencil" label="Sprint planning" onSelect={() => ws.go(tab("planning"))} />
         <MenuItem icon="list" label="Sprint summary" onSelect={() => ws.go(tab("summary"))} />
@@ -269,7 +259,12 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
   const grouped = () => props.route.scope.kind === "all" && views().some(v => v.sprint);
   const isRepo = () => view() === "code" || view() === "git" || view() === "worktrees";
   const repo = createMemo(() => repoOf(ws.store.state(), props.summary.project.id));
-  const checkout = () => { const r = repo(); return r ? defaultCheckout(r, props.route.checkout) : null; };
+  const state = ws.store.state;
+  const checkout = () => {
+    const r = repo(), id = props.route.checkout;
+    return r && !(id && unavailableCheckout(state(), r.projectId, id)) ? defaultCheckout(r, id) ?? null : null;
+  };
+  const missingCheckout = () => !!props.route.checkout && !checkout();
   const pickCheckout = (id: string) => ws.go({ ...props.route, checkout: id, file: undefined, line: undefined });
   const codeAt = (file: string, line?: number): Route => ({ ...at("code"), checkout: checkout()?.id, file, line });
   const areas = () => SECONDARY.filter(t => ws.store.mode === "demo" || ws.can(capabilityOf("git_fetch")) || (t.id === "code" ? ws.can(FEATURES.editFiles) : !["git", "worktrees"].includes(t.id)));
@@ -329,15 +324,16 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
         end={<Show when={isWork()}>
           <Show when={filtering()}><input id="ws-filter" class="inp ws-filter" placeholder="Filter tasks" aria-label="Filter tasks" value={filter()} onInput={e => setFilter(e.currentTarget.value)}
             onKeyDown={e => { if (e.key === "Escape") { setFilter(""); setFiltering(false); } }} ref={el => queueMicrotask(() => el.focus())} /></Show>
-          <button class="ib" aria-label="Filter" aria-pressed={filtering()} onClick={() => { if (filtering()) setFilter(""); setFiltering(!filtering()); }}><I n="search" /></button>
+          <button data-tooltip="" class="ib" aria-label="Filter" aria-pressed={filtering()} onClick={() => { if (filtering()) setFilter(""); setFiltering(!filtering()); }}><I n="search" /></button>
         </Show>} />
       <Show when={queueSprint()?.id}>{id => <SprintBar summary={props.summary} sprintId={id()} reason={queueReason} />}</Show>
     </>}
     status={<StatusLane items={status()} />}>
     <Show when={isWork() && props.summary.project.activated !== false} fallback={<Show when={isRepo()} fallback={<Show when={view() === "knowledge"} fallback={<ProjectSettingsPage summary={props.summary} />}><KnowledgePage summary={props.summary} /></Show>}>
+      <Show when={!missingCheckout()} fallback={<div class="note-panel" role="status"><span class="w500">Checkout unavailable</span><span>Restore the original checkout and refresh, or choose another checkout.</span><div class="row"><button class="btn btn-line btn-sm" onClick={() => void ws.store.reload()}>Refresh</button><A class="btn btn-line btn-sm" to={{ ...at(view()), checkout: undefined }}>Choose another checkout</A></div></div>}>
       <Show when={view() === "code"} fallback={<GitView summary={props.summary} repo={repo()} checkout={checkout()} right={view() === "worktrees" ? "branches" : "history"} onRight={right => ws.go(at(right === "branches" ? "worktrees" : "git"))} onPick={id => ws.go({ ...props.route, view: "git", checkout: id })} codeAt={path => ws.go(codeAt(path))} />}>
         <Show when={repo() && checkout()} fallback={<div class="note-panel"><span class="w500">No files for this project</span><span>{ws.t(props.summary.project.hasGit === false ? "noCodeWithoutGit" : "noCode")}</span></div>}><CodeView repo={repo()!} checkout={checkout()!} file={props.route.file} line={props.route.line} at={codeAt} /></Show>
-      </Show>
+      </Show></Show>
     </Show>}>
       <Show when={knownSprint()} fallback={<div class="note-panel"><span class="w500">Sprint not found</span><A class="lnk" to={{ ...props.route, scope: { kind: "all" } }}>Show all work</A></div>}>
         <Show when={missing() > 0 && !!props.summary.project.issue}><div class="note-panel" role="status"><span class="w500">Task details unavailable</span><span>{missing()} sprint task{missing() === 1 ? "" : "s"} could not be loaded. The sprint membership is retained.</span><button class="btn btn-line btn-sm" onClick={() => ws.store.reload()}>Retry</button></div></Show>
@@ -361,6 +357,13 @@ export function TaskMenu(props: { taskId: string | null; ref: (el: HTMLDivElemen
   const blocked = () => view()?.unknown ? "Unavailable until this task's state is confirmed" : undefined;
   const onOwnPage = () => { const r = ws.router.route(); return r.name === "task" && r.task === props.taskId; };
   const closeReason = () => { const m = props.taskId ? sessionModel(ws.store.index(), props.taskId) : null; return m ? closeBlocked(m) ?? undefined : undefined; };
+  const hasBoundWorktree = (task: TaskView["task"]) => task.checkout.kind === "worktree" && !!task.checkout.id;
+  const closeWorktree = (taskId: string) => ws.open({ kind: "confirm",
+    title: ws.t("closeDeleteWorktreeFolder"), action: ws.t("closeDeleteWorktreeFolder"), danger: true,
+    note: "Close this task and remove its clean worktree folder. The branch and main project folder are kept. If safe removal cannot be confirmed, the worktree is kept.",
+    pending: () => ws.store.pendingTask("close_task", taskId) ? "Closing task…" : undefined,
+    go: async () => (await ws.run({ type: "close_task", choice: "remove_worktree", taskId, confirmed: true, now: ws.store.clock() })).ok,
+  });
   // Resume and Continue follow the one rule every surface uses; an unavailable Resume says exactly why.
   const run = () => { const v = view(); return v ? resumeState(v) : null; };
   const resumeWhy = () => run()?.action === "continue_task" ? blocked() : run()?.why || blocked() || "This task is not paused";
@@ -377,7 +380,12 @@ export function TaskMenu(props: { taskId: string | null; ref: (el: HTMLDivElemen
       <Show when={run()?.action === "retry_task"}><MenuItem icon="play" label="Continue" disabled={blocked()} needs="retry_task" onSelect={() => ws.run({ type: "retry_task", taskId: v().id, now: ws.store.clock() })} /></Show>
       <Show when={v().task.status === "paused"}><MenuItem icon="play" label="Resume" disabled={resumeWhy()} needs="continue_task" onSelect={() => ws.run({ type: "continue_task", taskId: v().id, now: ws.store.clock() })} /></Show>
       <Show when={v().task.status === "stopping" && v().machine.connection === "connected"}><MenuItem icon="check" label={ws.t("confirmStop")} needs="confirm_stop" onSelect={() => ws.run({ type: "confirm_stop", taskId: v().id, now: ws.store.clock() })} /></Show>
+      <Show when={reworkBinding(v())}><MenuItem icon="message" label={REWORK_LABEL} needs="rework_task" onSelect={() => ws.returnForRework(v().id)} /></Show>
       <MenuItem icon="x" label="Close task…" disabled={closeReason()} needs="close_task" onSelect={() => ws.closeTask(v().id)} />
+      <Show when={hasBoundWorktree(v().task) && !v().task.archive}><MenuItem icon="trash" label={ws.t("closeDeleteWorktreeFolder")} needs="close_task"
+        disabled={blocked() ?? (!ws.can("workspace.task_worktrees") ? ws.t("noTaskWorktrees") : v().task.process !== "stopped" ? "Stop the task and wait for its workers first."
+          : v().task.merge && !v().task.merge!.finished ? "Finish or abort the merge first." : !taskCheckout(ws.store.state(), v().task) ? ws.t("worktreeUnavailable") : taskCheckout(ws.store.state(), v().task)!.files.length ? "Commit or remove uncommitted files first." : undefined)}
+        onSelect={() => closeWorktree(v().id)} /></Show>
       <MenuItem icon="archive" label="Archive" disabled={archiveBlocked(v().task)} needs="archive_task" onSelect={() => ws.archiveTask(v().id)} />
       <MenuItem icon="pin" label={ws.panels.pins().includes(v().id) ? "Unpin" : "Pin"} onSelect={() => ws.panels.togglePin(v().id)} />
       <div class="mi-sep"></div>

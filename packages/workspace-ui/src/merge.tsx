@@ -8,7 +8,7 @@ import { A, Count, I, Keyed, useWantOverview } from "./kit";
 import { Action, ActionBar, Row, Strip, Whole } from "./layout";
 import { AcceptBlocker, AcceptButton, OpenChecks, Outcomes } from "./review";
 import { ResultText } from "./result-text";
-import { acceptBlocked, behindTarget, conflictFacts, repoOf, cxOf, blockWord, fileName, fileResolved, finishBlocked, noCommitReason, RESOLVE_STEPS, taskCheckout, type Cx } from "./review-model";
+import { acceptBlocked, behindTarget, conflictFacts, mergeControls, repoOf, cxOf, blockWord, fileName, fileResolved, finishBlocked, noCommitReason, RESOLVE_STEPS, taskCheckout, type Cx } from "./review-model";
 import type { Route } from "./router";
 import { clock, nothingToCommit, readyLabel, sameBranch } from "./selectors";
 import { closeBlocked, duration, type SessionModel } from "./session-model";
@@ -38,6 +38,55 @@ function Steps(props: { merge: MergeState; line?: boolean }) {
       : <span class="cx-step todo"><I n="circle" s={14} />{label}</span>;
   };
   return <For each={RESOLVE_STEPS(file())}>{(label, i) => <><Show when={props.line && i() > 0}><I n="chevron-right" s={12} class="faint" /></Show>{step(label, i())}</>}</For>;
+}
+
+function RealMergeStatus(props: { task: Task; route: TaskRoute; summary?: boolean }) {
+  const ws = useWs();
+  const t = () => props.task;
+  const m = () => t().merge;
+  const a = () => mergeControls(t());
+  const [busy, setBusy] = createSignal(false);
+  const run = async (type: "inspect_merge" | "request_merge_checks" | "stop_resolution" | "abort_merge" | "finish_merge") => {
+    if (busy()) return;
+    setBusy(true);
+    try {
+      const taskId = t().id;
+      await ws.run(type === "inspect_merge" || type === "request_merge_checks"
+        ? { type, taskId, conflictId: m()?.conflictId ?? null } : { type, taskId });
+    } finally { setBusy(false); }
+  };
+  const button = (type: Parameters<typeof run>[0], label: string, primary = false) =>
+    <button class={`btn ${primary ? "btn-primary" : "btn-line"} btn-sm`} disabled={busy()} {...ws.needs(type)} onClick={() => void run(type)}>{label}</button>;
+  return <Show when={m()}>{merge => <div class="rcard">
+    <div class="rcard-h" role="status">{merge().finished
+      ? (t().resolvedBy === "cortex" ? "Merge resolved by the app" : "Merge finished")
+      : a().legacy ? "Saved merge from an earlier version" : a().uncertain ? "Merge outcome unconfirmed" : a().active ? "App handoff recorded" : "Task merge needs attention"}</div>
+    <div class="rcard-b">
+      {merge().finished ? (merge().freshChecks?.state === "requested"
+        ? "Fresh review and verification requested. Use the task result to see the recorded outcomes."
+        : merge().freshChecks?.state === "request_unknown"
+          ? "The fresh-check request could not be confirmed. Inspect before sending another request."
+          : "Fresh review and verification not requested. Earlier checks do not cover this merge.")
+        : a().legacy ? "Finish or abort the merge in Git in this task’s original checkout before clearing the saved record."
+          : a().uncertain ? "Inspect the saved merge before making changes. Inspection does not send another prompt."
+          : a().active ? "The app has control of this merge. The handoff does not confirm progress or completion."
+            : merge().failure ?? (a().finish ? "Stage any manual resolutions, then finish the merge. Git checks the full index."
+              : "Inspect the saved merge state before making changes.")}
+    </div>
+    <ActionBar place="card" class="rv-card-f">
+      <Show when={props.summary && !merge().finished}><A class="btn btn-line btn-sm" to={{ ...props.route, tab: "changes", sub: "conflict" }}>Open the conflict</A></Show>
+      <Show when={merge().finished}><A class="btn btn-line btn-sm" to={{ ...props.route, tab: "changes", sub: "diff" }}>Review the diff</A></Show>
+      <Show when={a().legacy}><button class="btn btn-line btn-sm" {...ws.needs("abort_merge")} onClick={() => ws.open({ kind: "clear-legacy-merge", taskId: t().id })}>Clear saved merge…</button></Show>
+      <Show when={a().inspect}>{button("inspect_merge", "Inspect merge state", true)}</Show>
+      <Show when={a().active && !a().legacy}>{button("stop_resolution", "Stop resolution")}</Show>
+      <Show when={a().handoff}><button class="btn btn-line btn-sm" disabled={busy()} {...ws.needs("resolve_with_cortex")} onClick={() => ws.open({ kind: "cortex", taskId: t().id })}>Hand to the app…</button></Show>
+      <Show when={a().abort}>{button("abort_merge", "Abort merge")}</Show>
+      <Show when={a().finish && !props.summary}>{button("finish_merge", "Finish merge", true)}</Show>
+      <Show when={merge().freshChecks?.state === "not_requested" && !!merge().conflictId && !!t().executionId}>
+        {button("request_merge_checks", "Request fresh checks", true)}
+      </Show>
+    </ActionBar>
+  </div>}</Show>;
 }
 
 /** Ready to merge: nothing reaches a branch from here until the owner confirms it in the dialog. */
@@ -101,7 +150,8 @@ export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
         <div class="rcard-b"><ResultText text={t().result?.summary} /></div><ActionBar place="card" class="rv-card-f"><A class="btn btn-line btn-sm" to={at("diff")}>Review the diff</A></ActionBar></div>;
     })()}</Show>
     <Show when={!same()}>
-    <Show when={cx() === "none" && t().conflict === "conflict" || cx() === "failed"}>
+    <Show when={ws.store.mode === "real" && (t().conflict !== "none" || !!merge()?.freshChecks)}><RealMergeStatus task={t()} route={props.route} summary /></Show>
+    <Show when={ws.store.mode !== "real" && ((cx() === "none" && t().conflict === "conflict") || cx() === "failed")}>
       <div class="rcard">
         <div class="rcard-h"><I n="alert" s={14} class="st-bad" />Conflict with {view().target}<span class="r">Merge blocked</span></div>
         <div class="rcard-b">{bodyConflict()}</div>
@@ -113,7 +163,7 @@ export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
         <ActionBar place="card" class="rv-card-f" start={<Flow from={t().checkout.branch} to={view().target} />}><button class="btn btn-line btn-sm" {...ws.needs("abort_merge")} onClick={abort}>Abort merge</button></ActionBar>
       </div>
     </Show>
-    <Show when={cx() === "running" && merge()}>{m => <div class="rcard">
+    <Show when={ws.store.mode !== "real" && cx() === "running" && merge()}>{m => <div class="rcard">
       <div class="rcard-h"><I n="loader" s={14} class="spin st-run" />Resolving the conflict<span class="r tnum">{elapsed()}</span></div>
       <div class="rcard-b">The result comes back here for your review. Nothing reaches <span class="mono">{view().target}</span> until you confirm it.</div>
       <div class="cx-steps"><Steps merge={m()} /></div>
@@ -139,7 +189,7 @@ export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
         <ActionBar place="card" class="rv-card-f"><button class="btn btn-primary btn-sm" {...ws.needs("close_task")} onClick={() => ws.closeTask(t().id, "already_in_target")}>Close task…</button></ActionBar>
       </div>
     </Show>
-    <Show when={t().status === "ready_to_merge" && !contained() && !same() && !t().acceptance && t().conflict === "none"}>
+    <Show when={t().status === "ready_to_merge" && !contained() && !same() && !t().acceptance && t().conflict === "none" && (!merge()?.freshChecks || merge()?.freshChecks?.state === "requested")}>
       <div class="rcard">
         <div class="rcard-h"><I n="merge" s={14} class="st-merge" />Ready to merge<Show when={t().resolvedBy}>{t().resolvedBy === "cortex" ? ", resolved automatically" : ", resolved by you"}</Show><span class="r">{merge()?.finishedAt != null ? `Finished ${clock(merge()!.finishedAt)}` : ""}</span></div>
         <div class="rcard-b">This is result v{t().result?.version}. <Show when={t().resolvedBy === "cortex"}>{merge()?.files.flatMap(f => f.blocks).find(b => b.choice === "cortex")?.cortexNote.replace("Resolved automatically: ", "Kept ") ?? ""} </Show>{noGit()
@@ -149,7 +199,7 @@ export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
         <OpenChecks checks={t().result?.checks ?? []} taskId={t().id} />
         <AcceptBlocker m={props.m} id={why} />
         <ActionBar place="card" class="rv-card-f" start={<><Show when={!noGit()}><Flow from={t().checkout.branch} to={view().target} /></Show><A class="lnk" to={at("diff")}>{noGit() ? "Review the result" : "Review the diff"}</A></>}>
-          <Show when={merge()}><button class="btn btn-line btn-sm" {...ws.needs("abort_merge")} onClick={abort}>Abort merge</button></Show>
+          <Show when={merge() && (ws.store.mode !== "real" || mergeControls(t()).abort)}><button class="btn btn-line btn-sm" {...ws.needs("abort_merge")} onClick={abort}>Abort merge</button></Show>
           <Show when={noGit()} fallback={<>
             <AcceptButton m={props.m} small line describedBy={acceptWhy()} />
             <button class="btn btn-primary btn-sm" aria-disabled={finish() ? "true" : undefined} data-why={finish()} {...ws.needs("integrate")} onClick={() => { if (!finish()) ws.open({ kind: "merge", taskId: t().id, how: "squash" }); }}>Review and merge…</button>
@@ -180,7 +230,7 @@ const Lines = (props: { path: string; side: Pick<CodeSide, "start" | "lines" | "
   <div class={`cl${props.side.hit.includes(i()) ? " hit" : ""}`}><span class="n">{props.side.start + i()}</span><span class="m"></span><span class="c"><Code path={props.path} text={line} /></span></div>}</For></div>;
 const Column = (props: { title: string; side: CodeSide; path: string }) => <div><div class="cf-col"><b>{props.title}</b><span class="mono">{props.side.ref}</span></div><Lines path={props.path} side={props.side} /></div>;
 
-function Block(props: { taskId: string; file: ConflictFile; block: ConflictBlock; cx: Cx }) {
+function Block(props: { taskId: string; file: ConflictFile; block: ConflictBlock; cx: Cx; fenced?: boolean }) {
   const ws = useWs();
   const pick = (choice: Exclude<BlockChoice, "cortex">) => ws.run({ type: "resolve_block", taskId: props.taskId, path: props.file.path, blockId: props.block.id, choice });
   const choice = () => props.block.choice;
@@ -189,20 +239,20 @@ function Block(props: { taskId: string; file: ConflictFile; block: ConflictBlock
   // Real helpers use this note for conflicts that require Git/editor resolution.
   // Demo blocks retain a future Cortex resolution note before any choice is made.
   const manualNote = () => ws.store.mode === "real" ? props.block.cortexNote : "";
-  const editable = () => props.cx === "none" || props.cx === "failed";
+  const editable = () => !props.fenced && (props.cx === "none" || props.cx === "failed");
   const btn = (c: Exclude<BlockChoice, "cortex">, text: string) => <button class={`btn ${choice() === c ? "btn-primary" : "btn-line"} btn-sm`} aria-pressed={choice() === c} {...ws.needs("resolve_block")} onClick={() => pick(c)}>{text}</button>;
   return <>
     <div class="cf3"><Column title="Base" side={props.block.base} path={props.file.path} /><Column title="Ours" side={props.block.ours} path={props.file.path} /><Column title="Theirs" side={props.block.theirs} path={props.file.path} /></div>
     <Show when={manualNote() && choice() !== "cortex"}><div class="cf-block"><I n="alert" s={14} class="st-warn" /><span>{props.block.cortexNote}</span></div></Show>
     <Show when={editable() && choice() !== "cortex" && !manualNote()}><div class="cf-block"><I n="alert" s={14} class="st-bad" /><span>{props.block.title}</span><span class="r">{btn("ours", "Accept ours")}{btn("theirs", "Accept theirs")}{btn("both", "Accept both")}</span></div></Show>
-    <Show when={props.cx === "running"}><div class="cf-block"><I n="loader" s={14} class="spin st-run" /><span>This block is being resolved. Your choices are paused until it finishes.</span></div></Show>
+    <Show when={ws.store.mode !== "real" && props.cx === "running"}><div class="cf-block"><I n="loader" s={14} class="spin st-run" /><span>This block is being resolved. Your choices are paused until it finishes.</span></div></Show>
     <Show when={choice() === "cortex"}><div class="cf-block ok"><I n="check-circle" s={14} class="st-ok" /><span>{props.block.cortexNote}</span></div></Show>
     <div class="cf-col"><b>Result</b><span>{label()}</span></div>
     <div class="cf-result"><Lines path={props.file.path} side={preview()} /></div>
   </>;
 }
 
-/** The two ways out of a conflict and the three-way view. Abort merge stays in every state, and nothing is ever stashed or reset. */
+/** Conflict preview and recovery; the live service decides when Git writes are safe. */
 export function ConflictPanel(props: { m: SessionModel; route: TaskRoute }) {
   const ws = useWs();
   const t = () => props.m.view.task;
@@ -220,6 +270,8 @@ export function ConflictPanel(props: { m: SessionModel; route: TaskRoute }) {
   const canFinish = () => ((facts()?.left ?? 1) === 0 || ws.store.mode === "real") && (cx() === "none" || cx() === "failed");
   const AbortBtn = () => <button class="btn btn-line btn-sm" {...ws.needs("abort_merge")} onClick={abort}>Abort merge</button>;
   return <Show when={merge()} fallback={<div class="note-panel task-panel"><span class="w500">No merge in progress</span><A class="lnk" to={ready}>Back to Changes</A></div>}>{m => <section class="task-panel" aria-label="Merge conflict">
+    <Show when={ws.store.mode === "real"}><RealMergeStatus task={t()} route={props.route} /></Show>
+    <Show when={ws.store.mode !== "real"}>
     <Show when={cx() === "none" || cx() === "running"}><Strip tone="fail" icon={<I n="alert" s={14} class="st-bad" />} action={<AbortBtn />}>Merging <span class="mono">{m().source}</span> into <span class="mono">{m().into}</span> stopped at {m().files.length} conflict{m().files.length === 1 ? "" : "s"}. Nothing was stashed or reset.</Strip></Show>
     <Show when={cx() === "done"}><Strip tone="ok" icon={<I n="check-circle" s={14} class="st-ok" />} action={<Show when={!t().acceptance}><AbortBtn /></Show>}>{t().resolvedBy === "cortex" ? "The last block was resolved and the checks ran." : "You finished the merge."} Nothing is merged until you confirm it in Ready to merge.</Strip></Show>
     <Show when={cx() === "failed"}><Strip tone="warn" icon={<I n="alert" s={14} class="st-warn" />} action={<AbortBtn />}>{m().failure}</Strip></Show>
@@ -235,7 +287,8 @@ export function ConflictPanel(props: { m: SessionModel; route: TaskRoute }) {
       <span class="cx-step now"><I n="merge" s={14} class="st-merge" />{t().acceptance ? "Accepted" : "Waiting for your review"}</span>
       <span class="r"><Show when={m().finishedAt !== null}><span class="faint">Finished {clock(m().finishedAt)}</span></Show></span>
     </div></Show>
-    <Show when={m().files.length > 0} fallback={<div class="note-panel"><span class="w500">{ws.t("noConflictDetails")}</span><span>Abort the merge, or resolve it automatically.</span></div>}>
+    </Show>
+    <Show when={m().files.length > 0} fallback={<Show when={ws.store.mode !== "real"}><div class="note-panel"><span class="w500">{ws.t("noConflictDetails")}</span></div></Show>}>
       <div class="cf-body">
         <div class="flist">
           <div class="wg">Conflicts<Count n={m().files.length} /></div>
@@ -247,12 +300,12 @@ export function ConflictPanel(props: { m: SessionModel; route: TaskRoute }) {
         </div>
         <div class="cf-main">
           <Show when={current()}>{f => <div class="fhead"><I n="file" s={14} class="faint" /><code>{f().path}</code><span>Block {Math.min(blockAt(), f().blocks.length - 1) + 1} of {f().blocks.length}</span>
-            <span class="r"><button class="ib ws-ib" classList={{ "ws-hide": blockAt() === 0 }} aria-label="Previous conflict" onClick={() => setBlockAt(n => Math.max(0, n - 1))}><I n="arrow-up" s={14} /></button>
-              <button class="ib ws-ib" classList={{ "ws-hide": blockAt() >= f().blocks.length - 1 }} aria-label="Next conflict" onClick={() => setBlockAt(n => Math.min(f().blocks.length - 1, n + 1))}><I n="arrow-down" s={14} /></button></span></div>}</Show>
-          <div class="cf-scroll"><Show when={current() && block()}><Block taskId={t().id} file={current()!} block={block()!} cx={cx()} /></Show></div>
-          <ActionBar class="rv-foot" start={<span class="cap muted tnum">{facts()!.resolved} of {facts()!.files} files resolved.</span>} hint={cx() === "running" ? "Abort merge stays available during this." : cx() === "done" ? "Nothing merges on its own." : "Finish merge verifies the Git index; stage all manual resolutions first."}>
+            <span class="r"><button data-tooltip="" class="ib ws-ib" classList={{ "ws-hide": blockAt() === 0 }} aria-label="Previous conflict" onClick={() => setBlockAt(n => Math.max(0, n - 1))}><I n="arrow-up" s={14} /></button>
+              <button data-tooltip="" class="ib ws-ib" classList={{ "ws-hide": blockAt() >= f().blocks.length - 1 }} aria-label="Next conflict" onClick={() => setBlockAt(n => Math.min(f().blocks.length - 1, n + 1))}><I n="arrow-down" s={14} /></button></span></div>}</Show>
+          <div class="cf-scroll"><Show when={current() && block()}><Block taskId={t().id} file={current()!} block={block()!} cx={cx()} fenced={ws.store.mode === "real" && !mergeControls(t()).abort} /></Show></div>
+          <Show when={ws.store.mode !== "real"}><ActionBar class="rv-foot" start={<span class="cap muted tnum">{facts()!.resolved} of {facts()!.files} files resolved.</span>} hint={cx() === "running" ? "Abort merge stays available during this." : cx() === "done" ? "Nothing merges on its own." : "Finish merge verifies the Git index; stage all manual resolutions first."}>
             <Show when={cx() === "done"} fallback={<button class="btn btn-primary" aria-disabled={canFinish() ? undefined : "true"} data-why={canFinish() ? undefined : "Resolve every block first"} {...ws.needs("finish_merge")} onClick={() => { if (canFinish()) ws.run({ type: "finish_merge", taskId: t().id, now: ws.store.clock() }); }}>Finish merge</button>}>
-              <A class="btn btn-primary" to={ready}>Review in Ready to merge</A></Show></ActionBar>
+              <A class="btn btn-primary" to={ready}>Review in Ready to merge</A></Show></ActionBar></Show>
         </div>
       </div>
     </Show>

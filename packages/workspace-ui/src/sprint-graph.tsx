@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, createUniqueId, For, Match, on, onCleanup, onMount, Show, Switch, untrack, type Accessor } from "solid-js";
 import type { PlanItem } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
+import { REQUESTING, RequestLabel } from "./request-feedback";
 import { A, I, Keyed, MenuItem, place, Pop } from "./kit";
 import { ActionBar, Toolbar } from "./layout";
 import {
@@ -161,7 +162,6 @@ export function GraphView(props: GraphViewProps) {
     setOffscreen(isOff());
     setView(v => ({ z: VW.z, tick: v.tick + 1 }));
     guardMap();
-    const t = tip(); if (t) showTip(t.id, t.at);
   };
   const kick = (moving: boolean) => {
     clampView();
@@ -318,6 +318,11 @@ export function GraphView(props: GraphViewProps) {
     return taskLabel(no, item ? graphTitle(item) : "", stateOf(key)?.text ?? null, numbers(adj().needs.get(key) ?? []), numbers(adj().unblocks.get(key) ?? []));
   };
 
+  const nodeHint = (key: string) => {
+    const item = byKey().get(key);
+    return item ? `${graphTitle(item)} — ${stateOf(key)?.text ?? afterText(depsOf(key))}` : undefined;
+  };
+
   // ---------- Focus and keyboard movement ----------
   const firstVertex = () => { const k = items()[0]?.key; return k ? g().vertexOf.get(k) ?? null : null; };
   const focusId = (id: string | null) => { if (!id) return; setFocus(id); els.get(id)?.focus({ preventScroll: true }); };
@@ -421,21 +426,6 @@ export function GraphView(props: GraphViewProps) {
   const toggleFull = () => props.onFull(!props.full);
   createEffect(on(() => props.full, on => { announce(on ? "Full view." : "Left full view."); queueMicrotask(() => { if (!document.activeElement || document.activeElement === document.body) focusId(focus()); }); }, { defer: true }));
 
-  // ---------- Tooltip ----------
-  const [tip, setTip] = createSignal<{ id: string; at?: { x: number; y: number }; left: number; top: number } | null>(null);
-  let tipTimer: ReturnType<typeof setTimeout> | undefined, tipEl: HTMLDivElement | undefined;
-  const hideTip = () => { clearTimeout(tipTimer); setTip(null); };
-  const showTip = (id: string, at?: { x: number; y: number }) => {
-    if (!id.startsWith("t:")) return hideTip();
-    const r = screenRect(id); if (!r) return hideTip();
-    setTip({ id, at, left: at ? at.x + 12 : r.l, top: at ? at.y + 16 : r.t - 40 });
-    const w = tipEl?.offsetWidth ?? 0, h = tipEl?.offsetHeight ?? 0;
-    let top = at ? at.y + 16 : r.t - h - 6;
-    if (top < 4) top = (at ? at.y : r.b) + 6;
-    setTip({ id, at, left: clamp(at ? at.x + 12 : r.l, 4, Math.max(4, CANVAS.w - w - 4)), top: clamp(top, 4, Math.max(4, CANVAS.h - h - 4)) });
-  };
-  const tipText = () => { const t = tip(); if (!t) return null; const k = t.id.slice(2), item = byKey().get(k); return item ? { head: `${adj().no.get(k)} · ${graphTitle(item)}`, sub: stateOf(k)?.text ?? afterText(depsOf(k)) } : null; };
-
   // ---------- Pointer ----------
   let down: { x: number; y: number; vx: number; vy: number; moved: boolean; target: Element; id: number } | null = null, lastClick = { id: "", t: 0 };
   // The canvas's place on the page, read once per gesture: reading it on every wheel event would force a layout each time.
@@ -443,7 +433,6 @@ export function GraphView(props: GraphViewProps) {
   const canvasBox = () => origin ??= canvas.getBoundingClientRect();
   const onPointerDown = (e: PointerEvent) => {
     if (e.button !== 0 || (e.target as Element).closest?.(".gv-map")) return;
-    hideTip();
     down = { x: e.clientX, y: e.clientY, vx: VW.x, vy: VW.y, moved: false, target: e.target as Element, id: e.pointerId };
     try { canvas.setPointerCapture?.(e.pointerId); } catch { /* a synthetic press has no pointer to capture */ }
   };
@@ -456,11 +445,7 @@ export function GraphView(props: GraphViewProps) {
       kick(true);
       return;
     }
-    const node = (e.target as Element).closest?.<SVGGElement>(".n");
-    if (!node) { hideTip(); return; }
-    const box = canvasBox(), at = { x: e.clientX - box.left, y: e.clientY - box.top }, id = node.dataset.id!;
-    if (tip()?.id === id) showTip(id, at);
-    else { clearTimeout(tipTimer); setTip(null); tipTimer = setTimeout(() => showTip(id, at), 300); }
+
   };
   const onPointerUp = () => {
     const d = down; if (!d) return;
@@ -480,7 +465,7 @@ export function GraphView(props: GraphViewProps) {
     if (props.picked) select(null);
   };
   const onWheel = (e: WheelEvent) => {
-    e.preventDefault(); hideTip();
+    e.preventDefault();
     if (e.ctrlKey) { const box = canvasBox(); setZoom(VW.z * Math.exp(-e.deltaY * 0.0022), e.clientX - box.left, e.clientY - box.top, true); }
     else if (e.shiftKey) { VW.x -= e.deltaY; fitLocked = false; kick(true); }
     else { VW.y -= e.deltaY; VW.x -= e.deltaX; fitLocked = false; kick(true); }
@@ -569,7 +554,7 @@ export function GraphView(props: GraphViewProps) {
       document.removeEventListener("keydown", onKey, true);
       canvas.removeEventListener("wheel", onWheel);
       if (raf) cancelAnimationFrame(raf);
-      clearTimeout(settleTimer); clearTimeout(tipTimer); clearTimeout(typed);
+      clearTimeout(settleTimer); clearTimeout(typed);
       props.memory.set(props.memoryKey, { z: VW.z, x: VW.x, y: VW.y, fit: fitLocked, collapsed: [...collapsed()] });
     });
   });
@@ -610,7 +595,7 @@ export function GraphView(props: GraphViewProps) {
           }} /></div>
         <span id={`${uid}-count`} class="gv-count">{countText()}</span>
         <For each={[[-1, "Previous match", "arrow-left"], [1, "Next match", "arrow-right"]] as const}>{([dir, name, icon]) =>
-          <button class="ib" classList={{ off: matches() === null }} aria-hidden={matches() === null ? "true" : undefined} tabindex={matches() === null ? -1 : 0} aria-label={name}
+          <button data-tooltip="" class="ib" classList={{ off: matches() === null }} aria-hidden={matches() === null ? "true" : undefined} tabindex={matches() === null ? -1 : 0} aria-label={name}
             aria-disabled={stepWhy() ? "true" : undefined} data-why={stepWhy()} aria-describedby={stepWhy() ? `${uid}-count` : undefined} onClick={() => step(dir)}><I n={icon} s={14} /></button>}</For>
         <button class="btn btn-sm gv-fitm" classList={{ off: !matches()?.length }} aria-hidden={matches()?.length ? undefined : "true"} tabindex={matches()?.length ? 0 : -1} onClick={fitMatches}>Fit matches</button>
         <Show when={hasStatus() || hasLayers()}><span class="vr t-tier2" /></Show>
@@ -619,13 +604,13 @@ export function GraphView(props: GraphViewProps) {
       <Show when={hasLayers()}><button class="chip t-tier2" popovertarget={ids.layers}>Layers<I n="chevron-down" s={12} /></button></Show>
     </>}
     end={<>
-      <button class="ib" aria-label="Zoom out" onClick={() => setZoom(VW.z / ZOOM_STEP)}><I n="minus" s={14} /></button>
+      <button data-tooltip="Zoom out · −" class="ib" aria-label="Zoom out" onClick={() => setZoom(VW.z / ZOOM_STEP)}><I n="minus" s={14} /></button>
       <button class="btn btn-sm gv-zoom" popovertarget={ids.zoom} aria-label="Zoom presets"><span ref={pct}>100%</span></button>
-      <button class="ib" aria-label="Zoom in" onClick={() => setZoom(VW.z * ZOOM_STEP)}><I n="plus" s={14} /></button>
+      <button data-tooltip="Zoom in · +" class="ib" aria-label="Zoom in" onClick={() => setZoom(VW.z * ZOOM_STEP)}><I n="plus" s={14} /></button>
       <button class="btn btn-sm" onClick={fitAll}>Fit</button>
-      <Show when={hasMap()}><button class="ib gv-tog t-tier2" aria-label="Minimap" aria-pressed={mapWanted(ws.panels.minimap(), canvasW())} onClick={toggleMap}><I n="board" s={14} /></button></Show>
+      <Show when={hasMap()}><button data-tooltip="Minimap · M" class="ib gv-tog t-tier2" aria-label="Minimap" aria-pressed={mapWanted(ws.panels.minimap(), canvasW())} onClick={toggleMap}><I n="board" s={14} /></button></Show>
       <Show when={!props.full}><button class="btn btn-sm" onClick={toggleFull}><I n="expand" s={14} />Full view</button></Show>
-      <Show when={tier() > 0 && (hasStatus() || hasLayers() || hasMap())}><button class="ib t-more" aria-label="More graph controls" popovertarget={ids.more}><I n="more" s={14} /></button></Show>
+      <Show when={tier() > 0 && (hasStatus() || hasLayers() || hasMap())}><button data-tooltip="" class="ib t-more" aria-label="More graph controls" popovertarget={ids.more}><I n="more" s={14} /></button></Show>
     </>} />;
 
   const RequestButton = () => <Show when={reqShown()}><button class="btn btn-line btn-sm" aria-disabled={reqWhy() ? "true" : undefined} data-why={reqWhy() ?? undefined}
@@ -643,7 +628,7 @@ export function GraphView(props: GraphViewProps) {
         <button aria-current={chain() ? "true" : "false"} onClick={() => ws.panels.setLinks("chain")}>Whole chain</button>
       </div>
       <Show when={pickedView()}>{v => <>
-        <Show when={startable()}><button class="btn btn-line btn-sm" {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: v().id, now: ws.store.clock() })}>Start</button></Show>
+        <Show when={startable()}><button class="btn btn-line btn-sm" {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: v().id, now: ws.store.clock() })}><RequestLabel pending={ws.store.pendingTask("start_task", v().id)} text={REQUESTING.start_task}>Start</RequestLabel></button></Show>
         <A class="btn btn-line btn-sm" to={{ name: "task", machine: v().machine.id, task: v().id }}>Open task</A>
       </>}</Show>
       <button class="btn btn-line btn-sm" onClick={() => { if (props.picked) props.onDetails(props.picked); }}>Details</button>
@@ -655,10 +640,9 @@ export function GraphView(props: GraphViewProps) {
 
   return <div ref={root} class="gv" data-tier={tier()}>
     {bar}
-    <div ref={canvas} class="gv-canvas" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerLeave={hideTip}>
+    <div ref={canvas} class="gv-canvas" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
       <div ref={layer} class="gv-layer"><svg ref={svg} class="gsv" width={Math.max(1, Math.ceil(g().width * drawn()))} height={Math.max(1, Math.ceil(g().height * drawn()))} role="group" aria-roledescription="dependency graph" aria-label={graphLabel(n())} data-lod={level()} data-low={low() ? "" : undefined} data-ni={level() === "number" && view().z >= numberIconZoom ? "" : undefined}
-        onFocusIn={e => { const el = (e.target as Element).closest?.<SVGGElement>(".n, .band"); if (!el) return; setFocus(el.dataset.id!); if (document.documentElement.hasAttribute("data-keyboard")) { reveal(el.dataset.id!, 48); showTip(el.dataset.id!); } }}
-        onFocusOut={e => { if (!(e.relatedTarget instanceof Node && svg.contains(e.relatedTarget))) hideTip(); }}>
+        onFocusIn={e => { const el = (e.target as Element).closest?.<SVGGElement>(".n, .band"); if (!el) return; setFocus(el.dataset.id!); if (document.documentElement.hasAttribute("data-keyboard")) reveal(el.dataset.id!, 48); }}>
         <defs>
           <For each={["var(--line-ctl)", "var(--fg)", "var(--line)"]}>{(fill, i) =>
             <marker id={`${uid}-a${i()}`} viewBox="0 0 8 8" refX="7.5" refY="4" markerUnits="userSpaceOnUse" markerWidth={8 / unit()} markerHeight={8 / unit()} orient="auto"><path d="M0 0L8 4L0 8z" style={{ fill }} /></marker>}</For>
@@ -681,7 +665,7 @@ export function GraphView(props: GraphViewProps) {
               // The id is the row's key, read once: a row being disposed must not read the list it leaves.
               const id = t().id;
               return <g ref={el => { els.set(id, el); onCleanup(() => { if (els.get(id) === el) els.delete(id); }); }} class={nodeClass().get(key) ?? "n"} data-id={t().id} data-f={st()?.filter ?? ""} data-t={st()?.tone ?? ""}
-                tabindex={focus() === t().id ? 0 : -1} role="button" aria-pressed={props.picked === key ? "true" : "false"} aria-label={nodeLabel(key)} transform={`translate(${t().x} ${t().y})`}>
+                tabindex={focus() === t().id ? 0 : -1} role="button" aria-pressed={props.picked === key ? "true" : "false"} aria-label={nodeLabel(key)} data-tooltip={nodeHint(key)} transform={`translate(${t().x} ${t().y})`}>
                 <rect class="bx" width={NW} height={NH} rx="6" />
                 <g transform={`translate(0 ${NH / 2})`}>
                   <text class="l1" x=".75em" y="-.25em"><tspan class="no">{no()}</tspan> {words()?.l1 ?? ""}</text>
@@ -715,7 +699,6 @@ export function GraphView(props: GraphViewProps) {
           <rect ref={mv} class="mv" />
         </svg>
       </div>
-      <Show when={tip() && tipText()}>{_ => <div ref={tipEl} class="gv-tip" aria-hidden="true" style={{ left: `${tip()!.left}px`, top: `${tip()!.top}px` }}>{tipText()!.head}<span class="s">{tipText()!.sub}</span></div>}</Show>
     </div>
     {band}
     <div class="ws-live" role="status" aria-live="polite" aria-atomic="true">{said()}</div>

@@ -30,7 +30,10 @@ export function EditTask(props: { taskId: string; onClose: () => void }) {
     : current()!.machine.connection !== "connected" ? "The machine is offline. Your draft stays here."
     : !loaded() ? "Read the saved attachments before editing."
     : saving() ? "Saving…" : undefined;
-  const why = () => off() ?? (!version && ws.store.mode === "real" ? "Refresh this task before editing." : !title().trim() || !text().trim() ? "Write a title and description first." : undefined);
+  const worktreeOff = () => current()?.project.hasGit === false ? ws.t("worktreeNeedsGit")
+    : !ws.can(FEATURES.taskWorktrees) ? ws.t("noTaskWorktrees")
+    : ws.store.state().sprints.some(s => s.id === initial.sprintId && s.runMode === "automatic") ? ws.t("worktreeNeedsManualOrHybrid") : undefined;
+  const why = () => off() ?? (checkout() === "worktree" ? worktreeOff() : undefined) ?? (!version && ws.store.mode === "real" ? "Refresh this task before editing." : !title().trim() || !text().trim() ? "Write a title and description first." : undefined);
   const save = async () => {
     if (why() || files.busy()) return;
     setSaving(true); setError("");
@@ -41,7 +44,7 @@ export function EditTask(props: { taskId: string; onClose: () => void }) {
     } finally { setSaving(false); }
   };
   return <>
-    <div class="dlg-h"><h2>Edit task</h2><button class="ib" aria-label="Cancel editing" onClick={props.onClose}><I n="x" /></button></div>
+    <div class="dlg-h"><h2>Edit task</h2><button data-tooltip="" class="ib" aria-label="Cancel editing" onClick={props.onClose}><I n="x" /></button></div>
     <div class="dlg-b">
       <label class="fld"><span class="lab">Title</span><input class="inp" aria-label="Task title" maxLength={200} value={title()} disabled={!!off()} onInput={e => setTitle(e.currentTarget.value)} /></label>
       <Show when={failed()}><div role="alert">Saved attachments could not be read. Nothing was replaced. <button class="btn btn-sm" onClick={load}>Retry</button></div></Show>
@@ -50,12 +53,10 @@ export function EditTask(props: { taskId: string; onClose: () => void }) {
         effect="Saves this task only. It does not start work or change its dependencies."
         route={<RouteBar id="edit-task" disabled={off()} settings={settings()} onChange={patch => setSettings({...settings(),...patch})} />}
         sendKey="mod-enter" send={{label:"Save changes",needs:"edit_task",why:why(),go:() => { void save(); }}} />
-      <Show when={current()?.project.hasGit !== false}>
-        <label class="fld"><span class="lab">Checkout</span><select class="inp" aria-label="Task checkout" disabled={!!off()} value={checkout()} onChange={e => setCheckout(e.currentTarget.value as "main" | "worktree")}>
-          <option value="main">Project folder</option><option value="worktree" disabled={!ws.can(FEATURES.taskWorktrees)}>Separate worktree</option>
+        <label class="fld"><span class="lab">Checkout</span><select class="inp" aria-label="Task checkout" aria-describedby={worktreeOff() ? "edit-worktree-reason" : undefined} disabled={!!off()} value={checkout()} onChange={e => setCheckout(e.currentTarget.value as "main" | "worktree")}>
+          <option value="main">Project folder</option><option value="worktree" disabled={!!worktreeOff()}>Separate worktree</option>
         </select></label>
-        <Show when={!ws.can(FEATURES.taskWorktrees)}><div class="cap muted">{ws.t("noTaskWorktrees")}</div></Show>
-      </Show>
+        <Show when={worktreeOff()}>{reason => <div id="edit-worktree-reason" class="cap muted">{reason()}</div>}</Show>
       <Show when={error()}><div class="err" role="alert">{error()} Your changes stay here. For a stale edit, copy your changes, then close and reopen the editor to review the current task before reapplying them.</div></Show>
     </div>
     <ActionBar place="dialog"><button class="btn btn-line" onClick={props.onClose}>Cancel</button></ActionBar>

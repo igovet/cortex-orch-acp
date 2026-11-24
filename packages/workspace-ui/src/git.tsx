@@ -1,11 +1,12 @@
-import { createMemo, createSignal, createUniqueId, For, Show } from "solid-js";
+import { createMemo, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
+import { draftNotice, WRITING_CHANGES } from "./copy";
 import { GitLetter } from "./diff";
 import type { CheckoutOperation, Commit, GitFile, ProjectRepo, RepoCheckout } from "@cortex/workspace-domain";
 import { operationWord, STOPPED, stoppedPull, updateBlocked } from "./git-actions-model";
 import { useWs } from "./ctx";
 import { A, Count, I, Keyed, MenuItem, place, Pop, useWantOverview } from "./kit";
 import { ActionBar, revealCutIn, SectionHead, Toolbar } from "./layout";
-import { conflictFacts, dirName, fileName, fileResolved, inConflict, worktreeRows, worktreeState, type WorktreeRow } from "./review-model";
+import { conflictFacts, dirName, fileName, fileResolved, inConflict, mergeControls, worktreeRows, worktreeState, type WorktreeRow } from "./review-model";
 import type { Route } from "./router";
 import { sameBranch, type ProjectSummary } from "./selectors";
 
@@ -19,8 +20,8 @@ function FileRow(props: { f: GitFile; c: RepoCheckout; go: (path: string) => voi
   const staged = () => props.f.stage === "staged";
   return <div class="gf"><button class="ws-gf" onClick={() => props.go(props.f.path)}><Row path={props.f.path} status={props.f.status} /><Show when={props.f.filter}><span class="cap muted">{props.f.filter === "lfs" ? "Git LFS" : `Filter: ${props.f.filter}`}</span></Show></button>
     <span class="acts">
-      <Show when={!staged()}><button class="ib" aria-label={`Revert ${fileName(props.f.path)}`} {...ws.needs("git_revert")} onClick={() => ws.open({ kind: "revert", checkoutId: props.c.id, path: props.f.path })}><I n="undo" s={14} /></button></Show>
-      <button class="ib" aria-label={`${staged() ? "Unstage" : "Stage"} ${fileName(props.f.path)}`} {...ws.needs("git_stage")} onClick={() => ws.run({ type: "git_stage", checkoutId: props.c.id, path: props.f.path, staged: !staged() })}><I n={staged() ? "minus" : "plus"} s={14} /></button>
+      <Show when={!staged()}><button data-tooltip="" class="ib" aria-label={`Revert ${fileName(props.f.path)}`} {...ws.needs("git_revert")} onClick={() => ws.open({ kind: "revert", checkoutId: props.c.id, path: props.f.path })}><I n="undo" s={14} /></button></Show>
+      <button data-tooltip="" class="ib" aria-label={`${staged() ? "Unstage" : "Stage"} ${fileName(props.f.path)}`} {...ws.needs("git_stage")} onClick={() => ws.run({ type: "git_stage", checkoutId: props.c.id, path: props.f.path, staged: !staged() })}><I n={staged() ? "minus" : "plus"} s={14} /></button>
     </span></div>;
 }
 
@@ -43,16 +44,35 @@ function Status(props: { repo: ProjectRepo; c: RepoCheckout; codeAt: (path: stri
   const pullBlocked = () => stopped() ? STOPPED : noUpstream() ? "No upstream is configured for this checkout" : !c().behind ? "No incoming commits in the last fetched state. Fetch to check the upstream." : undefined;
   // Diverged histories ask how to bring the remote commits in; otherwise Pull fast-forwards.
   const pull = () => { if (pullBlocked()) return; if (diverged()) ws.open({ kind: "pull", checkoutId: c().id, ...(c().taskId ? { taskId: c().taskId! } : {}) }); else ws.run({ type: "git_pull", checkoutId: c().id, now: ws.store.clock() }); };
+  const [writing, setWriting] = createSignal(false);
+  const [notice, setNotice] = createSignal("");
+  let generation = 0;
+  onCleanup(() => { generation++; });
   let commitButton: HTMLButtonElement | undefined, refreshButton: HTMLButtonElement | undefined, committing = false;
   // Staging and committing are one action: the button stays busy to the end, and neither a click nor Ctrl+Enter starts it twice.
   const commit = () => {
     if (blocked() || committing || ws.gate("git_commit")) return;
     const id = c().id, message = c().draft;
+    generation++;
+    setWriting(false);
+    setNotice("");
     committing = true;
     void ws.busy(ws.run({ type: "git_commit", checkoutId: id, message, now: ws.store.clock() })
       .finally(() => { committing = false; }), commitButton);
   };
-  const generate = () => { const count = group("staged").length || c().files.length; ws.run({ type: "git_draft", checkoutId: c().id, message: count ? `Update ${count} file${count === 1 ? "" : "s"}` : "Update the work in this checkout" }); };
+  const generate = async () => {
+    if (writing() || committing || !c().files.length || ws.gate("git_draft")) return;
+    const request = ++generation;
+    const { id, branch, draft } = c();
+    setWriting(true);
+    setNotice("");
+    const text = await ws.store.draftCheckoutCommit({ checkoutId: id });
+    if (generation !== request) return;
+    setWriting(false);
+    if (c().id !== id || c().branch !== branch || c().draft !== draft) return;
+    if (text?.message) void ws.run({ type: "git_draft", checkoutId: id, message: text.message });
+    setNotice(draftNotice(text, !!text?.message, "Written from the changes. You can edit it."));
+  };
   const last = () => props.repo.commits.find(x => x.branch === c().branch);
   const conflictTo = (): Route => ({ name: "task", machine: task()!.machine.id, task: task()!.id, tab: "changes", sub: "conflict" });
   // The toolbar has no room for words. Its line of facts is what explains a control that is off (0 behind: nothing to pull),
@@ -61,14 +81,14 @@ function Status(props: { repo: ProjectRepo; c: RepoCheckout; codeAt: (path: stri
   const describe = (off: unknown) => off ? facts : undefined;
   return <aside class="side-pane" aria-label="Status" ref={revealCutIn}>
     <Toolbar small class="git-sum" label="Checkout status"
-      mid={<span id={facts} class="cap muted trunc tnum">{c().ahead} ahead, {c().behind} behind <span class="mono">{c().base}</span><Show when={remote() && noUpstream()}>, no upstream</Show></span>}
+      mid={<span tabindex="0" data-tooltip="Commits ahead of and behind the base branch" id={facts} class="cap muted trunc tnum">{c().ahead} ahead, {c().behind} behind <span class="mono">{c().base}</span><Show when={remote() && noUpstream()}>, no upstream</Show></span>}
       end={<>
         {/* Git is read when this page opens, after the owner's own Git action and when a task's work moves; this reads it now. */}
-        <button class="ib" aria-label="Refresh Git status" ref={refreshButton} onClick={() => void ws.busy(ws.store.refreshProjectFacts(props.repo.projectId, true), refreshButton)}><I n="refresh" /></button>
+        <button data-tooltip="" class="ib" aria-label="Refresh Git status" ref={refreshButton} onClick={() => void ws.busy(ws.store.refreshProjectFacts(props.repo.projectId, true), refreshButton)}><I n="refresh" /></button>
         <Show when={remote()}>
-        <button class="ib" aria-label="Fetch" {...ws.needs("git_fetch")} aria-describedby={describe(ws.gate("git_fetch"))} onClick={() => ws.run({ type: "git_fetch", projectId: props.repo.projectId, now: ws.store.clock() })}><I n="refresh" /></button>
-        <button class="ib" data-why={pullBlocked()} aria-label={diverged() ? "Pull…" : "Pull"} {...ws.needs("git_pull")} aria-disabled={pullBlocked() || !ws.can("workspace.git_pull") ? "true" : undefined} aria-describedby={describe(pullBlocked() || !ws.can("workspace.git_pull"))} onClick={pull}><I n="download" /></button>
-        <button class="ib" aria-label="Push" {...ws.needs("git_push")} aria-describedby={describe(ws.gate("git_push"))} onClick={() => ws.open({ kind: "push", checkoutId: c().id })}><I n="upload" /></button>
+        <button data-tooltip="" class="ib" aria-label="Fetch" {...ws.needs("git_fetch")} aria-describedby={describe(ws.gate("git_fetch"))} onClick={() => ws.run({ type: "git_fetch", projectId: props.repo.projectId, now: ws.store.clock() })}><I n="refresh" /></button>
+        <button data-tooltip="" class="ib" data-why={pullBlocked()} aria-label={diverged() ? "Pull…" : "Pull"} {...ws.needs("git_pull")} aria-disabled={pullBlocked() || !ws.can("workspace.git_pull") ? "true" : undefined} aria-describedby={describe(pullBlocked() || !ws.can("workspace.git_pull"))} onClick={pull}><I n="download" /></button>
+        <button data-tooltip="" class="ib" aria-label="Push" {...ws.needs("git_push")} aria-describedby={describe(ws.gate("git_push"))} onClick={() => ws.open({ kind: "push", checkoutId: c().id })}><I n="upload" /></button>
         </Show>
       </>} />
     <div class="gscroll">
@@ -92,11 +112,12 @@ function Status(props: { repo: ProjectRepo; c: RepoCheckout; codeAt: (path: stri
       <Show when={c().files.length === 0 && !merge()}><div class="cap muted ws-pad">No uncommitted changes.</div></Show>
     </div>
     <div class="commit-box">
-      <textarea class="inp" rows="2" aria-label="Commit message" placeholder="Commit message" value={c().draft} onInput={e => ws.run({ type: "git_draft", checkoutId: c().id, message: e.currentTarget.value })} onKeyDown={e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commit(); } }} />
+      <textarea class="inp" rows="2" aria-label="Commit message" placeholder="Commit message" value={c().draft} aria-describedby={`${facts}-draft`} onInput={e => { generation++; setWriting(false); setNotice(""); void ws.run({ type: "git_draft", checkoutId: c().id, message: e.currentTarget.value }); }} onKeyDown={e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commit(); } }} />
+      <div class="cap muted" id={`${facts}-draft`} role="status">{writing() ? WRITING_CHANGES : notice()}</div>
       {/* Why Commit is off, or what it will take in, is said in the bar's own slot: the box never grows a line for it. */}
       <ActionBar place="card" class="commit-bar" hint={stagesAll() ? `Nothing is staged, so Commit includes all ${c().files.length} change${c().files.length === 1 ? "" : "s"}.` : undefined} start={<>
-        <button class="btn btn-sm" {...ws.needs("git_draft")} onClick={generate}><I n="sparkles" s={12} />Generate</button>
-        <button class="ib ws-ib" popovertarget="m-commit" aria-label="More commit options"><I n="more" s={14} /></button>
+        <button class="btn btn-sm" aria-description={ws.t("generateCommit")} {...ws.needs("git_draft")} disabled={writing() || !c().files.length} onClick={generate}><I n="sparkles" s={12} />Generate</button>
+        <button data-tooltip="" class="ib ws-ib" popovertarget="m-commit" aria-label="More commit options"><I n="more" s={14} /></button>
         <Pop id="m-commit" class="pop-up" align="up" label="Commit options"><MenuItem label="Amend last commit…" disabled={last() && c().draft.trim() ? undefined : "Write a message first"} needs="git_commit" onSelect={() => ws.open({ kind: "amend", checkoutId: c().id, message: c().draft, pushed: remote() && !!last()?.pushed })} /></Pop>
       </>}>
         <button class="btn btn-primary btn-sm" ref={commitButton} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("git_commit")} onClick={commit}>Commit<Show when={ws.keys("Ctrl+Enter")}>{k => <span class="key">{k()}</span>}</Show></button>
@@ -155,13 +176,13 @@ function Worktrees(props: { repo: ProjectRepo | null; summary: ProjectSummary; p
     <span class="cap muted trunc"><Show when={r().task} fallback={r().label}>{v => <A class="lnk" to={{ name: "task", machine: v().machine.id, task: v().id }}>{r().label}</A>}</Show></span>
     <span class="cap tnum">{r().ahead === null ? "" : `${r().ahead} / ${r().behind}`}</span>
     <span><span class={`st ${r().state.tone}`}><I n={r().state.icon} s={12} class={r().state.spin ? "spin" : undefined} />{r().state.label}</span></span>
-    <button class="ib ws-ib" aria-label={`Actions for ${r().branch}`} onClick={e => open(r(), e.currentTarget)}><I n="more" s={14} /></button>
+    <button data-tooltip="" class="ib ws-ib" aria-label={`Actions for ${r().branch}`} onClick={e => open(r(), e.currentTarget)}><I n="more" s={14} /></button>
   </div>;
   return <div class="hist" aria-label="Branches and worktrees">
     <Show when={main()}>{m => <>
       <SectionHead class="ws-wg" title="Project folder" />
       <div class="gt"><div class="gr" style={{ "--cols": COLS }}><span class="trunc"><span class="mono ws-fg">{m().branch}</span><span class="sub">{m().path}</span></span><span class="cap muted trunc">Git default branch</span><span class="cap tnum">{m().ahead} / {m().behind}</span><span><span class="st st-idle"><I n="file" s={12} />{m().files.length ? `${m().files.length} uncommitted` : "Clean"}</span></span>
-        <button class="ib ws-ib" aria-label="Open the project folder" onClick={() => props.pick(m().id)}><I n="arrow-right" s={14} /></button></div></div>
+        <button data-tooltip="" class="ib ws-ib" aria-label="Open the project folder" onClick={() => props.pick(m().id)}><I n="arrow-right" s={14} /></button></div></div>
     </>}</Show>
     <SectionHead class="ws-wg" title="Worktrees" count={rows().length} />
     <Show when={rows().length > 0} fallback={<div class="cap muted ws-pad">No worktrees in this project.</div>}><div class="gt"><Keyed each={rows()} by={r => r.key}>{r => gr(r)}</Keyed></div></Show>
@@ -226,14 +247,14 @@ export function StoppedPull(props: { checkout: RepoCheckout; op: CheckoutOperati
 export function GitView(props: { summary: ProjectSummary; repo: ProjectRepo | null; checkout: RepoCheckout | null; right: "history" | "branches"; onRight: (right: "history" | "branches") => void; onPick: (id: string) => void; codeAt: (path: string) => void }) {
   const ws = useWs();
   const task = createMemo(() => { const id = props.checkout?.taskId; return id ? ws.store.index().byId.get(id) ?? null : null; });
-  const stuck = () => { const t = task(); return t && inConflict(t.task) && t.task.conflict !== "resolving" ? t : null; };
+  const stuck = () => { const t = task(); return t?.task.merge && inConflict(t.task) && (ws.store.mode === "real" || t.task.conflict !== "resolving") ? t : null; };
   const stopped = () => stoppedPull(props.checkout, task()?.task);
   return <Show when={props.summary.project.hasGit !== false} fallback={<NoGit projectId={props.summary.project.id} />}><Show when={props.repo && props.checkout} fallback={<div class="note-panel"><span class="w500">No Git record for this project</span><span>{ws.t("noGitFacts")}</span></div>}>
     <Show when={stuck()}>{v => <div class="strip bad"><I n="alert" s={14} class="st-bad" /><span>Merging <span class="mono">{v().task.merge?.source}</span> into <span class="mono">{v().task.merge?.into}</span>: {conflictFacts(v().task.merge!).leftFiles} file{conflictFacts(v().task.merge!).leftFiles === 1 ? "" : "s"} with conflicts.</span>
-      <span class="acts"><A class="btn btn-primary btn-sm" to={{ name: "task", machine: v().machine.id, task: v().id, tab: "changes", sub: "conflict" }}>Resolve</A><button class="btn btn-line btn-sm" {...ws.needs("resolve_with_cortex")} onClick={() => ws.open({ kind: "cortex", taskId: v().id })}>Resolve automatically…</button><button class="btn btn-line btn-sm" {...ws.needs("abort_merge")} onClick={() => ws.run({ type: "abort_merge", taskId: v().id, now: ws.store.clock() })}>Abort merge</button></span></div>}</Show>
+      <span class="acts"><A class="btn btn-primary btn-sm" to={{ name: "task", machine: v().machine.id, task: v().id, tab: "changes", sub: "conflict" }}>{ws.store.mode === "real" ? "Open the conflict" : "Resolve"}</A><Show when={ws.store.mode !== "real" || mergeControls(v().task).handoff}><button class="btn btn-line btn-sm" {...ws.needs("resolve_with_cortex")} onClick={() => ws.open({ kind: "cortex", taskId: v().id })}>{ws.store.mode === "real" ? "Hand to the app…" : "Resolve automatically…"}</button></Show><Show when={ws.store.mode !== "real" || mergeControls(v().task).abort}><button class="btn btn-line btn-sm" {...ws.needs("abort_merge")} onClick={() => ws.run({ type: "abort_merge", taskId: v().id, now: ws.store.clock() })}>Abort merge</button></Show></span></div>}</Show>
     <Show when={stopped()}>{op => <StoppedPull checkout={props.checkout!} op={op()} />}</Show>
     <div class="git-body">
-      <Status repo={props.repo!} c={props.checkout!} codeAt={props.codeAt} />
+      <Show when={props.checkout && JSON.stringify([props.checkout.id, props.checkout.branch])} keyed>{_key => <Status repo={props.repo!} c={props.checkout!} codeAt={props.codeAt} />}</Show>
       <section class="git-right" aria-label="History" ref={revealCutIn}>
         <Toolbar small class="chg-tools" start={<div class="seg" role="group" aria-label="Git view">
           <button aria-current={props.right === "history" ? "true" : "false"} onClick={() => props.onRight("history")}>History</button>

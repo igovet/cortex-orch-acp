@@ -13,7 +13,7 @@ export const Code = (props: { path: string; text: string }) =>
 
 export const Counts = (props: { add: number; del: number }) => <span class="tnum"><Show when={props.add > 0 || props.del === 0}><span class="add">+{props.add}</span></Show>{props.add > 0 && props.del > 0 ? " " : ""}<Show when={props.del > 0}><span class="del">−{props.del}</span></Show></span>;
 export const STATUS_WORD: Record<string, string> = { M: "Modified", A: "Added", D: "Deleted", U: "Untracked", C: "Conflict" };
-export const GitLetter = (props: { status: string }) => <span class={`gs gs-${props.status.toLowerCase()}`}>{props.status}</span>;
+export const GitLetter = (props: { status: string }) => <span data-tooltip={STATUS_WORD[props.status]} class={`gs gs-${props.status.toLowerCase()}`}><span aria-hidden={STATUS_WORD[props.status] ? "true" : undefined}>{props.status}</span><span class="ws-sr">{STATUS_WORD[props.status]}</span></span>;
 
 /** `draft` and `onDraft` keep what is being written outside the form, so a line redrawn by a background read gives it back. */
 function CommentForm(props: { value: string; files?: AttachmentInput[]; draft?: string; onDraft?: (text: string) => void; onSave: (text: string, attachments: AttachmentInput[]) => void; onCancel: () => void }) {

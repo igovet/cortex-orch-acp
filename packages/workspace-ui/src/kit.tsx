@@ -38,8 +38,8 @@ export function useOverviewWait() {
 /** A count beside a name. Nothing to count says nothing, so no list ever reads "All 0". */
 export const Count = (props: { n: number }) => <Show when={props.n > 0}><span class="n">{props.n}</span></Show>;
 
-export const FactLine = (props: { fact: Fact; class?: string }) => <span class={`st ${props.fact.tone}${props.class ? ` ${props.class}` : ""}`}>
-  <Show when={props.fact.icon}><I n={props.fact.icon!} s={12} class={props.fact.spin ? "spin" : undefined} /></Show><span>{props.fact.text}</span>
+export const FactLine = (props: { fact: Fact; class?: string; cutHint?: boolean }) => <span class={`st ${props.fact.tone}${props.class ? ` ${props.class}` : ""}`}>
+  <Show when={props.fact.icon}><I n={props.fact.icon!} s={12} class={props.fact.spin ? "spin" : undefined} /></Show><span data-tooltip-cut={props.cutHint ? "" : undefined}>{props.fact.text}</span>
 </span>;
 
 /**

@@ -6,7 +6,7 @@ import { capture, emptyWorkspace, LOCAL_MACHINE_ID, routeIdOf, type EngineConnec
 import { Workspace } from "../src";
 import { createRealPort } from "../src/port/real";
 import { SIDEBAR_DEFAULT, SIDEBAR_MIN } from "../src/prefs";
-import { capabilitiesWire, flush, refOf, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
+import { capabilitiesWire, flush, refOf, scriptedTransport, snapshot, stoppedMerge, wireDecision, wireTask } from "./support";
 
 /** The screens on the real port, with a machine that answers as the helper does, so what they show is what real data gives. */
 const OFFERED = ["capabilities.get", "project.snapshot", "tasks.create", "tasks.start", "decisions.list", "decisions.answer", "results.get", "executions.get", "history.page"];
@@ -83,6 +83,17 @@ const openTeam = async () => { all(".timeline button.fold").find(b => /working|f
 const type = (label: string, value: string) => { const el = $<HTMLTextAreaElement>(`[aria-label="${label}"]`)!; el.value = value; el.dispatchEvent(new Event("input", { bubbles: true })); };
 const prompts = (s: ReturnType<typeof machine>) => s.calls.filter(c => c.operation === "executions.prompt").map(c => (c.message as { text: string }).text);
 const TASK = `/m/${LOCAL_MACHINE_ID}/t/task-1`;
+
+it("opts in only identified controls on the desktop frame and task composer", async () => {
+  await open(machine(), TASK);
+  for (const label of ["Sidebar", "Terminal", "Attach files", "Queue"]) {
+    expect(button(label), label).toBeTruthy();
+    expect(button(label)!.hasAttribute("data-tooltip"), label).toBe(true);
+    expect(button(label)!.hasAttribute("title"), label).toBe(false);
+  }
+  expect(button("Add project")?.hasAttribute("data-tooltip")).toBe(false);
+  expect($(".ws-tooltip-host")).not.toBeNull();
+});
 
 describe("machine overview, read when a screen shows it", () => {
   const ops = (s: ReturnType<typeof machine>) => s.calls.filter(c => c.operation === "machine.call").map(c => (c.message as { op: string }).op);
@@ -400,6 +411,109 @@ describe("Accept on real native result facts", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].message).toMatchObject({op:"product.task",projectId:"p",params:{action:"accept",taskId:"task-1",digest:result.digest,version:"47",acknowledgeOpenChecks:false}});
     expect(document.body.textContent).not.toContain("Acceptance was not confirmed");
+  });
+});
+
+describe("task merge recovery on real-port data", () => {
+  it("clears only the saved legacy record after explicit confirmation and permits a retry after Git is settled", async () => {
+    const s = machine([wireTask({executionId:"e",phase:"result",runtimeState:"COMPLETED",executionState:"result"})]);
+    const { conflictId, gitState, ...legacy } = stoppedMerge();
+    let cleared = false, gitSettled = false;
+    const asked: Record<string, unknown>[] = [];
+    const answer = s.answers["machine.call"]!;
+    s.answers["machine.call"] = message => {
+      const call = message as {op:string;params?:Record<string, unknown>};
+      if (call.op === "product.read") return {ok:true,result:{tasks:{"task-1":cleared
+        ? {conflict:"none",merge:null,requiresFreshResult:true}
+        : {conflict:"failed",merge:legacy}},sprints:[]}};
+      if (call.op === "product.task" && call.params?.action === "abort_merge") {
+        asked.push(call.params);
+        if (!gitSettled) return {ok:false,code:"legacy_merge_still_open",message:"Finish or abort the original merge in Git first."};
+        cleared = true;
+        return {ok:true,result:{}};
+      }
+      return answer(message);
+    };
+    await open(s, TASK + "/changes/conflict");
+    expect(document.body.textContent).toContain("Saved merge from an earlier version");
+    for (const label of ["Abort merge", "Finish merge", "Inspect merge state", "Stop resolution", "Hand to the app"]) {
+      expect(button(label)).toBeUndefined();
+    }
+    button("Clear saved merge…")!.click();
+    expect(document.activeElement?.textContent).toBe("Cancel");
+    expect($('dialog[open]')?.textContent).toContain("Clearing the saved record leaves Git unchanged");
+    expect(asked).toEqual([]);
+    button("Cancel", "dialog[open]")!.click();
+    expect(asked).toEqual([]);
+    button("Clear saved merge…")!.click();
+    button("Clear saved merge record", "dialog[open]")!.click();
+    await settled();
+    expect($('dialog[open] [role="alert"]')?.textContent).toContain("Finish or abort the original merge in Git first");
+    expect(asked).toEqual([{action:"abort_merge",taskId:"task-1",discardLegacy:true,requestId:expect.any(String)}]);
+    gitSettled = true;
+    button("Clear saved merge record", "dialog[open]")!.click();
+    await settled();
+    expect(asked).toHaveLength(2);
+    expect(asked[1]).toEqual({...asked[0],requestId:expect.any(String)});
+    expect(asked[1].requestId).not.toBe(asked[0].requestId);
+    expect($('dialog[open]')).toBeFalsy();
+    expect(document.body.textContent).toContain("No merge in progress");
+    expect(prompts(s)).toEqual([]);
+    expect(s.calls.some(c => c.operation === "executions.control")).toBe(false);
+  });
+
+  it("fences Abort while resolving, inspects uncertainty, and offers Finish with no displayed paths", async () => {
+    const s = machine([wireTask({executionId:"e",phase:"result",runtimeState:"COMPLETED",executionState:"result"})]);
+    const before = stoppedMerge();
+    const handoff = { state:"unknown", requestId:"h1",executionId:"e",sourceRevision:"s",targetRevision:"t",
+      manifest:{sourceRevision:"s",targetRevision:"t",paths:["a.txt"],complete:true,truncated:false} };
+    let merge: Record<string, unknown> = {...before, handoff:{...handoff,state:"active"}};
+    let conflict = "resolving", resolvedBy: string | null = null;
+    s.answers["executions.cancel"] = () => {
+      conflict = "failed"; merge = {...before, gitState:"unknown", handoff};
+      return {outcome:"cancellation_requested"};
+    };
+    const answer = s.answers["machine.call"]!;
+    s.answers["machine.call"] = message => {
+      const call = message as {op:string;params?:{action?:string}};
+      if (call.op === "product.read") return {ok:true,result:{tasks:{"task-1":{merge,conflict,resolvedBy}},sprints:[]}};
+      if (call.op === "product.task" && call.params?.action === "finish_merge") {
+        conflict = "none"; resolvedBy = "you";
+        merge = {...merge, finished:true, gitState:"completed", freshChecks:{state:"not_requested",revision:"resolved"}};
+      }
+      return answer(message);
+    };
+    s.answers["executions.control"] = message => {
+      const { action } = message as {action:string};
+      if (action === "inspect_merge") {
+        conflict = "conflict"; merge = {...before, handoff:{...handoff,state:"stopped"}};
+      }
+      if (action === "request_merge_checks") merge = {...merge,freshChecks:{state:"requested",revision:"resolved"}};
+      return {done:true};
+    };
+    await open(s, TASK + "/changes/conflict");
+    expect(button("Abort merge")).toBeUndefined();
+    expect(button("Finish merge")).toBeUndefined();
+    expect(button("Hand to the app")).toBeUndefined();
+    expect(document.body.textContent).toContain("App handoff recorded");
+    button("Stop resolution")!.click();
+    await settled();
+    expect(button("Abort merge")).toBeUndefined();
+    expect(document.body.textContent).toContain("Merge outcome unconfirmed");
+    expect(document.body.textContent).not.toContain("Resolve it yourself, resolve it automatically or abort the merge.");
+    button("Inspect merge state")!.click();
+    await settled();
+    expect(button("Abort merge")).toBeTruthy();
+    expect(button("Finish merge")).toBeTruthy();
+    button("Finish merge")!.click();
+    await settled();
+    expect(document.body.textContent).toContain("Fresh review and verification not requested");
+    expect(button("Abort merge")).toBeUndefined();
+    button("Request fresh checks")!.click();
+    await settled();
+    expect(document.body.textContent).toContain("Fresh review and verification requested");
+    expect(button("Request fresh checks")).toBeUndefined();
+    expect(prompts(s)).toEqual([]);
   });
 });
 
@@ -917,7 +1031,9 @@ describe("new task on real data", () => {
   const radio = (text: string) => all<HTMLLabelElement>("label.rc").find(l => l.textContent?.includes(text))!;
 
   it("offers task worktrees with the real branch base", async () => {
-    await open(machine([]), NEW);
+    const s = machine([]);
+    s.answers["service.capabilities"] = () => ({ methods: ["machine.call", "executions.control"], machine: true, taskWorktrees: true });
+    await open(s, NEW);
     expect(radio("Separate worktree").querySelector("input")!.disabled).toBe(false);
     expect(radio("Separate worktree").textContent).toMatch(/currently open branch/);
     expect(radio("Separate worktree").querySelector("input")!.checked).toBe(true);
