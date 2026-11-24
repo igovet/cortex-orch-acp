@@ -1,10 +1,18 @@
 # Senior consultant
 
-The only route to a senior consultant is `escalation_request`, which may carry an
-optional `question` and up to 16 `report_ids`. A plan that names the consultant is
+A senior consultant is added to a plan by one of two runtime routes. A worker or
+coordinator calls `escalation_request`, which may carry an optional `question` and up
+to 16 `report_ids`. Alternatively, the runtime's automatic recovery ladder (strategies
+`repair`, `escalate_route`, `consult`, `reassign`) reaches its `consult` rung for a task
+that keeps failing without progress: it records an automatic consultation request and
+the next plan receives the consultant node and packet through the same builder as an
+explicit escalation. A plan that names the consultant directly is
 refused with `consultant_requires_escalation`. The runtime validates the request, fences
-active work and creates the consultant node in the new plan. Role configuration selects
-its engine, model and effort. The automatic replan limit also bounds escalation.
+active work and creates the consultant node in the new plan. Automatic routing
+selects its model only from models whose `preferred_for` lists `design`; with none
+usable, no consultation starts and the reason is visible. There is no availability
+substitute for the consultant, and a `*` pin does not bypass the design list. The
+automatic replan limit also bounds escalation.
 
 The runtime builds the consultant's packet. It lists the reports the escalation named,
 then every report the escalated revision recorded as a result, and gives each report its

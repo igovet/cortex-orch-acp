@@ -1,5 +1,5 @@
 //! Settings-only route menu and deterministic policy ranking (Python rank v15).
-use super::{contains, read, refuse, Candidate, RouteResolver, SelectedRoute};
+use super::{contains, read, refuse, Candidate, RouteResolver, SelectedRoute, WorkerRouteContext};
 use cortex_core::{routing::Evidence, CoreError, CoreResult};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -59,41 +59,19 @@ pub(super) fn role_kind(role: &str) -> &'static str {
         _ => "implementation_backend",
     }
 }
-/// Review route selection over the usable candidates (already filtered for owner
-/// permission, automatic use, blocking and exhausted quota). `node["avoid_routes"]`
-/// names each reviewed node's author route with its recorded changed-file count;
-/// `node["previous_reviewers"]` the routes of earlier reviews of this revision.
-///
-/// 1. When any model the owner marked `preferred_for: review` is usable, only those
-///    are kept. A model not preferred for review reviews only when none is usable
-///    (`no_review_preferred_model`), never because of independence.
-/// 2. Among them, independence in this order: (a) a model different from every
-///    author model (`different_from_all_authors`); (b) a model different from the
-///    dominant author's model, preferring another engine than that author's
-///    (`different_from_dominant_author`); the dominant author is the reviewed node with
-///    the most recorded changed files, ties going to the first in plan order; (c) the
-///    authors' own review-preferred models, in a fresh session
-///    (`same_model_fresh_session`). Without review-preferred models, the former filter
-///    (another model, then another engine) applies to all candidates.
-/// 3. A rerun prefers, within the chosen set, a model no earlier review of this
-///    revision used. Ranking among the rest (quota, usage) is unchanged.
-///
-/// Returns the audit record, including the review's effort target: `high`, or
-/// `xhigh` for high-complexity work, raised one step per rerun.
+/// Rank independence and reruns only after the routing policy has selected the
+/// authorized review pool. The dominant author is the one with the most changed
+/// files (first in plan order on a tie).
 fn review_candidates<'a>(
     usable: &mut Vec<(&'a Candidate, Option<f64>)>,
     node: &Value,
-    preferred: impl Fn(&Candidate) -> bool,
+    listed_pool: bool,
 ) -> Value {
     let authors: Vec<&Value> = node["avoid_routes"]
         .as_array()
         .map(|a| a.iter().collect())
         .unwrap_or_default();
     let models: BTreeSet<&str> = authors.iter().filter_map(|a| a["model"].as_str()).collect();
-    let engines: BTreeSet<&str> = authors
-        .iter()
-        .filter_map(|a| a["engine"].as_str())
-        .collect();
     // The first author with the most changed files (`max_by_key` keeps the last of equals).
     let dominant = authors
         .iter()
@@ -106,44 +84,41 @@ fn review_candidates<'a>(
         .flatten()
         .filter_map(|r| r["model"].as_str())
         .collect();
-    let review: Vec<_> = usable
-        .iter()
-        .filter(|(c, _)| preferred(c))
-        .cloned()
-        .collect();
-    let rule = if review.is_empty() {
+    let rule = if !listed_pool {
+        // This can only be non-mandatory work classified as review with no list.
         if !models.is_empty() && usable.iter().any(|(c, _)| !models.contains(c.model())) {
             usable.retain(|(c, _)| !models.contains(c.model()));
+            let engines: BTreeSet<_> = authors
+                .iter()
+                .filter_map(|a| a["engine"].as_str())
+                .collect();
             if usable.iter().any(|(c, _)| !engines.contains(c.engine())) {
                 usable.retain(|(c, _)| !engines.contains(c.engine()));
             }
         }
         "no_review_preferred_model"
-    } else {
-        *usable = review;
-        if usable.iter().any(|(c, _)| !models.contains(c.model())) {
-            usable.retain(|(c, _)| !models.contains(c.model()));
-            if models.is_empty() {
-                "no_authors"
-            } else {
-                "different_from_all_authors"
-            }
-        } else if let Some(d) = dominant.filter(|d| {
-            usable
-                .iter()
-                .any(|(c, _)| Some(c.model()) != d["model"].as_str())
-        }) {
-            usable.retain(|(c, _)| Some(c.model()) != d["model"].as_str());
-            if usable
-                .iter()
-                .any(|(c, _)| Some(c.engine()) != d["engine"].as_str())
-            {
-                usable.retain(|(c, _)| Some(c.engine()) != d["engine"].as_str());
-            }
-            "different_from_dominant_author"
+    } else if usable.iter().any(|(c, _)| !models.contains(c.model())) {
+        usable.retain(|(c, _)| !models.contains(c.model()));
+        if models.is_empty() {
+            "no_authors"
         } else {
-            "same_model_fresh_session"
+            "different_from_all_authors"
         }
+    } else if let Some(d) = dominant.filter(|d| {
+        usable
+            .iter()
+            .any(|(c, _)| Some(c.model()) != d["model"].as_str())
+    }) {
+        usable.retain(|(c, _)| Some(c.model()) != d["model"].as_str());
+        if usable
+            .iter()
+            .any(|(c, _)| Some(c.engine()) != d["engine"].as_str())
+        {
+            usable.retain(|(c, _)| Some(c.engine()) != d["engine"].as_str());
+        }
+        "different_from_dominant_author"
+    } else {
+        "same_model_fresh_session"
     };
     let avoided_previous = !previous.is_empty()
         && usable.iter().any(|(c, _)| !previous.contains(c.model()))
@@ -151,8 +126,7 @@ fn review_candidates<'a>(
     if avoided_previous {
         usable.retain(|(c, _)| !previous.contains(c.model()));
     }
-    let rerun = node["review_rerun"].as_u64().unwrap_or(0) as usize;
-    let base = if node["complexity"] == "high" { 3 } else { 2 };
+    let (rerun, effort) = review_effort(node);
     json!({
         "rule": rule,
         "authors": authors.iter().map(|a| json!({"node":a["node"],"engine":a["engine"],"model":a["model"],"changes":a["changes"]})).collect::<Vec<_>>(),
@@ -160,8 +134,16 @@ fn review_candidates<'a>(
         "kept": usable.iter().map(|(c, _)| format!("{}/{}", c.engine(), c.model())).collect::<Vec<_>>(),
         "rerun": rerun,
         "avoided_previous_reviewer": avoided_previous,
-        "effort_target": EFFORTS[(base + rerun).min(EFFORTS.len() - 1)],
+        "effort_target": effort,
     })
+}
+fn review_effort(node: &Value) -> (u64, &'static str) {
+    let rerun = node["review_rerun"].as_u64().unwrap_or(0);
+    let base = if node["complexity"] == "high" { 3 } else { 2 };
+    (
+        rerun,
+        EFFORTS[base + rerun.min((EFFORTS.len() - 1 - base) as u64) as usize],
+    )
 }
 fn base_tier(role: &str) -> usize {
     match role.trim_start_matches("worker-") {
@@ -206,6 +188,34 @@ fn tiers(v: &Value) -> Vec<&str> {
         .filter(|t| v.as_str() == Some(t) || contains(v, t))
         .collect()
 }
+fn effective_kind<'a>(role: &str, node: &'a Value) -> &'a str {
+    match role.trim_start_matches("worker-") {
+        "code-reviewer" => "review",
+        "senior-consultant" => "design",
+        _ => node["work_kind"].as_str().unwrap_or(role_kind(role)),
+    }
+}
+
+fn tier_order(tier: usize) -> &'static [&'static str] {
+    match tier {
+        0 => &TIERS,
+        1 => &["deep", "standard", "light"],
+        2 => &["standard", "deep", "light"],
+        _ => &["light", "standard", "deep"],
+    }
+}
+
+fn provider_unavailability(event: &Value) -> Option<&'static str> {
+    match event["reason"].as_str()? {
+        "engine_quota_exhausted" | "provider_quota_limited" => Some("quota_exhausted"),
+        "provider_rate_limited" | "native_provider_temporarily_limited" => Some("provider_hold"),
+        "route_failure" | "provider_error" | "provider_outage" | "provider_unavailable" => {
+            Some("provider_route_failure")
+        }
+        _ => None,
+    }
+}
+
 fn hot(used: Option<f64>) -> bool {
     used.is_some_and(|n| n >= 95.0)
 }
@@ -503,7 +513,7 @@ impl RouteResolver {
                 format!("worker-{role}")
             };
             let hint = n["model"].as_str().unwrap_or("auto");
-            let kind = n["work_kind"].as_str().unwrap_or(role_kind(&role));
+            let kind = effective_kind(&role, n);
             if hint.contains('/')
                 && !self.candidates.iter().any(|c| {
                     label(c) == hint && self.allowed(c, true) && !self.placed(c).is_empty()
@@ -531,10 +541,33 @@ impl RouteResolver {
                     item["user_request"] = grant["source_ref"].clone();
                 }
             } else if hint.contains('/') {
-                let chosen = self.choose(&role, n, evidence, false, None)?;
+                let mut context = WorkerRouteContext::default();
+                let chosen = match self.choose_with_context(
+                    &role,
+                    n,
+                    evidence,
+                    false,
+                    None,
+                    &mut context,
+                ) {
+                    Ok(chosen) => chosen,
+                    Err(e)
+                        if e.code()
+                            == cortex_core::lifecycle::automatic::NO_MODEL_LISTED_FOR_WORK_KIND =>
+                    {
+                        item["preview_status"] = json!(e.code());
+                        item["preview_note"] = context.block["message"].clone();
+                        result.push(item);
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
                 item["preview_status"] = chosen.decision["model_hint_status"].clone();
                 if item["preview_status"] == "honoured" {
                     item["preview_status"] = json!("pending_dispatch");
+                }
+                if item["preview_status"] == "ignored:off_kind" {
+                    item["preview_note"] = json!("The hinted model is not listed for this kind of work. Dispatch will rank the eligible listed models.");
                 }
                 if item["preview_status"] == "ignored:owner_preferred" {
                     let mut preferred = chosen.decision["purpose"]["preferred"]
@@ -730,10 +763,31 @@ impl RouteResolver {
         escalated: bool,
         previous_engine: Option<&str>,
     ) -> CoreResult<SelectedRoute> {
+        self.choose_with_context(
+            role,
+            node,
+            evidence,
+            escalated,
+            previous_engine,
+            &mut WorkerRouteContext::default(),
+        )
+    }
+
+    pub(super) fn choose_with_context(
+        &self,
+        role: &str,
+        node: &Value,
+        evidence: &Evidence,
+        escalated: bool,
+        previous_engine: Option<&str>,
+        context: &mut WorkerRouteContext,
+    ) -> CoreResult<SelectedRoute> {
+        context.block = Value::Null;
         if !ROLES.contains(&role.trim_start_matches("worker-")) {
             return refuse("unknown_session_role");
         }
-        let kind = node["work_kind"].as_str().unwrap_or(role_kind(role));
+        let role_name = role.trim_start_matches("worker-");
+        let kind = effective_kind(role, node);
         if !KINDS.contains(&kind) {
             return refuse("invalid_work_kind");
         }
@@ -812,13 +866,35 @@ impl RouteResolver {
         if kind == "implementation_frontend_design" && affinity.is_none() {
             return refuse("no_available_route");
         }
+        let has_kind_list = self.rules["models"].as_object().is_some_and(|engines| {
+            engines.values().any(|engine| {
+                engine["policy"].as_object().is_some_and(|models| {
+                    models.values().any(|p| kind_in(&p["preferred_for"], kind))
+                })
+            })
+        });
         let pins = &self.rules["pin"];
-        if let Some(pin) = pins
-            .get(role)
-            .or_else(|| pins.get(role.trim_start_matches("worker-")))
-            .or_else(|| pins.get("*"))
-            .and_then(Value::as_str)
-        {
+        let exact_pin = pins.get(role).or_else(|| pins.get(role_name));
+        let mut pin = exact_pin.or_else(|| pins.get("*")).and_then(Value::as_str);
+        let mandatory_review = role_name == "code-reviewer";
+        let consultant = role_name == "senior-consultant";
+        let strict = has_kind_list || mandatory_review || consultant;
+        if exact_pin.is_none() && (strict || escalated) {
+            if let Some(wildcard) = pin {
+                let route = wildcard.rsplit_once(':').map_or(wildcard, |(r, _)| r);
+                let listed = route.split_once('/').is_some_and(|(engine, model)| {
+                    kind_in(
+                        &self.rules["models"][engine]["policy"][model]["preferred_for"],
+                        kind,
+                    )
+                });
+                if !listed {
+                    decision["wildcard_pin_status"] = json!("ignored:off_kind");
+                    pin = None;
+                }
+            }
+        }
+        if let Some(pin) = pin {
             let (route, effort) = pin
                 .rsplit_once(':')
                 .map_or((pin, None), |(r, e)| (r, Some(e)));
@@ -902,31 +978,130 @@ impl RouteResolver {
                 kind,
             );
         }
+        let listed = |c: &Candidate| kind_in(&self.policy(c)["preferred_for"], kind);
+        let allowed_automatically =
+            |c: &Candidate| self.allowed(c, true) && self.automatic(c).is_none();
         let base_role_tier = role_tier(role, complexity, false);
         let mut role_tier = role_tier(role, complexity, escalated);
         let stretch_allowed = base_tier(role) >= 2 && complexity != "high" && base_role_tier == 2;
+        let stretches = |c: &Candidate| {
+            stretch_allowed
+                && self.placed(c).contains(&"light")
+                && kind_in(&self.policy(c)["also_standard_for"], kind)
+        };
+        let serves = |c: &Candidate, tier: &str| {
+            self.placed(c).contains(&tier) || tier == "standard" && stretches(c)
+        };
+        let supported = |c: &Candidate, tier: &str| self.permitted(c, tier).is_ok();
+        let held = |c: &Candidate| {
+            context
+                .held
+                .iter()
+                .any(|key| key.0 == c.engine() && key.1 == c.connection_id() && key.2 == c.model())
+        };
+        let mut usable = Vec::new();
+        let mut unavailable = Vec::new();
+        let mut non_availability_block = false;
+        for c in self
+            .candidates
+            .iter()
+            .filter(|c| allowed_automatically(c) && (!strict || listed(c)))
+        {
+            let tiers = tier_order(role_tier);
+            if !tiers.iter().any(|t| serves(c, t)) {
+                continue;
+            }
+            if strict && !tiers.iter().any(|t| serves(c, t) && supported(c, t)) {
+                non_availability_block = true;
+                continue;
+            }
+            let blocked = self.blocked(c, evidence);
+            let (usage, availability) = if let Some(event) = blocked {
+                (None, provider_unavailability(event))
+            } else if strict && held(c) {
+                (None, Some("provider_hold"))
+            } else {
+                let usage = self.usage(c)?;
+                (
+                    usage,
+                    usage.filter(|u| *u >= 100.0).map(|_| "quota_exhausted"),
+                )
+            };
+            if let Some(reason) = availability {
+                unavailable.push(
+                    json!({"route":label(c),"connection_id":c.connection_id(),"reason":reason}),
+                );
+            } else if blocked.is_some() {
+                non_availability_block = true;
+            } else {
+                usable.push((c, usage));
+            }
+        }
         if escalated
-            && stretch_allowed
-            && self.candidates.iter().any(|c| {
-                self.placed(c).contains(&"light")
-                    && kind_in(&self.policy(c)["also_standard_for"], kind)
-            })
+            && usable
+                .iter()
+                .any(|(c, _)| stretches(c) && supported(c, "standard"))
         {
             role_tier = 2;
         }
-        let order: &[&str] = match role_tier {
-            0 => &TIERS,
-            1 => &["deep", "standard", "light"],
-            2 => &["standard", "deep", "light"],
-            _ => &["light", "standard", "deep"],
-        };
-        let serves = |c: &Candidate, tier: &str| {
-            self.placed(c).contains(&tier)
-                || tier == "standard"
-                    && stretch_allowed
-                    && self.placed(c).contains(&"light")
-                    && kind_in(&self.policy(c)["also_standard_for"], kind)
-        };
+
+        let mut order = tier_order(role_tier);
+        let target = TIERS[role_tier];
+        decision["work_kind_policy"] = json!({
+            "work_kind": kind, "target_tier": target,
+            "owner_list_exists": has_kind_list,
+            "mode": if strict { "listed_only" } else { "no_owner_list" }
+        });
+
+        // Availability failover is exceptional, not a quality escalation: an
+        // otherwise eligible listed route must have positive availability
+        // evidence and no reachable listed route may be blocked for other reasons.
+        let mut failover = false;
+        if strict
+            && usable.is_empty()
+            && !mandatory_review
+            && !consultant
+            && !non_availability_block
+            && !unavailable.is_empty()
+        {
+            for tier in order.iter().copied().filter(|tier| {
+                let index = TIERS.iter().position(|t| t == tier).unwrap();
+                index.abs_diff(role_tier) <= 1 && (index != 0 || role_tier == 0)
+            }) {
+                for c in self.candidates.iter().filter(|c| {
+                    allowed_automatically(c)
+                        && !listed(c)
+                        && self.placed(c).contains(&tier)
+                        && (target == "flagship" || !self.placed(c).contains(&"flagship"))
+                        && supported(c, tier)
+                        && self.blocked(c, evidence).is_none()
+                        && !held(c)
+                }) {
+                    let usage = self.usage(c)?;
+                    if usage.is_none_or(|u| u < 100.0) {
+                        usable.push((c, usage));
+                    }
+                }
+                if !usable.is_empty() {
+                    let index = TIERS.iter().position(|t| *t == tier).unwrap();
+                    order = &TIERS[index..=index];
+                    failover = true;
+                    decision["work_kind_policy"]["mode"] = json!("availability_failover");
+                    decision["availability_failover"] = json!({
+                        "work_kind":kind,"target_tier":target,"fallback_tier":tier,
+                        "unavailable_listed_routes":unavailable,
+                    });
+                    break;
+                }
+            }
+        }
+        if strict && usable.is_empty() {
+            context.block = json!({
+                "work_kind":kind,"target_tier":target,"owner_list_exists":has_kind_list,
+                "message":format!("No usable model is listed for {kind} work (target tier: {target})."),
+            });
+            return refuse(cortex_core::lifecycle::automatic::NO_MODEL_LISTED_FOR_WORK_KIND);
+        }
         let purpose = |c: &Candidate| {
             let p = self.policy(c);
             if p["preferred_when"].is_null() || kind == "implementation_frontend_design" {
@@ -937,41 +1112,33 @@ impl RouteResolver {
                     && (kinds(&p["preferred_for"]).is_empty() || kind_in(&p["preferred_for"], kind))
             }
         };
-        let mut usable = Vec::new();
-        for c in self.candidates.iter().filter(|c| {
-            self.allowed(c, true)
-                && self.automatic(c).is_none()
-                && self.blocked(c, evidence).is_none()
-        }) {
-            let usage = self.usage(c)?;
-            if usage.is_none_or(|v| v < 100.0) {
-                usable.push((c, usage));
-            }
-        }
-        // Review routing. A model the owner prefers for review always reviews when one is
-        // usable; independence then chooses among those models only, never by falling
-        // back to a model the owner did not mark for review. See `review_candidates`.
-        let mut review_hint_dropped = None;
-        if kind == "review" {
-            let matches_hint = |c: &Candidate| hint == label(c) || hint == c.engine();
-            let hinted_before: Vec<bool> = usable
+
+        let matches_hint = |c: &Candidate| hint == label(c) || hint == c.engine();
+        let off_kind_hint = strict
+            && !failover
+            && !usable.iter().any(|(c, _)| matches_hint(c))
+            && self
+                .candidates
                 .iter()
-                .filter(|(c, _)| matches_hint(c))
-                .map(|(c, _)| purpose(c))
-                .collect();
-            let rule = review_candidates(&mut usable, node, |c| {
-                purpose(c) && order.iter().any(|t| serves(c, t))
+                .any(|c| matches_hint(c) && !listed(c));
+        let mut review_hint_dropped = None;
+        if kind == "review" && failover {
+            // Keep the required review effort. Independence is reported for
+            // the actual choice, but does not diversify an off-list fallback.
+            let (rerun, effort) = review_effort(node);
+            decision["review_route"] = json!({
+                "rule":"availability_failover","rerun":rerun,"effort_target":effort
             });
-            decision["review_route"] = rule;
-            // A hinted model that review routing set aside says why.
-            if !hinted_before.is_empty() && !usable.iter().any(|(c, _)| matches_hint(c)) {
-                review_hint_dropped = Some(if hinted_before.iter().any(|p| *p) {
-                    "ignored:review_independence"
-                } else {
-                    "ignored:owner_preferred"
-                });
+        } else if kind == "review" {
+            let hinted_before = usable.iter().any(|(c, _)| matches_hint(c));
+            decision["review_route"] = review_candidates(&mut usable, node, strict);
+            if hinted_before && !usable.iter().any(|(c, _)| matches_hint(c)) {
+                review_hint_dropped = Some("ignored:review_independence");
             }
-        } else if let Some(avoid) = node["avoid_routes"].as_array().filter(|a| !a.is_empty()) {
+        } else if let Some(avoid) = node["avoid_routes"]
+            .as_array()
+            .filter(|a| !failover && !a.is_empty())
+        {
             // Other independence-constrained work: leave only routes on another model when
             // one exists, then prefer another engine among them.
             let models: BTreeSet<&str> = avoid.iter().filter_map(|a| a["model"].as_str()).collect();
@@ -983,18 +1150,6 @@ impl RouteResolver {
                     usable.retain(|(c, _)| !engines.contains(c.engine()));
                 }
             }
-        }
-        // The owner's per-model work kinds (`preferred_for`) decide which models may do
-        // this kind of work at all; tiers and escalation choose only among them. A model
-        // with no listed kinds serves every kind. Owner store 2026-11-21: an escalated
-        // QA (testing) node went to Fable, configured only for design. When no usable
-        // model lists the kind, every usable model stays eligible, so work never stops.
-        let eligible = |c: &Candidate| {
-            let p = &self.policy(c)["preferred_for"];
-            kinds(p).is_empty() || kind_in(p, kind)
-        };
-        if usable.iter().any(|(c, _)| eligible(c)) {
-            usable.retain(|(c, _)| eligible(c));
         }
         let meaningfully_worse =
             |preferred: &Vec<(&Candidate, Option<f64>)>, all: &Vec<(&Candidate, Option<f64>)>| {
@@ -1031,7 +1186,7 @@ impl RouteResolver {
         for tier in order {
             let mut candidates: Vec<_> = usable
                 .iter()
-                .filter(|(c, _)| serves(c, tier))
+                .filter(|(c, _)| failover || serves(c, tier) && (!strict || supported(c, tier)))
                 .cloned()
                 .collect();
             if candidates.is_empty() {
@@ -1062,26 +1217,28 @@ impl RouteResolver {
             let provider_active = provider.is_some()
                 && !provider_candidates.is_empty()
                 && !meaningfully_worse(&provider_candidates, &candidates);
-            let configured_preferred = self.rules["models"].as_object().is_some_and(|engines| {
-                engines.iter().any(|(engine, config)| {
-                    config["tiers"].as_object().is_some_and(|models| {
-                        models.iter().any(|(model, ts)| {
-                            let p = &config["policy"][model];
-                            tiers(ts).contains(tier)
-                                && if p["preferred_when"].is_null()
-                                    || kind == "implementation_frontend_design"
-                                {
-                                    kind_in(&p["preferred_for"], kind)
-                                } else {
-                                    !escalated
-                                        && hint == format!("{engine}/{model}")
-                                        && (kinds(&p["preferred_for"]).is_empty()
-                                            || kind_in(&p["preferred_for"], kind))
-                                }
+            let configured_preferred = !failover
+                && self.rules["models"].as_object().is_some_and(|engines| {
+                    engines.iter().any(|(engine, config)| {
+                        config["tiers"].as_object().is_some_and(|models| {
+                            models.iter().any(|(model, ts)| {
+                                let p = &config["policy"][model];
+                                tiers(ts).contains(tier)
+                                    && (!strict || kind_in(&p["preferred_for"], kind))
+                                    && if p["preferred_when"].is_null()
+                                        || kind == "implementation_frontend_design"
+                                    {
+                                        kind_in(&p["preferred_for"], kind)
+                                    } else {
+                                        !escalated
+                                            && hint == format!("{engine}/{model}")
+                                            && (kinds(&p["preferred_for"]).is_empty()
+                                                || kind_in(&p["preferred_for"], kind))
+                                    }
+                            })
                         })
                     })
-                })
-            });
+                });
             let usage_scope = if purpose_active {
                 preferred.clone()
             } else if configured_preferred {
@@ -1097,7 +1254,11 @@ impl RouteResolver {
                     u8::from(!(purpose_active && purpose(c))),
                     u8::from(!(hint_active && (hint == label(c) || hint == c.engine()))),
                     u8::from(hot(*u)),
-                    u8::from(!(escalated && previous_engine.is_some_and(|e| e != c.engine()))),
+                    u8::from(
+                        !(escalated
+                            && !failover
+                            && previous_engine.is_some_and(|e| e != c.engine())),
+                    ),
                     u8::from(Some(c.engine()) != affinity),
                 )
             };
@@ -1170,9 +1331,10 @@ impl RouteResolver {
                 "auto"
             } else if escalated {
                 "ignored:escalated"
-            } else if purpose_active
-                && !hinted.is_empty()
-                && !hinted.iter().any(|(c, _)| purpose(c))
+            } else if off_kind_hint && !purpose_active {
+                "ignored:off_kind"
+            } else if off_kind_hint
+                || purpose_active && !hinted.is_empty() && !hinted.iter().any(|(c, _)| purpose(c))
             {
                 "ignored:owner_preferred"
             } else if let Some(reason) = review_hint_dropped.filter(|_| hinted.is_empty()) {
@@ -1185,14 +1347,23 @@ impl RouteResolver {
                 "ignored:tier_mismatch"
             };
             decision["model_hint_status"] = json!(hint_status);
-            decision["basis"] = json!("rank");
+            decision["basis"] = json!(if failover {
+                "availability_failover"
+            } else {
+                "rank"
+            });
             decision["affinity"] = json!({"work_kind":kind,"engine":affinity,"source":if configured{"routing.json"}else{"default"}});
             decision["purpose"] = json!({"work_kind":kind,"status":if purpose_active{"honoured"}else if preferred.is_empty(){"none"}else{"ignored:near_quota_limit"},
                 "preferred":preferred.iter().map(|(c,_)|label(c)).collect::<Vec<_>>()});
             decision["usage"] = json!({"compared":usage_active,"active":usage_active,"status":if usage_active{"active"}else if configured_preferred{"not_applied:owner_preferred_unavailable"}else{"unavailable"},
                 "scope":if purpose_active{"preferred"}else if configured_preferred{"none"}else{"all"},"threshold":95,"role":"tie_breaker"});
             decision["candidates"]=json!(candidates.iter().map(|(c,u)|json!({"route":label(c),"connection_id":c.connection_id(),"used_percent":u})).collect::<Vec<_>>());
-            return self.resolved(c, tier, None, "auto", decision, escalated, kind);
+            let basis = if failover {
+                "auto:availability_failover"
+            } else {
+                "auto"
+            };
+            return self.resolved(c, tier, None, basis, decision, escalated, kind);
         }
         refuse("no_available_route")
     }

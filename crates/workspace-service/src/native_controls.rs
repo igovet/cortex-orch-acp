@@ -1679,11 +1679,115 @@ use cortex_core::{
 };
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
-use std::{io, sync::Arc};
+use std::{io, path::PathBuf, sync::Arc};
+use crate::machine::merge_control::{MergeTask, Prepared, Settlement};
+
+struct BoundMerge {
+    binding: control::Binding,
+    root: PathBuf,
+    checkout: PathBuf,
+    state: PathBuf,
+}
+
+impl BoundMerge {
+    fn task<'a>(&'a self, project: &'a str, execution: &'a str) -> MergeTask<'a> {
+        MergeTask {
+            root: &self.root, state: &self.state, project, execution,
+            binding: &self.binding, checkout: &self.checkout,
+        }
+    }
+}
+
+struct MergeDispatch<'a> {
+    task: MergeTask<'a>,
+    owner_request: &'a Value,
+    handoff: bool,
+    initial_goal: Option<String>,
+}
+
 fn err(e: CoreError) -> io::Error {
     failure(e.code())
 }
 impl Runtime {
+    pub(crate) async fn rework(
+        self: &Arc<Self>,
+        project: String,
+        request: Value,
+        capture: Option<cortex_core::input::Capture>,
+    ) -> crate::machine::native::Result<Value> {
+        use crate::machine::task_rework as rework;
+
+        // As with native controls, a disconnected client cannot cancel admission
+        // between its durable receipt and the runtime's driver launch.
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let _serial = runtime.controls.lock().await;
+            if *runtime.stop.borrow() {
+                return Err(rework::error("service_stopping"));
+            }
+            let state = runtime.host.workspace_state.clone()
+                .ok_or_else(|| rework::error("workspace_state_unavailable"))?;
+            let maintenance = state.clone();
+            let _maintenance = tokio::task::spawn_blocking(move || {
+                crate::machine::maintenance::admission(&maintenance)
+            }).await.map_err(|_| rework::error("maintenance_busy"))??;
+            let request = control::canonical_request(request, capture.as_ref())
+                .map_err(|e| rework::error(e.code()))?;
+            let (s, p, r) = (state.clone(), project.clone(), request.clone());
+            let (b, replay) = runtime.host.executor.publication(move |store| {
+                rework::preflight(store, &s, &p, &r)
+            }).map_err(|e| rework::error(e.code()))?.await
+                .map_err(|_| rework::error("native_host_closed"))?
+                .map_err(|e| rework::error(e.code()))?;
+            if let Some(receipt) = replay {
+                return Ok(receipt);
+            }
+            let (route, pin) = if let Some(b) = b {
+                let route = runtime.coordinator_route(&b.task, None).await
+                    .map_err(|e| rework::error(e.code()))?;
+                runtime.settle_task(&b.task).await.map_err(|e| rework::error(e.code()))?;
+                (route, None)
+            } else {
+                let (p, draft) = (project.clone(), request["taskId"].as_str().unwrap().to_owned());
+                let saved = runtime.host.executor.publication(move |store| {
+                    cortex_core::workspace::draft_settings(store, &p, &actor(), &draft)
+                }).map_err(|e| rework::error(e.code()))?.await
+                    .map_err(|_| rework::error("native_host_closed"))?
+                    .map_err(|e| rework::error(e.code()))?;
+                let root = &runtime.host.root;
+                let route = match &saved {
+                    Some(settings) => runtime.routes.task_route(root, settings),
+                    None => runtime.routes.route(root, "orchestrator"),
+                }.map_err(|e| rework::error(e.code()))?;
+                let pin = runtime.routes.coordinator_pin(root, saved.as_ref().unwrap_or(&json!({})))
+                    .map_err(|e| rework::error(e.code()))?;
+                (route, pin)
+            };
+            let (receipt, binding) = runtime.host.executor.publication(move |store| {
+                // The Core publication lane owns the store and Git/overlay
+                // changes. Keep the specific machine refusal in the response.
+                Ok(rework::admit(store, &state, &project, &request, capture.as_ref()))
+            }).map_err(|e| rework::error(e.code()))?.await
+                .map_err(|_| rework::error("native_host_closed"))?
+                .map_err(|e| rework::error(e.code()))??;
+            if let Some(b) = binding {
+                if let Some(pin) = pin {
+                    let task = b.task.clone();
+                    if let Ok(saved) = runtime.host.executor.write(move |db| {
+                        lifecycle::event_tx(db, &task, "NATIVE_COORDINATOR_ROUTE", pin)?;
+                        Ok(())
+                    }) {
+                        let _ = saved.await;
+                    }
+                }
+                runtime.continue_task(
+                    b.task, b.owner, format!("{}\n\nContinue from the retained task state with a fresh plan.", b.goal), route,
+                ).await.map_err(|e| rework::error(e.code()))?;
+            }
+            Ok(receipt)
+        }).await.map_err(|_| rework::error("native_control_outcome_unknown"))?
+    }
+
     pub(crate) async fn control(
         self: &Arc<Self>,
         project: String,
@@ -1739,7 +1843,8 @@ impl Runtime {
         // even if the caller disappears. Stop and cancellation remain available.
         let _maintenance = if matches!(
             request["action"].as_str(),
-            Some("resume" | "retry" | "prompt" | "incoming_prompt" | "rerun_check")
+            Some("resume" | "retry" | "prompt" | "incoming_prompt" | "rerun_check" |
+                "handoff_merge" | "request_merge_checks" | "inspect_merge")
         ) {
             if let Some(state) = self.host.workspace_state.clone() {
                 Some(
@@ -1764,6 +1869,27 @@ impl Runtime {
         ) {
             return self.owner_control(project, request).await.map_err(err);
         }
+        if matches!(request["action"].as_str(), Some("handoff_merge" | "inspect_merge" | "request_merge_checks")) {
+            return self.merge_control(&project, &request, capture).await;
+        }
+        let execution = request["executionId"].as_str().unwrap_or_default().to_owned();
+        let settle = matches!(request["action"].as_str(), Some("pause" | "stop" | "close_task" | "mark_resolved"));
+        let result = self.apply_runtime_control(project.clone(), request, capture, None).await;
+        if settle {
+            // Core's checked Stop receipt, not a UI action or a cancelled future,
+            // decides whether the merge's writers are gone.
+            let _ = self.reconcile_merge_execution(&project, &execution, None, false).await;
+        }
+        result
+    }
+
+    async fn apply_runtime_control(
+        self: &Arc<Self>,
+        project: String,
+        request: Value,
+        capture: Option<cortex_core::input::Capture>,
+        merge: Option<&MergeDispatch<'_>>,
+    ) -> io::Result<Value> {
         if request.as_object().is_none_or(|m| {
             m.keys().any(|k| {
                 ![
@@ -1809,6 +1935,17 @@ impl Runtime {
             request["action"].as_str(),
             Some("retry" | "prompt" | "incoming_prompt")
         );
+        if message {
+            if let Some(state) = self.host.workspace_state.clone() {
+                let project = project.clone();
+                let execution = request["executionId"].as_str().unwrap_or_default().to_owned();
+                self.host.executor.publication(move |store| {
+                    crate::machine::task_rework::with_plain_prompt_guard(
+                        store, &state, &project, &execution, || Ok(()),
+                    )
+                }).map_err(err)?.await.map_err(|_| failure("native_host_closed"))?.map_err(err)?;
+            }
+        }
         let route = if restart {
             let task = self.control_task(&project, &request).await.map_err(err)?;
             Some(self.coordinator_route(&task, None).await.map_err(err)?)
@@ -1817,10 +1954,20 @@ impl Runtime {
         };
         let p = project.clone();
         let r = request.clone();
+        let workspace_state = self.host.workspace_state.clone();
         let b = self
             .host
             .executor
-            .publication(move |s| control::admit_input(s, &p, &actor(), &r, capture.as_ref()))
+            .publication(move |s| {
+                let admit = || control::admit_input(s, &p, &actor(), &r, capture.as_ref());
+                if let Some(state) = workspace_state.as_ref().filter(|_| message) {
+                    crate::machine::task_rework::with_plain_prompt_guard(
+                        s, state, &p, r["executionId"].as_str().unwrap_or_default(), admit,
+                    )
+                } else {
+                    admit()
+                }
+            })
             .map_err(err)?
             .await
             .map_err(|_| failure("native_host_closed"))?
@@ -1888,16 +2035,28 @@ impl Runtime {
                 return Err(err(error));
             }
         };
+        let merge_receipt = match merge {
+            Some(merge) if !boundary && route.is_some() && result["outcome"] == "recorded" => {
+                Some(merge.task.confirmed(merge.owner_request, merge.handoff).map_err(|e| failure(e.code))?)
+            }
+            Some(_) => return Err(failure("merge_dispatch_unconfirmed")),
+            None => None,
+        };
         if boundary {
-            // A working task has a driver that delivers the message at its next
-            // boundary. Only when none runs (never replacing a live one) is one started.
-            if request["action"] != "allow_write" && !self.driven(&b.task).await {
-                self.resume_task(b.task, b.owner).await.map_err(err)?;
+            // The running driver can start a steering turn during execution.
+            // Only when no driver runs do we start one; never replace a live driver.
+            if request["action"] != "allow_write" {
+                self.wake.notify_waiters();
+                if !self.driven(&b.task).await {
+                    self.resume_task(b.task, b.owner).await.map_err(err)?;
+                }
             }
         } else if let Some(route) = route {
             // An owner message reaches the relaunched coordinator in its owner-message
             // section (`lifecycle::steering`), with any earlier undelivered ones.
-            let prompt = if message {
+            let prompt = if let Some(first_turn) = merge.and_then(|m| m.initial_goal.as_ref()) {
+                format!("{}\n\n{first_turn}", b.goal)
+            } else if message {
                 format!("{}\n\nContinue from the retained task state.", b.goal)
             } else {
                 format!(
@@ -1906,14 +2065,181 @@ impl Runtime {
                     request["text"].as_str().unwrap_or("Continue.")
                 )
             };
-            self.continue_task(b.task, b.owner, prompt, route)
+            let handoff = merge.filter(|m| m.handoff)
+                .and_then(|_| request["requestId"].as_str()).map(str::to_owned);
+            self.continue_with_handoff(b.task, b.owner, prompt, route, handoff)
                 .await
                 .map_err(err)?;
         } else if resume {
             self.resume_task(b.task, b.owner).await.map_err(err)?;
         }
-        Ok(result)
+        Ok(match merge_receipt {
+            Some(mut receipt) => {
+                receipt["runtimeReceipt"] = result;
+                receipt
+            }
+            None => result,
+        })
     }
+
+    async fn bound_merge(&self, project: &str, execution: &str) -> CoreResult<BoundMerge> {
+        let state = self.host.workspace_state.clone().ok_or(CoreError::Refused("workspace_state_unavailable"))?;
+        let (project, execution) = (project.to_owned(), execution.to_owned());
+        self.host.executor.publication(move |store| {
+            let root = store.key().root().to_owned();
+            store.read(|db| {
+                let binding = control::binding(db, &root.to_string_lossy(), &project, &actor(), &execution)?;
+                let checkout = cortex_core::workspace::worktrees::desktop_checkout_on(
+                    db, store.key(), &project, Some(&binding.draft), Some(&execution),
+                )?.ok_or(CoreError::Refused("worktree_binding_invalid"))?;
+                Ok(BoundMerge { binding, checkout: checkout.path().to_owned(), root, state })
+            })
+        })?.await.map_err(|_| CoreError::Refused("native_host_closed"))?
+    }
+
+    async fn merge_settlement(&self, task: &MergeTask<'_>, retained: &Value) -> CoreResult<Settlement> {
+        let driven = self.driven(&task.binding.task).await;
+        let (runtime, draft, project, root) = (
+            task.binding.task.clone(), task.binding.draft.clone(),
+            task.project.to_owned(), task.root.to_owned(),
+        );
+        let handoff = retained["handoff"]["runtimeRequestId"].as_str().map(str::to_owned);
+        let checks = retained["freshChecks"]["runtimeRequestId"].as_str().map(str::to_owned);
+        self.host.executor.read(move |db| {
+            let (phase, revision): (String, i64) = db.query_row(
+                "SELECT state,revision FROM runtime_tasks WHERE task_id=?", [&runtime],
+                |row| Ok((row.get(0)?,row.get(1)?)),
+            )?;
+            let seen = |kind, key: &Option<String>| -> CoreResult<bool> {
+                let Some(key) = key else { return Ok(false); };
+                Ok(db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_events
+                     WHERE task_id=? AND type=? AND json_extract(payload_json,'$.request')=?)",
+                    (&runtime,kind,key), |row| row.get(0),
+                )?)
+            };
+            let checks_confirmed = match &checks {
+                None => false,
+                Some(key) => db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=?
+                     AND actor='native-desktop-finish' AND request_key=? AND operation='native_desktop_finished'
+                     AND json_extract(result_json,'$.outcome')='recorded')",
+                    (&runtime,key), |row| row.get(0),
+                )?,
+            };
+            let quiet = !driven
+                && crate::machine::task_lifecycle::settled(db, &root, &project, &draft).is_ok()
+                && lifecycle::automatic::require_settled_execution(db, &runtime).is_ok();
+            Ok(Settlement {
+                phase, revision, quiet, checks_confirmed,
+                handoff_recorded: seen("USER_STEERING", &handoff)?,
+                handoff_delivered: seen("WORKSPACE_MERGE_HANDOFF_DELIVERED", &handoff)?,
+                checks_recorded: seen("USER_STEERING", &checks)?,
+            })
+        })?.await.map_err(|_| CoreError::Refused("native_host_closed"))?
+    }
+
+    async fn merge_control(
+        self: &Arc<Self>, project: &str, request: &Value, capture: Option<cortex_core::input::Capture>,
+    ) -> io::Result<Value> {
+        let handoff = request["action"] == "handoff_merge";
+        let inspect = request["action"] == "inspect_merge";
+        if request.as_object().is_none_or(|fields| fields.keys().any(|key| {
+            !matches!(key.as_str(), "projectId" | "executionId" | "requestId" | "action" | "conflictId")
+                && !(handoff && matches!(key.as_str(), "text" | "attachments"))
+        })) || (!handoff && capture.is_some())
+            || request.get("text").is_some_and(|t| t.as_str().is_none_or(|s| s.len() > 12_000))
+            || ((!inspect || !request["conflictId"].is_null())
+                && workspace_protocol::validate("Identity", &request["conflictId"]).is_err())
+        {
+            return Err(failure("invalid_request"));
+        }
+        if let Some(guidance) = request["text"].as_str() {
+            if !lifecycle::steering::parse_denials(guidance).map_err(err)?.is_empty()
+                || !lifecycle::steering::parse_lifts(guidance).map_err(err)?.is_empty()
+            {
+                // Unlike ordinary steering this one-shot guidance is not kept in
+                // that queue. Never silently discard a requested write constraint.
+                return Err(failure("merge_guidance_write_rule"));
+            }
+        }
+        let execution = request["executionId"].as_str().unwrap_or_default();
+        if inspect {
+            return self.reconcile_merge_execution(project, execution, Some(&request["conflictId"]), false).await;
+        }
+        let bound = self.bound_merge(project, execution).await.map_err(err)?;
+        let task = bound.task(project, execution);
+        let settlement = self.merge_settlement(&task, &Value::Null).await.map_err(err)?;
+        let fingerprint = capture.as_ref().map(|c| c.fingerprint());
+        let prepared = task.prepare(handoff, request, settlement.quiet, fingerprint).await.map_err(|e| failure(e.code))?;
+        let Prepared::Dispatch { prompt, guidance, runtime_key } = prepared else {
+            let Prepared::Existing(receipt) = prepared else { unreachable!() };
+            return Ok(receipt);
+        };
+        // Steering still records owner consent/attachments transactionally. The merge
+        // instructions themselves go only into this initial turn, not into the normal
+        // steering queue (which can replay an unconfirmed message on recovery).
+        let (text, initial_goal) = if handoff {
+            let first_turn = match guidance {
+                Some(guidance) => format!("{prompt}\n\nOwner guidance:\n{guidance}"),
+                None => prompt,
+            };
+            ("The owner requested help with a task merge. Only act on a merge handoff if this turn contains its bound manifest; do not replay a prior merge action.".to_owned(), Some(first_turn))
+        } else {
+            (prompt, None)
+        };
+        let input = json!({"projectId":project,"executionId":execution,"requestId":runtime_key,
+            "action":"incoming_prompt","text":text,"attachments":[]});
+        let dispatch = MergeDispatch { task, owner_request: request, handoff, initial_goal };
+        let result = self.apply_runtime_control(project.to_owned(), input, capture, Some(&dispatch)).await;
+        if result.is_err() {
+            // A route/admission refusal need not strand the owner. A recorded but
+            // unconfirmed input stays unknown instead of launching it again.
+            let _ = self.reconcile_merge_execution(project, execution, Some(&request["conflictId"]), false).await;
+        }
+        result
+    }
+
+    pub(super) async fn reconcile_merge_execution(
+        &self, project: &str, execution: &str, id: Option<&Value>, allow_commit: bool,
+    ) -> io::Result<Value> {
+        let bound = self.bound_merge(project, execution).await.map_err(err)?;
+        let task = bound.task(project, execution);
+        let retained = task.retained().map_err(|e| failure(e.code))?;
+        if id.is_none() && retained["finished"] == true
+            && retained["freshChecks"]["state"] != "request_unknown"
+        {
+            return Ok(Value::Null);
+        }
+        let outcome = self.merge_settlement(&task, &retained).await.map_err(err)?;
+        let (reply, changed) = task.reconcile(Some(id.unwrap_or(&retained["conflictId"])), outcome, allow_commit)
+            .await.map_err(|e| failure(e.code))?;
+        if changed {
+            if let Some(updates) = &self.workspace_updates {
+                let _ = updates.send(json!({"projectId":project,"type":"project_state"}));
+            }
+        }
+        Ok(reply)
+    }
+
+    pub(super) async fn reconcile_after_merge_driver(&self, runtime: &str) {
+        if self.host.workspace_state.is_none() || *self.stop.borrow() {
+            return;
+        }
+        let _control = self.controls.lock().await;
+        let task = runtime.to_owned();
+        let Ok(read) = self.host.executor.read(move |db| {
+            Ok(db.query_row(
+                "SELECT w.project_id,e.execution_id FROM workspace_tasks w JOIN workspace_executions e
+                 ON e.execution_id=w.execution_id AND e.task_id=w.task_id WHERE e.runtime_task_id=?",
+                [&task], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)),
+            ).optional()?)
+        }) else { return; };
+        if let Ok(Ok(Some((project, execution)))) = read.await {
+            let _ = self.reconcile_merge_execution(&project, &execution, None, true).await;
+        }
+    }
+
     /// RECOVERING with a recorded reason: no driver continues it on its own.
     async fn held_for_recovery(&self, task: &str) -> CoreResult<bool> {
         let task = task.to_owned();
@@ -2098,6 +2424,7 @@ impl Runtime {
             }
             runtime.driver_ended(&task, &cancelled).await;
             done.send_replace(true);
+            runtime.reconcile_after_merge_driver(&task).await;
         })
         .await;
         Ok(())
@@ -2400,8 +2727,8 @@ impl Runtime {
             }
         }
         // A worker-side route hold must see the same role and routing inputs
-        // qualify (with fresh task evidence), not just a usable coordinator. The
-        // resumed plan routes escalated, so the probe does too.
+        // qualify (with fresh task evidence), not just a usable coordinator.
+        // A strict kind refusal is a settings/availability wait, not a promotion.
         if owed.external {
             let reason = owed.evidence["reason"].as_str().unwrap_or_default();
             if reason == "engine_authentication_required" {
@@ -2428,6 +2755,12 @@ impl Runtime {
                     .read(move |db| cortex_core::routing::evidence(db, &t, &root))?
                     .await
                     .map_err(|_| CoreError::Refused("native_host_closed"))??;
+                let mut context = crate::native_routes::WorkerRouteContext {
+                    held: self.host.route_holds.active_routes(),
+                    ..Default::default()
+                };
+                let escalated = reason != automatic::NO_MODEL_LISTED_FOR_WORK_KIND
+                    || probe["escalated"] == true;
                 if self
                     .routes
                     .worker_selection(
@@ -2435,8 +2768,9 @@ impl Runtime {
                         role,
                         &probe["node"],
                         &evidence,
-                        true,
+                        escalated,
                         probe["previous"].as_str(),
+                        &mut context,
                     )
                     .is_err()
                 {

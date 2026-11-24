@@ -200,6 +200,17 @@ fn reason(e: &Event) -> Option<String> {
                 None => "an engine session did not start".into(),
             }
         }
+        "NATIVE_WORKER_ROUTE_BLOCKED"
+            if p["reason"] == cortex_core::lifecycle::automatic::NO_MODEL_LISTED_FOR_WORK_KIND =>
+        {
+            let block = &p["work_kind_block"];
+            match (spelled(&block["work_kind"]), spelled(&block["target_tier"])) {
+                (Some(kind), Some(tier)) => {
+                    format!("no usable model listed for {kind} work (target tier: {tier})")
+                }
+                _ => "no usable model listed for this kind of work".into(),
+            }
+        }
         "NATIVE_WORKER_ROUTE_BLOCKED" => "no usable model route".into(),
         "TURN_INTERRUPTED" => "a turn was interrupted".into(),
         "NATIVE_TURN_SETTLED" => match p["stop_reason"].as_str() {

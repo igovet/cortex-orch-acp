@@ -19,6 +19,20 @@ pub(super) struct Holds {
     pub changed: Notify,
 }
 
+impl Holds {
+    /// Snapshot exact routes still under a typed provider limit. Expired holds
+    /// are not exclusions: admission still serializes their first probe.
+    pub(super) fn active_routes(&self) -> Vec<RouteKey> {
+        let states = self.states.lock().unwrap();
+        let now = Instant::now();
+        states
+            .iter()
+            .filter(|(_, hold)| hold.until > now)
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+}
+
 struct Hold {
     limit: LimitKind,
     until: Instant,
@@ -168,6 +182,8 @@ mod tests {
         };
         let now = Instant::now();
         first.limited_at(rate, "first".into(), Duration::from_secs(100));
+        let active = holds.active_routes();
+        assert!(active.len() == 1 && active[0] == key);
         assert!(matches!(
             first.admit(true), Admission::Waiting { until: Some(at), .. } if at == now + Duration::from_secs(20)
         ));
@@ -175,6 +191,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(19)).await;
         assert!(matches!(first.admit(true), Admission::Waiting { .. }));
         tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(holds.active_routes().is_empty());
         assert!(matches!(first.admit(true), Admission::Ready));
         assert!(matches!(second.admit(true), Admission::Waiting { until: None, .. }));
         first.limited_at(rate, "retry".into(), Duration::from_secs(120));

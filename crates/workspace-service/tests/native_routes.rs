@@ -618,7 +618,8 @@ fn configured_provider_qualifies_all_engine_argv_without_running_them() {
         f.write(
             "config/cortex/routing.json",
             &json!({"model_policy_version":2,"enabled":{engine:["fixture-model"]},
-            "models":{engine:{"auto":["fixture-model"],"tiers":{"fixture-model":"standard"}}},
+            "models":{engine:{"auto":["fixture-model"],"tiers":{"fixture-model":"standard"},
+                "policy":{"fixture-model":{"preferred_for":["review"]}}}},
             "pin":{"*":format!("{engine}/fixture-model:high")}}),
         );
         let provider = workspace_service::native_routes::ConfiguredRoutes {
@@ -1089,7 +1090,11 @@ fn parity_usage_last_tie_break_and_hot_threshold_does_not_override_cool_hint() {
 #[test]
 fn a_reviewer_is_routed_off_the_reviewed_model_when_another_is_available() {
     let f = Fixture::new();
-    f.write("config/cortex/routing.json", &f.parity());
+    let mut rules = f.parity();
+    for (engine, model) in [("codex-acp", "sol"), ("claude-agent-acp", "sonnet")] {
+        rules["models"][engine]["policy"][model]["preferred_for"] = json!(["review"]);
+    }
+    f.write("config/cortex/routing.json", &rules);
     let route = |avoid: Value| {
         f.load()
             .unwrap()
@@ -1117,7 +1122,7 @@ fn a_reviewer_is_routed_off_the_reviewed_model_when_another_is_available() {
     let all = route(json!([
         {"engine":"codex-acp","model":"sol"},{"engine":"codex-acp","model":"luna"},{"engine":"codex-acp","model":"astra"},
         {"engine":"claude-agent-acp","model":"sonnet"},{"engine":"claude-agent-acp","model":"opus"}]));
-    assert!(["sol", "luna", "astra", "sonnet", "opus"].contains(&all.as_str()));
+    assert!(["sol", "sonnet"].contains(&all.as_str()));
 }
 #[test]
 fn parity_flagship_hint_reason_never_grants_but_recorded_request_overrides_pin() {
@@ -1369,44 +1374,46 @@ fn parity_effort_policy_observed_bounds_explicit_request_and_unsupported_require
     );
 }
 #[test]
-fn parity_conditional_preference_and_work_kind_only_apply_to_matching_nodes() {
+fn conditional_preference_changes_ranking_not_strict_kind_membership() {
     let f = Fixture::new();
     let mut r = f.parity();
-    r["models"]["codex-acp"]["policy"]["sol"]["preferred_when"] = json!("Backend only.");
+    r["models"]["codex-acp"]["policy"]["sol"]["preferred_when"] = json!("Special audit.");
     r["models"]["codex-acp"]["policy"]["sol"]["preferred_for"] = json!(["review"]);
     f.write("config/cortex/routing.json", &r);
     let resolver = f.load().unwrap();
     let e = Default::default();
-    assert_eq!(
-        resolver
-            .choose("worker-security-auditor", &json!({}), &e, false, None)
-            .unwrap()
-            .model(),
-        "sonnet"
-    );
-    assert_eq!(
-        resolver
+    for (node, escalated, purpose) in [
+        (json!({}), false, "none"),
+        (
+            json!({"model":"codex-acp/sol","model_reason":"Special audit."}),
+            false,
+            "honoured",
+        ),
+        (json!({"model":"codex-acp/sol"}), true, "none"),
+    ] {
+        let selected = resolver
             .choose(
                 "worker-security-auditor",
-                &json!({"model":"codex-acp/sol","model_reason":"Backend only."}),
+                &node,
                 &e,
-                false,
-                None
+                escalated,
+                Some("codex-acp"),
             )
-            .unwrap()
-            .model(),
-        "sol"
-    );
-    let retried = resolver
-        .choose(
-            "worker-security-auditor",
-            &json!({"model":"codex-acp/sol"}),
+            .unwrap();
+        assert_eq!(selected.model(), "sol");
+        assert_eq!(selected.decision["purpose"]["status"], purpose);
+    }
+    let preview = resolver
+        .previews(
+            &json!({"tasks":[{"id":"audit","role":"security-auditor","model":"claude-agent-acp/sonnet"}]}),
             &e,
-            true,
-            Some("codex-acp"),
         )
         .unwrap();
-    assert_ne!(retried.model(), "sol");
+    assert_eq!(preview[0]["preview_status"], "ignored:off_kind");
+    assert!(preview[0]["preview_note"]
+        .as_str()
+        .unwrap()
+        .contains("not listed for this kind of work"));
     // UI-design classification binds to the owner's affinity, independent of a coding hint.
     assert_eq!(
         resolver
@@ -1932,20 +1939,22 @@ fn a_reviewer_stays_on_review_preferred_models_and_independence_chooses_among_th
         (s.model(), s.decision["review_route"]["rule"].as_str()),
         ("sonnet", Some("same_model_fresh_session"))
     );
-    // No review model is usable at all (here: neither is enabled): only then another model reviews.
+    // Disabled review models are not an availability exception.
     f.used("cn_fixture", 10.0);
     let mut off = r.clone();
     off["enabled"]["codex-acp"] = json!(["luna", "astra"]);
     off["enabled"]["claude-agent-acp"] = json!(["opus"]);
     f.write("config/cortex/routing.json", &off);
-    let s = choose(
-        json!({"work_kind":"review","avoid_routes":[{"engine":"claude-agent-acp","model":"sonnet","node":"a","changes":1}]}),
-    );
     assert_eq!(
-        s.decision["review_route"]["rule"],
-        "no_review_preferred_model"
+        code(f.load().unwrap().choose(
+            "worker-code-reviewer",
+            &json!({"work_kind":"review"}),
+            &Default::default(),
+            false,
+            None,
+        )),
+        "no_model_listed_for_work_kind"
     );
-    assert!(!["sonnet", "sol"].contains(&s.model()), "{}", s.model());
 }
 
 /// Owner store 2026-11-21: an escalated QA node went to Fable, which the owner's
@@ -2017,4 +2026,350 @@ fn escalation_stays_within_the_models_listed_for_the_work_kind() {
         )
         .unwrap();
     assert_eq!(design.decision["chosen"], "claude-agent-acp/fable");
+}
+
+#[test]
+fn escalation_blocks_qa_when_listed_models_are_not_usable_for_quality() {
+    let f = Fixture::new();
+    let mut rules = f.parity();
+    rules["enabled"]["codex-acp"] = json!(["sol"]);
+    rules["enabled"]["claude-agent-acp"] = json!(["opus"]);
+    // This model cannot meet its configured effort policy at either of its tiers.
+    rules["models"]["codex-acp"]["policy"]["sol"] =
+        json!({"preferred_for":["testing"],"effort_floor":"max","max_effort":"max"});
+    rules["models"]["claude-agent-acp"]["policy"]["opus"]["preferred_for"] = json!(["design"]);
+    f.write("config/cortex/routing.json", &rules);
+    let resolver = f.load().unwrap();
+    assert_eq!(
+        code(resolver.choose(
+            "worker-qa-engineer",
+            &json!({"complexity":"high"}),
+            &Default::default(),
+            true,
+            None,
+        )),
+        "no_model_listed_for_work_kind"
+    );
+    let preview = resolver
+        .previews(
+            &json!({"tasks":[{"id":"qa","role":"qa-engineer","model":"claude-agent-acp/opus"}]}),
+            &Default::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        preview[0]["preview_status"],
+        "no_model_listed_for_work_kind"
+    );
+    assert_eq!(
+        preview[0]["preview_note"],
+        "No usable model is listed for testing work (target tier: standard)."
+    );
+}
+
+#[test]
+fn escalation_quota_failover_stays_at_the_target_tier_then_one_adjacent_tier() {
+    let f = Fixture::new();
+    let mut rules = f.parity();
+    rules["models"]["codex-acp"]["policy"]["sol"]["preferred_for"] = json!(["testing"]);
+    rules["models"]["claude-agent-acp"]["policy"]["opus"]["preferred_for"] = json!(["design"]);
+    // A flagship is not a failover for deep work even if cross-listed as deep.
+    rules["models"]["claude-agent-acp"]["tiers"]["opus"] = json!(["flagship", "deep"]);
+    f.used("cn_fixture", 100.0);
+    for (placement, expected) in [
+        (json!(["deep", "standard"]), Some("deep")),
+        (json!("standard"), Some("standard")),
+        (json!("light"), None),
+    ] {
+        rules["models"]["claude-agent-acp"]["tiers"]["sonnet"] = placement;
+        f.write("config/cortex/routing.json", &rules);
+        let selected = f.load().unwrap().choose(
+            "worker-qa-engineer",
+            &json!({}),
+            &Default::default(),
+            true,
+            Some("codex-acp"),
+        );
+        if let Some(tier) = expected {
+            let selected = selected.unwrap();
+            assert_eq!(selected.model(), "sonnet");
+            assert_eq!(selected.basis, "auto:availability_failover");
+            assert_eq!(selected.decision["basis"], "availability_failover");
+            assert_eq!(
+                selected.decision["availability_failover"]["target_tier"],
+                "deep"
+            );
+            assert_eq!(
+                selected.decision["availability_failover"]["fallback_tier"],
+                tier
+            );
+            assert_eq!(
+                selected.decision["availability_failover"]["unavailable_listed_routes"][0]
+                    ["reason"],
+                "quota_exhausted"
+            );
+        } else {
+            assert_eq!(code(selected), "no_model_listed_for_work_kind");
+        }
+    }
+}
+
+#[test]
+fn mandatory_review_blocks_off_list_failover_that_an_ordinary_audit_may_use() {
+    let f = Fixture::new();
+    let mut rules = f.parity();
+    rules["models"]["codex-acp"]["policy"]["sol"]["preferred_for"] = json!(["review"]);
+    f.write("config/cortex/routing.json", &rules);
+    let resolver = f.load().unwrap();
+    for (reason, allowed) in [("provider_outage", true), ("quality_failure", false)] {
+        let evidence = cortex_core::routing::Evidence {
+            unavailable: vec![json!({"connection_id":"cn_fixture","model":"sol","reason":reason})],
+            ..Default::default()
+        };
+        assert_eq!(
+            code(resolver.choose("worker-code-reviewer", &json!({}), &evidence, false, None)),
+            "no_model_listed_for_work_kind"
+        );
+        let preview = resolver
+            .previews(
+                &json!({"tasks":[{"id":"review","role":"code-reviewer","model":"claude-agent-acp/sonnet"}]}),
+                &evidence,
+            )
+            .unwrap();
+        assert_eq!(
+            preview[0]["preview_status"],
+            "no_model_listed_for_work_kind"
+        );
+        assert_eq!(
+            preview[0]["preview_note"],
+            "No usable model is listed for review work (target tier: standard)."
+        );
+
+        // The same available standard-tier model is a legal outage substitute
+        // for ordinary work classified as review, not for mandatory review.
+        let selected = resolver.choose(
+            "worker-accessibility-auditor",
+            &json!({}),
+            &evidence,
+            false,
+            None,
+        );
+        if allowed {
+            let selected = selected.unwrap();
+            assert_eq!(selected.model(), "sonnet");
+            assert_eq!(
+                selected.decision["review_route"]["rule"],
+                "availability_failover"
+            );
+            assert_eq!(
+                selected.decision["availability_failover"]["unavailable_listed_routes"][0]
+                    ["reason"],
+                "provider_route_failure"
+            );
+        } else {
+            assert_eq!(code(selected), "no_model_listed_for_work_kind");
+        }
+    }
+}
+
+#[test]
+fn escalation_quality_retry_reuses_the_only_listed_model_after_diversification() {
+    let f = Fixture::new();
+    let mut rules = f.parity();
+    rules["models"]["codex-acp"]["policy"]["sol"]["preferred_for"] = json!(["testing"]);
+    rules["models"]["claude-agent-acp"]["policy"]["opus"]["preferred_for"] = json!(["design"]);
+    f.write("config/cortex/routing.json", &rules);
+    let selected = f
+        .load()
+        .unwrap()
+        .choose(
+            "worker-qa-engineer",
+            &json!({"complexity":"high","avoid_routes":[{"engine":"codex-acp","model":"sol"}]}),
+            &Default::default(),
+            true,
+            Some("codex-acp"),
+        )
+        .unwrap();
+    assert_eq!(selected.model(), "sol");
+    assert_eq!(selected.decision["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(selected.decision["work_kind_policy"]["mode"], "listed_only");
+}
+
+#[test]
+fn strict_kind_routing_blocks_review_and_consultation_without_their_lists() {
+    let f = Fixture::new();
+    let mut rules = f.parity();
+    rules["models"]["codex-acp"]["policy"]["sol"]["preferred_for"] = json!(["testing"]);
+    rules["pin"]["*"] = json!("codex-acp/sol");
+    f.write("config/cortex/routing.json", &rules);
+    let resolver = f.load().unwrap();
+    for role in ["worker-code-reviewer", "worker-senior-consultant"] {
+        for escalated in [false, true] {
+            assert_eq!(
+                code(resolver.choose(
+                    role,
+                    &json!({"work_kind":"testing"}),
+                    &Default::default(),
+                    escalated,
+                    None,
+                )),
+                "no_model_listed_for_work_kind"
+            );
+        }
+    }
+
+    // A consultant is not substituted even if a design route has an exhausted quota.
+    rules["models"]["codex-acp"]["policy"]["sol"]["preferred_for"] = json!(["design"]);
+    rules["pin"] = json!({});
+    f.used("cn_fixture", 100.0);
+    f.write("config/cortex/routing.json", &rules);
+    assert_eq!(
+        code(f.load().unwrap().choose(
+            "worker-senior-consultant",
+            &json!({}),
+            &Default::default(),
+            false,
+            None,
+        )),
+        "no_model_listed_for_work_kind"
+    );
+}
+
+#[test]
+fn escalation_ignores_off_kind_wildcard_but_preserves_exact_role_pin() {
+    let f = Fixture::new();
+    let mut rules = f.parity();
+    rules["models"]["codex-acp"]["policy"]["sol"]["preferred_for"] = json!(["testing"]);
+    rules["models"]["claude-agent-acp"]["policy"]["sonnet"]["preferred_for"] = json!(["design"]);
+    rules["pin"]["*"] = json!("claude-agent-acp/sonnet");
+    f.write("config/cortex/routing.json", &rules);
+    let choose = |escalated| {
+        f.load()
+            .unwrap()
+            .choose(
+                "worker-qa-engineer",
+                &json!({}),
+                &Default::default(),
+                escalated,
+                None,
+            )
+            .unwrap()
+    };
+    for escalated in [false, true] {
+        let selected = choose(escalated);
+        assert_eq!(selected.model(), "sol");
+        assert_eq!(selected.decision["wildcard_pin_status"], "ignored:off_kind");
+        assert_eq!(selected.decision["work_kind_policy"]["mode"], "listed_only");
+    }
+
+    rules["pin"]["qa-engineer"] = rules["pin"]["*"].clone();
+    f.write("config/cortex/routing.json", &rules);
+    for escalated in [false, true] {
+        let selected = choose(escalated);
+        assert_eq!(selected.model(), "sonnet");
+        assert_eq!(selected.decision["basis"], "pin");
+    }
+
+    // Preserve the normal-rung wildcard when no model targets testing.
+    rules["pin"].as_object_mut().unwrap().remove("qa-engineer");
+    rules["models"]["codex-acp"]["policy"]["sol"]["preferred_for"] = json!(["design"]);
+    f.write("config/cortex/routing.json", &rules);
+    let selected = choose(false);
+    assert_eq!(selected.model(), "sonnet");
+    assert_eq!(selected.decision["basis"], "pin");
+}
+
+#[test]
+fn normal_rung_off_kind_wildcard_cannot_rescue_an_unusable_work_kind_list() {
+    let f = Fixture::new();
+    let mut rules = f.parity();
+    rules["models"]["codex-acp"]["policy"]["sol"]["preferred_for"] = json!(["testing"]);
+    rules["pin"]["*"] = json!("claude-agent-acp/sonnet");
+    f.write("config/cortex/routing.json", &rules);
+    let resolver = f.load().unwrap();
+    let evidence = cortex_core::routing::Evidence {
+        unavailable: vec![json!({
+            "connection_id":"cn_fixture","model":"sol","reason":"quality_failure"
+        })],
+        ..Default::default()
+    };
+
+    assert_eq!(
+        code(resolver.choose("worker-qa-engineer", &json!({}), &evidence, false, None)),
+        "no_model_listed_for_work_kind"
+    );
+    let preview = resolver
+        .previews(
+            &json!({"tasks":[{"id":"qa","role":"qa-engineer","model":"claude-agent-acp/sonnet"}]}),
+            &evidence,
+        )
+        .unwrap();
+    assert_eq!(
+        preview[0]["preview_status"],
+        "no_model_listed_for_work_kind"
+    );
+    assert!(preview[0]["preview_note"]
+        .as_str()
+        .unwrap()
+        .starts_with("No usable model is listed for testing work"));
+}
+
+#[test]
+fn escalation_stretch_reset_only_uses_usable_listed_lights() {
+    let f = Fixture::new();
+    let mut rules = f.parity();
+    rules["models"]["codex-acp"]["policy"]["sol"]["preferred_for"] = json!(["testing"]);
+    rules["models"]["claude-agent-acp"]["tiers"]["sonnet"] = json!("light");
+    rules["models"]["claude-agent-acp"]["policy"]["sonnet"]["also_standard_for"] =
+        json!(["testing"]);
+    for (kind, used, tier) in [
+        ("design", 0.0, "deep"),
+        ("testing", 100.0, "deep"),
+        ("testing", 0.0, "standard"),
+    ] {
+        rules["models"]["claude-agent-acp"]["policy"]["sonnet"]["preferred_for"] = json!([kind]);
+        f.used("cn_claude", used);
+        f.write("config/cortex/routing.json", &rules);
+        let selected = f
+            .load()
+            .unwrap()
+            .choose(
+                "worker-qa-engineer",
+                &json!({}),
+                &Default::default(),
+                true,
+                None,
+            )
+            .unwrap();
+        assert_eq!(selected.decision["role_tier"], tier);
+    }
+}
+
+#[test]
+fn no_work_kind_list_keeps_automatic_tier_selection_and_is_audited() {
+    let f = Fixture::new();
+    let mut rules = f.parity();
+    rules["models"]["codex-acp"]["policy"]["sol"]["preferred_for"] = json!(["design"]);
+    rules["models"]["claude-agent-acp"]["policy"]["sonnet"]["preferred_for"] = json!(["review"]);
+    f.write("config/cortex/routing.json", &rules);
+    let selected = f
+        .load()
+        .unwrap()
+        .choose(
+            "worker-qa-engineer",
+            &json!({}),
+            &Default::default(),
+            true,
+            Some("codex-acp"),
+        )
+        .unwrap();
+    assert_eq!(selected.model(), "sonnet");
+    assert_eq!(selected.decision["tier"], "deep");
+    assert_eq!(
+        selected.decision["work_kind_policy"]["mode"],
+        "no_owner_list"
+    );
+    assert_eq!(
+        selected.decision["work_kind_policy"]["owner_list_exists"],
+        false
+    );
 }

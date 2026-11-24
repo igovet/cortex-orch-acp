@@ -391,12 +391,15 @@ pub(super) fn require_failed_checks(
     Ok(())
 }
 
+pub const NO_MODEL_LISTED_FOR_WORK_KIND: &str = "no_model_listed_for_work_kind";
+
 pub fn route_blocked(reason: &str) -> bool {
     matches!(
         reason,
         "native_route_authorization_unavailable"
             | "native_task_route_unavailable"
             | "no_available_route"
+            | NO_MODEL_LISTED_FOR_WORK_KIND
             | "pinned_route_unavailable"
             | "user_requested_route_unavailable"
             | "portable_coordinator_unavailable"
@@ -1218,8 +1221,13 @@ pub(super) fn stop_tx(db: &Transaction<'_>, task: &str, reason: &str) -> CoreRes
     domain::revoke_tx(db, task, None)?;
     if route_blocked(reason) {
         details["pause_kind"] = json!("external_blocker");
-        // The resumed plan routes away from the blocked route.
-        details["strategy"] = json!("escalate_route");
+        if reason == NO_MODEL_LISTED_FOR_WORK_KIND {
+            details["strategy"] = json!("retry_unblocked");
+            details["instruction"] = json!(strategy_instruction("retry_unblocked"));
+        } else {
+            // The resumed plan routes away from the blocked route.
+            details["strategy"] = json!("escalate_route");
+        }
         event_tx(db, task, "AUTOMATIC_PAUSED", details)?;
         domain::state_tx(db, task, TaskState::Recovering, Some(PAUSED))?;
         return Ok(TaskState::Recovering);

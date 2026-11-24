@@ -11,7 +11,7 @@ mod policy;
 mod presentation;
 mod quota;
 pub mod short_text;
-#[cfg(test)]
+#[allow(dead_code)]
 #[path = "native_routes_view.rs"]
 pub(crate) mod view;
 use cortex_core::{CoreError, CoreResult};
@@ -59,6 +59,14 @@ pub(crate) fn catalog_route_id(
     format!("xr_{}", &digest(&serde_json::to_vec(&body).unwrap())[..24])
 }
 const MAX_JSON: u64 = 4 * 1024 * 1024;
+/// Internal inputs and refusal details for a native worker dispatch or recovery probe.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct WorkerRouteContext {
+    pub(crate) held: Vec<crate::native_route_hold::RouteKey>,
+    pub(crate) block: Value,
+}
+
 fn refuse<T>(code: &'static str) -> CoreResult<T> {
     Err(CoreError::Refused(code))
 }
@@ -1070,10 +1078,12 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
         evidence: &cortex_core::routing::Evidence,
         escalated: bool,
         previous: Option<&str>,
+        context: &mut WorkerRouteContext,
     ) -> CoreResult<(crate::native_sessions::SessionRoute, Value)> {
         let key = super::native_runtime::key(root)?;
         let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
-        let selected = resolver.choose(role, node, evidence, escalated, previous)?;
+        let selected =
+            resolver.choose_with_context(role, node, evidence, escalated, previous, context)?;
         let mut decision = selected.decision.clone();
         decision["route_engine"] = json!(selected.engine());
         Ok((self.session(root, selected)?, decision))

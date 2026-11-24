@@ -93,8 +93,35 @@ Automatic review routing (`review_candidates` in
 `crates/workspace-service/src/native_routes/policy.rs`, used for every node whose
 work kind is `review`) keeps only the models the owner marked `preferred_for:
 review` (with their `preferred_when` condition) whenever one is usable: enabled,
-automatic, not blocked and below 100 % of its quota. A model not preferred for
-review reviews only when none is (`no_review_preferred_model`). Among the kept
+automatic, not blocked and below 100 % of its quota. Review is strict: a model not
+listed for review is never chosen by this ranking. For the mandatory independent
+review, when no listed model is usable review blocks with a visible reason; it is
+never waived and never falls back to unlisted models. Ordinary worker nodes of
+work kind `review` follow the availability exception below.
+
+**Availability failover.** The mandatory independent review never uses it: it
+keeps only review-listed models, and when none is usable it waits or blocks with
+a visible reason and is never waived. An ordinary worker node whose work kind is
+`review` (for example an auditor) is not the mandatory review: it is strict to
+its work-kind list, but only when the reachable listed models are
+unavailable because of exhausted quota, an active provider rate/quota hold or a
+typed provider-route failure (not a quality failure, missing catalog entry,
+hard denial or unsupported effort) may such an automatic worker use another model that is enabled, not denied, provider-authorized
+and in the automatic list. It must sit in the target tier; only when the target
+tier has none, one adjacent tier is allowed (flagship: deep; deep: standard;
+standard: deep, then light; light: standard), and a flagship-configured model
+never substitutes for a lower target. The audit records it as
+`availability_failover`, with target and fallback tiers and the unavailable
+listed routes, separate from escalation. If none qualifies, routing waits.
+
+The wildcard `*` pin does not bypass the work-kind list on either the normal or
+the escalated rung, nor for mandatory review and consultation; an off-kind `*`
+pin is ignored and selection proceeds from the listed models. When no model
+lists the work kind, the pin applies as before. Exact-role or alias pins, explicit user model requests
+and applicable `AGENTS.md`/`CLAUDE.md` grants remain explicit exceptions.
+Coordinator alternate selection is unchanged. The consultant is routed only to
+models listed for `design`; without one no consultation starts, and no
+availability substitute applies. Among the kept
 models, independence from the reviewed work's authors (the routes of the
 revision's execution nodes, each with the number of files its sessions recorded
 changing) applies in this order: a model different from every author
@@ -793,13 +820,22 @@ every routing decision is the same as before rank version 8.
   ladder holding `max` permits `max` outside the light tier),
   `also_standard_for` (work kinds for which a light model is also a
   standard-tier candidate: the stretch rule below), `preferred_for` (work
-  kinds the owner allows this model for: a model that lists kinds is never a
-  candidate for a node of another kind, so tiers and escalation choose only
-  among the models listed for the node's kind; a model without listed kinds
-  serves every kind, and when no usable model lists the kind every usable model
-  stays eligible so work never stops; among eligible models it is also rank key
-  `purpose` below; owner store 2026-11-21: an escalated QA node went to Fable,
-  listed only for design),
+  kinds the owner allows this model for. Strict work-kind routing: once any
+  model in the effective settings lists a node's work kind, automatic
+  selection (normal and escalated rung, quality retries and fix nodes) takes
+  only models that list it; an untagged model is not a generalist for that
+  kind. The pool is widened to unlisted models only by the availability
+  failover (exhausted quota, provider hold or provider-side route failure; an
+  enabled, authorized, same-tier automatic-list model, never for mandatory
+  review). If no listed model is
+  usable the runtime refuses with the visible reason
+  `no_model_listed_for_work_kind` (naming the work kind and tier) in the
+  `NATIVE_WORKER_ROUTE_BLOCKED` audit event and waits instead of retrying.
+  When no model lists the kind at all, the previous behavior holds: the
+  ordinary eligible tier pool serves regular workers (audit `owner_list_exists:
+  false`, `mode: no_owner_list`). Among the listed models it is also rank key
+  `purpose` below. Retry diversification and stretch work only inside this
+  authorized pool; a sole usable listed model is reused),
   `preferred_when` (an owner-written condition that makes that preference
   conditional on the coordinator naming the route; see `purpose` below) and
   `request_names` (extra spellings for the
@@ -836,8 +872,9 @@ Plan hint previews and route audits report the effective classification.
 
 The default preset places Astra only in flagship and lists frontend-with-design
 only in Opus's `preferred_for`. Opus's conditional preference still requires
-the coordinator's exact route hint, and quality escalation still ignores such
-conditions. `preferred_for` is an eligibility rule, not an automatic promotion
+the coordinator's exact route hint; retries, fixes and quality escalation ignore
+such hints and conditions, and the strict work-kind list above still bounds
+their candidates. `preferred_for` is an eligibility rule, not an automatic promotion
 from the light tier. Existing version-2 files and profiles accept legacy
 `implementation` preferences, stretch allowances and affinity: effective reads
 expand it to all three new kinds without rewriting saved files. Editable source
