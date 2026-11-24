@@ -1,6 +1,6 @@
 # CW-C11: Description-first generated title contract
 
-**Status:** Implemented: a generated editable title and commit and PR drafts come from a short ACP engine session on the cheapest allowed model of the least-used connection ([maintenance and controls](../maintenance-and-controls.md)); no paid generation verified · **Phase:** 3+ · **Size:** M
+**Status:** Implemented: an editable task title and Commit, squash and Push drafts use a short ACP engine session on the cheapest allowed model of the least-used connection ([maintenance and controls](../maintenance-and-controls.md)); no paid generation verified · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Description-first generated title contract.

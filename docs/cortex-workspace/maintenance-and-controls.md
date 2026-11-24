@@ -143,7 +143,7 @@ error or deadline leaves the description fallback with a failed naming state;
 hovering the title explains the fallback. Owner renames win. Naming never starts
 the saved task. No paid engine generation is established by fixture tests.
 
-Commit, squash, Push and PR drafts use [English templates](local-task-execution.md#short-model-texts), not a model route. Commit drafts list changed files; Push summarizes the number of outgoing commits from local tracking information. If the service cannot read the needed Git facts, it reports why and leaves the text editable. A confirmed Push summary can prefill the PR description.
+Commit, squash and Push drafts use the same [short model text route](local-task-execution.md#short-model-texts) as naming. Commit and squash use changed files and bounded diffs for a subject and detailed body. Push summarizes outgoing commit subjects, bodies and change counts from local tracking information. If Git or the model cannot provide a draft, the dialog shows why and leaves the text editable. A confirmed Push summary can prefill the PR description, not the title. It is kept whole up to 8,000 UTF-8 bytes; a longer one disables Push with the byte count shown and is never shortened.
 
 ## Command-to-control map
 

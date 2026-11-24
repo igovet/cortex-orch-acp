@@ -362,135 +362,208 @@ fn repository(dir: &Path) -> PathBuf {
 }
 
 #[tokio::test]
-async fn an_integration_text_is_written_from_the_real_changes() {
+async fn squash_draft_uses_actual_text_but_not_private_files() {
     let dir = temp("integration");
     let state = dir.join("state");
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&state)
-        .unwrap();
     let repo = repository(&dir);
-    let mut git = Git::new();
-    let changes = changes(&repo, "squash", "main", &[], &mut git)
+    let changes = changes(&repo, "squash", "main", &[], &mut Git::new())
         .await
         .unwrap();
-    let names: Vec<_> = changes.files.iter().map(|f| f.0.as_str()).collect();
-    assert_eq!(names, [".env.local", "README.md", "src/upload.rs"]);
-    assert_eq!(changes.untracked, ["notes.txt"]);
-    let reply = integration_job(&state, "squash", Ok(changes));
-    assert_eq!(reply["source"], "template");
-    assert!(reply["route"].is_null() && reply["reason"].is_null());
-    let message = reply["text"]["message"].as_str().unwrap();
-    assert!(message.starts_with("Update 4 files\n\nChanged files:"));
-    assert!(message.contains("- `src/upload.rs` (+2 -1)"));
-    assert!(message.contains("- `notes.txt` (new)"));
-    assert!(!message.contains("retry(3)") && !message.contains("do-not-send"));
+    let (chosen, seen) = answering(Ok("Subject: Retry uploads\n\nBody: Retry a failed upload up to three times."));
+    let reply = integration_job(&state, "squash", Ok(changes), || Ok(chosen));
+    assert_eq!(reply["source"], "model");
+    assert!(reply["reason"].is_null());
+    assert_eq!(reply["route"]["model"], "haiku");
+    assert_eq!(reply["text"]["message"], "Retry uploads\n\nRetry a failed upload up to three times.");
+    let prompt = seen.lock().unwrap();
+    assert!(prompt.contains("src/upload.rs") && prompt.contains("+fn upload() { retry(3); }"));
+    assert!(prompt.contains("notes.txt") && !prompt.contains("+untracked"));
+    assert!(!prompt.contains(".env.local") && !prompt.contains("do-not-send"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[tokio::test]
-async fn integration_templates_use_pending_paths_and_keep_an_unreadable_fallback() {
+async fn commit_fallback_has_a_reason_and_keeps_the_selected_paths() {
     let dir = temp("integration-fallback");
     let state = dir.join("state");
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&state)
-        .unwrap();
     let repo = repository(&dir);
-    let mut git = Git::new();
-    // Commit to the same branch: only the owner's pending paths count.
     let pending = vec!["README.md".to_owned(), "notes.txt".to_owned()];
-    let changes = changes(&repo, "commit", "", &pending, &mut git)
-        .await
-        .unwrap();
-    assert_eq!(changes.files.len(), 1);
-    assert_eq!(changes.untracked, ["notes.txt"]);
-    let reply = integration_job(&state, "commit", Ok(changes));
-    assert_eq!(reply["source"], "template");
-    let message = reply["text"]["message"].as_str().unwrap();
-    assert_eq!(message, "Update 2 files\n\nChanged files:\n- `README.md` (+1 -0)\n- `notes.txt` (new)");
-    let changes = super::changes(&repo, "pr", "main", &[], &mut git)
-        .await
-        .unwrap();
-    let reply = integration_job(&state, "pr", Ok(changes));
+    for (chosen, reason) in [
+        (Err("no_route"), "no_route"),
+        (Ok(answering(Err("timeout")).0), "timeout"),
+        (Ok(answering(Ok("Subject with no body")).0), "unusable_answer"),
+    ] {
+        let changes = changes(&repo, "commit", "", &pending, &mut Git::new()).await.unwrap();
+        assert!(changes.excerpt.contains("+Retries uploads."));
+        assert!(!changes.excerpt.contains("retry(3)") && !changes.excerpt.contains("do-not-send"));
+        let reply = integration_job(&state, "commit", Ok(changes), || chosen);
+        assert_eq!(reply["source"], "fallback");
+        assert_eq!(reply["reason"], reason);
+        assert_eq!(reply["text"]["message"], "Update 2 files\n\nChanged files:\n- `README.md` (+1 -0)\n- `notes.txt` (new)");
+    }
+    let changes = changes(&repo, "pr", "main", &[], &mut Git::new()).await.unwrap();
+    let reply = integration_job(&state, "pr", Ok(changes), || panic!("PR uses its existing draft path"));
     assert_eq!(reply["source"], "template");
     assert_eq!(reply["text"]["title"], "Update 4 files");
-    assert!(reply["text"]["body"].as_str().unwrap().starts_with("Changed files:\n"));
-    let reply = integration_job(&state, "commit", Err(refuse("git_failed", "x")));
+    let reply = integration_job(&state, "commit", Err(refuse("git_failed", "x")), || panic!("no input"));
     assert_eq!(reply["reason"], "changes_unreadable");
-    assert_eq!(reply["text"]["message"], "Apply task changes");
+    assert_eq!(reply["text"], json!({}));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-#[tokio::test]
-async fn checkout_commit_draft_is_taskless_and_reads_the_index_first() {
-    let base = temp("checkout-draft");
-    let root = repository(&base);
-    let state = base.join("state");
-    let config = crate::Config {
+fn git_routes() -> &'static StdMutex<Vec<(PathBuf, Chosen)>> {
+    static ROUTES: OnceLock<StdMutex<Vec<(PathBuf, Chosen)>>> = OnceLock::new();
+    ROUTES.get_or_init(Default::default)
+}
+
+pub(in crate::machine) fn set_git_route(root: &Path, chosen: Chosen) {
+    git_routes().lock().unwrap().push((root.to_owned(), chosen));
+}
+
+pub(super) fn git_route(root: &Path) -> Option<std::result::Result<Chosen, &'static str>> {
+    let mut routes = git_routes().lock().unwrap();
+    let index = routes.iter().position(|(path, _)| path == root)?;
+    Some(Ok(routes.swap_remove(index).1))
+}
+
+fn draft_config(base: &Path) -> crate::Config {
+    crate::Config {
         runtime_dir: base.join("run"),
-        state_dir: state.clone(),
-        allowed_root: base.clone(),
+        state_dir: base.join("state"),
+        allowed_root: base.to_owned(),
         launch: crate::LaunchSpec::bare(),
         request_timeout: Duration::from_secs(5),
         shutdown_timeout: Duration::from_millis(150),
         event_capacity: 128,
-    };
-    sh(&root, &["reset", "--", ".env.local"]);
-    sh(&root, &["add", "--", "README.md"]);
-    std::fs::write(root.join("README.md"), "unstaged version\n").unwrap();
-    let staged = changes(&root, "checkout_commit", "", &[], &mut Git::new()).await.unwrap();
-    assert_eq!(staged.files, [("README.md".into(), Some(1), Some(0))]);
-    assert!(staged.untracked.is_empty());
-    let approved = format!("  Markdown\n\n- {}\u{202E}", "é".repeat(6000));
-    let body = push_body(&approved);
-    assert!(body.starts_with("  Markdown\n\n- "));
-    assert!(body.len() <= MAX_PUSH_SUMMARY && !body.contains('\u{202E}'));
+    }
+}
 
-    held().lock().unwrap().push((root.clone(), Arc::new(std::sync::atomic::AtomicBool::new(true))));
-    let started = run(&root, "p", &state, &json!({"action":"draft_checkout_commit","checkoutId":"p:main"}), &config).await.unwrap();
-    let mut poll = json!({"action":"short_text_poll","jobId":started["jobId"]});
-    poll["taskId"] = json!("t");
-    assert_eq!(run(&root, "p", &state, &poll, &config).await.unwrap_err().code, "unknown_job");
-    poll.as_object_mut().unwrap().remove("taskId");
-    let result = tokio::time::timeout(Duration::from_secs(8), async {
+async fn poll_draft(root: &Path, config: &crate::Config, job: &Value) -> Value {
+    let poll = json!({"action":"short_text_poll","jobId":job});
+    tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let result = run(&root, "p", &state, &poll, &config).await.unwrap();
+            let result = run(root, "p", &config.state_dir, &poll, config).await.unwrap();
             if result["state"] == "done" { break result; }
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
-    }).await.unwrap();
-    assert_eq!(result["source"], "template");
-    assert!(result["reason"].is_null() && result["route"].is_null());
-    assert_eq!(result["text"]["message"], "Update 1 file\n\nChanged files:\n- `README.md` (+1 -0)");
-    held().lock().unwrap().retain(|(r, _)| r != &root);
+    }).await.unwrap()
+}
 
-    sh(&root, &["reset", "--", "README.md"]);
-    let all = changes(&root, "checkout_commit", "", &[], &mut Git::new()).await.unwrap();
-    assert!(all.untracked.contains(&"notes.txt".to_owned()));
+#[tokio::test]
+async fn checkout_commit_draft_is_taskless_and_uses_distinct_index_or_worktree_data() {
+    let base = temp("checkout-draft");
+    let root = repository(&base);
+    let config = draft_config(&base);
+    sh(&root, &["reset", "--", ".env.local"]);
+    sh(&root, &["add", "--", "README.md"]);
+    std::fs::write(root.join("README.md"), "readme\nAdds preview before upload.\n").unwrap();
+
+    let mut prompts = Vec::new();
+    for (expected, excluded) in [("Retries uploads.", "Adds preview"), ("Adds preview", "Retries uploads.")] {
+        let (chosen, seen) = answering(Ok("Explain upload behavior\n\nDescribe the upload change in detail."));
+        set_git_route(&root, chosen);
+        let started = run(&root, "p", &config.state_dir, &json!({"action":"draft_checkout_commit","checkoutId":"p:main"}), &config).await.unwrap();
+        let wrong = json!({"action":"short_text_poll","jobId":started["jobId"],"taskId":"t"});
+        assert_eq!(run(&root, "p", &config.state_dir, &wrong, &config).await.unwrap_err().code, "unknown_job");
+        let result = poll_draft(&root, &config, &started["jobId"]).await;
+        assert_eq!(result["source"], "model");
+        assert_eq!(result["text"]["message"], "Explain upload behavior\n\nDescribe the upload change in detail.");
+        let prompt = seen.lock().unwrap().clone();
+        assert!(prompt.contains(expected) && !prompt.contains(excluded));
+        assert!(!prompt.contains(".env.local"));
+        prompts.push(prompt);
+        sh(&root, &["reset", "--", "README.md"]);
+    }
+    assert_ne!(prompts[0], prompts[1]);
+    assert!(!prompts[0].contains("notes.txt") && prompts[1].contains("notes.txt"));
     std::fs::remove_dir_all(base).unwrap();
 }
 
 #[tokio::test]
-async fn push_summary_counts_outgoing_commits_without_copying_their_prose() {
+async fn git_diff_prompt_is_bounded_and_filters_credential_like_lines() {
+    let base = temp("bounded-draft");
+    let root = repository(&base);
+    sh(&root, &["reset", "--", ".env.local"]);
+    let text = format!("readme\npassword = \"example-do-not-send\"\n{}", "é fairly long line\n".repeat(1000));
+    std::fs::write(root.join("README.md"), text).unwrap();
+    let changes = changes(&root, "checkout_commit", "", &[], &mut Git::new()).await.unwrap();
+    assert!(changes.excerpt.len() <= MAX_PATCH);
+    assert!(changes.excerpt.contains("[truncated]") && changes.excerpt.contains("+é fairly long line"));
+    let prompt = commit_prompt(&changes);
+    assert!(prompt.contains("[credential-like line omitted]") && !prompt.contains("example-do-not-send"));
+    let generated = format!("  Markdown\n\n- {}\u{202E}", "é".repeat(6000));
+    let body = push_body(&generated);
+    assert!(body.starts_with("  Markdown\n\n- "));
+    assert!(body.len() <= MAX_PUSH_SUMMARY && !body.contains('\u{202E}'));
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn confirmed_push_summary_is_kept_whole_or_refused_never_shortened() {
+    // Multi-byte text exactly at the byte limit, with an invisible control the
+    // limit does not count, is kept whole without the control.
+    let at_limit = format!("  Markdown\n\n- {}", "é".repeat((MAX_PUSH_SUMMARY - 14) / 2));
+    assert_eq!(at_limit.len(), MAX_PUSH_SUMMARY);
+    assert_eq!(confirmed_push_body(&format!("\u{202E}{at_limit}")).unwrap(), at_limit);
+    let over = format!("{at_limit}é");
+    assert_eq!(confirmed_push_body(&over).unwrap_err().code, "push_summary_too_long");
+    assert_eq!(confirmed_push_body("").unwrap(), "");
+}
+
+#[tokio::test]
+async fn push_summary_model_gets_outgoing_subjects_bodies_and_stats_only() {
     let base = temp("outgoing");
     let root = repository(&base);
+    let config = draft_config(&base);
     sh(&root, &["remote", "add", "origin", "./unused.git"]);
     assert_eq!(outgoing(&mut Git::new(), &root, "origin", "cw/task").await.err().unwrap().code, "push_baseline_unavailable");
     sh(&root, &["update-ref", "refs/remotes/origin/cw/task", "main"]);
-    let one = outgoing(&mut Git::new(), &root, "origin", "cw/task").await.unwrap();
-    assert_eq!(push_job(&base, Ok(one))["text"]["body"], "This push includes 1 outgoing commit.");
-    sh(&root, &["commit", "--only", "-m", "Corriger le chargement", "-m", "Le chargement est réparé.", "--", "README.md"]);
-    let commits = outgoing(&mut Git::new(), &root, "origin", "cw/task").await.unwrap();
-    let reply = push_job(&base, Ok(commits));
-    assert_eq!(reply["source"], "template");
-    assert!(reply["route"].is_null());
-    assert_eq!(reply["text"], json!({
-        "title":"Push 2 outgoing commits",
-        "body":"This push includes 2 outgoing commits."
-    }));
+    sh(&root, &["commit", "--only", "-m", "Corriger le chargement", "-m", "Le chargement est réparé.", "-m", "token=not-for-the-model", "--", "README.md"]);
+
+    let (chosen, seen) = answering(Ok("## Changes\n\nRetry uploads and explain loading behavior."));
+    set_git_route(&root, chosen);
+    let started = run(&root, "p", &config.state_dir, &json!({"action":"draft_push_summary","checkoutId":"p:main","remote":"origin","branch":"cw/task"}), &config).await.unwrap();
+    let reply = poll_draft(&root, &config, &started["jobId"]).await;
+    assert_eq!(reply["source"], "model");
+    assert_eq!(reply["text"], json!({"body":"## Changes\n\nRetry uploads and explain loading behavior."}));
+    let prompt = seen.lock().unwrap();
+    for expected in ["Outgoing commit count: 2", "Subject: work", "Subject: Corriger le chargement", "Le chargement est réparé.", "1 file changed"] {
+        assert!(prompt.contains(expected), "missing {expected}");
+    }
+    for excluded in ["Subject: base", "not-for-the-model", "./unused.git", "+Retries uploads."] {
+        assert!(!prompt.contains(excluded), "unexpected {excluded}");
+    }
     sh(&root, &["update-ref", "refs/remotes/origin/cw/task", "HEAD"]);
     assert_eq!(outgoing(&mut Git::new(), &root, "origin", "cw/task").await.err().unwrap().code, "no_outgoing_commits");
+    let reply = push_job(&config.state_dir, Ok("outgoing".to_owned()), || Err("engine_unavailable"));
+    assert_eq!(reply["source"], "fallback");
+    assert_eq!(reply["reason"], "engine_unavailable");
+    assert_eq!(reply["text"], json!({}));
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[tokio::test]
+async fn push_context_caps_commit_count_and_utf8_bytes() {
+    let base = temp("outgoing-bound");
+    let root = repository(&base);
+    sh(&root, &["remote", "add", "origin", "./unused.git"]);
+    // New destination: use the other local refs of that remote, not all history.
+    sh(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    sh(&root, &["reset", "--", ".env.local"]);
+    for index in 0..=MAX_OUTGOING {
+        sh(&root, &["commit", "--allow-empty", "-qm", &format!("Outgoing fixture {index:02}")]);
+    }
+    let mut git = Git::new().local_draft();
+    let read = outgoing(&mut git, &root, "origin", "cw/task").await.unwrap();
+    assert!(read.contains("Outgoing commit count: 21"));
+    assert!(read.contains("Subject: Outgoing fixture 20"));
+    assert!(!read.contains("Subject: Outgoing fixture 00"));
+    assert!(read.ends_with(TRUNCATED));
+    sh(&root, &["commit", "--amend", "--allow-empty", "-qm", "Outgoing fixture 20", "-m", &"évidence for the summary\n".repeat(1200)]);
+    let read = outgoing(&mut git, &root, "origin", "cw/task").await.unwrap();
+    let context = read.split_once("Outgoing commit count: 21\n").unwrap().1;
+    assert!(context.len() <= MAX_PUSH_CONTEXT && context.ends_with(TRUNCATED));
+    assert!(context.contains("évidence for the summary"));
     std::fs::remove_dir_all(base).unwrap();
 }
 

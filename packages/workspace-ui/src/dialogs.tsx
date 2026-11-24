@@ -429,6 +429,10 @@ const Confirm = (props: { title: string; note: JSX.Element; action: string; dang
   <ActionBar place="dialog"><button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Cancel</button><button class={`btn ${props.danger ? "btn-danger" : "btn-primary"} btn-lg`} onClick={() => props.onGo()}>{props.action}</button></ActionBar>
 </>;
 
+/** The service keeps a confirmed Push summary whole up to this many UTF-8 bytes and refuses a longer one. */
+export const PUSH_SUMMARY_MAX_BYTES = 8000;
+const utf8Bytes = (text: string) => new TextEncoder().encode(text).length;
+
 function Push(props: { d: Of<"push">; onClose: () => void }) {
   const ws = useWs();
   const checkoutId = props.d.checkoutId;
@@ -449,8 +453,12 @@ function Push(props: { d: Of<"push">; onClose: () => void }) {
   const why = () => {
     const current = find();
     if (!destination || current?.branch !== destination.branch || current?.remote !== destination.remote) return "The Push destination changed or is unavailable. Close and reopen Push.";
-    return ws.gate("git_push");
+    return tooLong() ?? ws.gate("git_push");
   };
+  function tooLong() {
+    const bytes = utf8Bytes(summary());
+    return bytes > PUSH_SUMMARY_MAX_BYTES ? `The summary is ${bytes.toLocaleString("en-US")} bytes. Shorten it to ${PUSH_SUMMARY_MAX_BYTES.toLocaleString("en-US")} bytes or fewer to push; nothing is cut automatically.` : undefined;
+  }
   if (destination) void ws.store.draftPushSummary({ checkoutId, ...destination }).then(text => {
     if (!active || edited || working()) return;
     setSummary(text?.body ?? "");
@@ -472,9 +480,9 @@ function Push(props: { d: Of<"push">; onClose: () => void }) {
     <div class="dlg-b">
       <div class="cap muted">{props.d.pullFirst ? "Pulls with fast-forward only. If the pull cannot fast-forward, nothing is pushed. " : ""}{ws.t("pushNote")}</div>
       <label class="fld"><span class="lab">Summary of commits being pushed</span>
-        <textarea class="inp" rows="3" aria-describedby={`${description} ${description}-status`} ref={el => autoGrow(el, summary)} value={summary()} disabled={working()} onInput={e => { edited = true; setSummary(e.currentTarget.value); setNote(""); }} />
+        <textarea class="inp" rows="3" aria-describedby={`${description} ${description}-status`} aria-invalid={tooLong() ? "true" : undefined} ref={el => autoGrow(el, summary)} value={summary()} disabled={working()} onInput={e => { edited = true; setSummary(e.currentTarget.value); setNote(""); }} />
       </label>
-      <div class="cap muted" id={description}>Optional. A successful Push saves this text for the PR description.</div>
+      <div class="cap muted" id={description}>Optional, up to {PUSH_SUMMARY_MAX_BYTES.toLocaleString("en-US")} bytes. A successful Push saves this text for the PR description.</div>
       <div class="cap muted" id={`${description}-status`} role="status">{why() ?? note()}</div>
     </div>
     <ActionBar place="dialog">

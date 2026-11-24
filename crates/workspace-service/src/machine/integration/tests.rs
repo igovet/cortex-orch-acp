@@ -748,6 +748,56 @@ async fn pull_request_fixture(scenario: &str) {
     params["draft"] = json!(true);
     let head = git(&env.root, &["rev-parse", "HEAD"]);
     let push = json!({"action":"push","checkoutId":"p1:main","remote":"origin","branch":"task","confirmed":true});
+    let config = crate::Config {
+        runtime_dir: env.base.join("run"),
+        state_dir: env.state.clone(),
+        allowed_root: env.base.clone(),
+        launch: crate::LaunchSpec::bare(),
+        request_timeout: std::time::Duration::from_secs(5),
+        shutdown_timeout: std::time::Duration::from_millis(150),
+        event_capacity: 128,
+    };
+    let draft = async |params: Value| {
+        super::super::short_text::run(&env.root, "p1", &env.state, &params, &config).await.unwrap()
+    };
+    use super::super::short_text::{set_git_route, Chosen, MAX_PUSH_SUMMARY};
+    let model_body = "Explain which accepted bytes the outgoing commit preserves.";
+    set_git_route(&env.root, Chosen {
+        route: crate::native_routes::short_text::ShortTextRoute {
+            engine: "claude-agent-acp".into(),
+            model: "haiku".into(),
+            connection: "cn_000000000001".into(),
+            tier: "light",
+            used: Some(0.0),
+            reason: "least_used",
+        },
+        run: Box::new(move |prompt, _| {
+            assert!(prompt.contains("Subject: Commit accepted work"));
+            Ok(model_body.to_owned())
+        }),
+    });
+    git(&env.root, &["update-ref", "refs/remotes/origin/task", &before]);
+    let started = draft(json!({"action":"draft_push_summary","checkoutId":"p1:main",
+        "remote":"origin","branch":"task"})).await;
+    let generated = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let result = draft(json!({"action":"short_text_poll","jobId":started["jobId"]})).await;
+            if result["state"] == "done" { break result; }
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(generated["source"], "model");
+    assert_eq!(generated["text"]["body"], model_body);
+    // A long multi-byte owner edit that fills the limit exactly must reach the
+    // PR description whole, not shortened.
+    let (detail, last) = ("- é détail conservé\n", "Final owner line.");
+    let mut edited = format!("{}\n\nEdited by the owner.\n", generated["text"]["body"].as_str().unwrap());
+    while edited.len() + detail.len() + last.len() <= MAX_PUSH_SUMMARY {
+        edited.push_str(detail);
+    }
+    edited.push_str(&"x".repeat(MAX_PUSH_SUMMARY - last.len() - edited.len()));
+    edited.push_str(last);
+    assert_eq!(edited.len(), MAX_PUSH_SUMMARY);
     // Reproduce the old false success: a real confirmed push to a local
     // remote updates the tracking ref; changing only pushurl cannot make it
     // an approved push to GitHub.
@@ -851,24 +901,20 @@ async fn pull_request_fixture(scenario: &str) {
     assert_eq!(lookup().await.as_deref(), Some(approved));
     env.git_action(push.clone()).await;
     assert_eq!(lookup().await, None);
-    summarized["summary"] = json!("Body text");
+    // One byte over the limit is refused before Git runs, never shortened and saved.
+    let mut too_long = summarized.clone();
+    too_long["summary"] = json!(format!("{edited}!"));
+    assert_eq!(
+        Git::new().action(&env.root, "p1", &env.state, &too_long).await.unwrap_err().code,
+        "push_summary_too_long"
+    );
+    assert_eq!(lookup().await, None);
+    summarized["summary"] = json!(edited);
     env.git_action(summarized).await;
     assert_eq!(
         product(&env.state, "p1").unwrap()["originPushWitnesses"],
         saved["originPushWitnesses"]
     );
-    let config = crate::Config {
-        runtime_dir: env.base.join("run"),
-        state_dir: env.state.clone(),
-        allowed_root: env.base.clone(),
-        launch: crate::LaunchSpec::bare(),
-        request_timeout: std::time::Duration::from_secs(5),
-        shutdown_timeout: std::time::Duration::from_millis(150),
-        event_capacity: 128,
-    };
-    let draft = async |params: Value| {
-        super::super::short_text::run(&env.root, "p1", &env.state, &params, &config).await.unwrap()
-    };
     let started = draft(json!({"action":"draft_integration_text","taskId":"t1","method":"pr","targetBranch":"main"})).await;
     let draft = tokio::time::timeout(std::time::Duration::from_secs(8), async {
         loop {
@@ -878,14 +924,14 @@ async fn pull_request_fixture(scenario: &str) {
         }
     }).await.unwrap();
     assert_eq!(draft["source"], "saved");
-    assert_eq!(draft["text"]["body"], "Body text");
+    assert_eq!(draft["text"]["body"], edited);
+    assert!(draft["text"]["body"].as_str().unwrap().ends_with("Final owner line."));
     params["body"] = draft["text"]["body"].clone();
     params["requestId"] = json!("create-pr");
     let result = env.run(params.clone()).await;
     let args = fs::read_to_string(&gh_args).unwrap();
-    assert_eq!(
-        args.lines().collect::<Vec<_>>(),
-        [
+    let expected_body_lines = edited.lines().collect::<Vec<_>>();
+    let fixed = [
             "pr",
             "create",
             "--repo",
@@ -897,10 +943,9 @@ async fn pull_request_fixture(scenario: &str) {
             "--title",
             "Integrate completed task",
             "--body",
-            "Body text",
-            "--draft"
-        ]
-    );
+    ];
+    let expected = fixed.into_iter().chain(expected_body_lines).chain(["--draft"]);
+    assert!(args.lines().eq(expected), "PR arguments did not preserve the title and edited Push body");
     let lookups = format!(
         "{ref_lookup}{ref_lookup}{}",
         if scenario == "wrong-repository" {

@@ -2,8 +2,8 @@ import { render } from "solid-js/web";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
-import { capabilityOf, emptyWorkspace, MACHINE_COMMANDS, type CommandEnvelope, type CommandReceipt, type PortUpdate, type QueryOperation, type QueryResults, type RepoCheckout, type WorkspacePort, type WorkspaceState } from "@cortex/workspace-domain";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { capabilityOf, emptyWorkspace, MACHINE_COMMANDS, type CommandEnvelope, type CommandReceipt, type IntegrationText, type PortUpdate, type QueryOperation, type QueryResults, type RepoCheckout, type WorkspacePort, type WorkspaceState } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { DETACHED, DIRTY, DIVERGED, gitItems, gitPrimary, PR_UNKNOWN, RUNNING, STOPPED, type GitFacts } from "../src/git-actions-model";
 import { openTargets } from "../src/git-actions";
@@ -166,6 +166,119 @@ const band = (root: HTMLElement) => root.querySelector<HTMLElement>(".titlebar .
 const gitPrimaryButton = (root: HTMLElement) => band(root).querySelector<HTMLButtonElement>('[aria-label="Git"] .hg-a')!;
 const menuLabels = (root: HTMLElement) => [...root.querySelectorAll<HTMLElement>("#m-git .mi")].map(b => b.querySelector(".grow")!.firstChild!.textContent);
 
+function typeInto(field: HTMLTextAreaElement, value: string) {
+  field.value = value;
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+}
+const dialogOf = (root: HTMLElement) => root.querySelector<HTMLDialogElement>("dialog[open]")!;
+const press = (within: ParentNode, label: string) => [...within.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === label)!.click();
+function pendingDraft() {
+  let answer!: (text: IntegrationText | null) => void;
+  const ready = new Promise<IntegrationText | null>(resolve => { answer = resolve; });
+  return { answer, request: vi.fn(() => ready) };
+}
+
+describe("editable Git drafts", () => {
+  const detailed = "Fix the race\n\n- Serialize updates to avoid concurrent writes.";
+  it.each(["generated", "typed", "failed"])("handles a %s checkout commit draft", async scenario => {
+    const p = port(() => ({})), pending = pendingDraft();
+    p.port.draftCheckoutCommit = pending.request;
+    const state = world(checkout({ files: [file("a.ts", "staged"), file("b.ts")] }), null);
+    const { root } = await open(state, "/m/local/p/p/git", p);
+    p.emit({ kind: "facts", facts: { projectId: "p", openBranch: "main", defaultBranch: "main", repo: state.repos[0], workers: [], reviews: [], overlays: {}, sprints: [] } });
+    await settle();
+    const box = root.querySelector(".commit-box")!;
+    const field = box.querySelector("textarea")!;
+    press(box, "Generate");
+    expect(pending.request).toHaveBeenCalledWith({ checkoutId: "p:main" });
+    expect(box.textContent).toContain("Writing from the changes…");
+    if (scenario === "typed") typeInto(field, "Owner text");
+    pending.answer(scenario === "failed" ? { source: "fallback", reason: "changes_unreadable" } : { source: "model", message: detailed });
+    await settle();
+    if (scenario === "failed") {
+      expect(box.textContent).toContain("Git couldn’t read the changes.");
+      expect(field.value).toBe("");
+      typeInto(field, "Owner text");
+    }
+    const expected = scenario === "generated" ? detailed : "Owner text";
+    expect(field.value).toBe(expected);
+    expect(p.commands.filter(c => c.payload.type === "git_draft").map(c => c.payload)).toEqual([
+      expect.objectContaining({ message: expected }),
+    ]);
+    box.querySelector<HTMLButtonElement>(".btn-primary")!.click();
+    await settle();
+    expect(p.commands.at(-1)?.payload).toMatchObject({ type: "git_commit", message: expected });
+  });
+
+  it("shows a detailed fallback and reason in Task Commit", async () => {
+    const p = port(() => ({}));
+    p.port.draftIntegrationText = async () => ({ source: "fallback", message: detailed, reason: "timeout" });
+    const { root } = await open(world(checkout({ files: [file("a.ts")] })), "/m/local/t/t", p);
+    gitPrimaryButton(root).click(); await settle();
+    expect(dialogOf(root).querySelector("textarea")?.value).toBe(detailed);
+    expect(dialogOf(root).textContent).toContain("The model took too long.");
+  });
+
+  it("shows a detailed fallback and reason in Finish", async () => {
+    const p = port(() => ({}));
+    p.port.draftIntegrationText = async () => ({ source: "fallback", message: detailed, reason: "timeout" });
+    const { root } = await open(world(checkout({ id: "p:wt", kind: "worktree", branch: "task/fix", taskId: "t" }), ready), "/m/local/t/t/changes", p);
+    gitPrimaryButton(root).click(); await settle();
+    expect(dialogOf(root).querySelector("textarea")?.value).toBe(detailed);
+    expect(dialogOf(root).textContent).toContain("The model took too long.");
+  });
+
+  it.each(["Push", "Typed", "Fallback", "Failed", "Empty"] as const)("sends the confirmed body for %s", async kind => {
+    const p = port(() => ({})), pending = pendingDraft();
+    p.port.draftPushSummary = pending.request;
+    const { root } = await open(world(checkout({ ahead: 1, behind: 1 }), null), "/m/local/p/p/git", p);
+    root.querySelector<HTMLButtonElement>('.side-pane [aria-label="Push"]')!.click();
+    await settle();
+    const dialog = dialogOf(root);
+    const field = dialog.querySelector("textarea")!;
+    expect(pending.request).toHaveBeenCalledWith({ checkoutId: "p:main", branch: "main", remote: "git@example.invalid:o/p.git" });
+    expect(dialog.textContent).toContain("Writing a summary");
+    if (kind === "Push" || kind === "Fallback") {
+      pending.answer(kind === "Push" ? { source: "model", body: detailed } : { source: "fallback", body: detailed, reason: "timeout" });
+      await settle();
+      expect(field.value).toBe(detailed);
+      expect(dialog.textContent).toContain(kind === "Push" ? "Written from the outgoing commits." : "The model took too long.");
+      typeInto(field, "Owner summary");
+    } else if (kind === "Typed") {
+      typeInto(field, "Owner summary");
+      pending.answer({ source: "model", body: detailed });
+      await settle();
+      expect(field.value).toBe("Owner summary");
+    } else if (kind === "Failed") {
+      pending.answer({ source: "fallback", reason: "push_baseline_unavailable" });
+      await settle();
+      expect(dialog.textContent).toContain("Fetch the selected remote");
+      typeInto(field, "Owner summary");
+    }
+    expect(p.commands).toEqual([]);
+    press(dialog, "Push"); await settle();
+    if (kind === "Empty") pending.answer(null);
+    expect(p.commands.map(c => c.payload.type)).toEqual(["git_push"]);
+    expect(p.commands.at(-1)?.payload).toMatchObject({ type: "git_push", confirmed: true, summary: kind === "Empty" ? "" : "Owner summary" });
+  });
+
+  it.each([false, true])("uses the saved Push summary as the PR description (owner types first: %s)", async manual => {
+    const p = port(() => ({})), pending = pendingDraft();
+    p.port.draftIntegrationText = pending.request;
+    const c = checkout({ id: "p:wt", kind: "worktree", branch: "task/fix", taskId: "t", path: "/w" });
+    const { root } = await open(world(c, ready), "/m/local/t/t/changes", p);
+    press(root.querySelector(".ready")!, "Create PR…"); await settle();
+    const dialog = dialogOf(root), field = dialog.querySelector("textarea")!;
+    if (manual) typeInto(field, "My description");
+    pending.answer({ source: "fallback", bodySource: "saved_push_summary", title: "Separate title", body: detailed });
+    await settle();
+    expect(field.value).toBe(manual ? "My description" : detailed);
+    expect(dialog.textContent).toContain("Loaded from the confirmed Push summary");
+    dialog.querySelector<HTMLButtonElement>('[aria-label="Create PR (no push)"]')!.click(); await settle();
+    expect(p.commands.at(-1)?.payload).toMatchObject({ type: "integrate", method: "pr", title: "Separate title", message: manual ? "My description" : detailed });
+  });
+});
+
 describe("accepted result freshness at Finish", () => {
   it("allows an unchanged committed result from both surfaces, and blocks drift even in an open PR dialog", async () => {
     const c = checkout({ id: "p:wt", kind: "worktree", branch: "task/fix", taskId: "t", path: "/w", upstream: "origin/task/fix" });
@@ -264,7 +377,7 @@ describe("the band on screen", () => {
     const dialog = root.querySelector<HTMLDialogElement>("dialog[open]")!;
     expect(dialog.textContent).toContain("1 staged, 1 unstaged");
     expect(dialog.querySelector("textarea")!.value).toBe("Fix the login race");
-    expect(dialog.textContent).toContain("Written from the changes, you can edit it");
+    expect(dialog.textContent).toContain("Written from the changes. You can edit it.");
     expect(p.commands.some(c => c.payload.type === "git_commit")).toBe(false);
     [...dialog.querySelectorAll("button")].find(b => b.textContent === "Commit")!.click(); await settle();
     expect(p.commands.filter(c => c.payload.type === "git_commit").map(c => c.payload)).toEqual([expect.objectContaining({ type: "git_commit", checkoutId: "p:main", message: "Fix the login race" })]);
@@ -281,6 +394,8 @@ describe("the band on screen", () => {
     expect(p.commands.some(c => c.payload.type === "git_commit")).toBe(false);
     expect([...dialog.querySelectorAll("button")].map(b => b.textContent)).toEqual(expect.arrayContaining(["Stop the task first", "Commit anyway"]));
     [...dialog.querySelectorAll("button")].find(b => b.textContent === "Commit anyway")!.click(); await settle();
+    expect(confirm.getAttribute("aria-disabled")).toBe("true");
+    typeInto(dialog.querySelector("textarea")!, "Manual commit");
     expect(confirm.getAttribute("aria-disabled")).toBeNull();
   });
 

@@ -4,14 +4,14 @@ import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import { emptyWorkspace, type Check, type Task, type WorkspaceCommand } from "@cortex/workspace-domain";
 import { WsContext, type Ws } from "../src/ctx";
-import { ReviewDialogs, type WsDialog } from "../src/dialogs";
+import { PUSH_SUMMARY_MAX_BYTES, ReviewDialogs, type WsDialog } from "../src/dialogs";
 import { MachineDialogs } from "../src/machine-dialogs";
 import { CloseDialog } from "../src/task-chrome";
 import { Modal } from "../src/kit";
-import { COPY } from "../src/copy";
+import { COPY, workspaceCopy } from "../src/copy";
 import { createWorkspaceStore } from "../src/store";
 import { createSettingsState } from "../src/settings-state";
-import { draftTask, flush, projection, scriptedPort } from "./support";
+import { draftTask, flush, projection, scriptedPort, stoppedMerge } from "./support";
 
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); dispose = undefined; document.body.innerHTML = ""; });
@@ -24,13 +24,18 @@ const type = (selector: string, text: string) => {
 };
 const settle = async () => { await flush(); await flush(); };
 
-function mount(accepted = true, remote = "origin", checks: Check[] = [{ name: "Check", outcome: "not_run", detail: "", technicalReason: "Executable unavailable" }], reviewActions?: Task["reviewActions"]) {
+function mount(accepted = true, remote = "origin", checks: Check[] = [{ name: "Check", outcome: "not_run", detail: "", technicalReason: "Executable unavailable" }], reviewActions?: Task["reviewActions"], conflict = false, cleanup?: NonNullable<Task["integrationFacts"]>["deleteWorktree"]) {
   const state = emptyWorkspace(), cap = { everything: true, operations: [] };
   state.machines[0].connection = "connected";
   state.projects.push({ id: "p", machineId: state.machines[0].id, name: "Project", repository: "/p", openBranch: "dev", defaultBranch: "main" });
-  state.tasks.push({ ...draftTask(), checkout: { kind: "main", branch: "dev" }, status: accepted ? "ready_to_merge" : "review", result: { version: 1, digest: "digest", summary: "Result", checks }, reviewActions, workspaceDigest: "digest", acceptance: accepted ? { version: 1, digest: "digest" } : null });
+  state.tasks.push({ ...draftTask(), checkout: { kind: "main", branch: "dev" }, status: accepted ? "ready_to_merge" : "review", result: { version: 1, digest: "digest", summary: "Result", checks }, reviewActions, workspaceDigest: "digest", acceptance: accepted ? { version: 1, digest: "digest" } : null, ...(conflict ? { executionId: "e", conflict: "conflict", merge: stoppedMerge() } : {}) });
   state.repos.push({ projectId: "p", remote, tree: [], sources: {}, commits: [], branches: [], fetchedAt: null,
     checkouts: [{ id: "p:main", projectId: "p", kind: "main", branch: "dev", path: "/p", taskId: null, label: null, base: "main", ahead: 0, behind: 0, behindOf: {}, files: [], draft: "", sources: {}, updateConflict: null }] });
+  if (cleanup) {
+    state.tasks[0].checkout = { kind: "worktree", id: "p:wt:task", path: "/task", branch: "cw/task" };
+    state.tasks[0].integrationFacts = { targetBranch: "main", alreadyInTarget: false, pushStatus: null, deleteWorktree: cleanup };
+    state.repos[0].checkouts.push({ ...state.repos[0].checkouts[0], kind: "worktree", id: "p:wt:task", path: "/task", branch: "cw/task" });
+  }
   const script = scriptedPort({ capabilities: cap });
   const actions: {op: string; params: Record<string, unknown>; resolve: (v: Record<string, unknown>) => void; reject: (e: Error) => void}[] = [];
   script.port.machineAction = (op, params) => new Promise((resolve, reject) => actions.push({op, params, resolve, reject}));
@@ -62,7 +67,7 @@ const cases: { name: string; dialog?: WsDialog; prepare?: () => void; action: st
   { name: "review feedback", dialog: { kind: "changes", taskId: "t", text: "Keep my feedback" }, action: "Send and reopen", operation: "request_changes" },
   { name: "acceptance", dialog: { kind: "accept", taskId: "t" }, prepare: () => { const el = active()!.querySelector<HTMLInputElement>('input[type="checkbox"]')!; el.checked = true; el.dispatchEvent(new Event("change", { bubbles: true })); }, action: "Accept v1", operation: "accept_result" },
   { name: "merge", dialog: { kind: "merge", taskId: "t", how: "squash" }, action: "Confirm merge into main", operation: "integrate" },
-  { name: "conflict guidance", dialog: { kind: "cortex", taskId: "t" }, action: "Resolve automatically", operation: "resolve_with_cortex" },
+  { name: "conflict guidance", dialog: { kind: "cortex", taskId: "t" }, action: "Hand to the app", operation: "resolve_with_cortex" },
   { name: "push", dialog: { kind: "push", checkoutId: "p:main" }, action: "Push", operation: "git_push" },
   { name: "revert", dialog: { kind: "revert", checkoutId: "p:main", path: "a.txt" }, action: "Revert", operation: "git_revert" },
   { name: "revert commit", dialog: { kind: "revert-commit", checkoutId: "p:main", sha: "abc", message: "Fix" }, action: "Revert commit", operation: "revert_commit" },
@@ -73,16 +78,19 @@ const cases: { name: string; dialog?: WsDialog; prepare?: () => void; action: st
 ];
 
 it.each(cases)("$name stays open pending/refused, then closes and returns focus only on success", async c => {
-  const h = mount(c.name !== "acceptance");
+  const h = mount(c.name !== "acceptance", undefined, undefined, undefined, c.operation === "resolve_with_cortex");
   h.ws.settings.setDraft(h.state.machines[0].id + ":routing", { kept: true });
   if (c.dialog) h.open(c.dialog); else h.closeTask();
   c.prepare?.();
   button(c.action).click();
   expect(active()).not.toBeNull();
   expect(h.script.commands.at(-1)?.operation).toBe(c.operation);
+  const status = active()?.querySelector(".ws-request-status");
+  if (c.operation === "accept_result" || c.operation === "close_task") expect(status?.textContent).toMatch(/^Requesting (acceptance|closure)…$/);
   h.script.receipt(false);
   await settle();
   expect(active()?.querySelector('[role="alert"]')?.textContent).toBe("Refused");
+  if (status) expect(status.textContent).toBe("");
   if (c.name === "profile") expect(h.ws.settings.draftsOn(h.state.machines[0].id)).toBe(1);
   if (c.name === "review feedback") expect(active()!.querySelector("textarea")!.value).toBe("Keep my feedback");
   button(c.action).click();
@@ -91,6 +99,23 @@ it.each(cases)("$name stays open pending/refused, then closes and returns focus 
   expect(active()).toBeNull();
   expect(document.activeElement).toBe(h.trigger());
   if (c.name === "profile") expect(h.ws.settings.draftsOn(h.state.machines[0].id)).toBe(0);
+});
+
+it.each([true, false])("shows the default cleanup choice only when safe (safe: %s)", available => {
+  const h = mount(true, "", [], undefined, false, { available, default: true, ...(available ? {} : { reason: "worktree_dirty" }) });
+  h.open({ kind: "merge", taskId: "t", how: "squash" });
+  const input = active()!.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  expect(document.getElementById(input.getAttribute("aria-labelledby")!)?.textContent).toBe("Delete worktree folder");
+  expect(input.disabled).toBe(!available);
+  expect(input.checked).toBe(available);
+  if (!available) expect(document.getElementById(input.getAttribute("aria-describedby")!)?.textContent).toContain("uncommitted or untracked");
+  button("Confirm merge into main").click();
+  expect(h.script.commands.at(-1)?.payload).toMatchObject({ type: "integrate", deleteWorktree: available });
+});
+
+it("uses the approved Russian worktree action labels", () => {
+  expect(workspaceCopy("deleteWorktreeFolder", "ru-RU")).toBe("Удалить worktree папку");
+  expect(workspaceCopy("closeDeleteWorktreeFolder", "ru")).toBe("Закрыть и удалить worktree папку");
 });
 
 const paidReason = "paid live check not requested by the owner";
@@ -126,7 +151,52 @@ it("confirms the displayed SSH URL and sends one push request for the current br
   expect(active()?.textContent).toContain(`Push dev to ${remote}?`);
   button("Push").click();
   expect(h.script.commands).toHaveLength(1);
-  expect(h.script.commands[0].payload).toEqual({ type: "git_push", checkoutId: "p:main", remote, branch: "dev", confirmed: true });
+  expect(h.script.commands[0].payload).toEqual({ type: "git_push", checkoutId: "p:main", remote, branch: "dev", confirmed: true, summary: "" });
+  h.script.receipt(true);
+  await settle();
+  expect(active()).toBeNull();
+});
+
+it("passes the edited summary to the Pull and push confirmation action", async () => {
+  const remote = "git@github.com:example/project.git";
+  const h = mount(true, remote);
+  const seen: unknown[] = [];
+  h.open({ kind: "push", checkoutId: "p:main", pullFirst: async push => { seen.push(push); return true; } });
+  const field = active()!.querySelector("textarea")!;
+  field.value = "Owner-reviewed outgoing changes";
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+  button("Pull and push").click();
+  await settle();
+  expect(seen).toEqual([{ type: "git_push", checkoutId: "p:main", remote, branch: "dev", confirmed: true, summary: field.value }]);
+  expect(active()).toBeNull();
+});
+
+it("refuses an over-limit Push summary with visible words and sends a summary at the limit whole", async () => {
+  const remote = "git@github.com:example/project.git";
+  const h = mount(true, remote);
+  h.open({ kind: "push", checkoutId: "p:main" });
+  await settle();
+  expect(active()!.textContent).toContain("up to 8,000 bytes");
+  const field = active()!.querySelector("textarea")!;
+  // Two-byte characters reach the byte limit at half as many characters.
+  const atLimit = `Owner summary\n\n${"é".repeat((PUSH_SUMMARY_MAX_BYTES - 15) / 2)}.`;
+  expect(new TextEncoder().encode(atLimit).length).toBe(PUSH_SUMMARY_MAX_BYTES);
+  field.value = `${atLimit}é`;
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle();
+  const status = active()!.querySelector('[role="status"]')!;
+  expect(status.textContent).toBe("The summary is 8,002 bytes. Shorten it to 8,000 bytes or fewer to push; nothing is cut automatically.");
+  expect(field.getAttribute("aria-invalid")).toBe("true");
+  expect(button("Push").getAttribute("aria-disabled")).toBe("true");
+  expect(button("Push").getAttribute("data-why")).toBe(status.textContent);
+  button("Push").click();
+  expect(h.script.commands).toHaveLength(0);
+  field.value = atLimit;
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle();
+  expect(field.getAttribute("aria-invalid")).toBeNull();
+  button("Push").click();
+  expect(h.script.commands.map(c => c.payload)).toEqual([{ type: "git_push", checkoutId: "p:main", remote, branch: "dev", confirmed: true, summary: atLimit }]);
   h.script.receipt(true);
   await settle();
   expect(active()).toBeNull();

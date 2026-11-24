@@ -701,9 +701,90 @@ impl workspace_service::native_runtime::NativeRoutes for ReworkRoute {
 }
 
 #[tokio::test]
+async fn worktree_start_requires_git_without_blocking_project_folder_tasks() {
+    use workspace_service::{connect, read_frame, write_frame};
+
+    let f = Fixture::with_routes(Some(std::sync::Arc::new(ReworkRoute))).await;
+    let directory = f.base.join("trees");
+    let settings = f.service.machine(serde_json::from_value(json!({
+        "op":"machine.update","projectId":f.id,"params":{"patch":{"worktreeRoot":directory}},
+    })).unwrap()).await.unwrap();
+    assert_eq!(settings["ok"], true, "{settings}");
+    f.service.activate(&f.id).await.unwrap();
+
+    let server = tokio::spawn(f.service.clone().serve());
+    let mut client = connect(f.service.socket_path()).await.unwrap();
+    let call = |operation: &str, target: &str, id: &str, version: &str, payload: Value| json!({
+        "jsonrpc":"2.0","id":id,"method":"workspace","params":{
+            "protocol":{"major":1,"minor":8},"requestId":id,"projectId":f.id,
+            "actorId":"fixture","operation":operation,"target":target,
+            "ownerEpoch":null,"expectedVersion":version,"payload":payload,
+        }
+    });
+    write_frame(&mut client, &call("tasks.create", &f.id, "create-tree", "0",
+        json!({"description":"Dedicated checkout","checkout":{"kind":"worktree"}})))
+        .await.unwrap();
+    let created = read_frame(&mut client).await.unwrap();
+    let draft = created["result"]["target"].as_str().unwrap_or_else(|| panic!("{created}"));
+    let worktree_draft = draft.to_owned();
+    let start = call("tasks.start", &worktree_draft, "start-tree", "1", json!({}));
+    for _ in 0..2 {
+        write_frame(&mut client, &start).await.unwrap();
+        let reply = read_frame(&mut client).await.unwrap();
+        assert_eq!(reply, json!({
+            "jsonrpc":"2.0","id":"start-tree","error":{
+                "code":-32000,
+                "message":"A separate worktree needs a Git repository. Initialize Git or choose Project folder.",
+                "data":{"kind":"worktree_start","reason":"worktree_git_required"},
+            }
+        }));
+    }
+    let store = f.store();
+    store.read(|db| {
+        for table in ["runtime_tasks", "workspace_executions", "task_workspaces"] {
+            let count: i64 = db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
+            assert_eq!(count, 0, "{table}");
+        }
+        Ok(())
+    }).unwrap();
+    assert!(!f.root.join(".git").exists());
+    assert!(fs::read_dir(&directory).is_ok_and(|mut entries| entries.next().is_none())
+        || !directory.exists());
+
+    write_frame(&mut client, &call("tasks.create", &f.id, "create-main", "0",
+        json!({"description":"Project folder checkout","checkout":{"kind":"main"}})))
+        .await.unwrap();
+    let created = read_frame(&mut client).await.unwrap();
+    let draft = created["result"]["target"].as_str().unwrap_or_else(|| panic!("{created}"));
+    write_frame(&mut client, &call("tasks.start", draft, "start-main", "1", json!({})))
+        .await.unwrap();
+    let started = read_frame(&mut client).await.unwrap();
+    assert_eq!(started["result"]["outcome"], "recorded", "{started}");
+
+    worktree_git(&f.root, &["init", "-b", "main"]);
+    let unborn = call("tasks.start", &worktree_draft, "start-unborn", "1", json!({}));
+    write_frame(&mut client, &unborn).await.unwrap();
+    let reply = read_frame(&mut client).await.unwrap();
+    assert_eq!(reply["error"], json!({
+        "code":-32000,
+        "message":"A separate worktree needs a commit. Make the first commit or choose Project folder.",
+        "data":{"kind":"worktree_start","reason":"worktree_head_unborn"},
+    }), "{reply}");
+
+    drop(client);
+    f.service.stop().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn owner_rework_uses_the_current_target_and_reopens_sprint_membership() {
     use cortex_core::workspace::{self, worktrees};
-    for kind in ["main", "worktree"] {
+    for (kind, close) in [
+        ("main", "merged"),
+        ("worktree", "merged"),
+        ("worktree", "already_in_target"),
+        ("worktree", "external"),
+    ] {
         let f = Fixture::with_routes(Some(std::sync::Arc::new(ReworkRoute))).await;
         let response = |op: &str, params: Value| {
             let service = f.service.clone();
@@ -758,22 +839,55 @@ async fn owner_rework_uses_the_current_target_and_reopens_sprint_membership() {
         }).unwrap();
         let old_tree = worktrees::owned(&store, &f.id, &task).unwrap();
         if let Some(tree) = &old_tree {
-            worktree_git(&f.root, &["worktree", "remove", tree.path.to_str().unwrap()]);
+            if close == "merged" {
+                worktree_git(&f.root, &["worktree", "remove", tree.path.to_str().unwrap()]);
+            } else {
+                fs::write(tree.path.join("landed"), "old task change").unwrap();
+                worktree_git(&tree.path, &["add", "landed"]);
+                worktree_git(&tree.path, &["commit", "-m", "old task change"]);
+                let source = worktree_git(&tree.path, &["rev-parse", "HEAD"]);
+                worktree_git(&f.root, &["cherry-pick", &source]);
+            }
+        }
+        fs::create_dir_all(f.path().parent().unwrap()).unwrap();
+        // Seed the comparison override retained after a prior Update from target.
+        let mut closed = json!({
+            "tasks":{
+                (&task):{"status":"done","work":"merged","doneAt":now_ms(),"targetBranch":"main",
+                    "checkout":{"kind":kind},"integration":{"targetBranch":"main","commit":initial},
+                    "acceptance":{"version":"1"},"sprintId":"sprint","changesBaseRevision":initial},
+                (&dependent):{"status":"done","sprintId":"sprint","dependencies":[task]},
+            },
+            "sprints":[{"id":"sprint","taskIds":[task,dependent],"runMode":"manual","queueState":"complete"}],
+        });
+        if close != "merged" {
+            let record = &mut closed["tasks"][&task];
+            record["status"] = json!("ready_to_merge");
+            record["work"] = json!("unmerged");
+            record["integration"] = Value::Null;
+            record["baseRevision"] = json!(initial);
+            fs::write(f.path(), serde_json::to_vec(&closed).unwrap()).unwrap();
+            let result = f.call(json!({"action":"close","choice":close,"confirmed":true,"taskId":task})).await;
+            assert_eq!(result["ok"], true, "{result}");
+            closed = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
+            let saved = &closed["tasks"][&task];
+            assert!(saved["acceptance"].is_null() && saved["integration"].is_null());
+            assert_eq!(saved["notVerifiedByCortex"], true);
+            assert_eq!(
+                saved["alreadyInTargetBranch"],
+                if close == "already_in_target" { json!("main") } else { Value::Null },
+            );
+        } else if kind == "worktree" {
+            closed["tasks"][&task]["conflict"] = json!("none");
+            closed["tasks"][&task]["merge"] = json!({
+                "finished":true,"gitState":"completed","targetRevision":initial,
+                "freshChecks":{"state":"requested"},
+            });
         }
         fs::write(f.root.join("tracked"), "advanced target").unwrap();
         worktree_git(&f.root, &["commit", "-am", "advance target"]);
         let advanced = worktree_git(&f.root, &["rev-parse", "HEAD"]);
         assert_ne!(advanced, initial);
-        fs::create_dir_all(f.path().parent().unwrap()).unwrap();
-        let closed = json!({
-            "tasks":{
-                (&task):{"status":"done","work":"merged","doneAt":now_ms(),"targetBranch":"main",
-                    "checkout":{"kind":kind},"integration":{"targetBranch":"main","commit":initial},
-                    "acceptance":{"version":"1"},"sprintId":"sprint"},
-                (&dependent):{"status":"done","sprintId":"sprint","dependencies":[task]},
-            },
-            "sprints":[{"id":"sprint","taskIds":[task,dependent],"runMode":"manual","queueState":"complete"}],
-        });
         fs::write(f.path(), serde_json::to_vec(&closed).unwrap()).unwrap();
         let read = response("product.board", json!({})).await;
         let projected = &read["result"]["tasks"][&task];
@@ -807,6 +921,19 @@ async fn owner_rework_uses_the_current_target_and_reopens_sprint_membership() {
             let reply = f.call(bad).await;
             assert_eq!(reply["code"], refusal, "{reply}");
         }
+        if close == "merged" && kind == "worktree" {
+            for (finished, state) in [(false, "pending"), (true, "unknown")] {
+                let mut unresolved = closed.clone();
+                unresolved["tasks"][&task]["merge"]["finished"] = json!(finished);
+                unresolved["tasks"][&task]["merge"]["gitState"] = json!(state);
+                fs::write(f.path(), serde_json::to_vec(&unresolved).unwrap()).unwrap();
+                let board = response("product.board", json!({})).await;
+                let projected = &board["result"]["tasks"][&task];
+                assert_eq!(projected["reworkAvailable"], false, "{board}");
+                assert_eq!(projected["reworkUnavailableReason"], "merge_in_progress");
+                assert_eq!(f.call(request.clone()).await["code"], "merge_in_progress");
+            }
+        }
         let mut archived = closed.clone();
         archived["tasks"][&task]["archive"] = json!({"at":2});
         fs::write(f.path(), serde_json::to_vec(&archived).unwrap()).unwrap();
@@ -820,7 +947,18 @@ async fn owner_rework_uses_the_current_target_and_reopens_sprint_membership() {
         let reply = f.call(request.clone()).await;
         assert_eq!(reply["ok"], true, "{reply}");
         assert_eq!(reply["result"]["state"], "PLANNING");
+        if close == "external" {
+            assert!(reply["result"]["baseRevision"].is_null(), "{reply}");
+            let current = worktrees::owned(&store, &f.id, &task).unwrap().unwrap();
+            assert_eq!(current.path, old_tree.unwrap().path);
+            let overlay: Value = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
+            assert_eq!(overlay["tasks"][&task]["changesBaseRevision"], initial);
+            f.service.stop().await.unwrap();
+            continue;
+        }
         assert_eq!(reply["result"]["baseRevision"], advanced);
+        let changes = response("repo.snapshot", json!({})).await;
+        assert_eq!(changes["result"]["taskDiffs"][&task]["files"], json!([]), "{changes}");
         assert_eq!(f.call(request.clone()).await, reply);
         let board = response("product.board", json!({})).await;
         let working = &board["result"]["tasks"][&task];
@@ -834,27 +972,38 @@ async fn owner_rework_uses_the_current_target_and_reopens_sprint_membership() {
         let recovered = response("product.board", json!({})).await;
         assert_eq!(recovered["result"]["tasks"][&task]["baseRevision"], advanced);
         assert!(recovered["result"]["tasks"][&task]["integration"].is_null());
+        let changes = response("repo.snapshot", json!({})).await;
+        assert_eq!(changes["result"]["taskDiffs"][&task]["files"], json!([]), "{changes}");
         let sprint_close = response("product.sprint", json!({"action":"close","sprintId":"sprint","confirmed":true})).await;
         assert_eq!(sprint_close["code"], "rework_pending", "{sprint_close}");
-        if let Some(old) = old_tree {
+        let checkout = if let Some(old) = old_tree {
             let current = worktrees::owned(&store, &f.id, &task).unwrap().unwrap();
             assert_ne!(current.path, old.path);
-            assert!(!old.path.exists());
+            assert_eq!(old.path.exists(), close == "already_in_target");
             assert_eq!(current.base_sha, advanced);
             assert_eq!(worktree_git(&current.path, &["rev-parse", "HEAD"]), advanced);
             assert_eq!(fs::read_to_string(current.path.join("tracked")).unwrap(), "advanced target");
+            current.path
         } else {
             assert_eq!(worktree_git(&f.root, &["rev-parse", "HEAD"]), advanced);
-        }
+            f.root.clone()
+        };
+        fs::write(checkout.join("new-edit"), "second cycle only").unwrap();
+        let changes = response("repo.snapshot", json!({})).await;
+        let files = changes["result"]["taskDiffs"][&task]["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1, "{changes}");
+        assert_eq!(files[0]["path"], "new-edit", "{changes}");
         store.read(|db| {
-            let (origin, integration, base): (String,String,String) = db.query_row(
+            let (origin, integration, base): (String,Option<String>,String) = db.query_row(
                 "SELECT json_extract(payload_json,'$.origin'),
                     json_extract(payload_json,'$.closed.integration.commit'),
                     json_extract(payload_json,'$.baseRevision') FROM runtime_events
                  WHERE type='TASK_REOPENED' AND task_id=?", [runtime],
                 |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
             )?;
-            assert_eq!((origin.as_str(), integration, base), ("owner_rework",initial,advanced));
+            assert_eq!(origin, "owner_rework");
+            assert_eq!(integration.as_deref(), (close == "merged").then_some(initial.as_str()));
+            assert_eq!(base, advanced);
             let source: i64 = db.query_row(
                 "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='USER_STEERING'
                   AND json_extract(payload_json,'$.text')='Do it again.'

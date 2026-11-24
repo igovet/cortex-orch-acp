@@ -94,10 +94,11 @@ it("a missing worktree never opens the main project instead",async()=>{
   expect(p.commands).toHaveLength(0);
 });
 
-it("Git Generate is English even with Russian filenames",async()=>{
+it("Git Generate does not fabricate a template when the service cannot draft",async()=>{
   const s=base(); s.repos[0].checkouts[0].files=[{path:"страница.html",status:"A",stage:"staged",hunks:[],add:1,del:0}];
   const {root,p}=await open(s,"/m/local/p/p/git"); button(root,"Generate").click(); await settle();
-  expect(p.commands.at(-1)?.payload).toMatchObject({type:"git_draft",message:"Update 1 file"});
+  expect(root.querySelector(".commit-box [role=status]")?.textContent).toContain("You can enter the text manually.");
+  expect(p.commands).toEqual([]);
 });
 
 it("PR title default is English while the original task remains Russian",async()=>{

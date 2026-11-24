@@ -17,10 +17,13 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
 };
-fn accepted_commit_source(record: &Value) -> Option<&Value> {
+fn accepted_commit_source<'a>(record: &'a Value, workspace: Option<&str>) -> Option<&'a Value> {
     let source = &record["acceptance"]["commitSource"];
     (record["status"] == "ready_to_merge"
-        && record["checkout"]["kind"].as_str().unwrap_or("main") == "main"
+        && match workspace {
+            Some(id) => source["checkoutId"] == id,
+            None => source["checkoutId"].is_null() && record["checkout"]["kind"].as_str().unwrap_or("main") == "main",
+        }
         && record["archive"].is_null()
         && record["purged"] != true
         && record["acceptance"]["committedDigest"].is_null()
@@ -39,6 +42,7 @@ const MAX_UNTRACKED: usize = 2000;
 pub struct Git {
     configs: BTreeMap<PathBuf, Vec<String>>,
     runtime_config: Option<crate::Config>,
+    local_only: bool,
 }
 struct Output {
     bytes: Vec<u8>,
@@ -238,13 +242,21 @@ impl Git {
         Self {
             configs: BTreeMap::new(),
             runtime_config: None,
+            local_only: false,
         }
     }
     pub fn for_service(config: &crate::Config) -> Self {
         Self {
             configs: BTreeMap::new(),
             runtime_config: Some(config.clone()),
+            local_only: false,
         }
+    }
+    /// Drafts inspect only local objects. In a partial clone a missing object
+    /// must not trigger an implicit fetch (including a configured helper).
+    pub(super) fn local_draft(mut self) -> Self {
+        self.local_only = true;
+        self
     }
     /// `None` when stdout exceeds `limit`; the child is killed as soon as that is known.
     async fn raw_bounded(
@@ -272,6 +284,9 @@ impl Git {
         }
         if let Some(config) = &self.runtime_config {
             crate::launch::runtime_environment(&mut cmd, config)?;
+        }
+        if self.local_only {
+            cmd.env("GIT_NO_LAZY_FETCH", "1").env("GIT_ALLOW_PROTOCOL", "");
         }
         cmd.args(["-c", "core.quotepath=false", "-c", "color.ui=false"])
             .args(argv)
@@ -476,6 +491,10 @@ impl Git {
     pub(super) async fn out(&mut self, path: &Path, a: &[&str]) -> Result<String> {
         Ok(self.run(path, args(a), true, None).await?.text)
     }
+    /// Bound each draft read before decoding it. `None` means it was too large.
+    pub(super) async fn draft_output(&mut self, path: &Path, a: &[&str]) -> Result<Option<String>> {
+        Ok(self.run_bounded(path, args(a), true, None, 256 * 1024).await?.map(|out| out.text))
+    }
     pub(super) async fn bytes(&mut self, path: &Path, a: &[&str]) -> Result<Vec<u8>> {
         Ok(self.run(path, args(a), true, None).await?.bytes)
     }
@@ -564,6 +583,18 @@ impl Git {
         Ok(result)
     }
     pub async fn resolve(&mut self, root: &Path, project: &str, wanted: &str) -> Result<PathBuf> {
+        use cortex_core::workspace::worktrees;
+        if wanted != format!("{project}:main") {
+            if let Some(store) = super::context::open(root, cortex_core::OpenMode::LiveReadOnly)? {
+                let owned = store.read(|db| {
+                    let Some(task) = worktrees::desktop_draft_for_checkout(db, project, wanted)? else { return Ok(None); };
+                    let checkout = worktrees::desktop_checkout_on(db, store.key(), project, Some(&task), None)?
+                        .and_then(|c| c.worktree).ok_or(cortex_core::CoreError::Refused("worktree_missing"))?;
+                    Ok(Some(checkout.path))
+                }).map_err(super::context::checkout_unavailable)?;
+                if let Some(path) = owned { return Ok(path); }
+            }
+        }
         if !self.is_repo(root).await? {
             return if wanted == format!("{project}:main") {
                 Ok(root.to_path_buf())
@@ -828,6 +859,29 @@ impl Git {
     /// A merge or rebase stopped in this checkout, read from Git's own state files: its
     /// kind, the files still in conflict and, for a rebase, the commit and branch it
     /// started from. `null` when neither is in progress. Reads only.
+    /// Read the merge marker location and whether a different Git operation is
+    /// present, without enumerating or decoding the unmerged index.
+    pub(super) async fn merge_marker(&mut self, path: &Path) -> Result<(PathBuf, bool)> {
+        let found = self.out(path, &[
+            "rev-parse", "--path-format=absolute",
+            "--git-path", "MERGE_HEAD", "--git-path", "rebase-apply",
+            "--git-path", "rebase-merge", "--git-path", "CHERRY_PICK_HEAD",
+            "--git-path", "REVERT_HEAD", "--git-path", "sequencer",
+        ]).await?;
+        let mut paths = found.lines().map(PathBuf::from);
+        let marker = paths.next().ok_or_else(|| refuse("unsafe_conflict", "Git did not identify the merge markers."))?;
+        let other = paths.collect::<Vec<_>>();
+        if !marker.is_absolute() || other.len() != 5 || other.iter().any(|p| !p.is_absolute()) {
+            return Err(refuse("unsafe_conflict", "Git did not identify the merge markers."));
+        }
+        for path in other {
+            if path.try_exists()? {
+                return Ok((marker, true));
+            }
+        }
+        Ok((marker, false))
+    }
+
     pub(super) async fn operation(&mut self, path: &Path) -> Result<Value> {
         let found = self
             .run(
@@ -1434,7 +1488,8 @@ impl Git {
                     .map(|(k, _)| k.as_str())
             });
             let (up, mut ahead, mut behind) = upstream.get(branch).cloned().unwrap_or_default();
-            let files = if path.is_dir() {
+            let bound_unavailable = task.is_some_and(|task| product["tasks"][task]["checkout"]["unavailable"] == true);
+            let files = if !bound_unavailable && path.is_dir() {
                 let found = self.status(path).await?;
                 statuses.insert(path.to_path_buf(), found.clone());
                 found
@@ -1508,6 +1563,10 @@ impl Git {
                 && record["checkout"]["path"]
                     .as_str()
                     .is_some_and(|p| !Path::new(p).exists());
+            if !removed && record["checkout"]["unavailable"] == true {
+                snapshot["taskDiffs"][task] = json!({"files":[],"reason":"The task's original worktree is unavailable."});
+                continue;
+            }
             let mut path = root;
             if !removed && record["checkout"]["kind"] == "worktree" {
                 let candidate = record["checkout"]["path"].as_str().unwrap_or("");
@@ -1692,6 +1751,33 @@ impl Git {
         }
         Ok(found[0].to_owned())
     }
+    async fn push_summary_key(&mut self, path: &Path, remote: &str, branch: &str) -> Result<String> {
+        let urls = self.out(path, &["remote", "get-url", "--push", "--all", "--", remote]).await?;
+        let location = path.canonicalize()?;
+        Ok(revision(json!([location.as_os_str().as_encoded_bytes(), remote, branch, urls.trim()]).to_string().as_bytes()))
+    }
+
+    fn push_summary_path(state: &Path, project: &str, key: &str) -> Result<PathBuf> {
+        // Apply the same project ID validation as the private product overlay.
+        product_path(state, project)?;
+        Ok(state.join("push-summaries").join(revision(project.as_bytes())).join(format!("{key}.json")))
+    }
+
+    pub(super) async fn saved_push_summary(&mut self, path: &Path, state: &Path, project: &str) -> Result<Option<String>> {
+        let branch = self.out(path, &["branch", "--show-current"]).await?;
+        let branch = branch.trim();
+        if !valid_branch(branch) {
+            return Ok(None);
+        }
+        let key = self.push_summary_key(path, "origin", branch).await?;
+        let saved = settings::read_json(&Self::push_summary_path(state, project, &key)?, Value::Null)?;
+        let Some(body) = saved["body"].as_str().filter(|s| !s.trim().is_empty()) else {
+            return Ok(None);
+        };
+        let head = self.out(path, &["rev-parse", "--verify", "HEAD^{commit}"]).await?;
+        Ok((saved["commit"] == head.trim()).then(|| body.to_owned()))
+    }
+
     /// Owner-confirmed Push to a single GitHub-shaped origin can authorize
     /// Finish. Capture Git's actual porcelain destination and the pinned refspec,
     /// not a tracking ref or a remote URL read after the network effect.
@@ -1702,7 +1788,10 @@ impl Git {
         project: &str,
         remote: &str,
         branch: &str,
+        summary: Option<String>,
     ) -> Result<()> {
+        let key = self.push_summary_key(path, remote, branch).await;
+        let body = summary.filter(|s| !s.trim().is_empty());
         let remote_ref = format!("refs/heads/{branch}");
         let repository = if remote == "origin" {
             self.out(path, &["remote", "get-url", "--push", "--all", "origin"])
@@ -1712,6 +1801,7 @@ impl Git {
         } else {
             None
         };
+        let mut pushed_commit = None;
         let witness = if let Some(repository) = repository {
             let commit = self
                 .out(
@@ -1726,6 +1816,7 @@ impl Git {
                     "Git did not identify the exact branch commit.",
                 ));
             }
+            pushed_commit = Some(commit.to_owned());
             let refspec = format!("{commit}:{remote_ref}");
             let receipt = self
                 .out(
@@ -1757,6 +1848,10 @@ impl Git {
                 && lines.next().is_none())
             .then(|| json!({"repository":repository.qualified_name(), "commit":commit, "ref":remote_ref}))
         } else {
+            if body.is_some() {
+                pushed_commit = self.out(path, &["rev-parse", "--verify", &format!("{remote_ref}^{{commit}}")])
+                    .await.ok().map(|s| s.trim().to_owned()).filter(|s| full_commit_id(s));
+            }
             self.checked(path, args(&["push", "--", remote, branch]))
                 .await?;
             None
@@ -1788,7 +1883,27 @@ impl Git {
                 "Git completed the push, but Workspace could not save its evidence. Inspect the remote before pushing again.",
             ))?;
         }
-        Ok(())
+        // The repo lock still serializes Push. The summary is not part of the
+        // product projection or PR authorization; no Git arguments contain it.
+        let save_summary = || -> Result<()> {
+            if let Some(body) = body {
+                let file = Self::push_summary_path(state, project, &key?)?;
+                let commit = pushed_commit.ok_or_else(|| refuse("git_failed", "Git did not identify the branch commit."))?;
+                settings::write_json(&file, &json!({"commit":commit,"body":body}))?;
+            } else if let Ok(key) = key {
+                let file = Self::push_summary_path(state, project, &key)?;
+                match fs::remove_file(file) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Ok(())
+        };
+        save_summary().map_err(|_| refuse(
+            "push_summary_unsaved",
+            "Git completed the push, but Workspace could not save or clear its summary. Inspect the remote before pushing again.",
+        ))
     }
     async fn hunk(
         &mut self,
@@ -1890,10 +2005,10 @@ impl Git {
         let saved = product(state, project)?;
         let here = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        for record in saved["tasks"]
+        for (task, record) in saved["tasks"]
             .as_object()
             .into_iter()
-            .flat_map(|m| m.values())
+            .flat_map(|m| m.iter())
         {
             let retained = record["merge"].is_object()
                 && record["merge"]["finished"] != true
@@ -1901,13 +2016,15 @@ impl Git {
                     record["conflict"].as_str(),
                     Some("conflict" | "resolving" | "failed")
                 );
-            let at = match record["checkout"]["kind"].as_str() {
+            if !retained { continue; }
+            let owned = super::context::owned_checkout(&root, project, task)?;
+            let at = if let Some(w) = owned { Some(w.path) } else { match record["checkout"]["kind"].as_str() {
                 Some("worktree") => record["checkout"]["path"]
                     .as_str()
                     .map(|p| fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p))),
                 _ => Some(root.clone()),
-            };
-            if retained && at.as_deref() == Some(here.as_path()) {
+            }};
+            if at.as_deref() == Some(here.as_path()) {
                 return Err(refuse(
                     "task_merge",
                     format!(
@@ -2156,6 +2273,23 @@ impl Git {
             .map(str::to_owned)
             .unwrap_or_else(|| format!("{project}:main"));
         let path = self.resolve(root, project, &wanted).await?;
+        if let Some(task) = p["taskId"].as_str() {
+            if let Some(binding) = super::context::owned_checkout(root, project, task)? {
+                if binding.id != wanted || binding.path != path {
+                    return Err(refuse("worktree_binding_invalid", "Select the task's original checkout for this Git action."));
+                }
+            }
+        }
+        let bound = if path != root {
+            match super::context::open(root, cortex_core::OpenMode::LiveReadOnly)? {
+                Some(store) => store.read(|db| cortex_core::workspace::worktrees::desktop_draft_for_checkout(db, project, &wanted))
+                    .map_err(super::context::core)?,
+                None => None,
+            }
+        } else { None };
+        if bound.is_some() && action != "draft" {
+            super::context::require_idle_checkout(root, project, &path)?;
+        }
         match action {
             "draft" => {
                 let _state_lock = Lock::new(state, "machine.lock")?;
@@ -2234,11 +2368,11 @@ impl Git {
                 }
             }
             "commit" => {
-                let track_acceptance = path == root
-                    && p["amend"] != true
+                let workspace = (path != root).then_some(wanted.as_str());
+                let track_acceptance = p["amend"] != true
                     && product(state, project).ok().is_some_and(|p| {
                         p["tasks"].as_object().is_some_and(|tasks| {
-                            tasks.values().any(|r| accepted_commit_source(r).is_some())
+                            tasks.values().any(|r| accepted_commit_source(r, workspace).is_some())
                         })
                     });
                 let staged = self
@@ -2295,7 +2429,7 @@ impl Git {
                     (proven, product["tasks"].as_object_mut())
                 {
                     for record in tasks.values_mut() {
-                        if accepted_commit_source(record).is_some_and(|source| {
+                        if accepted_commit_source(record, workspace).is_some_and(|source| {
                             source["head"] == head
                                 && source["branch"] == observed.branch
                                 && source["content"] == observed.content
@@ -2318,16 +2452,27 @@ impl Git {
             }
             "push" => {
                 let branch = p["branch"].as_str().unwrap_or("");
+                if let Some(task) = bound.as_deref() {
+                    if super::context::owned_checkout(root, project, task)?.is_none_or(|w| w.branch != branch) {
+                        return Err(refuse("worktree_binding_invalid", "Push only this task checkout's branch."));
+                    }
+                }
                 if p["confirmed"] != true || !valid_branch(branch) {
                     return Err(refuse(
                         "confirmation_required",
                         "Confirm the remote and branch first.",
                     ));
                 }
+                // Validate the whole confirmed summary before any Git effect.
+                let summary = match &p["summary"] {
+                    Value::Null => None,
+                    Value::String(text) => Some(super::short_text::confirmed_push_body(text)?),
+                    _ => return Err(refuse("invalid_request", "Provide the push summary as text.")),
+                };
                 let remote = self
                     .configured_remote(&path, p["remote"].as_str().unwrap_or(""))
                     .await?;
-                self.push(&path, state, project, &remote, branch).await?;
+                self.push(&path, state, project, &remote, branch, summary).await?;
             }
             "revert_commit" => {
                 let sha = p["sha"].as_str().unwrap_or("");

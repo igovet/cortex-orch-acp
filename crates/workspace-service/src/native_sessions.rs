@@ -1,5 +1,8 @@
 //! Native session composition. Desktop activation does not select this host yet.
 //! One StoreExecutor owns its project lease; never compose it beside a child scheduler.
+#[cfg(test)]
+#[path = "native_worktree_execution_tests.rs"]
+mod worktree_execution_tests;
 use cortex_core::{
     channels::{self, Credential, Identity, Principal},
     lifecycle::{
@@ -284,8 +287,19 @@ pub struct NativeHost {
     pub(super) commands: crate::native_commands::Running,
     pub(super) capacity_changed: Arc<tokio::sync::Notify>,
     pub(super) route_holds: Arc<crate::native_route_hold::Holds>,
+    pub(super) guidance_changed: Arc<tokio::sync::Notify>,
 }
 impl NativeHost {
+    pub(super) async fn execution_checkout(
+        &self, task: &str, owner: &OwnerEpoch,
+    ) -> CoreResult<cortex_core::workspace::worktrees::ExecutionCheckout> {
+        let task = task.to_owned();
+        let owner = owner.clone();
+        receive(self.executor.publication(move |store| {
+            cortex_core::workspace::worktrees::resolve(store, &task, &owner)
+        })?).await
+    }
+
     /// The trusted owner-client decision transport for native permission cards.
     pub fn bind_permissions(&self, provider: Arc<dyn ClientPermissions>) {
         *self.permissions.write().unwrap() = Some(provider);
@@ -298,6 +312,16 @@ impl NativeHost {
     pub fn open_with_mcp(key: ProjectKey, mcp: crate::native_mcp::Registry) -> CoreResult<Self> {
         Self::open_inner(key, mcp, false, false)
     }
+    /// Desktop composition supplies the machine state location. It stays
+    /// independent of the project key and the bound execution checkout.
+    pub fn open_workspace(
+        key: ProjectKey, mcp: crate::native_mcp::Registry, state: PathBuf,
+    ) -> CoreResult<Self> {
+        let mut host = Self::open_for_recovery(key, mcp)?;
+        host.workspace_state = Some(state);
+        Ok(host)
+    }
+
     /// Only the service recovery composition may take over legacy tasks. The
     /// executor acquires both lifetime fences before opening the writable store.
     pub(crate) fn open_for_recovery(
@@ -361,6 +385,7 @@ impl NativeHost {
             commands: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             capacity_changed: Arc::new(tokio::sync::Notify::new()),
             route_holds: Default::default(),
+            guidance_changed: Default::default(),
         })
     }
     pub async fn create(
@@ -509,7 +534,7 @@ impl NativeHost {
         task: String,
         owner: OwnerEpoch,
         who: SessionRole,
-        route: SessionRoute,
+        mut route: SessionRoute,
         mut wait: Option<WorkerLaunch>,
         mut managed: Option<(&mut crate::native_route_hold::Attempt, LaunchInterrupts)>,
     ) -> CoreResult<SessionDriver> {
@@ -523,11 +548,26 @@ impl NativeHost {
         {
             return Err(CoreError::Refused("invalid_session_route"));
         }
+        let checkout = self.execution_checkout(&task, &owner).await?;
+        let root = checkout.path().to_path_buf();
+        let worktree = checkout.worktree.as_ref().map(|tree| tree.id.clone());
         let engine_kind = route.launch.engine;
+        if worktree.is_some() {
+            if engine_kind == cortex_engine::environment::EngineKind::OpenCode {
+                return Err(CoreError::Refused("worktree_engine_route_unavailable"));
+            }
+            let state = self.workspace_state.as_deref()
+                .ok_or(CoreError::Refused("worktree_confinement_unavailable"))?;
+            route.launch.cwd = root.clone();
+            route.launch.confinement = Some(crate::native_routes::view::RouteConfiner::worktree(
+                state, &route.connection, &self.root, &root,
+            )?);
+        }
         let limit = route.connection_limit;
+        let steering = matches!(who, SessionRole::ActiveSteering);
         let assignment = match &who {
             SessionRole::Worker { assignment } => Some(assignment.clone()),
-            SessionRole::Coordinator => None,
+            SessionRole::Coordinator | SessionRole::ActiveSteering => None,
         };
         if let Some(wait) = &wait {
             wait.ticket.as_ref().unwrap().select(
@@ -569,6 +609,9 @@ impl NativeHost {
                 // sharing its connection. The ticket keeps its original position.
                 wait.ticket.as_ref().unwrap().set_held(reason.is_some());
             }
+            if steering && reason.is_some() {
+                break Err(CoreError::Refused("active_steering_route_held"));
+            }
             let wait_id = if reason.is_some() && provider_wait.is_none() {
                 match crate::identity() {
                     Ok(id) => Some(id),
@@ -591,6 +634,7 @@ impl NativeHost {
             let result = receive(self.executor.write(move |db| {
                 let principal = match &assignment {
                     Some(assignment) => Principal::Worker { assignment },
+                    None if steering => Principal::ActiveSteering,
                     None => Principal::Coordinator,
                 };
                 if let Some(interrupts) = &interrupts {
@@ -609,7 +653,7 @@ impl NativeHost {
                     )? {
                             return Err(CoreError::Refused("native_task_interrupted"));
                         }
-                    } else if !db.query_row(
+                    } else if !steering && !db.query_row(
                         "SELECT EXISTS(SELECT 1 FROM runtime_tasks t WHERE task_id=? AND state IN ('PLANNING','RECONCILING')
                          AND NOT EXISTS(SELECT 1 FROM task_stopped s WHERE s.task_id=t.task_id))",
                         [&task], |row| row.get::<_, bool>(0),
@@ -801,6 +845,19 @@ impl NativeHost {
             self.settle_unstarted(credential, reservation).await?;
             return Err(error);
         }
+        if let Some(id) = &worktree {
+            let current = self.execution_checkout(&task, &owner).await.and_then(|current| {
+                if current.path() != root || current.worktree.as_ref().map(|w| &w.id) != Some(id) {
+                    Err(CoreError::Refused("worktree_binding_invalid"))
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(error) = current {
+                self.settle_unstarted(credential, reservation).await?;
+                return Err(error);
+            }
+        }
         let policy = Arc::new(CorePolicy {
             workspace_state: self.workspace_state.clone(),
             commands: self.commands.clone(),
@@ -808,19 +865,21 @@ impl NativeHost {
             permissions: self.permissions.read().unwrap().clone(),
             executor: self.executor.clone(),
             credential: credential.clone(),
-            root: self.root.clone(),
-            protected_roots: vec![
-                route.launch.credential_directory.clone(),
-                route
-                    .launch
-                    .executable
-                    .parent()
-                    .unwrap_or(&route.launch.executable)
-                    .to_path_buf(),
-            ],
+            root: root.clone(),
+            logical: self.root.clone(),
+            worktree: worktree.clone(),
+            owner: owner.clone(),
+            protected_roots: {
+                let mut roots = vec![route.launch.credential_directory.clone()];
+                if worktree.is_none() {
+                    roots.push(route.launch.executable.parent().unwrap_or(&route.launch.executable).to_path_buf());
+                }
+                roots
+            },
             engine: engine_kind,
             mcp_servers: std::sync::Mutex::new(Vec::new()),
             activity: Default::default(),
+            guidance_changed: self.guidance_changed.clone(),
         });
         let credentials = || {
             Credentials::new(
@@ -873,13 +932,16 @@ impl NativeHost {
         } else {
             "native_session_start_failed"
         };
-        let instructions = format!("{instructions}\n\n{}", route.instructions);
+        let mut instructions = format!("{instructions}\n\n{}", route.instructions);
+        if worktree.is_some() {
+            instructions.push_str("\n\nThis task uses an isolated checkout. Use Cortex project file tools for repository writes. Commands can read this checkout and write only to private scratch, not the repository. Outside effects, native mutations and external MCP servers are unavailable for this task.");
+        }
         let project_context = crate::native_skills::project_files(
             &identity.role,
             identity.profile.as_deref(),
             identity.stage.as_deref(),
         )
-        .then(|| crate::native_skills::section(&self.root))
+        .then(|| crate::native_skills::section(&root))
         .flatten()
         .unwrap_or_default();
         let mut attempt: u32 = 0;
@@ -899,7 +961,10 @@ impl NativeHost {
                 let gateway = Gateway::new(policy.clone(), credentials().map_err(|_| Error::Invalid)?);
                 broker = Some(Broker::new(&route.broker_parent, Arc::new(gateway))?);
                 phase = "external_mcp";
-                self.mcp
+                // External MCP processes have their own authority, not the
+                // task's worktree view. Keep them off this route.
+                if worktree.is_none() && !steering {
+                    self.mcp
                     .attach(
                         &identity,
                         engine_kind,
@@ -913,6 +978,7 @@ impl NativeHost {
                         &mut withheld,
                     )
                     .await?;
+                }
                 phase = "launch";
                 let mut launch = route.launch.clone();
                 // Through Cortex's native Codex launcher the relays are App Server config
@@ -979,10 +1045,14 @@ impl NativeHost {
                     .then(|| {
                         let mut meta = crate::native_engine_policy::claude_session_meta();
                         meta["systemPrompt"] = json!(&instructions);
+                        if worktree.is_some() {
+                            // Worktree code is not an authority for native settings.
+                            meta["claudeCode"]["options"]["settingSources"] = json!([]);
+                        }
                         meta
                     });
                 let s = e
-                    .start_session_with_meta(&self.root, servers, meta, route.deadline)
+                    .start_session_with_meta(&root, servers, meta, route.deadline)
                     .await?;
                 phase = "configure";
                 e.configure(&s, "model", &route.model, route.deadline)
@@ -1001,7 +1071,7 @@ impl NativeHost {
                 // permission requests. Codex follows the same routes as the other
                 // engines (owner decision 2026-11-22).
                 let mode = crate::native_engine_policy::native_mode(
-                    engine_kind, read_only, &s.config_options())?;
+                    engine_kind, read_only || worktree.is_some(), &s.config_options())?;
                 e.configure(&s,"mode",mode,route.deadline).await?;
                 if engine_kind == cortex_engine::environment::EngineKind::Codex
                     && !crate::native_engine_policy::codex_native_confirmed(&s.config_options(), mode) {
@@ -1043,6 +1113,7 @@ impl NativeHost {
                 // The engine's name for the model (an alias such as `default` reads with the
                 // model it resolves to); absent when the engine names nothing better than the id.
                 if let Some(label) = model_label { configured["model_label"] = json!(label); }
+                if let Some(binding) = policy.worktree_receipt() { configured["checkout"] = binding; }
                 let s_id = s.id().to_owned();
                 receive(self.executor.write(move |db| {
                     let i = channels::authenticate(db,&c.channel_id,c.secret(),false)?;
@@ -1122,6 +1193,8 @@ impl NativeHost {
                 "native_session_outcome_unknown"
             } else if explicit_auth {
                 "engine_authentication_required"
+            } else if worktree.is_some() && phase == "launch" && matches!(error, Error::Forbidden) {
+                "worktree_confinement_unavailable"
             } else {
                 blocker
             };
@@ -1196,6 +1269,7 @@ impl NativeHost {
             project_context,
             engine_kind,
             policy,
+            active_steering: steering,
             delivered_attachments: std::sync::Mutex::new(std::collections::HashSet::new()),
             refusal_is_degenerate: std::sync::atomic::AtomicBool::new(false),
             dispatched_prompts: std::sync::atomic::AtomicI64::new(0),
@@ -1373,6 +1447,7 @@ impl WorkerLaunch {
 #[derive(Clone)]
 pub enum SessionRole {
     Coordinator,
+    ActiveSteering,
     Worker { assignment: String },
 }
 #[derive(Clone)]
@@ -1397,6 +1472,7 @@ pub struct Turn {
 struct WriterTurn {
     turn: String,
     since: i64,
+    checkout: Option<Value>,
     before: crate::native_change_set::Snapshot,
 }
 /// How often an active worker prompt checks whether its authority was revoked.
@@ -1428,6 +1504,7 @@ pub struct SessionDriver {
     project_context: String,
     engine_kind: cortex_engine::environment::EngineKind,
     policy: Arc<CorePolicy>,
+    active_steering: bool,
     /// Retained attachment bodies already delivered to this engine session.
     delivered_attachments: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Whether an ACP `refusal` stop ends a turn as degenerate (set for runtime-driven
@@ -1452,8 +1529,8 @@ struct PromptUsage<'a> {
     failed: bool,
 }
 
-impl Drop for PromptUsage<'_> {
-    fn drop(&mut self) {
+impl PromptUsage<'_> {
+    fn enqueue(&mut self) {
         let Some((id, sequence)) = self.call.take() else {
             return;
         };
@@ -1500,6 +1577,12 @@ impl Drop for PromptUsage<'_> {
     }
 }
 
+impl Drop for PromptUsage<'_> {
+    fn drop(&mut self) {
+        self.enqueue();
+    }
+}
+
 fn usage_write_diagnostic(error: &CoreError) {
     use std::io::Write as _;
     let _ = writeln!(
@@ -1512,7 +1595,7 @@ fn usage_write_diagnostic(error: &CoreError) {
 impl SessionDriver {
     fn root_for_input(&self) -> PathBuf {
         let channel = workspace_protocol::channel::current();
-        self.policy.root.join(if channel.is_dev() {
+        self.policy.logical.join(if channel.is_dev() {
             ".cortex-dev"
         } else {
             ".cortex"
@@ -1529,17 +1612,49 @@ impl SessionDriver {
 
     /// Drain ACP updates concurrently. Chat/end_turn never become tool authority.
     pub async fn prompt(&self, text: &str) -> CoreResult<Turn> {
+        self.prompt_guidance(text, &[]).await
+    }
+
+    pub(crate) async fn prompt_guidance(&self, text: &str, guidance: &[Value]) -> CoreResult<Turn> {
         self.policy
             .check(true)
             .await
             .map_err(|_| CoreError::Refused("channel_authority_refused"))?;
         let c = self.credential.clone();
-        let (delivery, capsule) = receive(
-            self.executor
-                .write(move |db| cortex_core::recovery_context::delivery_tx(db, &c))?,
-        )
-        .await?;
-        let mut prompt = format!("{}\n\n{capsule}\n\n{text}", self.project_context);
+        let active_steering = self.active_steering;
+        let (delivery, capsule, live_steering) = receive(self.executor.write(move |db| {
+            let (delivery, capsule) = cortex_core::recovery_context::delivery_tx(db, &c)?;
+            let mut section = String::new();
+            if active_steering {
+                use cortex_core::lifecycle::steering;
+                let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
+                let messages = steering::hand_active_tx(db, &i.task, &c.channel_id)?;
+                if messages.is_empty() { return Err(CoreError::Refused("active_steering_empty")); }
+                let plan: String = db.query_row(
+                    "SELECT plan_json FROM runtime_tasks WHERE task_id=?", [&i.task], |r| r.get(0)
+                )?;
+                let digest = crate::native_project::digest(plan.as_bytes());
+                let stored: Value = serde_json::from_str(&plan)?;
+                let proposal = lifecycle::plan::steerable_plan(&stored)?;
+                let workers = db.prepare("SELECT p.attempt_id,n.node_id,n.assignment_ref FROM runtime_nodes n
+                    JOIN runtime_tasks t USING(task_id) JOIN delegation_provisioning p
+                      ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
+                    JOIN trusted_channels c ON c.channel_id=p.channel_id
+                    WHERE n.task_id=? AND n.revision=t.revision AND n.stage='execution' AND n.status='running'
+                      AND n.result_json IS NULL AND p.owner_epoch=? AND p.status='ready' AND c.revoked_at IS NULL
+                    ORDER BY n.rowid")?
+                    .query_map((&i.task, i.epoch), |r| Ok(json!({
+                        "attempt":r.get::<_, String>(0)?,"node":r.get::<_, String>(1)?,
+                        "assignment_ref":r.get::<_, String>(2)?
+                    })))?.collect::<Result<Vec<_>,_>>()?;
+                section = format!("\n\nLive steering snapshot (runtime facts; targets may settle before tool use):\n{}",
+                    json!({"plan":proposal,"plan_digest":digest,
+                           "live_attempts":workers,"owner_messages":messages}));
+            }
+            Ok((delivery, capsule, section))
+        })?).await?;
+        let brief = format!("{text}{live_steering}");
+        let mut prompt = format!("{}\n\n{capsule}\n\n{brief}", self.project_context);
         if self.engine_kind == cortex_engine::environment::EngineKind::OpenCode {
             prompt = format!("{}\n\n{prompt}", self.instructions);
         }
@@ -1561,6 +1676,9 @@ impl SessionDriver {
             tokens: None,
             failed: true,
         };
+        let live_steering = identity.stage.as_deref() == Some(lifecycle::steering::ACTIVE_STAGE);
+        let worker_attempt = usage.attempt.clone();
+        let guidance_ids: Vec<Value> = guidance.iter().map(|g| g["guidance_id"].clone()).collect();
         let task = identity.task;
         let root = self.root_for_input();
         let stored = receive(self.executor.read(move|db|{
@@ -1596,7 +1714,7 @@ impl SessionDriver {
         blocks.extend(attachments);
         let c = self.credential.clone();
         let transmitted = delivery.clone();
-        let (bundle, brief) = (self.instructions.clone(), text.to_owned());
+        let bundle = self.instructions.clone();
         receive(self.executor.write(move|db|{
             let i=channels::authenticate(db,&c.channel_id,c.secret(),true)?;
             let session=format!("native:{}:{}",i.attempt,i.session.as_deref().unwrap());
@@ -1616,89 +1734,94 @@ impl SessionDriver {
         } else {
             None
         };
-        let call = &usage.call;
-        let session_ref = &usage.session;
-        let pending = self
-            .engine
-            .prompt_content_observed(&self.session, blocks, || {
-                let sequence = self
-                    .dispatched_prompts
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    + 1;
-                let id = format!(
-                    "{}{session_ref}:{sequence}",
-                    crate::notifier::progress::NATIVE_USAGE_PREFIX,
-                );
-                let _ = call.set((id, sequence));
-            });
-        tokio::pin!(pending);
         let mut updates = 0;
         let mut compacted = false;
-        // A worker turn whose authority the runtime has revoked can do nothing more,
-        // yet the engine may keep generating for minutes while the attempt's capacity
-        // stays reserved and recovery waits for it. Once the revocation is observed on
-        // an active prompt, ask the engine to cancel; a prompt that does not reply
-        // within the grace ends here with its outcome unknown, and the caller's
-        // shutdown terminates and settles the session process.
-        let revocation = tokio::time::sleep(REVOCATION_POLL);
-        tokio::pin!(revocation);
-        let mut cancel_sent = false;
-        let mut revoked_since: Option<tokio::time::Instant> = None;
-        // The degenerate-turn watchdog (see `degenerate`) reads every agent message of
-        // this turn as it streams. A trip records which rule fired, cancels the turn
-        // through the same bounded cancel-and-grace path as a revoked worker, and keeps
-        // the rest of the degenerate text out of the conversation.
         let mut watch = degenerate::Watch::default();
         let mut tripped = false;
-        let result = loop {
-            tokio::select! {
-                result=&mut pending=>break result,
-                event=self.engine.next_event()=>{
-                    match event {
-                        Some(Event::Update(params))=>{
-                            updates+=1;
-                            if !tripped && params["sessionId"] == self.session.id() {
-                                if let Some(trip) = watch.observe(&params["update"]) {
-                                    tripped = true;
-                                    self.record_degenerate(&trip, worker).await?;
-                                    if self.prompt_active() {
-                                        let _ = self.engine.cancel(&self.session).await;
-                                    }
-                                    cancel_sent = true;
-                                    revocation.as_mut().reset(tokio::time::Instant::now() + REVOKED_CANCEL_GRACE);
-                                    continue;
-                                }
-                            }
-                            if tripped && degenerate::agent_text(&params["update"]) {
-                                continue;
-                            }
-                            compacted |= self.record_update(params).await?;
+        let result = {
+            let call = &usage.call;
+            let session_ref = &usage.session;
+            let pending = self
+                .engine
+                .prompt_content_observed(&self.session, blocks, || {
+                    let sequence = self
+                        .dispatched_prompts
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
+                    let id = format!(
+                        "{}{session_ref}:{sequence}",
+                        crate::notifier::progress::NATIVE_USAGE_PREFIX,
+                    );
+                    let _ = call.set((id, sequence));
+                });
+            tokio::pin!(pending);
+            // A worker turn whose authority the runtime has revoked can do nothing more,
+            // yet the engine may keep generating for minutes while the attempt's capacity
+            // stays reserved and recovery waits for it. Once the revocation is observed on
+            // an active prompt, ask the engine to cancel; a prompt that does not reply
+            // within the grace ends here with its outcome unknown, and the caller's
+            // shutdown terminates and settles the session process.
+            let revocation = tokio::time::sleep(REVOCATION_POLL);
+            tokio::pin!(revocation);
+            let mut cancel_sent = false;
+            let mut revoked_since: Option<tokio::time::Instant> = None;
+            // The degenerate-turn watchdog (see `degenerate`) reads every agent message of
+            // this turn as it streams. A trip records which rule fired, cancels the turn
+            // through the same bounded cancel-and-grace path as a revoked worker, and keeps
+            // the rest of the degenerate text out of the conversation.
+            loop {
+                tokio::select! {
+                    // The reader can enqueue EOF immediately after delivering the final
+                    // reply. Settle the ready reply before consuming that close event.
+                    biased;
+                    result=&mut pending=>break result,
+                    _=&mut revocation, if worker || cancel_sent=>{
+                        if cancel_sent {
+                            break Err(Error::Closed);
                         }
-                        Some(Event::TransportClosed)|None=>break Err(Error::Closed),
-                        _=>{}
-                    }
-                }
-                _=&mut revocation, if worker || cancel_sent=>{
-                    if cancel_sent {
-                        break Err(Error::Closed);
-                    }
-                    // Cancelling before the prompt is active would poison the session.
-                    // A revoked turn first gets a short chance to end by itself: the
-                    // revocation is often the turn's own accepted request (a replan or
-                    // escalation), and its closing reply should not be cut off.
-                    let next = if self.prompt_active() && self.authority_revoked().await {
-                        let since = *revoked_since.get_or_insert_with(tokio::time::Instant::now);
-                        if since.elapsed() >= REVOKED_FINISH_GRACE {
-                            let _ = self.engine.cancel(&self.session).await;
-                            cancel_sent = true;
-                            REVOKED_CANCEL_GRACE
+                        // Cancelling before the prompt is active would poison the session.
+                        // A revoked turn first gets a short chance to end by itself: the
+                        // revocation is often the turn's own accepted request (a replan or
+                        // escalation), and its closing reply should not be cut off.
+                        let next = if self.prompt_active() && self.authority_revoked().await {
+                            let since = *revoked_since.get_or_insert_with(tokio::time::Instant::now);
+                            if since.elapsed() >= REVOKED_FINISH_GRACE {
+                                let _ = self.engine.cancel(&self.session).await;
+                                cancel_sent = true;
+                                REVOKED_CANCEL_GRACE
+                            } else {
+                                REVOCATION_POLL
+                            }
                         } else {
                             REVOCATION_POLL
+                        };
+                        revocation.as_mut().reset(tokio::time::Instant::now() + next);
+                    }
+                    event=self.engine.next_event()=>{
+                        match event {
+                            Some(Event::Update(params))=>{
+                                updates+=1;
+                                if !tripped && params["sessionId"] == self.session.id() {
+                                    if let Some(trip) = watch.observe(&params["update"]) {
+                                        tripped = true;
+                                        self.record_degenerate(&trip, worker).await?;
+                                        if self.prompt_active() {
+                                            let _ = self.engine.cancel(&self.session).await;
+                                        }
+                                        cancel_sent = true;
+                                        revocation.as_mut().reset(tokio::time::Instant::now() + REVOKED_CANCEL_GRACE);
+                                        continue;
+                                    }
+                                }
+                                if tripped && degenerate::agent_text(&params["update"]) {
+                                    continue;
+                                }
+                                compacted |= self.record_update(params).await?;
+                            }
+                            Some(Event::TransportClosed)|None=>break Err(Error::Closed),
+                            _=>{}
                         }
-                    } else {
-                        REVOCATION_POLL
-                    };
-                    revocation.as_mut().reset(tokio::time::Instant::now() + next);
+                    }
                 }
             }
         };
@@ -1756,6 +1879,12 @@ impl SessionDriver {
         let credential = self.credential.clone();
         let recorded = reason.clone();
         let usage_id = usage.call.get().map(|(id, _)| id.clone());
+        let refusal_is_degenerate = reason == "refusal"
+            && self.refusal_is_degenerate.load(std::sync::atomic::Ordering::SeqCst);
+        usage.failed = refusal_is_degenerate;
+        // Queue the insert before settlement can invalidate display snapshots.
+        // Drop still records interrupted calls, but cannot enqueue this call again.
+        usage.enqueue();
         receive(self.executor.write(move |db| {
             // A valid tool may already have advanced or revoked this channel.
             let task: String = db.query_row(
@@ -1765,27 +1894,33 @@ impl SessionDriver {
             )?;
             // `writer` says whether the turn kept a change record
             // (`NATIVE_WRITER_TURN_CHANGES`).
-            lifecycle::event_tx(
+            let reply = lifecycle::event_tx(
                 db,
                 &task,
                 "NATIVE_TURN_SETTLED",
                 json!({"channel_id":credential.channel_id,"stop_reason":recorded,"writer":writer,"usage_id":usage_id}),
             )?;
+            let answered = !matches!(recorded.as_str(), "cancelled" | "refusal");
+            if live_steering && answered && channels::authenticate(
+                db, &credential.channel_id, credential.secret(), true
+            ).is_ok() {
+                lifecycle::steering::confirm_active_tx(db, &task, &credential.channel_id, reply)?;
+            }
+            for id in guidance_ids {
+                lifecycle::event_tx(db, &task, "NATIVE_COORDINATOR_GUIDANCE_SETTLED",
+                    json!({"guidance_id":id,"attempt":worker_attempt,"channel_id":credential.channel_id,
+                           "outcome":if answered {"delivered"} else {"unconfirmed"}}))?;
+            }
             Ok(())
         })?)
         .await?;
         // An ACP `refusal` stop is the model declining the turn (claude-agent-acp reports
         // a refused turn with it). In a runtime-driven turn it counts as degenerate.
-        if reason == "refusal"
-            && self
-                .refusal_is_degenerate
-                .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if refusal_is_degenerate {
             self.record_degenerate(&degenerate::Trip::refusal(), worker)
                 .await?;
             return Err(CoreError::Refused("native_turn_degenerate"));
         }
-        usage.failed = false;
         Ok(Turn {
             stop_reason: reason,
             updates,
@@ -1798,6 +1933,9 @@ impl SessionDriver {
         let turn = crate::native_effects::identity()?[..24].to_owned();
         let c = self.credential.clone();
         let t = turn.clone();
+        let checkout = self.policy.worktree_receipt();
+        if checkout.is_some() { self.policy.identity(true).await.map_err(engine_error_to_core)?; }
+        let started_checkout = checkout.clone();
         let since = receive(self.executor.write(move |db| {
             let task: String = db.query_row(
                 "SELECT task_id FROM trusted_channels WHERE channel_id=?",
@@ -1808,7 +1946,11 @@ impl SessionDriver {
                 db,
                 &task,
                 "NATIVE_WRITER_TURN_STARTED",
-                json!({"channel_id":c.channel_id,"turn":t}),
+                {
+                    let mut event = json!({"channel_id":c.channel_id,"turn":t});
+                    if let Some(binding) = started_checkout { event["checkout"] = binding; }
+                    event
+                },
             )
         })?)
         .await?;
@@ -1816,6 +1958,7 @@ impl SessionDriver {
         Ok(WriterTurn {
             turn,
             since,
+            checkout,
             before,
         })
     }
@@ -1827,12 +1970,15 @@ impl SessionDriver {
         let Some(window) = window else {
             return Ok(());
         };
-        let record = if ended {
+        let valid_checkout = window.checkout.is_none()
+            || self.policy.identity(true).await.is_ok();
+        let record = if ended && valid_checkout {
             let after = crate::native_change_set::snapshot(self.policy.root.clone()).await;
             crate::native_change_set::record(&window.before, &after)
         } else {
-            crate::native_change_set::incomplete("turn_outcome_unknown")
+            crate::native_change_set::incomplete(if valid_checkout { "turn_outcome_unknown" } else { "worktree_binding_invalid" })
         };
+        let checkout = window.checkout.clone();
         let c = self.credential.clone();
         let (turn, since) = (window.turn.clone(), window.since);
         use cortex_engine::environment::EngineKind;
@@ -1857,6 +2003,7 @@ impl SessionDriver {
                 )?,
             };
             let mut payload = json!({"channel_id":c.channel_id,"turn":turn,"native_mutation":native});
+            if let Some(binding) = checkout { payload["checkout"] = binding; }
             crate::native_change_set::add(&mut payload, &record);
             lifecycle::event_tx(db, &task, "NATIVE_WRITER_TURN_CHANGES", payload)?;
             Ok(())
@@ -1978,6 +2125,51 @@ impl SessionDriver {
         })?)
         .await
     }
+    /// Watch the durable attempt-bound queue. A wake is only an optimization;
+    /// the initial read also catches instructions committed before this wait.
+    pub(crate) async fn coordinator_guidance(&self, wait: bool) -> CoreResult<Vec<Value>> {
+        loop {
+            let wake = self.policy.guidance_changed.notified();
+            tokio::pin!(wake);
+            wake.as_mut().enable();
+            let channel = self.credential.channel_id.clone();
+            let pending = receive(self.executor.read(move |db| {
+                let live: Option<(String, String)> = db.query_row(
+                    "SELECT c.task_id,c.attempt_id FROM trusted_channels c
+                     JOIN runtime_nodes n ON n.task_id=c.task_id AND n.assignment_ref=c.assignment_id
+                     JOIN runtime_tasks t ON t.task_id=n.task_id AND t.revision=n.revision
+                     WHERE c.channel_id=? AND c.revoked_at IS NULL AND t.state='EXECUTING'
+                       AND n.stage='execution' AND n.status='running' AND n.result_json IS NULL",
+                    [&channel], |r| Ok((r.get(0)?, r.get(1)?)),
+                ).optional()?;
+                match live {
+                    Some((task, attempt)) => lifecycle::steering::pending_guidance(db, &task, &attempt),
+                    None => Ok(Vec::new()),
+                }
+            })?).await?;
+            if !wait || !pending.is_empty() { return Ok(pending); }
+            wake.await;
+        }
+    }
+
+    pub(crate) async fn forward_coordinator_guidance(&self, mut pending: Vec<Value>) -> CoreResult<()> {
+        while !pending.is_empty() {
+            let input: Vec<&str> = pending.iter().filter_map(|g| g["text"].as_str()).collect();
+            let prompt = format!(
+                "Coordinator guidance, oldest first (does not grant any authority or expand your assignment):\n{}",
+                input.join("\n\n"),
+            );
+            match self.prompt_guidance(&prompt, &pending).await {
+                // Publication or owner cancellation can fence the target just before
+                // the replacement prompt. Never inject into a different attempt.
+                Err(e) if e.code() == "channel_authority_refused" => return Ok(()),
+                other => { other?; }
+            }
+            pending = self.coordinator_guidance(false).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn prompt_active(&self) -> bool {
         self.session.prompt_active()
     }
@@ -2423,6 +2615,17 @@ async fn settle(
         for (task,request) in pending {
             lifecycle::event_tx(db,&task,"NATIVE_GUIDANCE_SETTLED",json!({"request":request,"delivered":false}))?;
         }
+        let worker: Option<(String, String)> = db.query_row(
+            "SELECT task_id,attempt_id FROM trusted_channels WHERE channel_id=? AND role='worker'",
+            [&c.channel_id], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).optional()?;
+        if let Some((task, attempt)) = worker {
+            for item in lifecycle::steering::pending_guidance(db, &task, &attempt)? {
+                lifecycle::event_tx(db, &task, "NATIVE_COORDINATOR_GUIDANCE_SETTLED",
+                    json!({"guidance_id":item["guidance_id"],"attempt":attempt,
+                           "channel_id":c.channel_id,"outcome":"unconfirmed"}))?;
+            }
+        }
         Ok(())
     })?)
     .await
@@ -2436,15 +2639,28 @@ struct CorePolicy {
     executor: Arc<StoreExecutor>,
     credential: Credential,
     root: PathBuf,
+    logical: PathBuf,
+    worktree: Option<String>,
+    owner: OwnerEpoch,
     protected_roots: Vec<PathBuf>,
     engine: cortex_engine::environment::EngineKind,
     /// External MCP servers attached to this session, set by the start attempt
     /// that launched it before the session is bound.
     mcp_servers: std::sync::Mutex<Vec<String>>,
     activity: Arc<std::sync::atomic::AtomicBool>,
+    guidance_changed: Arc<tokio::sync::Notify>,
 }
 impl CorePolicy {
+    fn worktree_receipt(&self) -> Option<Value> {
+        self.worktree.as_ref().map(|id| json!({
+            "id":id,"root":self.root,"logical":self.logical,"owner_epoch":self.owner.epoch,
+        }))
+    }
+
     async fn check(&self, ready: bool) -> cortex_engine::Result<Identity> {
+        if self.worktree.is_some() {
+            return self.identity(ready).await;
+        }
         let c = self.credential.clone();
         receive(
             self.executor
@@ -2518,6 +2734,7 @@ impl PermissionPolicy for CorePolicy {
             let tool = permission::tool_name(request).map(str::to_owned);
             let kind = permission::tool_kind(request).map(str::to_owned);
             let (owned, root, engine) = (request.clone(), self.root.clone(), self.engine);
+            let worktree = self.worktree.is_some();
             let mcp_servers = self.mcp_servers.lock().unwrap().clone();
             let incoming = receive(self.executor.write(move |db| {
                 let i=channels::authenticate(db,&c.channel_id,c.secret(),true)?;
@@ -2543,9 +2760,10 @@ impl PermissionPolicy for CorePolicy {
                 lifecycle::event_tx(db,&i.task,"NATIVE_PERMISSION_REQUESTED",
                     json!({"channel_id":c.channel_id,"session":session,"request_id":id,"turn_generation":generation,
                         "tool":tool,"kind":kind}))?;
-                Ok(Ok((sessions.into_iter().next(),access)))
+                let ru = lifecycle::domain::task_language_tx(db, &i.task)? == "ru";
+                Ok(Ok((sessions.into_iter().next(),access,ru)))
             }).map_err(engine_error)?).await.map_err(engine_error)?;
-            let (incoming, access) = match incoming {
+            let (incoming, access, ru) = match incoming {
                 Ok(pending) => pending,
                 Err(option) => return Ok(PermissionDecision::Selected(option)),
             };
@@ -2561,7 +2779,7 @@ impl PermissionPolicy for CorePolicy {
                 .map(std::path::PathBuf::from)
                 .filter(|h| h.is_absolute());
             let mcp_servers = self.mcp_servers.lock().unwrap().clone();
-            let verdict = permission::classify(
+            let mut verdict = permission::classify(
                 request,
                 &permission::Facts {
                     access: &access,
@@ -2585,6 +2803,10 @@ impl PermissionPolicy for CorePolicy {
             // the runtime for a policy refusal or a card nobody could answer.
             let mut decider = "runtime".to_owned();
             let mut owner_outcome: Option<(&str, String, Value)> = None;
+            if worktree {
+                verdict.action = Action::Refuse;
+                verdict.rule = "worktree_native_effect_unavailable";
+            }
             let decision = match verdict.action {
                 Action::Allow => {
                     decider = format!("mode:{access}");
@@ -2599,12 +2821,13 @@ impl PermissionPolicy for CorePolicy {
                     // Allow once / Deny: on the incoming ACP client, or as an owner
                     // decision of a Workspace task. The engine's request waits for it.
                     let who = i.profile.clone().unwrap_or_else(|| i.role.clone());
-                    let card = permission::owner_card(request, &who, verdict.rule);
+                    let card = permission::owner_card(request, &who, verdict.rule, ru);
                     let details = crate::native_owner_decisions::details(
                         request,
                         &who,
                         verdict.rule,
                         &access,
+                        ru,
                     );
                     let request_ref = format!(
                         "{}#{}",
@@ -2692,6 +2915,8 @@ impl GatewayCore for CorePolicy {
                 | "answer_submit"
                 | "result_submit"
                 | "plan_submit"
+                | "steer_plan"
+                | "steer_worker"
                 | "list_route_options"
                 | "synthesis_submit"
                 | "verification_submit"
@@ -2712,7 +2937,7 @@ impl GatewayCore for CorePolicy {
     }
     fn authenticate<'a>(&'a self, credentials: &'a Credentials) -> FutureResult<'a, Channel> {
         Box::pin(async move {
-            if credentials.project != self.root
+            if credentials.project != self.logical
                 || credentials.channel_id != self.credential.channel_id
                 || credentials.secret() != self.credential.secret()
             {
@@ -2739,6 +2964,9 @@ impl GatewayCore for CorePolicy {
                 .await;
             // result_submit keeps its own classification (native_results::correctable):
             // its other refusals stay named refusals, never a retryable tool error.
+            if result.is_ok() && name == "steer_worker" {
+                self.guidance_changed.notify_waiters();
+            }
             if name == "result_submit" {
                 result
             } else {
@@ -2751,6 +2979,18 @@ impl CorePolicy {
     /// Channel authentication that keeps the precise refusal code.
     async fn identity(&self, ready: bool) -> cortex_engine::Result<Identity> {
         let c = self.credential.clone();
+        if let Some(expected) = self.worktree.clone() {
+            let owner = self.owner.clone();
+            let root = self.root.clone();
+            return receive(self.executor.publication(move |store| {
+                let i = store.read(|db| channels::authenticate(db, &c.channel_id, c.secret(), ready))?;
+                let current = cortex_core::workspace::worktrees::resolve(store, &i.task, &owner)?;
+                if current.path() != root || current.worktree.as_ref().map(|w| &w.id) != Some(&expected) {
+                    return Err(CoreError::Refused("worktree_binding_invalid"));
+                }
+                Ok(i)
+            }).map_err(tool_error)?).await.map_err(tool_error);
+        }
         receive(
             self.executor
                 .read(move |db| channels::authenticate(db, &c.channel_id, c.secret(), ready))
@@ -2905,7 +3145,7 @@ impl CorePolicy {
         batched: bool,
     ) -> cortex_engine::Result<Value> {
         {
-            if credentials.project != self.root
+            if credentials.project != self.logical
                 || credentials.channel_id != self.credential.channel_id
                 || credentials.secret() != self.credential.secret()
             {
@@ -2921,9 +3161,12 @@ impl CorePolicy {
             let c = self.credential.clone();
             let expected = channel.clone();
             let name = name.to_owned();
-            // Codex uses the same effect routes as the other engines (owner
-            // decision 2026-11-22); the strict scoped route is not used.
-            let scoped = false;
+            if self.worktree.is_some() && crate::native_access::supports(&name) {
+                return Err(Error::Refused("worktree_host_effect_unavailable"));
+            }
+            // Main keeps its existing policy. Linked checkouts require explicit
+            // assignment coverage for brokered file writes.
+            let scoped = self.worktree.is_some();
             if crate::native_project_ops::supports(&name) {
                 let i = self.identity(true).await?;
                 if !same(&i, &expected) {
@@ -2948,14 +3191,16 @@ impl CorePolicy {
                     return Err(Error::Refused("channel_identity_changed"));
                 }
                 return crate::native_tool_errors::outcome(
-                    crate::native_context_tools::preflight(self.root.clone(), &arguments)
+                    crate::native_context_tools::preflight(
+                        self.root.clone(), self.worktree.as_ref().map(|_| self.logical.clone()), &arguments,
+                    )
                         .await
                         .map(crate::native_sources::reply),
                 );
             }
             if crate::native_context_tools::supports(&name) {
                 let state = self.workspace_state.clone();
-                let recipient = self.root.clone();
+                let recipient = self.logical.clone();
                 let result = receive(
                     self.executor
                         .publication(move |store| {
@@ -3003,7 +3248,8 @@ impl CorePolicy {
                     self.commands.clone(),
                     &name,
                     arguments,
-                    scoped,
+                    false,
+                    self.worktree.clone(),
                 )
                 .await;
                 if let Err(error) = &result {
@@ -3098,7 +3344,7 @@ impl CorePolicy {
                     .routes
                     .clone()
                     .ok_or(Error::Refused("route_options_unavailable"))?;
-                let root = self.root.clone();
+                let root = self.logical.clone();
                 let value = receive(
                     self.executor
                         .read(move |db| {
@@ -3174,8 +3420,9 @@ impl CorePolicy {
                     .to_owned();
                 let replay=receive(self.executor.read(move|db|Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?)",(&task,&actor,&key),|r|r.get::<_,bool>(0))?)).map_err(tool_error)?).await.map_err(tool_error)?;
                 if !replay {
-                    if let Err(error) = crate::native_effects::verification_preflight(
+                    if let Err(error) = crate::native_effects::checkout_preflight(
                         self.root.clone(),
+                        self.worktree.as_ref().map(|_| self.logical.clone()),
                         &arguments["verification"],
                     )
                     .await
@@ -3200,7 +3447,9 @@ impl CorePolicy {
                     (&task,&actor,&key),|r|r.get::<_,bool>(0))?)).map_err(tool_error)?).await.map_err(tool_error)?;
                 if !replay {
                     if let Err(error) =
-                        crate::native_effects::plan_preflight(self.root.clone(), &arguments["plan"])
+                        crate::native_effects::plan_preflight(
+                            self.root.clone(), self.worktree.as_ref().map(|_| self.logical.clone()), &arguments["plan"],
+                        )
                             .await
                     {
                         return Ok(content_refusal("plan", error));
@@ -3208,7 +3457,7 @@ impl CorePolicy {
                 }
             }
             if name == "result_submit" {
-                let evidence = if channel.stage.as_deref() == Some("review")
+                let mut evidence = if channel.stage.as_deref() == Some("review")
                     || arguments["checks"]
                         .as_array()
                         .is_some_and(|checks| checks.iter().any(|c| c["outcome"] == "passed"))
@@ -3219,6 +3468,9 @@ impl CorePolicy {
                 } else {
                     EvidenceSnapshot::default()
                 };
+                if let Some(checkout) = self.worktree_receipt() {
+                    evidence.checkout_evidence = Some(json!({"checkout":checkout,"cwd":self.root}));
+                }
                 let outcome = receive(
                     self.executor
                         .publication(move |store| {
@@ -3286,7 +3538,7 @@ impl CorePolicy {
                 };
             }
             let routing = self.routes.clone();
-            let root = self.root.clone();
+            let root = self.logical.clone();
             let synthesis = matches!(name.as_str(), "synthesis_submit" | "answer_submit");
             let value = receive(
                 self.executor
@@ -3314,6 +3566,7 @@ impl CorePolicy {
                             .as_str()
                             .ok_or(CoreError::Refused("invalid_request_key"))?;
                         match name.as_str() {
+                            "steer_plan" | "steer_worker" => lifecycle::steering::active_action_tx(db, &i, &c.channel_id, &name, &arguments),
                             "plan_submit" if i.role == "coordinator" => {
                                 let replay:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?)",
                                     (&i.task,&c.channel_id,key),|r|r.get(0))?;
@@ -3344,9 +3597,7 @@ impl CorePolicy {
                                         options: f["options"]
                                             .as_array()
                                             .unwrap()
-                                            .iter()
-                                            .map(|s| s.as_str().unwrap().into())
-                                            .collect(),
+                                            .clone(),
                                     })
                                     .collect::<Vec<_>>();
                                 waits::request_tx_bound_topics(db, &i.task, &c.channel_id, key, &forms, &topics)
