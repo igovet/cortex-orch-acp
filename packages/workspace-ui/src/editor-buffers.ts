@@ -1,5 +1,7 @@
 import { createSignal } from "solid-js";
 import type { FileRead, FileSaveResult } from "@cortex/workspace-domain";
+import { COPY } from "./copy";
+import { CodeRefusal, leaseMessage, type CodeLeaseIo } from "./code-support";
 import { same } from "./stable";
 
 /** The machine's bound for one file, and what one request can carry once the text is escaped. */
@@ -9,7 +11,8 @@ export const UNCONFIRMED_WRITER = "unconfirmed";
 
 export type BufferIo = {
   read(checkoutId: string, path: string): Promise<FileRead>;
-  save(checkoutId: string, path: string, text: string, revision: string | null): Promise<FileSaveResult>;
+  lease?: CodeLeaseIo;
+  taskTitle?(id: string): string | undefined;
   /** What the rest of the app shows for this file, such as search. */
   remember(projectId: string, checkoutId: string, path: string, text: string): void;
 };
@@ -22,6 +25,8 @@ export type FileBuffer = {
   missing: string | null;
   revision: string | null; base: string; dirty: boolean;
   saving: boolean; saved: boolean;
+  lease: "idle" | "acquiring" | "held";
+  leaseNotice: string | null;
   conflict: DiskConflict | null;
   /** The reply was lost and a fresh read did not show the owner's text. It is never treated as clean. */
   unconfirmed: boolean;
@@ -51,8 +56,12 @@ function tooLarge(text: string) {
  */
 export function createBuffers(io: BufferIo) {
   const [list, setList] = createSignal<FileBuffer[]>([]);
+  const active = new Map<string, { token: string; deadline: number; timer?: ReturnType<typeof setTimeout>; expiry?: ReturnType<typeof setTimeout> }>();
+  const pending = new Map<string, { cancelled: boolean; done: Promise<void> }>();
+  const releasing = new Map<string, Promise<unknown>>();
   const texts = new Map<string, string>();
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const textListeners = new Set<(key: string) => void>();
   const listeners = new Set<(key: string, text: string, undoable: boolean) => void>();
   /** Moves on every write, so a read that started before one cannot be taken for what the disk holds after it. */
   const writes = new Map<string, number>();
@@ -69,16 +78,92 @@ export function createBuffers(io: BufferIo) {
   };
   const cancel = (key: string) => { clearTimeout(timers.get(key)); timers.delete(key); };
   const textOf = (key: string) => texts.get(key) ?? "";
-  const canAutosave = (b: FileBuffer) => b.dirty && !b.saving && !b.conflict && !b.unconfirmed && !b.writer && !b.readOnly;
+  const canAutosave = (b: FileBuffer) => b.lease === "held" && b.dirty && !b.saving && !b.conflict && !b.unconfirmed && !b.readOnly;
   const schedule = (key: string) => {
     cancel(key);
     const b = find(key);
     if (!autosave || !b || !canAutosave(b)) return;
     timers.set(key, setTimeout(() => { timers.delete(key); const now = find(key); if (autosave && now && canAutosave(now)) void save(key); }, AUTOSAVE_MS));
   };
+  function release(key: string, notice?: string) {
+    const request = pending.get(key);
+    if (request) request.cancelled = true;
+    const held = active.get(key), b = find(key);
+    cancel(key);
+    if (held) {
+      clearTimeout(held.timer);
+      clearTimeout(held.expiry);
+      active.delete(key);
+      if (b) void releaseToken(b, held.token);
+    }
+    update(key, { lease: "idle", ...(notice ? { leaseNotice: notice } : {}) });
+  }
+
+  async function releaseToken(b: FileBuffer, token: string) {
+    const result = io.lease!.release(b, token).catch(() => undefined);
+    releasing.set(b.key, result);
+    await result;
+    if (releasing.get(b.key) === result) releasing.delete(b.key);
+  }
+
+  function reason(error: unknown) {
+    const holder = error instanceof CodeRefusal ? error.holderTaskId : undefined;
+    return leaseMessage(error, holder ? io.taskTitle?.(holder) : undefined);
+  }
+
+  async function acquire(key: string) {
+    const b = find(key), lease = io.lease;
+    if (!lease || !b?.loaded || b.missing || b.readOnly || pending.has(key) || active.has(key)) return;
+    let finish!: () => void;
+    const done = new Promise<void>(resolve => { finish = resolve; });
+    const request = { cancelled: false, done };
+    pending.set(key, request);
+    update(key, { lease: "acquiring", leaseNotice: null });
+    try {
+      if (releasing.has(key)) await releasing.get(key);
+      if (request.cancelled) return;
+      const start = Date.now(), grant = await lease.acquire(b);
+      if (request.cancelled || start + grant.expiresInMs <= Date.now()) {
+        await releaseToken(b, grant.leaseToken);
+        if (!request.cancelled) update(key, { lease: "idle", leaseNotice: COPY.codeLeaseLost });
+        return;
+      }
+      const held = { token: grant.leaseToken, deadline: 0 } as NonNullable<ReturnType<typeof active.get>>;
+      active.set(key, held);
+      const arm = (issuedAt: number, expiresInMs: number) => {
+        held.deadline = issuedAt + expiresInMs;
+        clearTimeout(held.expiry);
+        held.expiry = setTimeout(() => { if (active.get(key) === held) release(key, COPY.codeLeaseLost); }, Math.max(0, held.deadline - Date.now()));
+        held.timer = setTimeout(async () => {
+          if (active.get(key) !== held) return;
+          try {
+            const tick = Date.now();
+            const renewed = await lease.renew(b, held.token);
+            if (active.get(key) === held) {
+              if (Date.now() >= held.deadline) release(key, COPY.codeLeaseLost);
+              else arm(tick, renewed.expiresInMs);
+            }
+          } catch (error) {
+            if (active.get(key) === held) release(key, error instanceof CodeRefusal && error.code === "task_file_lease_held" ? reason(error) : COPY.codeLeaseLost);
+          }
+        }, Math.max(0, issuedAt + grant.renewAfterMs - Date.now()));
+      };
+      arm(start, grant.expiresInMs);
+      update(key, { lease: "held", leaseNotice: null });
+      // Compare the disk before editing or saving resumed text. No automatic resubmission on reacquire.
+      void refresh(key);
+    } catch (error) {
+      if (!request.cancelled) update(key, { lease: "idle", leaseNotice: reason(error) });
+    } finally {
+      pending.delete(key);
+      finish();
+    }
+  }
+
   const replaceText = (b: FileBuffer, text: string, undoable: boolean) => {
     texts.set(b.key, text);
     for (const listener of listeners) listener(b.key, text, undoable);
+    for (const listener of textListeners) listener(b.key);
   };
   const adopt = (b: FileBuffer, read: FileRead, text: string) => {
     io.remember(b.projectId, b.checkoutId, b.path, text);
@@ -88,23 +173,25 @@ export function createBuffers(io: BufferIo) {
   async function open(projectId: string, checkoutId: string, path: string) {
     const key = bufferKey(checkoutId, path);
     if (find(key)) return;
-    setList(all => [...all, { key, projectId, checkoutId, path, loaded: false, missing: null, revision: null, base: "", dirty: false, saving: false, saved: false, conflict: null, unconfirmed: false, refusal: null, readOnly: null, writer: null, eol: "\n" }]);
+    setList(all => [...all, { key, projectId, checkoutId, path, loaded: false, missing: null, revision: null, base: "", dirty: false, saving: false, saved: false, conflict: null, unconfirmed: false, refusal: null, readOnly: null, writer: null, lease: "idle", leaseNotice: null, eol: "\n" }]);
+    const opened = writes.get(key);
     try {
       const read = await io.read(checkoutId, path), b = find(key);
-      if (!b) return;
+      if (!b || writes.get(key) !== opened) return;
       if (typeof read.text !== "string") { update(key, { loaded: true, missing: read.reason ?? "This file could not be read." }); return; }
       texts.set(key, read.text);
       update(key, { ...adopt(b, read, read.text), loaded: true });
     } catch (error) {
-      if (find(key)) update(key, { loaded: true, missing: error instanceof Error ? error.message : "This file could not be read." });
+      if (find(key) && writes.get(key) === opened) update(key, { loaded: true, missing: error instanceof Error ? error.message : "This file could not be read." });
     }
   }
 
   /** The owner's text changed. Only the flags reach the screens. */
   function edit(key: string, text: string) {
     const b = find(key);
-    if (!b) return;
+    if (!b || b.lease !== "held") return;
     texts.set(key, text);
+    for (const listener of textListeners) listener(key);
     const dirty = text !== b.base;
     if (dirty !== b.dirty || b.saved || b.refusal) update(key, { dirty, saved: false, refusal: null });
     schedule(key);
@@ -141,14 +228,26 @@ export function createBuffers(io: BufferIo) {
   }
 
   async function save(key: string) {
-    const b = find(key);
-    if (!b || !b.loaded || b.saving || b.readOnly) return;
+    const b = find(key), held = active.get(key);
+    if (!b || !b.loaded || b.saving || b.readOnly || b.conflict || !hasUnsaved(b) || !held || !io.lease) return;
+    if (Date.now() >= held.deadline) { release(key, COPY.codeLeaseLost); return; }
     cancel(key);
     const sent = textOf(key);
     if (tooLarge(sent)) { update(key, { refusal: "This file is too large to save here. Your text is kept." }); return; }
     update(key, { saving: true, refusal: null });
     wrote(key);
-    const result = await io.save(b.checkoutId, b.path, sent, b.revision).catch((): FileSaveResult => ({ outcome: "unknown" }));
+    let result: FileSaveResult;
+    try { result = await io.lease.save(b, sent, b.revision, held.token); }
+    catch (error) {
+      if (error instanceof CodeRefusal) {
+        if (error.code === "edit_lease_lost" || error.code === "task_file_lease_held") {
+          if (active.get(key) === held) release(key, reason(error));
+          update(key, { saving: false });
+          return;
+        }
+        result = { outcome: "refused", message: error.message };
+      } else result = { outcome: "unknown" };
+    }
     wrote(key);
     const settle = (patch: Partial<FileBuffer>) => update(key, { saving: false, ...patch });
     if (!find(key)) return;
@@ -189,17 +288,23 @@ export function createBuffers(io: BufferIo) {
   /** The owner keeps their text over what they were just shown. It is still a save bound to that exact revision. */
   async function keepMine(key: string) {
     const b = find(key);
-    if (!b?.conflict) return;
+    if (!b?.conflict || b.lease !== "held" || b.saving || b.readOnly) return;
     update(key, { revision: b.conflict.revision, base: b.conflict.text ?? "", dirty: true, conflict: null, unconfirmed: false });
     await save(key);
   }
 
   return {
-    list, find, open, edit, save, refresh, reload, keepMine,
+    list, find, open, edit, save, refresh, reload, keepMine, acquire, release,
+    hasPendingLease: () => pending.size > 0,
+    async releaseAll() {
+      for (const key of new Set([...active.keys(), ...pending.keys()])) release(key);
+      await Promise.all([...pending.values()].map(request => request.done).concat([...releasing.values()].map(result => result.then(() => undefined))));
+    },
+    subscribeText(listener: (key: string) => void) { textListeners.add(listener); return () => { textListeners.delete(listener); }; },
     text: textOf,
     unsaved: () => list().filter(hasUnsaved),
     /** Drops a buffer. Screens call this only for a clean one or after the owner chose to discard. */
-    close(key: string) { cancel(key); texts.delete(key); setList(all => all.filter(b => b.key !== key)); },
+    close(key: string) { if (find(key)?.saving) return; release(key); wrote(key); texts.delete(key); setList(all => all.filter(b => b.key !== key)); },
     setAutosave(on: boolean) { autosave = on; for (const b of list()) schedule(b.key); },
     subscribe(listener: (key: string, text: string, undoable: boolean) => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
   };

@@ -6,20 +6,20 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 pub(super) fn core(error: CoreError) -> Refused {
-    refuse(
-        error.code(),
-        "The project store could not confirm this operation.",
-    )
+    match error.storage_diagnostic() {
+        Some(diagnostic) => refuse(diagnostic.reason, diagnostic.message),
+        None => refuse(error.code(), "The project store could not confirm this operation."),
+    }
 }
 pub fn key(root: &Path) -> Result<cortex_core::ProjectKey> {
     crate::native_runtime::key(root).map_err(core)
 }
 pub(super) fn open(root: &Path, mode: OpenMode) -> Result<Option<Store>> {
     let key = key(root)?;
-    match key.database().symlink_metadata() {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
-        Ok(_) => Store::open(key, mode).map(Some).map_err(core),
+    match Store::open(key.clone(), mode) {
+        Ok(store) => Ok(Some(store)),
+        Err(e) if crate::local::store_missing(&key, &e) => Ok(None),
+        Err(e) => Err(core(e)),
     }
 }
 pub(super) fn checkout_unavailable(error: CoreError) -> Refused {

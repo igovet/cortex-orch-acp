@@ -54,7 +54,7 @@ describe("Code on a checkout a running task holds", () => {
     history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}/p/p/code?file=a.txt`);
     const root = document.createElement("div");
     document.body.append(root);
-    dispose = render(() => <Workspace port={createRealPort({ transport: d.transport, actorId: "owner", registry: true })} />, root);
+    dispose = render(() => <Workspace port={createRealPort({ transport: d.transport, actorId: "owner", registry: true, localCode: true })} />, root);
     for (let i = 0; i < 40 && !document.querySelector(".cm-content"); i++) await settled();
     await settled();
     expect(document.querySelector(".cm-content")!.getAttribute("aria-label")).toBe("Read a.txt");
@@ -72,7 +72,7 @@ describe("Code on a checkout a running task holds", () => {
 describe("the open file's disk check", () => {
   it("a poll that finds the same revision, writer and lock replaces no record", async () => {
     const read: FileRead = { text: "one\n", revision: "r1", readOnly: LOCK, writer: "task-1" };
-    const buffers = createBuffers({ read: async () => ({ ...read }), save: async () => ({ outcome: "refused", message: "no" }), remember: () => {} });
+    const buffers = createBuffers({ read: async () => ({ ...read }), remember: () => {} });
     await buffers.open("p", "p:main", "a.txt");
     const before = buffers.list();
     expect(before[0]).toMatchObject({ loaded: true, writer: "task-1", readOnly: LOCK });

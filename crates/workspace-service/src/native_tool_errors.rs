@@ -80,7 +80,8 @@ fn field(code: &str) -> Option<&'static str> {
         | "outside_parent_unavailable"
         | "write_outside_assignment_scope"
         | "rule_file_protected" => "path",
-        "invalid_cwd" | "outside_cwd_unavailable" | "scoped_command_cwd_refused" => "cwd",
+        "invalid_cwd" | "outside_cwd_unavailable" | "scoped_command_cwd_refused"
+        | "worktree_command_cwd_refused" => "cwd",
         "skill_link_name_invalid" | "skill_source_missing" => "name",
         "skill_link_occupied" | "skill_link_conflict" => "replace_symlink_target",
         "skill_link_collision" | "skill_link_not_managed" | "skill_link_parent_unsafe" => "name",
@@ -105,6 +106,11 @@ fn field(code: &str) -> Option<&'static str> {
 /// A short correction for the codes a model can act on.
 fn hint(code: &str) -> &'static str {
     match code {
+        "owner_file_lease_held" => "The owner is editing this file in Code. Leave it unchanged and report the conflict. Read it again after the lease is released before making a new request.",
+        "worktree_command_cwd_refused" => "Omit cwd to use the task checkout, or choose an existing directory inside that checkout. Main and sibling checkouts are not command working directories for this task.",
+        "worktree_host_effect_unavailable" => "Host effects and privilege escalation are unavailable for this checkout. Use a contained read-only command or Cortex project file tools; there is no host reroute.",
+        "worktree_binding_invalid" | "worktree_unavailable" | "worktree_closed" => "The task's bound checkout is unavailable. Do not substitute the main folder. The owner must recover the bound checkout or start a new task.",
+        "worktree_receipt_binding_mismatch" => "This receipt does not describe the task's bound checkout. Use only observations from the current checkout and owner epoch.",
         "managed_codex_host_command_refused" => "Managed Codex cannot run on the host or request privilege escalation. Use project tools or a scratch-only command.",
         "managed_codex_git_refused" => "This Git context tool needs the live repository metadata. Use project reads or retained change evidence; managed Codex commands cannot access the host Git control plane.",
         "scoped_command_cwd_refused" => "Use the current checkout or a directory in it. The command sees a read-only snapshot under /workspace and private scratch under /tmp.",

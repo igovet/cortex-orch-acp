@@ -147,6 +147,17 @@ impl Sandbox {
     }
 
     pub(super) fn runtime_inputs(&mut self, root: &Path, protected: &[PathBuf]) -> io::Result<()> {
+        self.runtime_inputs_at(root, protected, Path::new(HOME))
+    }
+
+    /// Language servers use a small tmpfs as HOME. The normal command
+    /// profile leaves the generated default in its own bound scratch.
+    pub(super) fn runtime_inputs_at(
+        &mut self,
+        root: &Path,
+        protected: &[PathBuf],
+        view: &Path,
+    ) -> io::Result<()> {
         // System executables, loaders, headers and named package data. Do not
         // include /usr/local, /etc, /run or any containing home or cache root.
         for name in USR {
@@ -212,7 +223,6 @@ impl Sandbox {
         // .rustup, settings, credentials, package locks, or redirected caches.
         let cargo = home.join(".cargo");
         let rustup = home.join(".rustup");
-        let view = Path::new(HOME);
         let mut rust = false;
         for name in [
             "cargo",
@@ -253,10 +263,17 @@ impl Sandbox {
                         // +toolchain and project toolchain files keep precedence.
                         let private = self.scratch.join(".rustup");
                         fs::create_dir(&private)?;
-                        fs::write(
-                            private.join("settings.toml"),
-                            format!("version = \"12\"\ndefault_toolchain = \"{name}\"\n"),
-                        )?;
+                        let settings = private.join("settings.toml");
+                        fs::write(&settings, format!("version = \"12\"\ndefault_toolchain = \"{name}\"\n"))?;
+                        if view != Path::new(HOME) {
+                            let file = Arc::new(fs::File::open(settings)?);
+                            self.args.extend([
+                                "--file".into(),
+                                file.as_raw_fd().to_string().into(),
+                                view.join(".rustup/settings.toml").into_os_string(),
+                            ]);
+                            self.pins.push(file);
+                        }
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}

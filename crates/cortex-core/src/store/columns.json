@@ -1,4 +1,10 @@
 {
+  "code_editor_epoch": ["singleton", "record_version", "epoch"],
+  "code_owner_file_leases": [
+    "record_version", "checkout", "device", "inode", "path", "holder", "epoch", "token_hash",
+    "acquired_generation", "released_generation", "expires_at", "state"
+  ],
+  "code_writer_reservations": ["record_version", "id", "checkout", "device", "inode", "paths", "state"],
   "acp_host_sessions": [
     "session_id",
     "project_root",

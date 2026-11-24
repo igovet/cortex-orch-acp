@@ -183,6 +183,28 @@ fn held(folder: &File, name: &str) -> Result<Option<(Vec<u8>, u32)>> {
     }
     Ok(Some((data, info.mode() & 0o7777)))
 }
+/// Code LSP may only name regular UTF-8 checkout files, never private paths or aliases.
+pub(super) fn lsp_text(checkout: &Path, name: &str) -> Result<String> {
+    use crate::native_command_sandbox::policy;
+    if name.split('/').any(|part| policy::private(std::ffi::OsStr::new(part)))
+        || policy::protected_target(checkout, &checkout.join(name))
+    {
+        return Err(refuse("invalid_path", "Private helper path."));
+    }
+    let (folder, name) = parent(checkout, name)?;
+    let file = open_at(&folder, &name, libc::O_RDONLY | libc::O_NONBLOCK, 0)?;
+    let info = file.metadata()?;
+    if !info.is_file() || info.nlink() != 1 || info.len() > MAX_FILE as u64 {
+        return Err(refuse("invalid_path", "Not an eligible Code language file."));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_FILE || bytes.contains(&0) {
+        return Err(refuse("invalid_path", "Not an eligible Code language file."));
+    }
+    String::from_utf8(bytes).map_err(|_| refuse("invalid_path", "Not a UTF-8 text file."))
+}
+
 /// Bounded, descriptor-relative observation of the current working copy.
 pub(super) fn checkout_digest(checkout: &Path, name: &str) -> Result<Option<String>> {
     let (folder, leaf) = match parent(checkout, name) {
@@ -349,27 +371,15 @@ pub fn read(checkout: &Path, p: &Value) -> Result<Value> {
 fn conflict(current: Option<&(Vec<u8>, u32)>) -> Value {
     json!({"outcome":"conflict","revision":current.map(|(d,_)|revision(d))})
 }
-pub fn save(checkout: &Path, state: &Path, p: &Value) -> Result<Value> {
-    save_with(checkout, state, p, || Ok(()))
+pub(super) fn save_locked(checkout: &Path, p: &Value, lock: &Lock) -> Result<Value> {
+    save_locked_with(checkout, p, lock, || Ok(()))
 }
-fn save_with(
-    checkout: &Path,
-    state: &Path,
-    p: &Value,
-    before_replace: impl FnOnce() -> std::io::Result<()>,
-) -> Result<Value> {
-    save_locked_with(checkout, p, before_replace, || {
-        Lock::new(state, "machine.lock").map(Some)
-    })
-}
-pub(super) fn save_locked(checkout: &Path, p: &Value, _lock: &Lock) -> Result<Value> {
-    save_locked_with(checkout, p, || Ok(()), || Ok(None))
-}
-fn save_locked_with(
+
+pub(super) fn save_locked_with(
     checkout: &Path,
     p: &Value,
-    before_replace: impl FnOnce() -> std::io::Result<()>,
-    acquire_lock: impl FnOnce() -> Result<Option<Lock>>,
+    _lock: &Lock,
+    before_replace: impl FnOnce() -> Result<()>,
 ) -> Result<Value> {
     let text = string(p, "text")?;
     let base = p
@@ -385,7 +395,6 @@ fn save_locked_with(
     if text.contains('\0') {
         return Err(refuse("binary_file", "This text holds a NUL byte."));
     }
-    let _lock = acquire_lock()?;
     let (folder, name) = parent(checkout, string(p, "file")?)?;
     let current = held(&folder, &name)?;
     if let Some((data, _)) = &current {
@@ -542,9 +551,13 @@ mod tests {
         let file = root.join("a");
         fs::write(&file, b"old").unwrap();
         let p = json!({"file":"a","text":"new","revision":revision(b"old")});
-        assert!(save_with(&root, &root, &p, || Err(std::io::Error::other("injected"))).is_err());
+        let lock = Lock::new(&root, "machine.lock").unwrap();
+        assert!(
+            save_locked_with(&root, &p, &lock, || Err(std::io::Error::other("injected").into()))
+                .is_err()
+        );
         assert_eq!(fs::read(&file).unwrap(), b"old");
-        let reply = save_with(&root, &root, &p, || fs::write(&file, b"worker")).unwrap();
+        let reply = save_locked_with(&root, &p, &lock, || Ok(fs::write(&file, b"worker")?)).unwrap();
         assert_eq!(reply["outcome"], "conflict");
         assert_eq!(fs::read(&file).unwrap(), b"worker");
         assert!(!fs::read_dir(&root).unwrap().any(|e| e
@@ -552,6 +565,7 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .starts_with(".cw-save-")));
+        drop(lock);
         fs::remove_dir_all(root).unwrap();
     }
 }

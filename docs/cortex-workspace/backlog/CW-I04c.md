@@ -1,6 +1,6 @@
 # CW-I04c: TypeScript language server integration
 
-**Status:** Not implemented; no language server integration exists · **Phase:** 3+ · **Size:** M
+**Status:** Local Code implements [TypeScript/JavaScript diagnostics and definition jumps](../ide-and-git.md#language-tools). This does not establish the full original fixture and qualification plan below.
 
 ## Goal
 Apply the same language-server integration to a pinned TypeScript language server and a TypeScript fixture project. Reuse the supervisor and document synchronization from CW-I04b, and add detection of the project configuration (tsconfig).

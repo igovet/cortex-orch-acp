@@ -6,9 +6,10 @@ use super::SchedulingPolicy;
 use crate::{
     error::refuse,
     lifecycle::{domain, event_tx, request_tx, waits},
+    store::owner_file_leases as leases,
     CoreError, CoreResult,
 };
-use rusqlite::{OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, os::unix::fs::MetadataExt, path::Path};
 
@@ -76,9 +77,44 @@ fn strings(v: &Value) -> CoreResult<Vec<String>> {
         })
         .collect()
 }
-fn root_tx(db: &Transaction<'_>, task: &str) -> CoreResult<String> {
+fn root_tx(db: &Connection, task: &str) -> CoreResult<String> {
     Ok(db.query_row("SELECT coalesce((SELECT workspace_root FROM task_workspaces WHERE task_id=t.id),project_root) FROM tasks t WHERE id=?",
         [task],|r|r.get(0))?)
+}
+// The lease side is a literal path, not a glob. Scope patterns retain the
+// reservation policy's conservative static-prefix semantics.
+fn overlaps_file(scope: &str, file: &Path) -> bool {
+    let scope = canonical(scope);
+    let glob = scope.find(['*', '?', '[']);
+    let prefix = scope[..glob.unwrap_or(scope.len())].trim_end_matches('/');
+    let p = Path::new(prefix);
+    file.starts_with(p)
+        || p.starts_with(file)
+        || glob.is_some() && file.to_str().is_some_and(|s| s.starts_with(prefix))
+}
+
+fn owner_blocker_tx(
+    db: &Connection,
+    root: &str,
+    scope: &[String],
+) -> CoreResult<Option<leases::OwnerBlocker>> {
+    leases::scheduler_blocker(db, Path::new(root), |lease_root, path| {
+        let file = lease_root.join(path.as_str());
+        scope.iter().any(|s| overlaps_file(s, &file))
+    })
+}
+
+pub(crate) fn file_write_holder(
+    db: &Connection,
+    root: &Path,
+    path: &str,
+) -> CoreResult<Option<String>> {
+    let file = root.join(path);
+    Ok(holdings_tx(db)?
+        .into_iter()
+        .filter(|h| h.paths.iter().any(|s| overlaps_file(s, &file)))
+        .map(|h| h.task)
+        .min())
 }
 fn absolute(root: &str, paths: &[String]) -> Vec<String> {
     paths
@@ -93,7 +129,7 @@ fn absolute(root: &str, paths: &[String]) -> Vec<String> {
         .collect()
 }
 pub fn effective_scope_tx(
-    db: &Transaction<'_>,
+    db: &Connection,
     task: &str,
     assignment: Option<&str>,
     scope: &str,
@@ -129,7 +165,7 @@ struct Holding {
 /// revoked and whose nodes are never claimed again, and never for an attempt whose
 /// every delegation row is terminated with no reservation left unreleased. Rows
 /// written by earlier builds are read the same way.
-fn holdings_tx(db: &Transaction<'_>) -> CoreResult<Vec<Holding>> {
+fn holdings_tx(db: &Connection) -> CoreResult<Vec<Holding>> {
     let rows=db.prepare("SELECT n.task_id,n.assignment_ref,n.scope_json,n.role,n.stage FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
         WHERE t.state NOT IN ('COMPLETED','CANCELLED','FAILED')
         AND EXISTS(SELECT 1 FROM tasks b WHERE b.id=n.task_id)
@@ -166,7 +202,7 @@ fn holdings_tx(db: &Transaction<'_>) -> CoreResult<Vec<Holding>> {
     Ok(out)
 }
 /// A stable checkout is shared by independent readers through final verification.
-fn review_holder_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Option<String>> {
+fn review_holder_tx(db: &Connection, task: &str) -> CoreResult<Option<String>> {
     let root = root_tx(db, task)?;
     Ok(db.query_row("SELECT t.task_id FROM runtime_tasks t JOIN tasks b ON b.id=t.task_id
         LEFT JOIN task_workspaces w ON w.task_id=t.task_id
@@ -181,7 +217,7 @@ fn review_holder_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Option<Strin
 }
 
 /// Check before entering review, in the same transaction that reserves the checkout.
-pub fn review_writer_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Option<Value>> {
+pub fn review_writer_tx(db: &Connection, task: &str) -> CoreResult<Option<Value>> {
     let root = root_tx(db, task)?;
     for h in holdings_tx(db)? {
         if h.task != task && root_tx(db, &h.task)? == root {
@@ -251,7 +287,11 @@ impl SchedulingPolicy for NativePolicy {
         if scope.iter().any(|a| denied.iter().any(|b| overlaps(a, b))) {
             return Ok(false);
         }
-        let paths = absolute(&root_tx(db, task)?, &scope);
+        let root = root_tx(db, task)?;
+        let paths = absolute(&root, &scope);
+        if owner_blocker_tx(db, &root, &paths)?.is_some() {
+            return Ok(false);
+        }
         for h in holdings_tx(db)? {
             if paths.iter().any(|a| h.paths.iter().any(|b| overlaps(a, b))) {
                 return Ok(false);
@@ -269,11 +309,15 @@ impl SchedulingPolicy for NativePolicy {
         Ok(true)
     }
 }
-/// A dependency-ready writing node of the task's current revision that cannot be
-/// claimed only because another unfinished task's worker holds overlapping files:
-/// `{"node","holder_task","paths"}` for the first such node, in claim order. The
-/// node is queued behind that holding; nothing is recorded or changed here.
+/// First ready node blocked by a worker holding or owner lease (in claim order).
+/// Owner waits carry a reason and expiry hint instead of a holder task. The node
+/// stays queued; this query never records or changes lifecycle state.
 pub fn write_conflict_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Option<Value>> {
+    write_conflict(db, task)
+}
+
+/// Read-only view of the same live blocker used by the runtime's wait loop.
+pub(crate) fn write_conflict(db: &Connection, task: &str) -> CoreResult<Option<Value>> {
     let Some((state, revision)): Option<(String, i64)> = db
         .query_row(
             "SELECT state,revision FROM runtime_tasks WHERE task_id=?",
@@ -335,6 +379,12 @@ pub fn write_conflict_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Option<
             &root,
             &effective_scope_tx(db, task, assignment.as_deref(), &scope)?,
         );
+        if let Some(held) = owner_blocker_tx(db, &root, &paths)? {
+            return Ok(Some(json!({
+                "node":node, "reason":"owner_file_lease_held", "paths":[held.path],
+                "retry_after_ms":held.remaining_ms
+            })));
+        }
         for h in holdings.iter().filter(|h| h.task != task) {
             let held: Vec<&String> = h
                 .paths
@@ -433,6 +483,10 @@ pub fn claim_obstacles_tx(
                 .filter(|a| rules.iter().any(|b| overlaps(a, b)))
                 .collect::<Vec<_>>());
             json!("denied")
+        } else if let Some(held) = owner_blocker_tx(db, &root, &absolute(&root, &scope))? {
+            item["paths"] = json!([held.path]);
+            item["retry_after_ms"] = json!(held.remaining_ms);
+            json!("owner_file_lease_held")
         } else {
             let paths = absolute(&root, &scope);
             let holder = holdings.iter().find_map(|h| {

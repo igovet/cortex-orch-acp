@@ -179,14 +179,18 @@ impl Fixture {
             .machine("repo.file", Some(&id), json!({"file":"readme.txt"}))
             .await;
         assert_eq!(file["text"], "native file\n");
+        let lease = self.machine("repo.file.lease.acquire", Some(&id), json!({"file":"readme.txt"})).await;
         let saved = self
             .machine(
                 "repo.file.save",
                 Some(&id),
-                json!({"file":"readme.txt","text":"native file\n","revision":file["revision"]}),
+                json!({"file":"readme.txt","text":"native file\n","revision":file["revision"],"leaseToken":lease["leaseToken"]}),
             )
             .await;
         assert_eq!(saved["outcome"], "saved");
+        let released = self.machine("repo.file.lease.release", Some(&id),
+            json!({"file":"readme.txt","leaseToken":lease["leaseToken"]})).await;
+        assert_eq!(released["released"], true);
         let git = self.machine("repo.snapshot", Some(&id), json!({})).await;
         assert!(git["checkouts"].is_array(), "{git}");
         let settings = self.machine("config.read", None, json!({})).await;

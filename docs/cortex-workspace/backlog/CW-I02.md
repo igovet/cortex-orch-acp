@@ -1,6 +1,6 @@
 # CW-I02: Human-mutation lease and writer quiescence
 
-**Status:** Not implemented; no human or agent write lease exists · **Phase:** 3+ · **Size:** L
+**Status:** Local Code file lease implemented for same-project structured file tools and Code saves. The broader device-based design below is not shipped; see the [supported boundary](../ide-and-git.md#code-editing-and-write-leases).
 
 ## Goal
 Provide a runtime-coordinated lease that lets a human edit a path scope only after the runtime confirms that no model writer is active in that scope. The lease is released, expires, or is dropped when its device is revoked. The lease replaces visual pause controls with an enforced runtime state.

@@ -92,7 +92,7 @@ impl NativeRoutes for Routes {
             .into(),
             parameters: BTreeMap::new(),
             instructions: "No-paid fixture.".into(),
-            deadline: Duration::from_secs(3),
+            deadline: Duration::from_secs(if scenario == "active-steering-hold" { 12 } else { 3 }),
         })
     }
 }
@@ -1107,6 +1107,85 @@ async fn waiting_worker(variant: &str) {
 /// editable; no window is involved. The service takes it when the revision reaches
 /// its boundary, the coordinator receives it once, and the owner's facts show it
 /// delivered with its time; a lifted write denial leaves the list of denials.
+async fn active_steering_journey() {
+    let f = Fixture::new();
+    let project = f.0.join("project");
+    std::fs::write(project.join("scenario.txt"), "active-steering-hold").unwrap();
+    let service = Service::bind_native(f.config(), Arc::new(Routes)).await.unwrap();
+    let registered = service.register(&project, "Active steer").await.unwrap();
+    let id = registered["projectId"].as_str().unwrap();
+    service.activate(id).await.unwrap();
+    let runner = tokio::spawn(service.clone().serve());
+    let store = f.store();
+    let created = service.workspace(command(id, "tasks.create", json!(id), "create",
+        json!({"description":"Active steering fixture","checkout":{"kind":"main"}}))).await.unwrap();
+    let started = service.workspace(command(id, "tasks.start", created["target"].clone(), "start",
+        json!({}))).await.unwrap();
+    let execution = started["target"].as_str().unwrap();
+    let count = |sql: &str| store.read(|db| Ok(db.query_row(sql, [], |r| r.get::<_, i64>(0))?)).unwrap();
+    let wait = async |sql: &str| {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while count(sql) == 0 { tokio::time::sleep(Duration::from_millis(15)).await; }
+        }).await.unwrap_or_else(|_| {
+            let events = store.read(|db| Ok(db.prepare("SELECT type FROM runtime_events ORDER BY id DESC LIMIT 30")?
+                .query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)).unwrap();
+            panic!("did not observe {sql}; recent event kinds: {events:?}")
+        });
+    };
+    let mark = async |name: &str| {
+        let path = project.join(".git").join(name);
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while !path.exists() { tokio::time::sleep(Duration::from_millis(15)).await; }
+        }).await.unwrap_or_else(|_| {
+            let reasons = store.read(|db| Ok(db.prepare("SELECT type,
+              coalesce(json_extract(payload_json,'$.reason'),json_extract(payload_json,'$.state'),'')
+              FROM runtime_events ORDER BY id DESC LIMIT 35")?.query_map([], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?)))?
+              .collect::<Result<Vec<_>, _>>()?)).unwrap();
+            let refusal = std::fs::read_to_string(project.join(".git/steer-fixture-refused")).ok();
+            panic!("missing fixture marker {name}; fixture tool refusal: {refusal:?}; event kinds and reason codes: {reasons:?}")
+        });
+    };
+    mark("steer-first-worker-held").await;
+    mark("steer-second-held").await;
+    let send = async |key: &str, message: &str| service.prompt_execution(id, execution, message, Some(key), json!([])).await.unwrap();
+    let first = send("live-1", "Hold the first steering reply").await;
+    assert_eq!(send("live-1", "Hold the first steering reply").await, first);
+    mark("steer-first-entered").await;
+    send("live-2", "Amend pending work and guide one worker").await;
+    send("live-3", "Reply to the third owner message").await;
+    assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='STEERING_DELIVERED'"), 0);
+    std::fs::write(project.join(".git/steer-first-release"), "").unwrap();
+    wait("SELECT count(*) FROM host_transcript WHERE kind='agent_message'
+          AND text='Steering reply: Amend pending work and guide one worker / Reply to the third owner message'").await;
+    wait("SELECT count(*) FROM runtime_events WHERE type='NATIVE_COORDINATOR_GUIDANCE_SETTLED'
+          AND json_extract(payload_json,'$.outcome')='delivered'").await;
+    wait("SELECT count(*) FROM runtime_nodes WHERE node_id='work' AND status='completed'").await;
+    assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='PLAN_AMENDED'"), 1);
+    assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_COORDINATOR_GUIDANCE_QUEUED'"), 1);
+    assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='STEERING_DELIVERED'"), 3);
+    assert_eq!(count("SELECT count(*) FROM runtime_nodes WHERE node_id='third' AND objective='Use the amended pending objective'"), 1);
+    assert_eq!(std::fs::read_to_string(project.join("work.txt")).unwrap(), "directed");
+    assert!(project.join(".git/steer-guided").exists());
+    assert_eq!(count("SELECT count(*) FROM delegation_provisioning p JOIN runtime_nodes n ON n.task_id=p.task_id
+          AND n.assignment_ref=p.idempotency_key WHERE n.node_id='second' AND p.status='ready'"), 1);
+    assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='ASSIGNMENT_RETRIED'"), 0);
+    assert_eq!(count("SELECT count(*) FROM runtime_tasks WHERE state='EXECUTING' AND revision=1"), 1);
+    send("live-4", "Try the worker that finishes before tool admission").await;
+    wait("SELECT count(*) FROM runtime_events WHERE type='STEERING_DELIVERED' AND json_extract(payload_json,'$.request')='live-4'").await;
+    assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_COORDINATOR_GUIDANCE_QUEUED'"), 1);
+    send("live-5", "Hold the final steering reply").await;
+    mark("steer-final-entered").await;
+    std::fs::write(project.join("scenario.txt"), "complete").unwrap();
+    wait("SELECT count(*)=3 FROM runtime_nodes WHERE revision=1 AND stage='execution' AND status='completed'").await;
+    assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='REVIEW_STARTED'"), 0);
+    assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='STEERING_DELIVERED'"), 4);
+    std::fs::write(project.join(".git/steer-final-release"), "").unwrap();
+    wait("SELECT count(*) FROM runtime_events WHERE type='STEERING_DELIVERED' AND json_extract(payload_json,'$.request')='live-5'").await;
+    assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='USER_STEERING'"), 5);
+    service.stop().await.unwrap();
+    runner.await.unwrap().unwrap();
+}
+
 async fn queued_message_journey() {
     let f = Fixture::new();
     std::fs::write(f.0.join("project/scenario.txt"), "hold").unwrap();
@@ -1232,7 +1311,7 @@ async fn queued_message_journey() {
         })
         .unwrap();
     assert!(
-        synthesis.contains("Owner guidance applied (deny-write: secrets)"),
+        synthesis.contains("Owner guidance applied (Queued owner note, edited)"),
         "{synthesis}"
     );
     // The owner's facts: the queue row became the runtime's delivered record.
@@ -2049,8 +2128,7 @@ async fn controls(scenario: &str, action: &str) {
         std::fs::write(f.0.join("project/scenario.txt"), "complete").unwrap();
     } else if action == "prompt" {
         // Sent while the worker still runs: it keeps running, nothing is interrupted,
-        // and the task stays EXECUTING. The coordinator receives the message once, after
-        // the worker, review and verification finished.
+        // and the task stays EXECUTING. The coordinator can reply while the worker is held.
         let worker: String = store.read(|db| Ok(db.query_row(
             "SELECT attempt_id FROM delegation_provisioning WHERE role_id!='orchestrator' AND status='ready'", [], |r| r.get(0))?)).unwrap();
         let receipt = service
@@ -2091,7 +2169,7 @@ async fn controls(scenario: &str, action: &str) {
             store.read(|db| Ok(db.query_row(
             "SELECT (SELECT state FROM runtime_tasks)||':'||(SELECT status FROM delegation_provisioning WHERE attempt_id=?1)
              ||':'||(SELECT count(*) FROM runtime_nodes WHERE status='running')
-             ||':'||(SELECT count(*) FROM runtime_events WHERE type IN ('TURN_INTERRUPTED','LIVE_ASSIGNMENTS_CANCELLED','STEERING_APPLIED'))",
+             ||':'||(SELECT count(*) FROM runtime_events WHERE type IN ('TURN_INTERRUPTED','LIVE_ASSIGNMENTS_CANCELLED'))",
             [&worker], |r| r.get::<_, String>(0))?)).unwrap()
         };
         assert_eq!(
@@ -2099,7 +2177,12 @@ async fn controls(scenario: &str, action: &str) {
             "EXECUTING:ready:1:0",
             "the message disturbed the running worker"
         );
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while store.read(|db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM host_transcript
+                WHERE kind='agent_message' AND text='Steering reply: Use the other output')", [], |r| r.get::<_, bool>(0))?)).unwrap() == false {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("the coordinator did not reply before worker release");
         assert_eq!(
             running(&store),
             "EXECUTING:ready:1:0",
@@ -2168,9 +2251,8 @@ async fn controls(scenario: &str, action: &str) {
         assert!(store.read(|db|Ok(db.query_row("SELECT count(*) FROM delegation_provisioning WHERE role_id='worker-backend-dev'",[],|r|r.get::<_,i64>(0))?)).unwrap()>=2);
     }
     if action == "prompt" {
-        // The held worker's own result was kept (revision 1 completed), the message was
-        // applied after it and handed to exactly one coordinator turn, and nothing was
-        // interrupted on the way.
+        // The held worker's result and execution revision were kept. One active turn
+        // handled the message without interrupting or completing the task.
         let (completed, applied, delivered, interrupted): (i64, i64, i64, i64) = store.read(|db| Ok(db.query_row(
             "SELECT (SELECT count(*) FROM runtime_nodes WHERE revision=1 AND stage='execution' AND status='completed'),
                     (SELECT count(*) FROM runtime_events WHERE type='STEERING_APPLIED'),
@@ -2178,15 +2260,9 @@ async fn controls(scenario: &str, action: &str) {
                     (SELECT count(*) FROM runtime_events WHERE type='TURN_INTERRUPTED')",
             [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?)).unwrap();
         assert_eq!((completed, applied, delivered, interrupted), (1, 1, 1, 0));
-        // The fixture coordinator answers with the first message its prompt listed.
-        let (answers, synthesis): (i64, String) = store.read(|db| Ok(db.query_row(
-            "SELECT (SELECT count(*) FROM runtime_events WHERE type='ANSWER_SUBMITTED'),(SELECT coalesce(synthesis,'') FROM runtime_tasks)",
-            [], |r| Ok((r.get(0)?, r.get(1)?)))?)).unwrap();
-        assert_eq!(answers, 1);
-        assert!(
-            synthesis.contains("Owner guidance applied (Use the other output)"),
-            "{synthesis}"
-        );
+        assert_eq!(store.read(|db| Ok(db.query_row(
+            "SELECT count(*) FROM runtime_events WHERE type='STEERING_DELIVERED' AND json_type(payload_json,'$.channel_id')='text'",
+            [], |r| r.get::<_, i64>(0))?)).unwrap(), 1);
     }
     if action == "answer" {
         store.write(|db| {
@@ -4521,7 +4597,7 @@ async fn bound_worktree_journey() {
         assert_eq!(code["result"]["text"], *label, "{code}");
         let denied = call("repo.file.save", json!({"checkoutId":w.id,"taskId":draft,
             "file":"work.txt","revision":code["result"]["revision"],"text":"must not write"})).await;
-        assert_eq!(denied["code"], "checkout_busy", "{denied}");
+        assert_eq!(denied["code"], "edit_lease_lost", "{denied}");
         let wrong = call("repo.file", json!({"checkoutId":format!("{id}:main"),"taskId":draft,"file":"work.txt"})).await;
         assert_eq!(wrong["code"], "worktree_binding_invalid", "{wrong}");
         assert_eq!(std::fs::read_to_string(w.path.join("work.txt")).unwrap(), *label);
@@ -4773,8 +4849,18 @@ fn main() {
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(maintenance_admission());
-    if namespace_host::assert_unavailable_view() {
+    let namespace_restricted = namespace_host::assert_unavailable_view();
+    if namespace_restricted {
+        assert_ne!(mode, "active-steering-probe", "the explicit steering probe needs the real plan-admission namespace");
         return;
+    }
+    if mode.is_empty() || mode == "active-steering-probe" {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            tokio::time::timeout(Duration::from_secs(45), active_steering_journey())
+                .await.expect("active steering journey timeout");
+        });
+        println!("active steering: ordered replies, accepted plan amendment, exact-attempt guidance and the last-worker race");
+        if mode == "active-steering-probe" { return; }
     }
     if mode == "binary_journey" {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -4835,7 +4921,7 @@ fn main() {
             tokio::time::timeout(Duration::from_secs(35), controls("hold", "prompt"))
                 .await
                 .expect("steering control journey timeout");
-            println!("owner message during a running worker: nothing interrupted, delivered once at the boundary");
+            println!("owner message during a running worker: nothing interrupted, replied before the worker finished");
             tokio::time::timeout(Duration::from_secs(40), queued_message_journey())
                 .await
                 .expect("queued message journey timeout");

@@ -2,11 +2,37 @@
  * Words that depend on what is behind the screen. These are the production words: true of a real machine, or empty where
  * nothing needs saying. The demo entry replaces them with its own, so simulated data always says it is simulated.
  */
+/** A request has left this control; this copy never claims that it succeeded. */
+export const REQUESTING = {
+  create_task: "Requesting task creation…",
+  create_sprint: "Requesting sprint creation…",
+  start_task: "Requesting start…",
+  close_task: "Requesting closure…",
+  accept_result: "Requesting acceptance…",
+  delete_sprint: "Requesting deletion…",
+  purge_many: "Requesting deletion…",
+  clear_old: "Requesting deletion…",
+} as const;
+
 export const COPY = {
   notOffered: "Not available on this machine yet",
   notAvailable: "Not available yet",
   noExternal: "No external editor was found on this machine. Install VS Code, or xdg-utils to use the default application.",
+  noFileManager: "No file manager or folder opener was found on this machine.",
   noLogOpener: "No folder opener was found on this machine. Install xdg-utils to open logs from here.",
+  codeEdit: "Edit",
+  codeEditPending: "Requesting edit access…",
+  codeEditRequired: "Select Edit to acquire write access.",
+  codeLeaseLost: "Edit lease lost. Your draft is kept. Select Edit to try again.",
+  codeTaskEditing: "Task {task} is editing this file.",
+  codeStopEditing: "Stop editing",
+  codeTaskEditingUnknown: "A task is editing this file.",
+  codeEditUnavailable: "Could not get edit access. Select Edit to try again.",
+  codeDiskChanged: "The file changed on disk. Your draft is kept.",
+  codeLanguageUnavailable: "Language services unavailable",
+  codeNoDefinition: "No definition found in this checkout.",
+  codeDiagnostics: "Diagnostics",
+  codeDefinition: "Go to definition (F12)",
   editAnyway: "Type now. Your text stays here and can be saved once the task stops.",
   writerWorking: "A task is working in this checkout. Saving here waits until the task stops, because your edits change the files it is checking.",
   writerChosen: "You chose to type while the task works. Your text stays here and saves once the task stops. Verification may be blocked.",
@@ -34,7 +60,12 @@ export const COPY = {
   overviewIssue: "This machine's details could not be read yet. Retrying automatically.",
   ghChecking: "Checking for GitHub CLI (gh)…",
   machineRoute: "This machine sets this for every task, in Settings. A choice per task is not available yet.",
-  noTaskWorktrees: "A separate worktree per task is not available yet. Tasks work in the project folder.",
+  noTaskWorktrees: "This service does not support separate task worktrees.",
+  worktreeNeedsGit: "A separate worktree needs a Git repository.",
+  worktreeNeedsManualOrHybrid: "Automatic uses the project folder. Choose Manual or Hybrid for a separate worktree.",
+  worktreeUnavailable: "The task’s worktree is unavailable. Restore the original checkout and refresh, or use task history.",
+  deleteWorktreeFolder: "Delete worktree folder",
+  closeDeleteWorktreeFolder: "Close and delete worktree folder",
   noCheckoutState: "Checkout state is not available",
   pushNote: "Push never forces, and an unclear result is never retried on its own.",
   noDiff: "No diff is available for this file.",
@@ -75,6 +106,16 @@ export const COPY = {
   disconnected: "Not connected to the service. Nothing shown here is current.",
 } as const;
 export type CopyKey = keyof typeof COPY;
+
+// The Workspace copy catalogue is English by default. Keep locale overrides here,
+// using the client locale (not the language sent to an engine).
+const RU: Partial<Record<CopyKey, string>> = {
+  deleteWorktreeFolder: "Удалить worktree папку",
+  closeDeleteWorktreeFolder: "Закрыть и удалить worktree папку",
+};
+export function workspaceCopy(key: CopyKey, locale = globalThis.navigator?.language ?? "en"): string {
+  return (locale.toLowerCase().split("-")[0] === "ru" ? RU[key] : undefined) ?? COPY[key];
+}
 
 export const WRITING_CHANGES = "Writing from the changes…";
 

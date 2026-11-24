@@ -1,3 +1,4 @@
+import { validate, type CodeLspEvent } from "@cortex/workspace-contract";
 import { nativeDelta } from "../../../packages/workspace-ui/src/port/native";
 import type { RealTransport, TransportEvent } from "../../../packages/workspace-ui/src/port/real";
 
@@ -30,6 +31,11 @@ function eventOf(raw: unknown): TransportEvent | null {
   if (e.type === "invalidated" && typeof e.projectId === "string") return { type: "invalidated", projectId: e.projectId, ...(e.source === "runtime" ? {source:"runtime" as const} : {}) };
   if (e.type === "native_delta") { const delta = nativeDelta(e); return delta ? { type: "native_delta", ...delta } : typeof e.projectId === "string" ? {type:"native_resync",projectId:e.projectId} : null; }
   if (e.type === "native_resync" && typeof e.projectId === "string") return { type: "native_resync", projectId: e.projectId };
+  if (e.type === "code_lsp_resync") return { type: "code_lsp_resync" };
+  if (e.type === "code_lsp") {
+    try { validate("CodeLspEvent", e); return e as CodeLspEvent; }
+    catch { return null; }
+  }
   if (e.type === "refresh") return { type: "refresh" };
   if (e.type === "connection" && ["connecting", "connected", "disconnected", "unavailable"].includes(String(e.state)))
     return { type: "connection", state: e.state as "connecting" | "connected" | "disconnected" | "unavailable",

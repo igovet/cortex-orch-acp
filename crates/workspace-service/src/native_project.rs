@@ -102,6 +102,83 @@ pub(super) fn writable(
     }
     Ok(())
 }
+/// Match the actual descriptor-relative destination and every parent this
+/// effect may create. Permission checks and no-follow publication still apply.
+pub(super) struct WorkerLeaseFence(
+    Option<(
+        cortex_core::store::owner_file_leases::Checkout,
+        Vec<cortex_core::store::owner_file_leases::RelativePath>,
+    )>,
+);
+
+impl WorkerLeaseFence {
+    pub(super) fn new(root: &Path, path: &str, parents: &[String]) -> CoreResult<Self> {
+        use cortex_core::store::owner_file_leases::{Checkout, RelativePath};
+        if path == "." {
+            // The only supported effect at "." is the no-op mkdir.
+            return Ok(Self(None));
+        }
+        let mut paths = vec![RelativePath::new(path)?];
+        // The highest missing parent covers its entire ancestor chain.
+        if let Some(parent) = parents.first() {
+            paths.push(RelativePath::new(parent)?);
+        }
+        Ok(Self(Some((Checkout::identify(root)?, paths))))
+    }
+
+    pub(super) fn check(&self, db: &rusqlite::Transaction<'_>) -> CoreResult<()> {
+        match &self.0 {
+            Some((checkout, paths)) => cortex_core::store::owner_file_leases::validate_worker_paths_tx(db, checkout, paths),
+            None => Ok(()),
+        }
+    }
+}
+
+pub(super) fn lease_denial(binding: Option<&Value>) -> Value {
+    let mut receipt = json!({"complete":true, "reply":crate::native_tool_errors::reply("owner_file_lease_held")});
+    if let Some(binding) = binding {
+        receipt["checkout"] = binding.clone();
+    }
+    receipt
+}
+
+/// Exact worktree identity attached to MCP observations. The channel is
+/// authenticated before this lookup; its epoch must still own the task.
+pub(super) fn checkout_binding(store: &Store, i: &Identity) -> CoreResult<Option<Value>> {
+    store.read(|db| {
+        let owner = db.query_row(
+            "SELECT owner_ref FROM task_owners WHERE task_id=? AND epoch=?",
+            (&i.task, i.epoch),
+            |row| row.get(0),
+        ).optional()?.ok_or(CoreError::Refused("stale_owner"))?;
+        checkout_binding_for(store, db, &i.task, owner, i.epoch)
+    })
+}
+
+fn checkout_binding_for(store: &Store, db: &rusqlite::Connection, task: &str, owner: String, epoch: i64) -> CoreResult<Option<Value>> {
+    let binding = cortex_core::workspace::worktrees::resolve_on(db, store.key(), task,
+        &cortex_core::ownership::OwnerEpoch { owner, epoch })?;
+    Ok(binding.worktree.map(|w| json!({
+        "id":w.id, "root":w.path, "logical":binding.logical.root(), "owner_epoch":epoch
+    })))
+}
+
+pub(super) fn retained_checkout_matches(store: &Store, task: &str, binding: &Value) -> CoreResult<bool> {
+    store.read(|db| {
+        let Some(epoch) = binding["owner_epoch"].as_i64() else { return Ok(false); };
+        let owner: Option<String> = db.query_row(
+            "SELECT owner_ref FROM task_owners WHERE task_id=? AND epoch=?",
+            (task, epoch), |row| row.get(0),
+        ).optional()?;
+        let Some(owner) = owner else { return Ok(false); };
+        match checkout_binding_for(store, db, task, owner, epoch) {
+            Ok(current) => Ok(current.as_ref() == Some(binding)),
+            Err(CoreError::Refused(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    })
+}
+
 /// Current working checkout, not the logical root used by the shared store.
 pub(super) fn task_root(db: &rusqlite::Connection, task: &str) -> CoreResult<std::path::PathBuf> {
     let path: String = db.query_row(
@@ -371,8 +448,9 @@ fn coverage(
     c: &Credential,
     path: &str,
     hash: &str,
+    binding: Option<&Value>,
 ) -> CoreResult<Value> {
-    Ok(read_state(store, i, c, path)?
+    Ok(read_state(store, i, c, path, binding)?
         .filter(|v| v["sha256"] == hash)
         .unwrap_or(json!({"sha256":hash,"lines":[],"complete":false})))
 }
@@ -381,12 +459,13 @@ fn read_state(
     i: &Identity,
     c: &Credential,
     path: &str,
+    binding: Option<&Value>,
 ) -> CoreResult<Option<Value>> {
     let old: Option<String> = store.read(|db| Ok(db.query_row(
         "SELECT result_json FROM runtime_requests WHERE task_id=? AND request_key=? AND actor=? AND operation='native_file_read'",
         (&i.task, coverage_key(path), &c.channel_id), |r| r.get(0)).optional()?))?;
-    old.map(|s| serde_json::from_str(&s).map_err(Into::into))
-        .transpose()
+    let value: Option<Value> = old.map(|s| serde_json::from_str(&s)).transpose()?;
+    Ok(value.filter(|v| v.get("checkout") == binding))
 }
 fn require_read(state: Option<&Value>, hash: &str, complete: bool) -> CoreResult<()> {
     if state.is_none() || (complete && state.unwrap()["complete"] != true) {
@@ -433,8 +512,10 @@ fn save_coverage(
     c: &Credential,
     path: &str,
     v: &Value,
+    binding: Option<&Value>,
 ) -> CoreResult<()> {
     let mut v = v.clone();
+    if let Some(binding) = binding { v["checkout"] = binding.clone(); }
     v["observed"] = json!(true);
     store.write(|db|{let current=channels::authenticate(db,&c.channel_id,c.secret(),true)?;if &current!=i{return Err(CoreError::Refused("channel_identity_changed"));}db.execute("INSERT INTO runtime_requests VALUES (?,?,?,'native_file_read',?,?) ON CONFLICT(task_id,actor,request_key) DO UPDATE SET digest=excluded.digest,result_json=excluded.result_json WHERE operation='native_file_read'",
         (&i.task,coverage_key(path),&c.channel_id,v["sha256"].as_str().unwrap_or("absent"),v.to_string()))?;Ok(())})
@@ -459,7 +540,7 @@ fn read(
     args: &Value,
     batched: bool,
 ) -> CoreResult<Value> {
-    read_at(store, i, c, args, batched, store.key().root())
+    read_at(store, i, c, args, batched, store.key().root(), None)
 }
 
 fn read_at(
@@ -469,6 +550,7 @@ fn read_at(
     args: &Value,
     batched: bool,
     root: &Path,
+    binding: Option<&Value>,
 ) -> CoreResult<Value> {
     let path = text(args, "path")?;
     safe(path)?;
@@ -491,6 +573,7 @@ fn read_at(
                         c,
                         path,
                         &json!({"sha256":"absent","complete":true}),
+                        binding,
                     )?;
                     return Ok(crate::native_sources::reply(v));
                 }
@@ -545,6 +628,7 @@ fn read_at(
                 c,
                 path,
                 &json!({"sha256":hash,"lines":[],"complete":true,"content":"image"}),
+                binding,
             )?;
             meta["read_coverage_complete"] = json!(true);
         }
@@ -564,6 +648,7 @@ fn read_at(
             c,
             path,
             &json!({"sha256":hash,"lines":[],"complete":true,"content":"binary"}),
+            binding,
         )?;
         meta["read_coverage_complete"] = json!(true);
         return Ok(crate::native_sources::reply(meta));
@@ -582,7 +667,7 @@ fn read_at(
     }
     let mut content = String::new();
     let mut truncated = Vec::new();
-    let mut covered = coverage(store, i, c, path, &hash)?;
+    let mut covered = coverage(store, i, c, path, &hash, binding)?;
     let mut seen = covered["lines"].as_array().cloned().unwrap_or_default();
     // Characters of an over-long line already returned contiguously from its
     // start, by line number; the line joins `lines` once every one was returned.
@@ -680,7 +765,7 @@ fn read_at(
     // page the batch would defer records nothing and claims only the coverage
     // already recorded before it.
     if !batched || serde_json::to_vec(&meta)?.len() <= crate::native_batch::ITEM_BYTES {
-        save_coverage(store, i, c, path, &covered)?;
+        save_coverage(store, i, c, path, &covered, binding)?;
     } else {
         meta["read_coverage_complete"] = json!(prior_complete);
         meta["full_content_sha256"] = if prior_complete {
@@ -715,6 +800,15 @@ fn reconcile_file(
         return Ok(None);
     }
     let workspace = intent["workspace"].as_str().map(Path::new);
+    if let Some(binding) = intent.get("checkout") {
+        if binding["root"].as_str().map(Path::new) != workspace
+            || !retained_checkout_matches(store, task, binding)? {
+            return Ok(None);
+        }
+    } else if store.read(|db| Ok(task_root(db, task)? != store.key().root()))? {
+        // A legacy partial receipt cannot establish a worktree effect.
+        return Ok(None);
+    }
     if let Some(workspace) = workspace {
         let current = store.read(|db| task_root(db, task))?;
         if workspace != current {
@@ -1117,7 +1211,7 @@ mod long_line_tests {
         ] {
             fs::write(f.0.join(name), body).unwrap();
         }
-        let state = |path: &str| read_state(&store, &i, &c, path).unwrap();
+        let state = |path: &str| read_state(&store, &i, &c, path, None).unwrap();
         // A binary read is hash-bound coverage, single or batched.
         let reply = read(&store, &i, &c, &json!({"path":"font.woff2"}), true).unwrap();
         assert_eq!(reply["structuredContent"]["binary"], true);
@@ -1417,14 +1511,21 @@ pub(super) fn execute(
     root: &Path,
     scoped: bool,
 ) -> CoreResult<Value> {
+    let binding = if scoped && root != store.key().root() {
+        let value = checkout_binding(store, i)?.ok_or(CoreError::Refused("worktree_binding_invalid"))?;
+        if value["root"].as_str().map(Path::new) != Some(root) {
+            return Err(CoreError::Refused("worktree_binding_invalid"));
+        }
+        Some(value)
+    } else { None };
     if name == "project_read" {
         if scoped {
-            return read_at(store, i, c, args, batched, root);
+            return read_at(store, i, c, args, batched, root, binding.as_ref());
         }
         return read(store, i, c, args, batched);
     }
     let mut failed_field: Option<String> = None;
-    let result = execute_inner(store, i, c, name, args, &mut failed_field, root, scoped);
+    let result = execute_inner(store, i, c, name, args, &mut failed_field, root, scoped, binding.as_ref());
     let error_reply = |code| match &failed_field {
         Some(field) => crate::native_tool_errors::reply_at(code, field),
         None => file_error(code),
@@ -1434,6 +1535,8 @@ pub(super) fn execute(
             let hash = digest(&serde_json::to_vec(&json!([name, args]))?);
             let reply = error_reply(e.code());
             store.write(|db| {
+                let mut receipt = json!({"complete":true,"reply":reply});
+                if let Some(binding) = &binding { receipt["checkout"] = binding.clone(); }
                 db.execute(
                     "INSERT OR IGNORE INTO runtime_requests VALUES (?,?,?,?,?,?)",
                     (
@@ -1442,7 +1545,7 @@ pub(super) fn execute(
                         &c.channel_id,
                         name,
                         hash,
-                        json!({"complete":true,"reply":reply}).to_string(),
+                        receipt.to_string(),
                     ),
                 )?;
                 Ok(())
@@ -1475,6 +1578,7 @@ fn execute_inner(
     failed_field: &mut Option<String>,
     root: &Path,
     scoped: bool,
+    binding: Option<&Value>,
 ) -> CoreResult<Value> {
     if name == "command_status" {
         return crate::native_command_handles::status(
@@ -1530,6 +1634,9 @@ fn execute_inner(
             return Err(CoreError::Refused("request_key_conflict"));
         }
         let v: Value = serde_json::from_str(&v)?;
+        if binding.is_some() && v.get("checkout") != binding {
+            return Err(CoreError::Refused("worktree_receipt_binding_mismatch"));
+        }
         let v = if v["complete"] == true {
             v
         } else {
@@ -1537,6 +1644,23 @@ fn execute_inner(
                 .ok_or(CoreError::Refused("file_outcome_unknown"))?
         };
         return Ok(v["reply"].clone());
+    }
+    let denied = store.write(|db| {
+        authorize(db, i, c, None)?;
+        writable_target(db, i, root_path, path, scoped)?;
+        match WorkerLeaseFence::new(root_path, path, &[])?.check(db) {
+            Ok(()) => Ok(None),
+            Err(CoreError::OwnerFileLeaseHeld { .. }) => {
+                let denial = lease_denial(binding);
+                db.execute("INSERT INTO runtime_requests VALUES (?,?,?,?,?,?)",
+                    (&i.task, &key, &c.channel_id, name, &hash, denial.to_string()))?;
+                Ok(Some(denial["reply"].clone()))
+            }
+            Err(error) => Err(error),
+        }
+    })?;
+    if let Some(denied) = denied {
+        return Ok(denied);
     }
     let old = match parent(root_path, path) {
         Ok((folder, file)) => bytes(&folder, &file)?,
@@ -1552,19 +1676,19 @@ fn execute_inner(
         .as_ref()
         .map(|(b, _)| digest(b))
         .unwrap_or("absent".into());
-    let covered = coverage(store, i, c, path, &old_hash)?;
+    let covered = coverage(store, i, c, path, &old_hash, binding)?;
     if name == "project_write" {
         if text(args, "expected_sha256")? != old_hash {
             return Err(CoreError::Refused("gateway_write_conflict"));
         }
         if old.is_some() {
-            require_read(read_state(store, i, c, path)?.as_ref(), &old_hash, true)?;
+            require_read(read_state(store, i, c, path, binding)?.as_ref(), &old_hash, true)?;
         }
     } else {
         if old.is_none() {
             return Err(CoreError::Refused("file_missing"));
         }
-        require_read(read_state(store, i, c, path)?.as_ref(), &old_hash, false)?;
+        require_read(read_state(store, i, c, path, binding)?.as_ref(), &old_hash, false)?;
     }
     let previous = old
         .as_ref()
@@ -1653,6 +1777,8 @@ fn execute_inner(
     );
     // Bind both hashes and the acknowledgement before replacement. Recovery
     // observes bytes only; it never re-executes the edit or grants read coverage.
+    let mut intent = json!({"complete":false,"path":path,"workspace":scoped.then_some(root_path),"before_sha256":old_hash,"after_sha256":new_hash,"reply":v});
+    if let Some(binding) = binding { intent["checkout"] = binding.clone(); }
     store.write(|db| {
         authorize(db, i, c, None)?;
         writable_target(db, i, root_path, path, scoped)?;
@@ -1667,17 +1793,28 @@ fn execute_inner(
                 &c.channel_id,
                 name,
                 &hash,
-                json!({"complete":false,"path":path,"workspace":scoped.then_some(root_path),"before_sha256":old_hash,"after_sha256":new_hash,"reply":v}).to_string(),
+                intent.to_string(),
             ),
         )?;
         Ok(())
     })?;
-    store.write(|db| {
+    let denied = store.write(|db| {
         authorize(db, i, c, None)?;
         writable_target(db, i, root_path, path, scoped)?;
         let missing = missing_parents(root_path, path, |parent| {
             writable_target(db, i, root_path, parent, scoped)
         })?;
+        let fence = WorkerLeaseFence::new(root_path, path, &missing)?;
+        match fence.check(db) {
+            Ok(()) => {}
+            Err(CoreError::OwnerFileLeaseHeld { .. }) => {
+                let denial = lease_denial(binding);
+                db.execute("UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?",
+                    (denial.to_string(), &i.task, &c.channel_id, &key))?;
+                return Ok(Some(denial["reply"].clone()));
+            }
+            Err(error) => return Err(error),
+        }
         let (folder, file) = parent_for_effect(root_path, path, &missing)?;
         let temp = format!(".cortex-edit-{}", &crate::native_effects::identity()?[..16]);
         let mut f = openat(
@@ -1702,6 +1839,7 @@ fn execute_inner(
             // The transaction fences state changes, but expiry is wall-clock.
             // Recheck immediately after fsync, before publishing the replacement.
             authorize(db, i, c, None)?;
+            fence.check(db)?;
             let src = std::ffi::CString::new(temp.as_str()).unwrap();
             let dest = std::ffi::CString::new(file).unwrap();
             let rc = unsafe {
@@ -1735,18 +1873,29 @@ fn execute_inner(
                 0,
             )
         };
-        effect
+        effect?;
+        Ok(None)
     })?;
+    if let Some(denied) = denied {
+        return Ok(denied);
+    }
     save_coverage(
         store,
         i,
         c,
         path,
         &json!({"sha256":new_hash,"complete":complete,"lines":[]}),
+        binding,
     )?;
+    let mut settled = json!({"complete":true,"reply":v});
+    let mut event = json!({"channel_id":c.channel_id,"path":path,"sha256":new_hash,"add":added,"del":removed});
+    if let Some(binding) = binding {
+        settled["checkout"] = binding.clone();
+        event["checkout"] = binding.clone();
+    }
     store.write(|db|{db.execute("UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?",
-        (json!({"complete":true,"reply":v}).to_string(),&i.task,&c.channel_id,&key))?;
-        lifecycle::event_tx(db,&i.task,"NATIVE_PROJECT_WRITTEN",json!({"channel_id":c.channel_id,"path":path,"sha256":new_hash,"add":added,"del":removed}))?;Ok(())})?;
+        (settled.to_string(),&i.task,&c.channel_id,&key))?;
+        lifecycle::event_tx(db,&i.task,"NATIVE_PROJECT_WRITTEN",event)?;Ok(())})?;
     Ok(v)
 }
 /// Lines added and removed by one write: the common leading and trailing lines

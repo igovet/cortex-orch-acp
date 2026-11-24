@@ -1,0 +1,56 @@
+[
+  {
+    "name": "code_editor_epoch",
+    "type": "table",
+    "tbl_name": "code_editor_epoch",
+    "sql": "CREATE TABLE code_editor_epoch (\n singleton INTEGER PRIMARY KEY CHECK(singleton=1),\n record_version INTEGER NOT NULL CHECK(record_version=1),\n epoch TEXT NOT NULL\n)"
+  },
+  {
+    "name": "code_owner_file_active",
+    "type": "index",
+    "tbl_name": "code_owner_file_leases",
+    "sql": "CREATE INDEX code_owner_file_active ON code_owner_file_leases(epoch,expires_at)\n WHERE state='active'"
+  },
+  {
+    "name": "code_owner_file_leases",
+    "type": "table",
+    "tbl_name": "code_owner_file_leases",
+    "sql": "CREATE TABLE code_owner_file_leases (\n record_version INTEGER NOT NULL CHECK(record_version=1),\n checkout TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL,\n path TEXT NOT NULL, holder TEXT NOT NULL, epoch TEXT NOT NULL,\n token_hash TEXT NOT NULL CHECK(length(token_hash)=64),\n acquired_generation INTEGER NOT NULL CHECK(acquired_generation>0),\n released_generation INTEGER CHECK(released_generation=acquired_generation+1),\n expires_at INTEGER NOT NULL,\n state TEXT NOT NULL CHECK(state IN ('active','released')),\n CHECK((state='active')=(released_generation IS NULL)),\n PRIMARY KEY(checkout,path)\n)"
+  },
+  {
+    "name": "code_writer_active",
+    "type": "index",
+    "tbl_name": "code_writer_reservations",
+    "sql": "CREATE INDEX code_writer_active ON code_writer_reservations(checkout)\n WHERE state IN ('reserved','ambiguous')"
+  },
+  {
+    "name": "code_writer_reservations",
+    "type": "table",
+    "tbl_name": "code_writer_reservations",
+    "sql": "CREATE TABLE code_writer_reservations (\n record_version INTEGER NOT NULL CHECK(record_version=1),\n id TEXT PRIMARY KEY NOT NULL, checkout TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL,\n paths TEXT CHECK(paths IS NULL OR json_valid(paths)),\n state TEXT NOT NULL CHECK(state IN ('reserved','ambiguous','released'))\n)"
+  },
+  {
+    "name": "native_worktree_active_draft",
+    "type": "index",
+    "tbl_name": "native_worktree_starts",
+    "sql": "CREATE UNIQUE INDEX native_worktree_active_draft ON native_worktree_starts(project_id,draft_id)\n WHERE state IN ('pending','uncertain','bound')"
+  },
+  {
+    "name": "native_worktree_bound_immutable",
+    "type": "trigger",
+    "tbl_name": "native_worktree_starts",
+    "sql": "CREATE TRIGGER native_worktree_bound_immutable\n BEFORE UPDATE OF project_id,actor_id,request_id,draft_id,draft_version,digest,\n  intent_version,state,plan_json,witness_json,runtime_task_id,error_code ON native_worktree_starts\n WHEN OLD.state='bound' BEGIN SELECT RAISE(ABORT, 'immutable'); END"
+  },
+  {
+    "name": "native_worktree_bound_keep",
+    "type": "trigger",
+    "tbl_name": "native_worktree_starts",
+    "sql": "CREATE TRIGGER native_worktree_bound_keep\n BEFORE DELETE ON native_worktree_starts\n WHEN OLD.state='bound' BEGIN SELECT RAISE(ABORT, 'immutable'); END"
+  },
+  {
+    "name": "native_worktree_starts",
+    "type": "table",
+    "tbl_name": "native_worktree_starts",
+    "sql": "CREATE TABLE native_worktree_starts (\n project_id TEXT NOT NULL, actor_id TEXT NOT NULL, request_id TEXT NOT NULL,\n draft_id TEXT NOT NULL, draft_version INTEGER NOT NULL, digest TEXT NOT NULL,\n intent_version INTEGER NOT NULL CHECK(intent_version=1),\n state TEXT NOT NULL CHECK(state IN ('pending','bound','failed-known','uncertain')),\n plan_json TEXT, witness_json TEXT, runtime_task_id TEXT UNIQUE, error_code TEXT,\n close_cleanup TEXT, purge_cleanup TEXT,\n PRIMARY KEY(project_id,actor_id,request_id)\n)"
+  }
+]

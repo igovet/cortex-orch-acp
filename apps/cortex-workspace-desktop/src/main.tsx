@@ -63,7 +63,7 @@ function Desktop() {
     void poll();
     onCleanup(() => { active = false; clearTimeout(timer); });
   });
-  return <Workspace logo={logo} notify={({ label, target }) => invoke<void>("workspace_notify", { label, target })} notificationClicks={notificationClicks} notificationService={notificationService} voice={createVoicePort(native.transport)} terminal={createTerminalPort(native.transport)} port={createRealPort({ transport: native.transport, registry: true, actorId: "local-peer", boardStorage: {getItem:key => localStorage.getItem(key),setItem:(key,value) => localStorage.setItem(key,value)} })} chrome={chrome}
+  return <Workspace logo={logo} openResultTarget={target => invoke<void>("workspace_open_result_target", { target })} notify={({ label, target }) => invoke<void>("workspace_notify", { label, target })} notificationClicks={notificationClicks} notificationService={notificationService} voice={createVoicePort(native.transport)} terminal={createTerminalPort(native.transport)} port={createRealPort({ transport: native.transport, registry: true, localCode: true, actorId: "local-peer", boardStorage: {getItem:key => localStorage.getItem(key),setItem:(key,value) => localStorage.setItem(key,value)} })} chrome={chrome}
     notice={<><Show when={chrome.closeError()}>{reason => <div class="strip bad" role="alert">{reason()}</div>}</Show><Show when={setup().length}><div class="strip info" role="status"><For each={notices()}>{([engines, copy]) =>
       <span>{engines}: {copy} </span>
     }</For></div></Show></>} />;

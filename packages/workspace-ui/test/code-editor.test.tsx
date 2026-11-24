@@ -12,10 +12,12 @@ const OFFERED = ["capabilities.get", "project.snapshot", "tasks.create", "tasks.
 const repoFacts = { projectId: "p", remote: "", tree: ["a.txt", "b.txt"], sources: {}, commits: [], branches: [], fetchedAt: null, openBranch: "dev", defaultBranch: "main",
   checkouts: [{ id: "p:main", projectId: "p", kind: "main", branch: "dev", path: "/cedar", taskId: null, label: null, base: "main", ahead: 0, behind: 0, behindOf: {}, draft: "", sources: {}, updateConflict: null, files: [] }] };
 
+const rev = (n: number) => n.toString(16).padStart(64, "0");
+const token = "a".repeat(64);
 function disk(files: Record<string, string> = { "a.txt": "one\ntwo\n", "b.txt": "bee\n" }, methods: string[] = []) {
   let revision = 0;
   const state = { files: { ...files }, revisions: {} as Record<string, string>, writer: null as string | null, readOnly: null as string | null, saves: [] as { file: string; text: string; revision: string | null }[], lose: false, loseAfterWrite: false, refuse: null as string | null };
-  const put = (file: string, text: string) => { state.files[file] = text; state.revisions[file] = `r${++revision}`; };
+  const put = (file: string, text: string) => { state.files[file] = text; state.revisions[file] = rev(++revision); };
   for (const [file, text] of Object.entries(files)) put(file, text);
   const config = structuredClone(emptyWorkspace().machines[0].config);
   const s = scriptedTransport({
@@ -27,8 +29,9 @@ function disk(files: Record<string, string> = { "a.txt": "one\ntwo\n", "b.txt": 
     "history.page": () => ({ items: [], nextCursor: null, highWatermark: "0" }),
     "native.open_editor": () => ({ outcome: "opened" }),
     "native.open_logs": () => ({ outcome: "opened" }),
+    "native.reveal_file": () => ({ outcome: "opened" }),
     "machine.call": message => {
-      const { op, params } = message as { op: string; params: { file: string; text: string; revision: string | null } };
+      const { op, params } = message as { op: string; params: { file: string; text: string; revision: string | null; leaseToken?: string } };
       if (op === "repo.snapshot") return { ok: true, result: repoFacts };
       if (op === "product.read") return { ok: true, result: { tasks: {}, sprints: [], messages: [] } };
       if (op === "workers") return { ok: true, result: [] };
@@ -39,11 +42,17 @@ function disk(files: Record<string, string> = { "a.txt": "one\ntwo\n", "b.txt": 
         const text = state.files[params.file];
         return { ok: true, result: text === undefined ? { file: params.file, text: null, revision: null, reason: "This file is not in the checkout." } : { file: params.file, text, revision: state.revisions[params.file], readOnly: state.readOnly, writer: state.writer } };
       }
+      if (op === "repo.file.lease.acquire") {
+        if (state.writer) return { ok: false, code: "task_file_lease_held", holderTaskId: state.writer };
+        return { ok: true, result: { leaseToken: token, expiresInMs: 60000, renewAfterMs: 20000 } };
+      }
+      if (op === "repo.file.lease.renew") return { ok: true, result: { expiresInMs: 60000 } };
+      if (op === "repo.file.lease.release") return { ok: true, result: { released: true } };
       if (op === "repo.file.save") {
+        if (params.leaseToken !== token || state.writer) return { ok: false, code: "edit_lease_lost" };
         state.saves.push({ file: params.file, text: params.text, revision: params.revision });
         if (state.lose) throw new Error("service_timeout");
         if (state.refuse) return { ok: false, code: "refused", message: state.refuse };
-        if (state.writer) return { ok: true, result: { outcome: "writer_active", writer: state.writer } };
         if ((state.revisions[params.file] ?? null) !== params.revision) return { ok: true, result: { outcome: "conflict", revision: state.revisions[params.file] ?? null } };
         put(params.file, params.text);
         if (state.loseAfterWrite) throw new Error("service_timeout");
@@ -66,18 +75,24 @@ afterEach(() => { vi.useRealTimers(); dispose?.(); dispose = undefined; document
 
 const CODE = (file = "a.txt") => `/m/${LOCAL_MACHINE_ID}/p/p/code?file=${file}`;
 const settled = async () => { for (let i = 0; i < 14; i++) await flush(); };
-async function open(d: ReturnType<typeof disk>, path = CODE(), chrome?: WindowChrome) {
+async function open(d: ReturnType<typeof disk>, path = CODE(), chrome?: WindowChrome, localCode = true) {
   history.replaceState(null, "", path);
   const root = document.createElement("div");
   document.body.append(root);
-  dispose = render(() => <Workspace chrome={chrome} port={createRealPort({ transport: d.transport, actorId: "owner", registry: true })} />, root);
+  dispose = render(() => <Workspace chrome={chrome} port={createRealPort({ transport: d.transport, actorId: "owner", registry: true, localCode })} />, root);
   for (let i = 0; i < 40 && !document.querySelector(".cm-content"); i++) await settled();
   await settled();
 }
 const $ = <T extends Element = HTMLElement>(selector: string) => document.querySelector<T>(selector);
 const all = <T extends Element = HTMLElement>(selector: string) => [...document.querySelectorAll<T>(selector)];
 const button = (text: string) => all("button").find(b => b.textContent?.trim() === text || b.getAttribute("aria-label") === text);
-const crumbButton = (text: string) => all(".ecrumb button").find(b => b.textContent?.trim() === text);
+const fileActions = () => {
+  const trigger = $<HTMLButtonElement>('.ecrumb button[aria-label="File actions"]')!;
+  trigger.click();
+  const menu = document.getElementById(trigger.getAttribute("popovertarget")!)!;
+  expect(menu.getAttribute("role")).toBe("menu");
+  return [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+};
 const view = () => EditorView.findFromDOM($(".cm-editor")!)!;
 const doc = () => view().state.doc.toString();
 const until = async (text: string) => { for (let i = 0; i < 20 && !($(".cm-editor") && doc() === text); i++) await settled(); };
@@ -90,6 +105,10 @@ describe("editing a checkout file", () => {
   it("opens a labelled editor and saves only changed text, bound to the revision it read", async () => {
     const d = disk();
     await open(d);
+    expect($(".cm-content")!.getAttribute("aria-label")).toBe("Read a.txt");
+    type("cannot type");
+    expect(d.calls.some(c => (c.message as { op?: string })?.op?.startsWith("repo.file.lease."))).toBe(false);
+    await click("Edit");
     expect($(".cm-content")!.getAttribute("aria-label")).toBe("Edit a.txt");
     expect(doc()).toBe("one\ntwo\n");
     expect(button("Save a.txt")!.getAttribute("aria-disabled")).toBe("true");
@@ -100,19 +119,20 @@ describe("editing a checkout file", () => {
     expect(tab()).toBe("a.txt, unsaved");
     expect(button("Save a.txt")!.getAttribute("aria-disabled")).toBeNull();
     await click("Save a.txt");
-    expect(d.state.saves).toEqual([{ file: "a.txt", text: "one\ntwo\nthree\n", revision: "r1" }]);
+    expect(d.state.saves).toEqual([{ file: "a.txt", text: "one\ntwo\nthree\n", revision: rev(1) }]);
     expect(d.state.files["a.txt"]).toBe("one\ntwo\nthree\n");
     expect(status()).toBe("Saved");
     expect(tab()).toBe("a.txt");
     type("four\n");
     await settled();
     await click("Save a.txt");
-    expect(d.state.saves.at(-1)!.revision).toBe("r3");
+    expect(d.state.saves.at(-1)!.revision).toBe(rev(3));
   });
 
   it("saves with Ctrl+S from the editor", async () => {
     const d = disk();
     await open(d);
+    await click("Edit");
     type("x");
     await settled();
     $(".cm-content")!.dispatchEvent(new KeyboardEvent("keydown", { key: "s", code: "KeyS", keyCode: 83, ctrlKey: true, bubbles: true, cancelable: true }));
@@ -124,6 +144,7 @@ describe("editing a checkout file", () => {
     const d = disk({ "a.txt": "one\r\ntwo\r\n" });
     await open(d);
     expect(doc()).toBe("one\ntwo\n");
+    await click("Edit");
     type("x");
     await settled();
     await click("Save a.txt");
@@ -173,8 +194,8 @@ describe("a change that did not come from this editor", () => {
     vi.advanceTimersByTime(3000);
     await settled();
     expect(doc()).toBe("worker\n");
-    // A clean file says so beside Save, which is why Save is off.
-    expect(status()).toBe("No changes");
+    expect(status()).toBe("Read-only");
+    await click("Edit");
     type("mine");
     await settled();
     d.put("a.txt", "worker again\n");
@@ -190,15 +211,16 @@ describe("a change that did not come from this editor", () => {
   it("a conflict at Save writes nothing; Keep mine saves over exactly what was shown", async () => {
     const d = disk();
     await open(d);
+    await click("Edit");
     type("mine\n");
     await settled();
     d.put("a.txt", "worker\n");
     await click("Save a.txt");
     expect(d.state.files["a.txt"]).toBe("worker\n");
     expect(tab()).toBe("a.txt, unsaved");
-    expect($(".strip.warn[role=alert]")!.textContent).toContain("Your text is kept here");
+    expect($(".strip.warn[role=alert]")!.textContent).toContain("Your draft is kept");
     await click("Keep mine");
-    expect(d.state.saves.at(-1)).toEqual({ file: "a.txt", text: "one\ntwo\nmine\n", revision: "r3" });
+    expect(d.state.saves.at(-1)).toEqual({ file: "a.txt", text: "one\ntwo\nmine\n", revision: rev(3) });
     expect(d.state.files["a.txt"]).toBe("one\ntwo\nmine\n");
     expect($(".strip.warn[role=alert]")).toBeNull();
     expect(status()).toBe("Saved");
@@ -208,6 +230,7 @@ describe("a change that did not come from this editor", () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const d = disk();
     await open(d);
+    await click("Edit");
     type("mine\n");
     await settled();
     const answer = d.answers["machine.call"]!;
@@ -229,6 +252,7 @@ describe("a change that did not come from this editor", () => {
   it("Keep mine meets a second change as another conflict, never as an overwrite", async () => {
     const d = disk();
     await open(d);
+    await click("Edit");
     type("mine\n");
     await settled();
     d.put("a.txt", "worker\n");
@@ -242,6 +266,7 @@ describe("a change that did not come from this editor", () => {
   it("Reload takes the disk's version and one undo brings the owner's text back", async () => {
     const d = disk();
     await open(d);
+    await click("Edit");
     type("mine\n");
     await settled();
     d.put("a.txt", "worker\n");
@@ -258,6 +283,7 @@ describe("a change that did not come from this editor", () => {
   it("a deleted file offers to restore the owner's text and never recreates it unasked", async () => {
     const d = disk();
     await open(d);
+    await click("Edit");
     type("mine\n");
     await settled();
     delete d.state.files["a.txt"]; delete d.state.revisions["a.txt"];
@@ -272,47 +298,123 @@ describe("a change that did not come from this editor", () => {
 });
 
 describe("while Cortex works in the checkout", () => {
-  it("locks the file until the owner chooses, keeps their text and saves only once the machine confirms quiet", async () => {
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  it("shows the task holding the file and retries only on Edit", async () => {
     const d = disk();
     d.state.writer = "task-1";
     await open(d);
-    expect($(".strip.warn")!.textContent).toContain("A task is working in this checkout");
-    expect($(".cm-content")!.getAttribute("aria-label")).toBe("Read a.txt");
-    expect(button("Stop the task first")).toBeDefined();
-    await click("Edit anyway");
-    expect($(".cm-content")!.getAttribute("aria-label")).toBe("Edit a.txt");
-    type("mine\n");
-    await settled();
-    expect(button("Save a.txt")!.getAttribute("aria-disabled")).toBe("true");
-    expect(button("Save a.txt")!.dataset.why).toContain("waits until the task stops");
+    await click("Edit");
+    expect($(".strip.warn")!.textContent).toContain("Task Fix the login race is editing this file.");
+    expect(view().state.readOnly).toBe(true);
     expect(d.state.saves).toEqual([]);
     d.state.writer = null;
-    vi.advanceTimersByTime(3000);
-    await settled();
-    await click("Save a.txt");
-    expect(d.state.files["a.txt"]).toBe("one\ntwo\nmine\n");
-    expect($(".strip.warn")).toBeNull();
+    await click("Edit");
+    expect(view().state.readOnly).toBe(false);
   });
 
-  it("a writer that starts during a save keeps the text unsaved", async () => {
+  it("locks on lease loss at Save, preserving text for an explicit retry", async () => {
     const d = disk();
     await open(d);
+    await click("Edit");
     type("mine\n");
     await settled();
-    d.state.writer = "unconfirmed";
+    d.state.writer = "another-task";
     await click("Save a.txt");
     expect(d.state.files["a.txt"]).toBe("one\ntwo\n");
     expect(tab()).toBe("a.txt, unsaved");
-    expect($(".strip.warn")!.textContent).toContain("could not be confirmed");
-    expect(button("Stop the task first")).toBeUndefined();
+    expect(view().state.readOnly).toBe(true);
+    expect($(".strip.warn")!.textContent).toContain("Edit lease lost");
+    d.state.writer = null;
+    await click("Edit");
+    await click("Save a.txt");
+    expect(d.state.files["a.txt"]).toBe("one\ntwo\nmine\n");
   });
+
+  it("renews after 20 seconds and locks with the draft intact when renewal stalls past the deadline", async () => {
+    const d = disk();
+    const machine = d.answers["machine.call"]!;
+    const renewals = vi.fn();
+    let finishRenewal!: (reply: unknown) => void;
+    const stalled = new Promise(resolve => { finishRenewal = resolve; });
+    const renewed = { ok: true, result: { expiresInMs: 60000 } };
+    d.answers["machine.call"] = message => {
+      const { op, params } = message as { op: string; params: unknown };
+      if (op !== "repo.file.lease.renew") return machine(message);
+      renewals(params);
+      return renewals.mock.calls.length === 1 ? renewed : stalled;
+    };
+    await open(d);
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    button("Edit")!.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(view().state.readOnly).toBe(false);
+    type("my draft\n");
+
+    await vi.advanceTimersByTimeAsync(19999);
+    expect(renewals).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(renewals).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      file: "a.txt", checkoutId: "p:main", leaseToken: token,
+    }));
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(renewals).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(39999);
+    expect(view().state.readOnly).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(view().state.readOnly).toBe(true);
+    expect($(".strip.warn")!.textContent).toContain("Edit lease lost");
+    expect(tab()).toBe("a.txt, unsaved");
+    expect(doc()).toBe("one\ntwo\nmy draft\n");
+
+    finishRenewal(renewed);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(view().state.readOnly).toBe(true);
+    expect(d.calls.some(c => (c.message as { op?: string })?.op === "repo.file.save")).toBe(false);
+    expect(d.state.files["a.txt"]).toBe("one\ntwo\n");
+  });
+
+  it("keeps a nonlocal shell read-only without lease or language requests", async () => {
+    const d = disk();
+    await open(d, CODE(), undefined, false);
+    expect(button("Edit")).toBeUndefined();
+    expect(button("Save a.txt")).toBeUndefined();
+    expect(d.calls.some(c => /repo\.(lsp|file\.lease)\./.test(String((c.message as { op?: string })?.op)))).toBe(false);
+  });
+});
+
+it("shows local diagnostics with marks and a list and opens a definition via F12", async () => {
+  const d = disk({ "sample.rs": "fn main() {}\n", "b.txt": "target\n" });
+  const call = d.answers["machine.call"]!;
+  const caps = d.answers["service.capabilities"]!;
+  d.answers["service.capabilities"] = msg => ({ ...(caps(msg) as object), codeLsp: true });
+  const eventId = "b".repeat(32), documentId = "c".repeat(64);
+  const range = { start: { line: 0, character: 3 }, end: { line: 0, character: 7 } };
+  const snapshot = { eventId, version: 1, generation: 1, status: "ready", diagnostics: [{ range, message: "Example warning", severity: 2 }] };
+  d.answers["machine.call"] = message => {
+    switch ((message as { op: string }).op) {
+      case "repo.lsp.open": return { ok: true, result: { ...snapshot, documentId } };
+      case "repo.lsp.status": return { ok: true, result: snapshot };
+      case "repo.lsp.definition": return { ok: true, result: { version: 1, generation: 1, targets: [{ checkoutId: "p:main", file: "b.txt", range }] } };
+      case "repo.lsp.close": return { ok: true, result: { closed: true } };
+      default: return call(message);
+    }
+  };
+  await open(d, CODE("sample.rs"));
+  expect(view().state.readOnly).toBe(true);
+  expect($(".ws-code-diagnostics")?.textContent).toContain("Warning: Example warning");
+  expect($(".cm-diag-range")?.textContent).toBe("main");
+  expect($(".cm-diag-gutter .cm-diag-note")?.textContent).toBe("!");
+  $(".cm-content")!.dispatchEvent(new KeyboardEvent("keydown", { key: "F12", bubbles: true, cancelable: true }));
+  await until("target\n");
+  expect(doc()).toBe("target\n");
+  expect($(".ws-code-diagnostics")).toBeNull();
+  expect(d.calls.some(c => (c.message as { op?: string })?.op === "repo.lsp.close")).toBe(true);
 });
 
 describe("owner text is never lost", () => {
   it("a lost reply stays unconfirmed, never clean, and is not sent again on its own", async () => {
     const d = disk();
     await open(d);
+    await click("Edit");
     type("mine\n");
     await settled();
     d.state.lose = true;
@@ -332,6 +434,7 @@ describe("owner text is never lost", () => {
   it("a lost reply whose write landed is confirmed by reading the disk", async () => {
     const d = disk();
     await open(d);
+    await click("Edit");
     type("mine\n");
     await settled();
     d.state.loseAfterWrite = true;
@@ -343,6 +446,7 @@ describe("owner text is never lost", () => {
   it("a refusal says why and keeps the text", async () => {
     const d = disk();
     await open(d);
+    await click("Edit");
     type("mine\n");
     await settled();
     d.state.refuse = "This file is too large to save here.";
@@ -355,6 +459,7 @@ describe("owner text is never lost", () => {
   it("refuses text the machine could not take without sending it", async () => {
     const d = disk();
     await open(d);
+    await click("Edit");
     type("x".repeat(512 * 1024 + 1));
     await settled();
     await click("Save a.txt");
@@ -365,6 +470,7 @@ describe("owner text is never lost", () => {
   it("closing a dirty tab asks first, and Cancel keeps it", async () => {
     const d = disk();
     await open(d);
+    await click("Edit");
     type("mine\n");
     await settled();
     await click("Close a.txt");
@@ -381,6 +487,7 @@ describe("owner text is never lost", () => {
   it("switching files and leaving the screen keep the text, its tab and its undo", async () => {
     const d = disk();
     await open(d);
+    await click("Edit");
     type("mine\n");
     await settled();
     all<HTMLButtonElement>(".tn").find(b => b.textContent?.includes("b.txt"))!.click();
@@ -390,6 +497,9 @@ describe("owner text is never lost", () => {
     all(".etab").find(t => t.textContent?.includes("a.txt"))!.click();
     await until("one\ntwo\nmine\n");
     expect(doc()).toBe("one\ntwo\nmine\n");
+    expect(view().state.readOnly).toBe(true);
+    expect(d.calls.some(c => (c.message as { op?: string })?.op === "repo.file.lease.release")).toBe(true);
+    await click("Edit");
     undo(view());
     expect(doc()).toBe("one\ntwo\n");
     type("again\n");
@@ -407,6 +517,7 @@ describe("owner text is never lost", () => {
     // Both retained states must route new edits through the remounted view, not an old closure.
     all<HTMLButtonElement>(".tn").find(b => b.textContent?.includes("b.txt"))!.click();
     await until("bee\n");
+    await click("Edit");
     type("after return");
     await settled();
     await click("Save b.txt");
@@ -423,6 +534,7 @@ describe("owner text is never lost", () => {
     const d = disk();
     await open(d, CODE(), chrome);
     expect(guard()).toBe(false);
+    await click("Edit");
     type("mine\n");
     await settled();
     expect(guard()).toBe(true);
@@ -444,6 +556,7 @@ describe("owner text is never lost", () => {
     const chrome: WindowChrome = { maximized: () => false, minimize: vi.fn(), toggleMaximize: vi.fn(), close: vi.fn(), startDragging: vi.fn(), guardClose: g => { guard = g; }, closeNow };
     const d = disk();
     await open(d, CODE(), chrome);
+    await click("Edit");
     type("mine\n");
     await settled();
     d.put("a.txt", "worker\n");
@@ -461,6 +574,7 @@ describe("autosave", () => {
   it("is off by default and saves about a second after typing when on", async () => {
     const d = disk();
     await open(d);
+    await click("Edit");
     type("x");
     await new Promise(resolve => setTimeout(resolve, 1200));
     expect(d.state.saves).toEqual([]);
@@ -468,6 +582,7 @@ describe("autosave", () => {
     localStorage.setItem("cw.ws.autosave", "true");
     const e = disk();
     await open(e);
+    await click("Edit");
     type("y");
     await settled();
     expect(e.state.saves).toEqual([]);
@@ -481,6 +596,7 @@ describe("autosave", () => {
     localStorage.setItem("cw.ws.autosave", "true");
     const d = disk();
     await open(d);
+    await click("Edit");
     type("y");
     d.put("a.txt", "worker\n");
     await new Promise(resolve => setTimeout(resolve, 1200));
@@ -495,34 +611,67 @@ describe("autosave", () => {
 });
 
 describe("opening things elsewhere", () => {
-  it("says why when this computer has no opener", async () => {
+  it("puts exactly three commands in one file actions menu and opens the file palette", async () => {
+    await open(disk());
+    expect(all(".ecrumb button[popovertarget]")).toHaveLength(1);
+    const labels = all(".ecrumb button").map(b => b.getAttribute("aria-label") ?? b.textContent?.trim());
+    expect(labels).not.toContain("Go to file");
+    expect(labels).not.toContain("Open in VS Code");
+    expect(labels).not.toContain("Open in default app");
+    const items = fileActions();
+    expect(items).toHaveLength(3);
+    expect(items.map(item => item.querySelector(".grow")?.firstChild?.textContent)).toEqual([
+      "Go to file", "Open in VS Code", "Show in file manager",
+    ]);
+    items[0].click();
+    await settled();
+    expect($('dialog[open] input[aria-label="Go to file"]')).not.toBeNull();
+  });
+
+  it("says why when this computer has no openers and dispatches neither command", async () => {
     const d = disk();
     await open(d);
-    const external = crumbButton("Open in VS Code")!;
+    const [, external, reveal] = fileActions();
     expect(external.getAttribute("aria-disabled")).toBe("true");
     expect(external.dataset.why).toContain("No external editor was found");
+    expect(reveal.getAttribute("aria-disabled")).toBe("true");
+    expect(reveal.dataset.why).toContain("No file manager or folder opener was found");
     external.click();
+    reveal.click();
     await settled();
-    expect(d.calls.some(c => c.operation === "native.open_editor")).toBe(false);
+    expect(d.calls.some(c => ["native.open_editor", "native.reveal_file"].includes(c.operation))).toBe(false);
   });
 
   it("opens the checkout's file at its line in VS Code", async () => {
     const d = disk(undefined, ["native.open_editor", "native.open_editor.vscode", "native.open_logs"]);
     await open(d, CODE() + "&line=2");
-    crumbButton("Open in VS Code")!.click();
+    const [, external] = fileActions();
+    expect(external.textContent).toBe("Open in VS Code");
+    external.click();
     await settled();
     expect(d.calls.filter(c => c.operation === "native.open_editor").map(c => c.message)).toEqual([{ projectId: "p", checkoutId: "p:main", file: "a.txt", line: 2 }]);
+  });
+
+  it("reveals exactly the current checkout file without a line", async () => {
+    const d = disk(undefined, ["native.reveal_file"]);
+    await open(d, CODE("b.txt") + "&line=1");
+    const [, external, reveal] = fileActions();
+    expect(external.getAttribute("aria-disabled")).toBe("true");
+    expect(reveal.getAttribute("aria-disabled")).toBeNull();
+    reveal.click();
+    await settled();
+    expect(d.calls.filter(c => c.operation === "native.reveal_file").map(c => c.message)).toEqual([{ projectId: "p", checkoutId: "p:main", file: "b.txt" }]);
   });
 
   it("names the default application when only a system opener exists", async () => {
     const d = disk(undefined, ["native.open_editor"]);
     await open(d);
-    expect(crumbButton("Open in VS Code")).toBeUndefined();
-    crumbButton("Open in default app")!.click();
+    const [, external] = fileActions();
+    expect(external.textContent).toBe("Open in default app");
+    external.click();
     await settled();
     expect(d.calls.some(c => c.operation === "native.open_editor")).toBe(true);
   });
-
   it("Open logs says why it is off, and works where an opener exists", async () => {
     const off = disk();
     await open(off, `/settings/machine/${LOCAL_MACHINE_ID}/diagnostics`);

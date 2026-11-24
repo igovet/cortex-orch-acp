@@ -1,5 +1,7 @@
 //! Offline engine and voice trees from reviewed npm locks (`bundle-engines`, `bundle-voice`).
 
+pub(crate) mod language;
+
 use crate::fsutil::{file_digest, read_text, walk_files, write_text};
 use crate::json::{parse, pretty_ascii, Res, Value};
 use crate::proc::{chmod, mode, output, run, which};
@@ -284,7 +286,11 @@ pub fn build_engines(root: &Path, output: &Path) -> Res<()> {
         );
         installed.push(item);
     }
+    let (language_files, language_packages) = language::stage(root, output, arch)?;
+    required.extend(language_files);
+    installed.extend(language_packages);
     let mut manifest = Value::obj();
+    manifest.set("lsp_pins_sha256", Value::str(file_digest(&root.join(language::PINS))?));
     manifest.set("node_version", Value::str(version));
     manifest.set("architecture", Value::str(arch));
     manifest.set(
@@ -301,7 +307,8 @@ pub fn build_engines(root: &Path, output: &Path) -> Res<()> {
         &output.join("bundle-manifest.json"),
         &pretty_ascii(&manifest)?,
     )?;
-    validate_tree(output)?;
+    let staged = validate_tree(output)?;
+    language::validate(root, output, &staged)?;
     Ok(())
 }
 

@@ -277,6 +277,17 @@ initialize, checks native binaries' versions, and verifies the root-owned bundle
 remains unchanged. No login, session/new, model prompt or paid call is made.
 This does not qualify sandbox policy, systemd startup or rendered desktop behavior.
 
+## Bundled Code language servers
+
+The Linux desktop packages (Dev and release) stage rust-analyzer **2026-11-16**,
+typescript-language-server **4.4.0** and TypeScript **5.9.3**. The build
+uses [the language-server pins](../../packaging/engines/lsp-pins.json) and
+validates the staged bundle. The installed service does not download a server
+on demand. Workspace Dev accepts optional absolute executable paths
+(`rustAnalyzerPath` and `typescriptLanguageServerPath`) in local machine
+settings; these are not remote settings and are not release overrides. See
+[Code language tools](../cortex-workspace/ide-and-git.md#language-tools).
+
 ## Pinned dependencies
 
 `./pinned-dependencies.json` is the single manifest for:

@@ -565,7 +565,7 @@ this is not qualification of full legacy routing, installed clients or live acco
 Service teardown joins its cancelled supervision and event tasks before the server
 returns. The same-user endpoint lock stays held until its actual owners are gone;
 requesting task cancellation alone is not evidence of released ownership.
-Projects whose stores were last written by the former Python runtime are not adopted automatically (the legacy controller and the `CORTEX_WORKSPACE_NATIVE=0` opt-out were removed on 2026-11-16). No socket option changes that decision. Unsupported creation-time settings and unqualified worktree routes refuse; no permission policy is widened. Desktop worktree support does not enable linked-checkout ingress through standalone ACP.
+Projects whose stores were last written by the former Python runtime are adopted automatically on Workspace activation through fenced Rust recovery: the format-11 store is upgraded with a verified private backup, a new ownership epoch is acquired, a separate host-transfer event is recorded without rewriting creation provenance, prior channels are revoked, and work with unsettled effects stays held and is never replayed. This does not add an ACP continuation route: old incoming ACP chats remain read-only history and new work starts in a new chat (the legacy controller and the `CORTEX_WORKSPACE_NATIVE=0` opt-out were removed on 2026-11-16). No socket option changes that decision. Unsupported creation-time settings and unqualified worktree routes refuse; no permission policy is widened. Desktop worktree support does not enable linked-checkout ingress through standalone ACP.
 Native-owned send/steer, Stop/Pause/Resume, question answers, Retry and confirmed
 owner resolution use the Rust host, not the retained mutation adapter. Each
 control rechecks the activated project/actor, exact execution/session, persisted
@@ -1271,7 +1271,12 @@ and a format-11 store is upgraded by the verified backup-first migration; contin
 old task from incoming ACP is not implemented. Legacy format-12 session/load instead uses a query-only Core reader:
 no native scheduler, recovery, permission grant or task adoption is triggered, and
 `session/prompt` on such a session is refused with `legacy_session_read_only`. Storage
-refusals return a human-readable message with a stable `reason` and leave files unchanged.
+refusals return a human-readable message with a stable `reason`. A non-initializing
+open that refuses format 11, or an open that refuses an unknown format, does not
+migrate the store or create a migration backup. If schema validation rejects a
+format-11 upgrade, the transaction rolls back without rewriting the main database,
+but the private backup created before the transaction can remain. See
+[format migration](docs/project/format-migration.md#opening-python-era-projects-through-incoming-acp).
 The Rust entry is the default Paseo/Zed launch. Host setup (Zed registration, the
 Paseo setup launch record) or a Paseo source-root launch selects the fixed
 checkout path `target/debug/cortex-acp`, never model input; an explicit
@@ -1759,8 +1764,10 @@ status/login display only, never a proven refresh or persistence). See
 Localized final-answer disclosure descriptions replace raw check names only in
 display. Original names remain unchanged in retained structured evidence and
 gap matching; a translated description cannot satisfy a missing exact-name
-disclosure. Descriptions and blockers are coordinator-authored text, not runtime
-translation or language enforcement. See [final disclosures](docs/features/task-lifecycle/index.md).
+disclosure. Coordinator-authored prose is not translated or language-validated.
+Runtime-authored consent copy can use the effective response language; operation,
+option identity and required authority do not depend on the translated text.
+See [final disclosures](docs/features/task-lifecycle/index.md).
 
 Paseo's history boundary distinguishes command output from native reads:
 shell calls retain their output in the shell row, including split

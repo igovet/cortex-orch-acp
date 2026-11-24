@@ -9,7 +9,7 @@ use crate::{
     Service,
 };
 use cortex_core::{
-    ownership::OwnerEpoch, CoreError, CoreResult, OpenMode, ProjectKey, Store, StoreChannel,
+    ownership::OwnerEpoch, CoreError, CoreResult, ProjectKey, StoreChannel,
 };
 use futures::{stream::FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
@@ -1751,16 +1751,12 @@ pub(crate) fn key(root: &Path) -> CoreResult<ProjectKey> {
         },
     )
 }
-/// Incoming history-only ingress still refuses unadopted legacy projects.
-pub(crate) fn legacy(root: &Path) -> CoreResult<bool> {
-    let key = key(root)?;
-    if !key.database().try_exists()? {
-        return Ok(false);
-    }
-    Store::open(key, OpenMode::LiveReadOnly)?.read(|db| Ok(db.query_row(
+/// On an already opened runtime, is there legacy work for fenced recovery?
+pub(crate) fn has_legacy_tasks(db: &rusqlite::Connection) -> CoreResult<bool> {
+    Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM runtime_tasks t WHERE NOT EXISTS(SELECT 1 FROM runtime_events e
          WHERE e.task_id=t.task_id AND e.type IN ('TASK_CREATED','NATIVE_TASK_ADOPTED') AND json_extract(e.payload_json,'$.execution_host')='rust'))",
-        [], |r| r.get(0))?))
+        [], |r| r.get(0))?)
 }
 impl Runtime {
     #[cfg(test)]
@@ -1769,15 +1765,16 @@ impl Runtime {
         project: &str,
         routes: Arc<dyn NativeRoutes>,
     ) -> CoreResult<Self> {
-        Self::open_with(root, project, routes, false, None)
+        Self::open_with(root, project, routes, false, None).map(|(runtime, _)| runtime)
     }
     /// Incoming ACP agents may share a project: see `StoreExecutor::open_shared`.
+    /// Return the registered project ID, using the derived ID only for a new root.
     pub(crate) fn open_shared(
         root: &Path,
-        project: &str,
+        derived_project: &str,
         routes: Arc<dyn NativeRoutes>,
-    ) -> CoreResult<Self> {
-        Self::open_with(root, project, routes, true, None)
+    ) -> CoreResult<(Self, String)> {
+        Self::open_with(root, derived_project, routes, true, None)
     }
     fn open_with(
         root: &Path,
@@ -1785,7 +1782,9 @@ impl Runtime {
         routes: Arc<dyn NativeRoutes>,
         shared: bool,
         workspace_state: Option<PathBuf>,
-    ) -> CoreResult<Self> {
+    ) -> CoreResult<(Self, String)> {
+        use rusqlite::OptionalExtension;
+
         let host = match (shared, workspace_state) {
             (true, None) => NativeHost::open_shared_for_recovery(key(root)?, routes.mcp_registry()?)?,
             (false, Some(state)) => NativeHost::open_workspace(key(root)?, routes.mcp_registry()?, state)?,
@@ -1795,32 +1794,48 @@ impl Runtime {
         *host.routes.write().unwrap() = Some(routes.clone());
         let project = project.to_owned();
         let root = root.to_string_lossy().into_owned();
-        host.executor.write(move |db| {
-            let actor = actor();
-            db.execute("INSERT OR IGNORE INTO workspace_projects VALUES (?,?,?, ?,1)",
-                (&project,&root,&actor,cortex_core::now()))?;
-            let valid: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM workspace_projects WHERE project_id=? AND project_root=? AND activated_by=?)",
-                (&project,&root,&actor), |r| r.get(0))?;
-            if !valid { return Err(CoreError::Refused("project_context_conflict")); }
-            Ok(())
-        })?.blocking_recv().map_err(|_| CoreError::Refused("native_host_closed"))??;
+        let project_id = host
+            .executor
+            .write(move |db| {
+                let actor = actor();
+                db.execute(
+                    "INSERT OR IGNORE INTO workspace_projects VALUES (?,?,?, ?,1)",
+                    (&project, &root, &actor, cortex_core::now()),
+                )?;
+                // Incoming ACP has no caller-supplied project ID. Reuse the
+                // unique root's registration only for the same local actor.
+                // Workspace opens still require their exact project ID.
+                db.query_row(
+                    "SELECT project_id FROM workspace_projects
+                     WHERE project_root=? AND activated_by=? AND (? OR project_id=?)",
+                    (&root, &actor, shared, &project),
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or(CoreError::Refused("project_context_conflict"))
+            })?
+            .blocking_recv()
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
         let (stop, _) = watch::channel(false);
-        Ok(Self {
-            host: Arc::new(host),
-            routes,
-            controls: Mutex::new(()),
-            command_controls: Mutex::new(()),
-            pumps: Mutex::new(HashMap::new()),
-            guidance: Mutex::new(HashMap::new()),
-            worker_stops: Mutex::new(HashMap::new()),
-            wake: tokio::sync::Notify::new(),
-            workspace_updates: None,
-            jobs: Mutex::new(Vec::new()),
-            stop,
-            exit_recheck: Default::default(),
-            followers: std::sync::atomic::AtomicBool::new(true),
-            command_recheck: Default::default(),
-        })
+        Ok((
+            Self {
+                host: Arc::new(host),
+                routes,
+                controls: Mutex::new(()),
+                command_controls: Mutex::new(()),
+                pumps: Mutex::new(HashMap::new()),
+                guidance: Mutex::new(HashMap::new()),
+                worker_stops: Mutex::new(HashMap::new()),
+                wake: tokio::sync::Notify::new(),
+                workspace_updates: None,
+                jobs: Mutex::new(Vec::new()),
+                stop,
+                exit_recheck: Default::default(),
+                followers: std::sync::atomic::AtomicBool::new(true),
+                command_recheck: Default::default(),
+            },
+            project_id,
+        ))
     }
     pub(crate) fn open_workspace(
         root: &Path,
@@ -1828,7 +1843,7 @@ impl Runtime {
         routes: Arc<dyn NativeRoutes>,
         state: PathBuf,
     ) -> CoreResult<Self> {
-        Self::open_with(root, project, routes, false, Some(state))
+        Self::open_with(root, project, routes, false, Some(state)).map(|(runtime, _)| runtime)
     }
     pub(crate) async fn draft_attachments(
         &self,
@@ -1876,10 +1891,24 @@ impl Runtime {
             .await
             .map_err(err)
     }
-    pub(super) async fn start_automatic(
+    pub(crate) async fn sprint_queue_snapshot(
+        &self,
+        project: String,
+        sprint: String,
+    ) -> io::Result<crate::machine::sprint_live::Snapshot> {
+        let state = self.host.workspace_state.clone().ok_or_else(|| failure("project_inactive"))?;
+        self.host.executor.publication_wait(move |store| {
+            crate::machine::sprint_live::read_snapshot(store, &state, &project, &sprint)
+                .map_err(|e| CoreError::Refused(e.code))
+        }).await.map_err(err)
+    }
+
+    pub(super) async fn start_queued(
         self: &Arc<Self>,
         project: String,
         request: Value,
+        automatic: bool,
+        expected: crate::machine::sprint_live::Expectation,
     ) -> io::Result<Value> {
         use cortex_core::workspace::NativeExecutionPolicy;
         if request["operation"] != "tasks.start" {
@@ -1889,7 +1918,8 @@ impl Runtime {
             project,
             request,
             None,
-            Some(NativeExecutionPolicy::AutomaticContinuation),
+            automatic.then_some(NativeExecutionPolicy::AutomaticContinuation),
+            Some(expected),
         )
         .await
     }
@@ -1908,6 +1938,7 @@ impl Runtime {
             request,
             None,
             Some(NativeExecutionPolicy::SprintPlanning),
+            None,
         )
         .await
     }
@@ -1917,7 +1948,7 @@ impl Runtime {
         request: Value,
         client: Option<(String, Value, Option<cortex_core::input::Capture>)>,
     ) -> io::Result<Value> {
-        self.command_with_policy(project, request, client, None)
+        self.command_with_policy(project, request, client, None, None)
             .await
     }
     async fn command_with_policy(
@@ -1926,6 +1957,7 @@ impl Runtime {
         request: Value,
         client: Option<(String, Value, Option<cortex_core::input::Capture>)>,
         policy: Option<cortex_core::workspace::NativeExecutionPolicy>,
+        queued: Option<crate::machine::sprint_live::Expectation>,
     ) -> io::Result<Value> {
         if *self.stop.borrow() {
             return Err(failure("service_stopping"));
@@ -1976,9 +2008,9 @@ impl Runtime {
         if let Some(receipt) = host
             .executor
             .publication({
-                let incoming = client.is_some();
+                let check_replay = client.is_none() && queued.is_none();
                 move |store| {
-                    if incoming {
+                    if !check_replay {
                         return Ok(None);
                     }
                     cortex_core::workspace::replay_native_start_with_policy(
@@ -2063,7 +2095,7 @@ impl Runtime {
                             }
                             let state = maintenance.as_deref()
                                 .ok_or(CoreError::Refused("native_worktree_unavailable"))?;
-                            return crate::machine::start_worktree(store, state, &project, &actor(), &request);
+                            return crate::machine::start_worktree(store, state, &project, &actor(), &request, queued.as_ref());
                         }
                         let start = || cortex_core::workspace::start_native_input_with_policy(
                             store, &project, &actor(), &request,
@@ -2072,7 +2104,11 @@ impl Runtime {
                             policy,
                         );
                         if let Some(state) = maintenance.as_deref() {
-                            crate::machine::task_rework::with_plain_start_guard(state, &project, &request, start)
+                            crate::machine::task_rework::with_plain_start_guard(
+                                state, &project, &request, queued.as_ref().map(|expected| (store, expected)), start,
+                            )
+                        } else if queued.is_some() {
+                            Err(CoreError::Refused(crate::machine::sprint_live::STALE))
                         } else {
                             start()
                         }

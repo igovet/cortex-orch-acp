@@ -4,7 +4,13 @@
 #[path = "support/hermetic.rs"]
 mod hermetic;
 use serde_json::{json, Value};
-use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    io::Write as _,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use workspace_remote::{Client, ClientConfig, ConnectionState};
 use workspace_service::{connect, read_frame, Config, LaunchSpec, Service};
@@ -97,12 +103,83 @@ async fn a_paired_phone_reaches_the_service_only_through_the_remote_policy() {
         .expect("remote end-to-end scenario exceeded its time bound");
 }
 
+async fn assert_owner_sees_failed_approval(
+    service: &Service,
+    f: &Fixture,
+    phone: &Client,
+    link: &str,
+) {
+    let attempt = phone.pair_begin(link, "Test Phone").await.unwrap();
+    let pending = until(service, |s| {
+        s["pending"].as_array().is_some_and(|p| !p.is_empty())
+    })
+    .await;
+    let path = f.config().state_dir.join("remote/remote-devices.json");
+    std::fs::create_dir(&path).unwrap();
+    let mut local = connect(service.socket_path()).await.unwrap();
+    let response = call(
+        &mut local,
+        "remote.pairing.decide",
+        json!({
+            "requestId": pending["pending"][0]["requestId"], "allow": true
+        }),
+    )
+    .await;
+    assert_eq!(response["error"]["message"], "remote_state_unavailable");
+    assert!(matches!(
+        attempt.finish().await,
+        Err(workspace_remote::PairError::Cancelled)
+    ));
+    let status = owner(service, "remote.status", json!({})).await;
+    assert_eq!(status["devices"], json!([]));
+    std::fs::remove_dir(path).unwrap();
+}
+
+#[tokio::test]
+async fn damaged_remote_state_keeps_the_endpoint_closed_and_the_file_intact() {
+    tokio::time::timeout(LIMIT, async {
+        for (file, contents) in [
+            ("remote-devices.json", b"not JSON".as_slice()),
+            ("remote-settings.json", br#"{"enabled":"not a bool"}"#.as_slice()),
+        ] {
+            let f = Fixture::new();
+            let service: Arc<Service> = Service::bind(f.config()).await.unwrap();
+            let dir = f.config().state_dir.join("remote");
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let write_private = |name: &str, bytes: &[u8]| {
+                std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600)
+                    .open(dir.join(name)).unwrap().write_all(bytes).unwrap();
+            };
+            if file == "remote-devices.json" {
+                write_private("remote-settings.json", br#"{"enabled":true}"#);
+            }
+            write_private(file, contents);
+            let reserved = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = reserved.local_addr().unwrap();
+            drop(reserved);
+            service.start_remote_with(vec![addr], None).await;
+            let _still_free = std::net::UdpSocket::bind(addr).expect("endpoint must not bind");
+            assert_eq!(std::fs::read(dir.join(file)).unwrap(), contents);
+            assert!(!dir.join("remote-host.key").exists());
+            let runner = tokio::spawn(service.clone().serve());
+            let status = owner(&service, "remote.status", json!({})).await;
+            assert_eq!(status["available"], false);
+            assert_eq!(status["enabled"], false);
+            assert_eq!(status["reason"], "Remote access could not start: its saved state is damaged. It stays off until the file is fixed.");
+            service.stop().await.unwrap();
+            tokio::time::timeout(STEP, runner).await.unwrap().unwrap().unwrap();
+        }
+    }).await.unwrap();
+}
+
 async fn scenario() {
     let f = Fixture::new();
+    let address = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let bind_address = address.local_addr().unwrap();
+    drop(address);
     let service: Arc<Service> = Service::bind(f.config()).await.unwrap();
-    service
-        .start_remote_with(vec!["127.0.0.1:0".parse().unwrap()], None)
-        .await;
+    service.start_remote_with(vec![bind_address], None).await;
     let runner = tokio::spawn(service.clone().serve());
 
     // The owner sees remote access available and off, and the methods advertised.
@@ -139,7 +216,10 @@ async fn scenario() {
     config.bind_addrs = vec!["127.0.0.1:0".parse().unwrap()];
     config.connect_timeout = Duration::from_secs(5);
     let client = Client::new(config).unwrap();
-    let attempt = client.pair_begin(&link, "Test Phone").await.unwrap();
+    assert_owner_sees_failed_approval(&service, &f, &client, &link).await;
+    let offer = owner(&service, "remote.pairing.start", json!({})).await;
+    let link = offer["pairing"]["link"].as_str().unwrap();
+    let attempt = client.pair_begin(link, "Test Phone").await.unwrap();
     let pending = until(&service, |s| {
         s["pending"].as_array().is_some_and(|p| !p.is_empty())
     })
@@ -167,6 +247,14 @@ async fn scenario() {
     let mut stream = connection.open().await.unwrap();
     let status = call(&mut stream, "service.status", json!({})).await;
     assert_eq!(status["result"]["transport"], "unix", "{status}");
+    assert_eq!(
+        status["result"]["protocol"]["major"],
+        workspace_protocol::WIRE_MAJOR
+    );
+    assert_eq!(
+        status["result"]["protocol"]["minor"],
+        workspace_protocol::WIRE_MINOR
+    );
     // Owner-only and machine-bound methods are answered by the tunnel, not forwarded.
     for (method, params) in [
         ("remote.status", json!({})),
@@ -183,6 +271,18 @@ async fn scenario() {
             "machine.call",
             json!({"op":"repo.file.save","projectId":"p","params":{}}),
         ),
+        ("machine.call", json!({"op":"repo.file.lease.acquire","projectId":"p","params":{"file":"a.txt"}})),
+        ("machine.call", json!({"op":"repo.file.lease.renew","projectId":"p","params":{"file":"a.txt"}})),
+        ("machine.call", json!({"op":"repo.file.lease.release","projectId":"p","params":{"file":"a.txt"}})),
+        ("machine.call", json!({"op":"repo.file.lease.status","projectId":"p","params":{"file":"a.txt"}})),
+        ("service.subscribe.code", json!({})),
+        ("machine.call", json!({"op":"repo.lsp.open","projectId":"p","params":{"file":"a.rs","text":"fn main() {}","version":1}})),
+        ("machine.call", json!({"op":"repo.lsp.change","projectId":"p","params":{}})),
+        ("machine.call", json!({"op":"repo.lsp.definition","projectId":"p","params":{}})),
+        ("machine.call", json!({"op":"repo.lsp.close","projectId":"p","params":{}})),
+        ("machine.call", json!({"op":"repo.lsp.status","projectId":"p","params":{}})),
+        ("machine.call", json!({"op":"repo.lsp.settings","params":{}})),
+        ("machine.call", json!({"op":"machine.update","params":{"patch":{"rustAnalyzerPath":"/does-not-exist"}}})),
         ("brand.new", json!({})),
     ] {
         let reply = call(&mut stream, method, params).await;
@@ -215,15 +315,21 @@ async fn scenario() {
     assert_eq!(device["name"], "Test Phone");
     assert!(device["pairedAt"].as_u64().is_some());
 
-    // Revoking the device ends its access: the open subscription ends, and so does
-    // every later attempt.
-    let revoked = owner(
-        &service,
-        "remote.devices.revoke",
-        json!({"deviceId":client.device_id()}),
-    )
-    .await;
-    assert_eq!(revoked["devices"], json!([]));
+    // Even a failed save immediately cuts off the device, while keeping a local row
+    // from which the owner can retry. Damage only the mode, leaving the old grant on disk.
+    let registry = f.config().state_dir.join("remote/remote-devices.json");
+    let previous = std::fs::read(&registry).unwrap();
+    std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let params = json!({"deviceId":client.device_id()});
+    let mut local = connect(service.socket_path()).await.unwrap();
+    let failed = call(&mut local, "remote.devices.revoke", params.clone()).await;
+    assert_eq!(failed["error"]["message"], "remote_state_unavailable");
+    drop(local);
+    let retry_row = owner(&service, "remote.status", json!({})).await;
+    assert_eq!(retry_row["devices"].as_array().unwrap().len(), 1);
+    assert_eq!(retry_row["devices"][0]["deviceId"], client.device_id());
+    assert_eq!(retry_row["devices"][0]["connected"], false);
+    assert_eq!(std::fs::read(&registry).unwrap(), previous);
     loop {
         match receive(&mut subscription).await {
             Ok(event) => assert_eq!(event["method"], "service.event", "{event}"),
@@ -263,10 +369,45 @@ async fn scenario() {
     assert!(refused, "a revoked device was not refused");
     assert_eq!(*connection.state().borrow(), ConnectionState::Rejected);
 
+    std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let revoked = owner(&service, "remote.devices.revoke", params.clone()).await;
+    assert_eq!(revoked["devices"], json!([]));
+
     service.stop().await.unwrap();
     tokio::time::timeout(STEP, runner)
         .await
         .expect("the service did not stop")
+        .unwrap()
+        .unwrap();
+    drop(service);
+
+    let restarted: Arc<Service> = Service::bind(f.config()).await.unwrap();
+    restarted.start_remote_with(vec![bind_address], None).await;
+    let runner = tokio::spawn(restarted.clone().serve());
+    let status = owner(&restarted, "remote.status", json!({})).await;
+    assert_eq!(status["enabled"], true);
+    assert_eq!(status["machineId"], machine.machine_id);
+    assert_eq!(status["devices"], json!([]));
+    let mut local = connect(restarted.socket_path()).await.unwrap();
+    let unknown = call(&mut local, "remote.devices.revoke", params).await;
+    assert_eq!(unknown["error"]["message"], "unknown_device");
+    drop(local);
+
+    let mut config = ClientConfig::new(&phone_state);
+    config.bind_addrs = vec!["127.0.0.1:0".parse().unwrap()];
+    config.connect_timeout = Duration::from_secs(5);
+    let fresh = Client::new(config)
+        .unwrap()
+        .connection(&machine.machine_id)
+        .unwrap();
+    assert!(matches!(
+        fresh.open().await,
+        Err(workspace_remote::ConnectError::Rejected)
+    ));
+    restarted.stop().await.unwrap();
+    tokio::time::timeout(STEP, runner)
+        .await
+        .unwrap()
         .unwrap()
         .unwrap();
 }

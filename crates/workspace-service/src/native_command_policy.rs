@@ -139,7 +139,7 @@ pub(super) fn expand(root: &Path, paths: &[PathBuf]) -> io::Result<Vec<PathBuf>>
     }
     Ok(result.into_iter().collect())
 }
-pub(super) fn private(name: &OsStr) -> bool {
+pub(crate) fn private(name: &OsStr) -> bool {
     [
         ".git",
         ".cortex",

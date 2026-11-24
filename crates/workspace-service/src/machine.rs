@@ -6,11 +6,14 @@ pub(crate) mod config_action;
 // Owner attachment bodies; the service boundary resolves references for Core and engines.
 pub(crate) mod attachment_files;
 mod close_commit;
+pub(crate) mod code_lsp;
 mod config_read;
 mod config_save;
 mod context;
 mod coordinator;
 mod engine_connection;
+mod editor;
+pub(crate) use editor::Authority as EditorAuthority;
 pub(crate) mod files;
 mod git;
 mod integration;
@@ -24,7 +27,7 @@ mod mcp_redact;
 pub(crate) mod usage_refresh;
 // Display activity redacts selected tool inputs with the same credential rules.
 pub(crate) use mcp_redact::redact as redact_display_text;
-mod native;
+pub(crate) mod native;
 // The native owner read and its result identity use the same saved task records.
 pub(crate) use native::{product as native_product, queue_driven_mode};
 mod product;
@@ -39,14 +42,17 @@ pub(crate) use project_config_save::{routing_observation, valid_cached_entry};
 mod project_registry;
 pub(crate) mod project_routing;
 mod project_skills;
-mod retention;
+pub(crate) mod retention;
 mod settings;
 pub mod settings_api;
 pub(crate) mod short_text;
 pub(crate) mod sprint_graph;
+mod sprint_dag;
+pub(crate) mod sprint_live;
 mod sprint_materialize;
 pub(crate) mod sprint_result;
 mod task_actions;
+pub(crate) mod task_rework;
 pub(crate) mod task_auto_repair;
 pub(crate) mod task_facts;
 mod task_facts_attempts;
@@ -58,6 +64,7 @@ mod task_facts_work;
 pub(crate) use task_facts_work::withdrawn as withdrawn_checks;
 pub(crate) mod task_lifecycle;
 mod task_merge;
+pub(crate) mod merge_control;
 mod task_resolution;
 pub(crate) mod task_review;
 mod worker_history;
@@ -76,6 +83,56 @@ pub(crate) fn seed_default_profile(
     config_action::seed_default_profile(bytes, now).map_err(|e| io::Error::other(e.code))
 }
 
+/// Stage-gated desktop admission uses the same logical repository lock as
+/// commit, merge, purge, and other owner Git actions.
+pub(crate) fn start_worktree(
+    store: &cortex_core::Store,
+    state: &std::path::Path,
+    project: &str,
+    actor: &str,
+    request: &Value,
+    queued: Option<&sprint_live::Expectation>,
+) -> cortex_core::CoreResult<Value> {
+    use cortex_core::CoreError;
+    let root = store.key().root();
+    let _repo = settings::Lock::long(
+        state,
+        &git::repo_lock(root),
+        "git_in_progress",
+        "A task worktree is being created. Try again when it finishes.",
+    )
+    .map_err(|e| CoreError::Refused(e.code))?;
+    let directory = worktree_directory(state)?;
+    task_rework::with_plain_start_guard(state, project, request, queued.map(|expected| (store, expected)), || {
+        cortex_core::workspace::start_native_worktree(store, project, actor, request, &directory)
+    })
+}
+
+fn worktree_directory(state: &std::path::Path) -> cortex_core::CoreResult<std::path::PathBuf> {
+    use cortex_core::CoreError;
+    let settings = settings::machine(state).map_err(|e| CoreError::Refused(e.code))?;
+    let location = settings["worktreeRoot"]
+        .as_str()
+        .ok_or(CoreError::Refused("unsafe_worktree_root"))?;
+    let directory = if let Some(tail) = location.strip_prefix("~/") {
+        std::path::PathBuf::from(
+            std::env::var_os("HOME").ok_or(CoreError::Refused("unsafe_worktree_root"))?,
+        )
+        .join(tail)
+    } else {
+        std::path::PathBuf::from(location)
+    };
+    let projects = crate::local::read_registry(&state.join("projects.json"))
+        .map_err(|_| CoreError::Refused("worktree_settings_unavailable"))?;
+    if projects
+        .iter()
+        .any(|p| directory.starts_with(&p.canonical_root))
+    {
+        return Err(CoreError::Refused("unsafe_worktree_root"));
+    }
+    Ok(directory)
+}
+
 /// Operations that need a registered project.
 const PROJECT_OPERATIONS: &[&str] = &[
     "project.config.read",
@@ -84,11 +141,16 @@ const PROJECT_OPERATIONS: &[&str] = &[
     "repo.context",
     "repo.file",
     "repo.file.save",
+    "repo.file.lease.acquire",
+    "repo.file.lease.renew",
+    "repo.file.lease.release",
+    "repo.file.lease.status",
     "repo.locate",
     "repo.list",
     "repo.skills",
     "git",
     "git_init",
+    "command.output",
     "workers",
     "product.read",
     "product.board",
@@ -108,7 +170,8 @@ const HELPER_DEADLINE: Duration = Duration::from_secs(30);
 /// Reads never do; neither does an automatic settle that accepted nothing (the loop's own retry) nor a short model text.
 fn sprint_wake(call: &MachineCall) -> bool {
     match call.op.as_str() {
-        "product.sprint" | "product.integrate" => true,
+        "product.sprint" => call.params["action"] != "live_graph",
+        "product.integrate" => true,
         // An automatic settle that did accept is decided by the reply (see `machine`).
         "product.task" => !short_text::handles(&call.params),
         _ => false,
@@ -145,7 +208,23 @@ impl Default for Helper {
 }
 
 impl crate::Service {
-    pub async fn machine(&self, call: MachineCall) -> io::Result<Value> {
+    pub async fn machine(&self, mut call: MachineCall) -> io::Result<Value> {
+        if call.op == "product.task" && call.params["action"] == "rework" {
+            return Ok(native::envelope(self.rework_task(call).await));
+        }
+        if code_lsp::handles(&call.op) {
+            return code_lsp::call(self, call).await;
+        }
+        if call.op == "product.sprint"
+            && matches!(
+                call.params["action"].as_str(),
+                Some("recover_planning_message" | "replace_planning_request")
+            )
+        {
+            if let Err(error) = self.check_planning_recovery(&mut call).await? {
+                return Ok(native::envelope(Err(error)));
+            }
+        }
         if call.op == "product.sprint" && call.params["action"] == "delete" {
             // One bounded owner action, using the existing session cancellation route.
             // A timeout never means stopped: the durable deletion fence remains for Retry.
@@ -161,20 +240,196 @@ impl crate::Service {
                     "reason":"Deletion is not confirmed yet. The queue stays stopped. Retry Delete sprint."}})),
             };
         }
+        // Owner Git mutations share the execution control lane: a Resume or
+        // Request changes cannot start a new writer between the quiet check and Git.
+        let runtime = if call.op == "product.task" && matches!(
+            call.params["action"].as_str(), Some("finish_merge" | "abort_merge" | "resolve_block")
+        ) {
+            let state = self.state.lock().await;
+            call.project_id.as_ref().and_then(|project| state.native.get(project)).cloned()
+        } else {
+            None
+        };
+        let _control = match &runtime {
+            Some(runtime) => Some(runtime.controls.lock().await),
+            None => None,
+        };
         let wakes = sprint_wake(&call);
         let project = call.project_id.clone();
         let call_action = call.params["action"].as_str().map(str::to_owned);
-        let reply = self.machine_helper(call, false).await;
+        let graph_read = call.op == "product.sprint" && call.params["action"] == "live_graph";
+        let releases_lease = call.op == "repo.file.lease.release";
+        let fact_bundle = call.op == "product.facts";
+        let task_facts = fact_bundle || matches!(call.op.as_str(), "product.board" | "product.read");
+        let mut reply = self.machine_helper(call, false).await;
+        if let (true, Some(project), Ok(reply)) = (graph_read, project.as_deref(), &mut reply) {
+            if reply["ok"] == true && !self.state.lock().await.native.contains_key(project) {
+                if let Some(rows) = reply["result"]["order"]["notStarted"].as_array_mut() {
+                    for row in rows.iter_mut().filter(|row| row["next"] == true) {
+                        row["next"] = json!(false);
+                        row["conditional"] = json!(true);
+                    }
+                }
+            }
+        }
+        if let (true, Some(project), Ok(reply)) = (task_facts, project.as_deref(), &mut reply) {
+            if reply["ok"] == true && !self.state.lock().await.native.contains_key(project) {
+                let product = if fact_bundle { &mut reply["result"]["product"] } else { &mut reply["result"] };
+                if let Some(tasks) = product.get_mut("tasks").and_then(Value::as_object_mut) {
+                    for task in tasks.values_mut().filter(|task| task["reworkAvailable"] == true) {
+                        task["reworkAvailable"] = json!(false);
+                        task["reworkUnavailableReason"] = json!("project_inactive");
+                        task["reworkWarnings"] = json!([]);
+                        for key in ["reworkVersion", "reworkOwnerEpoch", "reworkExecutionId"] {
+                            task.as_object_mut().unwrap().remove(key);
+                        }
+                    }
+                }
+            }
+        }
+        if let (true, Some(project), Ok(reply)) = (releases_lease, project.as_deref(), &reply) {
+            if reply["ok"] == true {
+                if let Some(runtime) = self.state.lock().await.native.get(project) {
+                    runtime.wake.notify_waiters();
+                }
+            }
+        }
         // The sprint loop sleeps until something can move a sprint on: an owner or loop change of a sprint
         // or task record is one (a run mode, a queue state, an acceptance, a sprint membership).
         if let (true, Some(project), Ok(reply)) = (wakes, project.as_deref(), reply.as_ref()) {
             let idle_settle =
                 call_action.as_deref() == Some("auto_ready") && reply["result"]["accepted"] != true;
-            if reply["ok"] == true && !idle_settle {
+            let graph_write = matches!(call_action.as_deref(), Some("set_dependency" | "move_priority"));
+            if reply["ok"] == true && !idle_settle && (!graph_write || reply["result"]["changed"] == true) {
                 self.sprint_wake.project(project);
+                if graph_write {
+                    let _ = self.events.send(json!({"projectId":project,"type":"invalidation"}));
+                }
             }
         }
         reply
+    }
+
+    async fn rework_task(&self, call: MachineCall) -> native::Result<Value> {
+        self.accepting().map_err(|_| task_rework::error("service_stopping"))?;
+        let project = call.project_id.ok_or_else(|| task_rework::error("invalid_project"))?;
+        let mut request = call.params;
+        if request.as_object().is_none_or(|p| p.keys().any(|k| !matches!(k.as_str(),
+            "action" | "taskId" | "executionId" | "requestId" | "expectedVersion" | "ownerEpoch" | "text" | "attachments"
+        ))) {
+            return Err(task_rework::error("invalid_request"));
+        }
+        for field in ["taskId", "requestId"] {
+            workspace_protocol::validate("Identity", &request[field])
+                .map_err(|_| task_rework::error("invalid_request"))?;
+        }
+        workspace_protocol::validate("Decimal", &request["expectedVersion"])
+            .map_err(|_| task_rework::error("stale_version"))?;
+        if request["executionId"].is_null() {
+            if !request["ownerEpoch"].is_null() {
+                return Err(task_rework::error("stale_epoch"));
+            }
+            request["executionId"] = Value::Null;
+            request["ownerEpoch"] = Value::Null;
+        } else {
+            workspace_protocol::validate("Identity", &request["executionId"])
+                .map_err(|_| task_rework::error("invalid_request"))?;
+            workspace_protocol::validate("Decimal", &request["ownerEpoch"])
+                .map_err(|_| task_rework::error("stale_epoch"))?;
+        }
+        if !request["text"].as_str().is_some_and(|text| !text.trim().is_empty() && text.chars().count() <= 32_000) {
+            return Err(task_rework::error("invalid_message"));
+        }
+        let runtime = {
+            let state = self.state.lock().await;
+            let root = &state.projects.iter().find(|p| p.project_id == project)
+                .ok_or_else(|| task_rework::error("invalid_project"))?.canonical_root;
+            crate::project_guard::check(root)?;
+            state.native.get(&project).cloned()
+        };
+        let Some(runtime) = runtime else {
+            if native::product(&self.config.state_dir, &project)?["tasks"][request["taskId"].as_str().unwrap()]["archive"].is_object() {
+                return Err(task_rework::error("task_archived"));
+            }
+            return Err(task_rework::error("project_inactive"));
+        };
+        let files = request.as_object_mut().unwrap().remove("attachments");
+        let capture = match files {
+            None => None,
+            Some(Value::Array(items)) if items.is_empty() => None,
+            Some(items) => Some(cortex_core::input::capture_from_wire(
+                &self.resolved_attachments(json!({"attachments":items}))
+                    .await.map_err(|_| task_rework::error("invalid_attachments"))?["attachments"],
+            ).map_err(|e| task_rework::error(e.code()))?),
+        };
+        request["projectId"] = json!(project);
+        let result = runtime.rework(project.clone(), request, capture).await;
+        if result.is_ok() {
+            self.notifier.touch(&project);
+            self.project_changed(&project);
+            self.sprint_wake.project(&project);
+        }
+        result
+    }
+
+    // The client board can lag an execution commit. Decide from the runtime,
+    // and bind the later product write to the exact failure and task inspected.
+    async fn check_planning_recovery(
+        &self,
+        call: &mut MachineCall,
+    ) -> io::Result<native::Result<()>> {
+        let project = call
+            .project_id
+            .as_deref()
+            .ok_or_else(|| failure("invalid_project"))?;
+        let board = self
+            .machine_helper(
+                MachineCall {
+                    op: "product.board".into(),
+                    project_id: call.project_id.clone(),
+                    params: json!({}),
+                },
+                false,
+            )
+            .await?;
+        let Some(sprint) = board["result"]["sprints"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|s| s["id"] == call.params["sprintId"])
+        else {
+            return Ok(Err(native::refuse("unknown_sprint", "Unknown sprint.")));
+        };
+        if let Err(error) =
+            product::check_planning_recovery(sprint, call.params["action"].as_str().unwrap_or(""))
+        {
+            return Ok(Err(error));
+        }
+        if let Some(task) = sprint["planningTaskId"].as_str() {
+            let runtime = self
+                .state
+                .lock()
+                .await
+                .native
+                .get(project)
+                .cloned()
+                .ok_or_else(|| failure("planning_unavailable"))?;
+            let fact = crate::native_driver::sprints::planning_fact(&runtime, task).await?;
+            if fact.execution.is_some()
+                && !matches!(
+                    fact.state.as_deref(),
+                    Some("COMPLETED" | "FAILED" | "CANCELLED")
+                )
+            {
+                return Ok(Err(native::refuse(
+                    "planning_execution_live",
+                    "The sprint still has a planning execution. Refresh and use its conversation.",
+                )));
+            }
+        }
+        call.params["expectedPlanningTaskId"] = sprint["planningTaskId"].clone();
+        call.params["expectedPlanningFailure"] = sprint["planningFailure"].clone();
+        Ok(Ok(()))
     }
 
     async fn delete_sprint(&self, call: MachineCall) -> io::Result<Value> {
@@ -392,6 +647,7 @@ impl crate::Service {
         }
         let native_supported = (scheduler
             && matches!(call.op.as_str(), "automatic.finish" | "automatic.queue"))
+            || editor::handles(&call.op)
             || native::supported(&call.op)
             || matches!(call.op.as_str(), "product.read" | "product.facts")
             || call.op == "product.task" && task_actions::supported(&call.params)
@@ -434,11 +690,12 @@ impl crate::Service {
         let slots = match call.op.as_str() {
             "overview" | "project.config.read" | "config.read" => self.helper.settings.clone(),
             "repo.snapshot" => self.helper.inspections.clone(),
+            "product.sprint" if call.params["action"] == "live_graph" => self.helper.reads.clone(),
             "engine.connection" if call.params["action"] == "login_command" => {
                 self.helper.inspections.clone()
             }
-            "repo.file" | "repo.locate" | "repo.list" | "repo.skills" | "product.read"
-            | "product.facts" | "workers" => self.helper.reads.clone(),
+            "repo.file" | "repo.file.lease.status" | "repo.locate" | "repo.list" | "repo.skills" | "product.read"
+            | "product.facts" | "workers" | "command.output" => self.helper.reads.clone(),
             _ => self.helper.actions.clone(),
         };
         let slot = tokio::time::timeout_at(deadline, slots.acquire_owned())
@@ -447,6 +704,7 @@ impl crate::Service {
             .map_err(|_| failure("service_stopping"))?;
         let config = self.config.clone();
         let state = config.state_dir.clone();
+        let editor = self.editor.clone();
         let (mut send, receive) = tokio::sync::oneshot::channel();
         // Bounded native lanes retain their permit even if a filesystem call is stuck.
         // A stuck mount cannot occupy the async reactor or delay runtime shutdown.
@@ -464,8 +722,15 @@ impl crate::Service {
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
                 let result = runtime.block_on(async {
                     tokio::select! {
-                        reply = tokio::time::timeout_at(deadline, native::run(&call.op, root.as_deref(),
-                            call.project_id.as_deref().unwrap_or(""), &state, &call.params, &projects, &config, None, deadline.into_std())) =>
+                        reply = tokio::time::timeout_at(deadline, async {
+                            let project = call.project_id.as_deref().unwrap_or("");
+                            if editor::handles(&call.op) {
+                                let root = root.as_deref().ok_or_else(|| native::refuse("project_required", "Unknown project."))?;
+                                editor::run(&editor, &call.op, root, &state, project, &call.params, &mut git::Git::for_service(&config)).await
+                            } else {
+                                native::run(&call.op, root.as_deref(), project, &state, &call.params, &projects, &config, None, deadline.into_std()).await
+                            }
+                        }) =>
                             reply.unwrap_or_else(|_|Err(native::refuse("machine_tool_timeout",
                                 "The operation deadline expired. A write may have completed; inspect before retrying."))),
                         _ = send.closed() => Err(native::refuse("machine_tool_cancelled",

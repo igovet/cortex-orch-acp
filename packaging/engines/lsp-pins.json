@@ -1,0 +1,23 @@
+{
+  "rustAnalyzer": {
+    "version": "2026-11-16",
+    "sha256": {
+      "x64": "4a08727a03094e5114db4438e4bd1d6182cc26eff37d6962115ea1ec1a491ca3",
+      "arm64": "73d8b9b87384b3115a183a8a51db9f7c205ce4c89ea511f3c8c8fea863038a50"
+    },
+    "licenses": {
+      "LICENSE-MIT": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "LICENSE-APACHE": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    }
+  },
+  "npm": {
+    "typescript-language-server": {
+      "version": "4.4.0",
+      "sha256": "bc1d4ae48f4128f607b2b2d75c67f62ebfff6d098a2c405035e51d0f9a9d6958"
+    },
+    "typescript": {
+      "version": "5.9.3",
+      "sha256": "10e108c9cf7d5f2879053dff18515fb405abf2ccef63eaaf017d9c571687a1d3"
+    }
+  }
+}

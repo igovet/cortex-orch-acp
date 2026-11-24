@@ -32,6 +32,18 @@ describe("native port", () => {
     expect(invoke).toHaveBeenCalledWith({operation:"native.query",message:{operation:"tasks.state"}});
     native.dispose();
   });
+  it("forwards validated Code diagnostics and resync, not malformed diagnostics", () => {
+    let emit!: (event: unknown) => void;
+    const native = createDesktopTransport({ invoke: vi.fn(), listen: async listener => { emit = listener; return () => {}; } });
+    const receive = vi.fn();
+    native.transport.subscribe(receive);
+    const event = { type: "code_lsp", projectId: "p", eventId: "e".repeat(32), version: 1, generation: 1, status: "ready", diagnostics: [] };
+    emit({ ...event, version: -1 });
+    emit(event);
+    emit({ type: "code_lsp_resync" });
+    expect(receive.mock.calls).toEqual([[event], [{ type: "code_lsp_resync" }]]);
+    native.dispose();
+  });
   it("fences new writes and waits for outstanding acknowledgements before closing", async () => {
     let answer!: (value: unknown) => void;
     const invoke = vi.fn(() => new Promise(resolve => { answer = resolve; }));
@@ -158,7 +170,7 @@ it("ships no remote capabilities, generic plugin or network escape", () => {
   const cap = JSON.parse(readFileSync(new URL("capabilities/main.json", root), "utf8"));
   expect(cap.windows).toEqual(["main"]);
   expect(cap.remote).toBeUndefined();
-  expect(cap.permissions).toEqual(["allow-workspace-request","allow-workspace-notify","allow-workspace-close","core:event:allow-listen","core:event:allow-unlisten",
+  expect(cap.permissions).toEqual(["allow-workspace-request","allow-workspace-notify","allow-workspace-open-result-target","allow-workspace-close","core:event:allow-listen","core:event:allow-unlisten",
     "core:window:allow-minimize","core:window:allow-toggle-maximize","core:window:allow-is-maximized","core:window:allow-close","core:window:allow-start-dragging"]);
   const cfg = JSON.parse(readFileSync(new URL("tauri.conf.json", root), "utf8"));
   expect(cfg.build.devUrl).toBeUndefined();

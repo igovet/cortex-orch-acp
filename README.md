@@ -417,8 +417,11 @@ Native worker guidance now reaches the same session after a confirmed prompt
 cancellation; worker stop cancels only the bound assignment and settles its owned process,
 leaving independent siblings runnable and an owner wait when no work can continue. Exact host-verifier commands can be stopped and retained checks rerun
 in the same read-only sandbox. Native task settings persist for next use: eligible
-coordinator model/effort and response language, with Guarded access only. Native
-worker/check/settings presentation reads use the same Rust store. These five
+coordinator model/effort and response language, with Guarded access only. The
+effective response language also selects runtime-authored questions and
+result headings. Automatic follows the original request; it does not translate
+quotes or change the Workspace interface language. Native worker/check/settings
+presentation reads use the same Rust store. These five
 command-handler effects have disposable fake-engine tests and versioned UI deltas,
 not installed-GUI or real-account qualification. Restart recovery remains separate.
 See [architecture](docs/project/architecture.md#rust-core-migration) and

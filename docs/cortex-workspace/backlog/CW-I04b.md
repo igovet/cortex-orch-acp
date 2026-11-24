@@ -1,6 +1,6 @@
 # CW-I04b: Python language server integration (completion, diagnostics, definition)
 
-**Status:** Not implemented; no language server integration exists · **Phase:** 3+ · **Size:** L
+**Status:** Python support and completion are not implemented. Local Code instead supports [Rust and TypeScript/JavaScript diagnostics and definitions](../ide-and-git.md#language-tools). The original proposal follows.
 
 ## Goal
 Connect a pinned Python language server, run by the Rust service, to the desktop CodeMirror client (@codemirror/lsp-client). Provide completion, diagnostics and go-to-definition for the fixture Python project. This item also introduces the service-side language-server supervisor, which CW-I04c reuses. The server candidate and its exact version are selected and recorded during CW-F03.
@@ -12,7 +12,7 @@ Connect a pinned Python language server, run by the Rust service, to the desktop
 See [requirements](../requirements.md).
 
 ## Inputs
-- [IDE and Git](../ide-and-git.md): language servers provide diagnostics and completion; unsaved buffers survive language-server restarts.
+- [IDE and Git](../ide-and-git.md#language-tools): current local language support and limits.
 - The lsp-client fixture from [CW-F03](CW-F03.md).
 - The editor and buffer store from [CW-I04a](CW-I04a.md).
 - Explicit project activation from [CW-H02](CW-H02.md) and the path rules in [security](../security.md).

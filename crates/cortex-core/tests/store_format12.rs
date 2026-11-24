@@ -8,7 +8,7 @@ use std::{
 };
 use support::*;
 #[test]
-fn schema_matches_complete_current_python_snapshot() {
+fn schema_matches_frozen_python_base_and_rust_additions() {
     let p = Project::new();
     let s = p.open();
     let fixture: Value =
@@ -19,9 +19,25 @@ fn schema_matches_complete_current_python_snapshot() {
         let actual=db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'")?
             .query_map([],|r|Ok((r.get::<_,String>(1)?,(r.get::<_,String>(0)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?))))?
             .collect::<Result<BTreeMap<_,_>,_>>()?;
-        let expected:BTreeMap<_,_>=fixture["objects"].as_array().unwrap().iter().map(|o|
-            (o["name"].as_str().unwrap().to_owned(),(o["type"].as_str().unwrap().to_owned(),o["tbl_name"].as_str().unwrap().to_owned(),o["sql"].as_str().unwrap().to_owned()))).collect();
-        assert_eq!(actual,expected);
+        // Keep the historical base fixture byte-for-byte. Assert the entire
+        // current schema by supplementing it with independently frozen DDL
+        // for the additive Rust groups, not by filtering those groups out.
+        let additions: Vec<Value> =
+            serde_json::from_str(include_str!("fixtures/rust_additive_format12.json")).unwrap();
+        let mut expected = BTreeMap::new();
+        for o in fixture["objects"].as_array().unwrap().iter().chain(&additions) {
+            let name = o["name"].as_str().unwrap().to_owned();
+            let definition = (
+                o["type"].as_str().unwrap().to_owned(),
+                o["tbl_name"].as_str().unwrap().to_owned(),
+                o["sql"].as_str().unwrap().to_owned(),
+            );
+            assert!(expected.insert(name, definition).is_none());
+        }
+        assert_eq!(actual.keys().collect::<Vec<_>>(), expected.keys().collect::<Vec<_>>());
+        for (name, definition) in expected {
+            assert_eq!(actual[&name], definition, "{name}");
+        }
         for (table,columns) in fixture["columns"].as_object().unwrap() {
             let actual=db.prepare(&format!("PRAGMA table_info({table})"))?.query_map([],|r|Ok(serde_json::json!([
                 r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?,

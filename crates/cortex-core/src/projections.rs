@@ -14,7 +14,7 @@ use std::{
 use workspace_protocol::{
     core::{CoreCommand, CoreQuery, NativeBody, Protocol, Version},
     events::{DeltaBatch, DeltaOperation, EntityChange, EntityKind, PublicEntity, StreamKey},
-    read::{QueryReply, ReadPage, ReadReply, TaskProjection},
+    read::{FilesWait, QueryReply, ReadPage, ReadReply, TaskProjection},
 };
 
 pub(super) fn row(db: &Connection, sql: &str, params: impl Params) -> CoreResult<Option<Value>> {
@@ -76,9 +76,39 @@ pub(crate) const CONTRADICTORY_EVIDENCE: &str = "contradictory_evidence";
 
 // Internal request identities are not accepted as client request IDs. The receipt
 // belongs to the Workspace task and execution pointer, not to a disputed runtime owner.
-pub(crate) fn unconfirmed_close_key(task: &str) -> String {
+pub(crate) fn unconfirmed_close_key(
+    db: &Connection,
+    task: &str,
+    execution: &str,
+) -> CoreResult<String> {
+    let generation: Option<i64> = db.query_row(
+        "SELECT max(v.id) FROM workspace_executions e JOIN runtime_events v ON v.task_id=e.runtime_task_id
+         WHERE e.execution_id=? AND e.task_id=? AND v.type='TASK_REOPENED'
+         AND json_extract(v.payload_json,'$.origin')='owner_rework'",
+        (execution, task), |r| r.get(0),
+    )?;
     // The wire Identity allows any string up to 128 characters.
-    format!("/close-unconfirmed/{task}/{:0>129}", "")
+    let generation = generation.map(|id| id.to_string()).unwrap_or_default();
+    Ok(format!("/close-unconfirmed/{task}/{generation:0>129}"))
+}
+
+pub(crate) fn unconfirmed_close_at(
+    db: &Connection,
+    project: &str,
+    root: &str,
+    id: &str,
+    execution: &str,
+) -> CoreResult<Option<String>> {
+    let close = row(
+        db,
+        "SELECT json_extract(w.receipt_json,'$.closedAt') AS closed_at
+         FROM workspace_requests w JOIN workspace_projects p USING(project_id)
+         WHERE w.project_id=? AND p.project_root=? AND w.actor_id=p.activated_by
+         AND w.request_id=? AND w.operation=?
+         AND json_extract(w.receipt_json,'$.executionId')=?",
+        (project, root, unconfirmed_close_key(db, id, execution)?, CLOSE_UNCONFIRMED, execution),
+    )?;
+    Ok(close.as_ref().and_then(|v| field(v, "closed_at")).map(str::to_owned))
 }
 
 pub fn task_records(
@@ -96,9 +126,21 @@ pub(super) fn task(
     root: &str,
     id: &str,
 ) -> CoreResult<Option<TaskProjection>> {
+    task_with_disposition(db, project, root, id, true)
+}
+
+pub(crate) fn task_with_disposition(
+    db: &Connection,
+    project: &str,
+    root: &str,
+    id: &str,
+    include_unconfirmed_close: bool,
+) -> CoreResult<Option<TaskProjection>> {
     let Some(t) = row(
         db,
-        "SELECT * FROM workspace_tasks WHERE project_id=? AND task_id=?",
+        "SELECT t.*, json_extract(o.options_json, '$.planningSprintId') AS planning_sprint_id
+         FROM workspace_tasks t LEFT JOIN workspace_task_options o USING(task_id)
+         WHERE t.project_id=? AND t.task_id=?",
         [project, id],
     )?
     else {
@@ -108,6 +150,7 @@ pub(super) fn task(
     let mut state = "not_started";
     let mut runtime_state = None;
     let mut reason = None;
+    let mut files_wait_context = None;
     let mut at = field(&t, "created_at").map(str::to_owned);
     let mut warnings = Vec::new();
     let mut route = None;
@@ -172,7 +215,7 @@ pub(super) fn task(
                     // So is Finish chosen on the runtime's stop question (or "finish the
                     // task" given as its answer): `USER_FORCE_FINISHED` closes it as is.
                     if raw=="CANCELLED" && (matches!(field(r, "blocker"), Some("owner_resolved_without_certification" | "user_force_finished"))
-                        || row(db,"SELECT 1 FROM runtime_events WHERE task_id=? AND type IN ('OWNER_TASK_RESOLVED','USER_FORCE_FINISHED') LIMIT 1",[runtime])?.is_some()) {
+                        || crate::workspace::control::owner_resolution_current(db, runtime)?) {
                         warnings.push("owner_resolved_without_certification".into());
                     }
                 } else {
@@ -211,14 +254,18 @@ pub(super) fn task(
                             }
                         }
                     }
-                    // A step queued behind another task's files waits, visibly, for
-                    // that task to release them; it is not stopped.
+                    // A step queued behind a writer or the owner's Code edit
+                    // waits visibly for the affected files; it is not stopped.
                     if matches!(raw, "EXECUTING" | "REVIEWING") {
                         if reason.is_none() {
-                            if let Some(wait) =
-                                files_wait(db, runtime, field(r, "project_root").unwrap_or(""))?
-                            {
-                                reason = Some(wait);
+                            if let Some((message, context)) = files_wait(
+                                db,
+                                project,
+                                runtime,
+                                field(r, "project_root").unwrap_or(""),
+                            )? {
+                                reason = Some(message);
+                                files_wait_context = context;
                                 warnings.push("waiting_for_files".into());
                             }
                         }
@@ -270,27 +317,17 @@ pub(super) fn task(
         if state == "unknown" && warnings.is_empty() {
             warnings.push("contradictory_evidence".into());
         }
-        let close = row(
-            db,
-            "SELECT json_extract(w.receipt_json,'$.closedAt') AS closed_at
-             FROM workspace_requests w JOIN workspace_projects p USING(project_id)
-             WHERE w.project_id=? AND p.project_root=? AND w.actor_id=p.activated_by
-             AND w.request_id=? AND w.operation=?
-             AND json_extract(w.receipt_json,'$.executionId')=?",
-            (
-                project,
-                root,
-                unconfirmed_close_key(id),
-                CLOSE_UNCONFIRMED,
-                execution,
-            ),
-        )?;
-        if let Some(closed_at) = close.as_ref().and_then(|r| field(r, "closed_at")) {
+        if let Some(closed_at) = if include_unconfirmed_close {
+            unconfirmed_close_at(db, project, root, id, execution)?
+        } else {
+            None
+        } {
             // Close the card, not a process we cannot safely identify.
             (phase, state) = ("unknown", "unknown");
             runtime_state = None;
             reason = None;
-            at = Some(closed_at.to_owned());
+            files_wait_context = None;
+            at = Some(closed_at);
             route = None;
             automatic_continuation = None;
             warnings = vec![CONTRADICTORY_EVIDENCE.into(), CLOSED_UNCONFIRMED.into()];
@@ -298,6 +335,7 @@ pub(super) fn task(
     }
     let mut result = TaskProjection {
         task_id: id.into(),
+        planning_sprint_id: field(&t, "planning_sprint_id").map(str::to_owned),
         description: field(&t, "description").unwrap_or("").into(),
         title: None,
         title_availability: "not_connected".into(),
@@ -307,6 +345,7 @@ pub(super) fn task(
         runtime_state,
         execution_state: state.into(),
         wait_reason: reason,
+        files_wait: files_wait_context,
         last_confirmed_at: at,
         coordinator_route: route,
         automatic_continuation,
@@ -415,17 +454,46 @@ pub fn worker_capacity_wait(db: &Connection, task: &str) -> CoreResult<bool> {
 /// The recorded wait of a ready step for another unfinished task's files, as one
 /// sentence naming that task and the files, while no later plan, owner message or
 /// claimed step has ended it.
-fn files_wait(db: &Connection, runtime: &str, root: &str) -> CoreResult<Option<String>> {
+fn files_wait(
+    db: &Connection,
+    project: &str,
+    runtime: &str,
+    root: &str,
+) -> CoreResult<Option<(String, Option<FilesWait>)>> {
+    let recorded_owner_wait: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=?1
+           AND e.type='NATIVE_WRITE_CONFLICT_WAITING'
+           AND json_extract(e.payload_json,'$.reason')='owner_file_lease_held'
+           AND e.id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type IN
+               ('PLAN_ACCEPTED','USER_STEERING','USER_ANSWER_RECEIVED','ASSIGNMENT_CREATED')),0))",
+        [runtime],
+        |r| r.get(0),
+    )?;
+    if recorded_owner_wait {
+        // The event establishes that the step waited; it is not evidence that
+        // the lease is still active. Recheck its current scope and deadline.
+        if let Some(wait) = crate::scheduler::policy::write_conflict(db, runtime)?
+            .filter(|w| w["reason"] == "owner_file_lease_held")
+        {
+            let message = match wait["paths"][0].as_str() {
+                Some(path) => format!("Waiting for you to finish editing {path} in Code"),
+                None => "Waiting for you to release the file in Code".into(),
+            };
+            return Ok(Some((message, None)));
+        }
+    }
     let Some(w) = row(
         db,
-        "SELECT json_extract(e.payload_json,'$.holder_task') AS holder,json_extract(e.payload_json,'$.paths') AS paths,
+        "SELECT json_extract(e.payload_json,'$.paths') AS paths,
+            (SELECT d.task_id FROM workspace_tasks d JOIN workspace_executions x USING(task_id)
+             WHERE x.runtime_task_id=h.task_id AND d.project_id=?2 AND d.execution_id=x.execution_id) AS workspace_holder,
             coalesce((SELECT d.description FROM workspace_tasks d JOIN workspace_executions x USING(task_id) WHERE x.runtime_task_id=h.task_id),h.goal) AS title
          FROM runtime_events e JOIN runtime_tasks h ON h.task_id=json_extract(e.payload_json,'$.holder_task')
          WHERE e.task_id=?1 AND e.type='NATIVE_WRITE_CONFLICT_WAITING' AND h.state NOT IN ('COMPLETED','CANCELLED','FAILED')
          AND e.id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type IN
             ('PLAN_ACCEPTED','USER_STEERING','USER_ANSWER_RECEIVED','ASSIGNMENT_CREATED')),0)
          ORDER BY e.id DESC LIMIT 1",
-        [runtime],
+        [runtime, project],
     )?
     else {
         return Ok(None);
@@ -458,11 +526,15 @@ fn files_wait(db: &Connection, runtime: &str, root: &str) -> CoreResult<Option<S
     if paths.len() > 3 {
         files.push_str(&format!(" and {} more", paths.len() - 3));
     }
-    Ok(Some(if files.is_empty() {
-        format!("Waiting for the task “{title}” to release the files this step needs")
-    } else {
-        format!("Waiting for the task “{title}” to release {files}")
-    }))
+    if files.is_empty() {
+        files = "the files this step needs".into();
+    }
+    let message = format!("Waiting for the task “{title}” to release {files}");
+    let context = field(&w, "workspace_holder").map(|holder| FilesWait {
+        holder_task_id: holder.into(),
+        release_target: files,
+    });
+    Ok(Some((message, context)))
 }
 fn native_recovery_reason(db: &Connection, runtime: &str, r: &Value) -> CoreResult<Option<String>> {
     let native = row(
@@ -892,7 +964,7 @@ pub(super) fn parse_cursor(cursor: Option<&str>, prefix: &str, binding: &str) ->
     Ok(value)
 }
 mod history;
-pub use history::{tool_step, tool_step_from};
+pub use history::{retained_command_text, tool_step, tool_step_from};
 
 #[cfg(test)]
 mod latency_diagnostic {
@@ -984,24 +1056,88 @@ mod files_wait_tests {
                     "NATIVE_WRITE_CONFLICT_WAITING",
                     json!({"node":"reset","holder_task":"h","paths":[format!("{base}/test/a.js")]}),
                 )?;
+                let fallback = super::files_wait(db, "p", "t", &base)?.unwrap();
                 assert_eq!(
-                    super::files_wait(db, "t", &base)?.as_deref(),
-                    Some("Waiting for the task “Format all tests” to release test/a.js")
+                    fallback.0,
+                    "Waiting for the task “Format all tests” to release test/a.js",
                 );
+                assert!(fallback.1.is_none());
+                db.execute(
+                    "INSERT INTO workspace_projects VALUES ('p',?1,'owner','now',1)",
+                    [&base],
+                )?;
+                db.execute(
+                    "INSERT INTO workspace_tasks(task_id,project_id,description,execution_id,created_at)
+                     VALUES ('holder-card','p','Description differs from title','holder-run','now')",
+                    [],
+                )?;
+                db.execute(
+                    "INSERT INTO workspace_executions VALUES ('holder-run','holder-card','h','s',1,1,'now')",
+                    [],
+                )?;
+                let (message, context) = super::files_wait(db, "p", "t", &base)?.unwrap();
+                assert_eq!(
+                    message,
+                    "Waiting for the task “Description differs from title” to release test/a.js",
+                );
+                assert_eq!(
+                    context,
+                    Some(super::FilesWait {
+                        holder_task_id: "holder-card".into(),
+                        release_target: "test/a.js".into(),
+                    }),
+                );
+                assert!(super::files_wait(db, "other", "t", &base)?.unwrap().1.is_none());
                 db.execute(
                     "UPDATE runtime_tasks SET state='COMPLETED' WHERE task_id='h'",
                     [],
                 )?;
-                assert_eq!(super::files_wait(db, "t", &base)?, None);
+                assert_eq!(super::files_wait(db, "p", "t", &base)?, None);
                 db.execute(
                     "UPDATE runtime_tasks SET state='EXECUTING' WHERE task_id='h'",
                     [],
                 )?;
                 lifecycle::event_tx(db, "t", "ASSIGNMENT_CREATED", json!({}))?;
-                assert_eq!(super::files_wait(db, "t", &base)?, None);
+                assert_eq!(super::files_wait(db, "p", "t", &base)?, None);
                 Ok(())
             })
             .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_owner_file_wait_is_named_only_while_the_lease_is_live() {
+        use crate::store::owner_file_leases as leases;
+        let root = std::env::temp_dir().join(format!("owner-file-wait-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let store = Store::open(
+            crate::ProjectKey::new(&root, crate::StoreChannel::Dev).unwrap(),
+            crate::OpenMode::Initialize,
+        ).unwrap();
+        lifecycle::TaskMachine::new(&store).create("t", "g", "o").unwrap();
+        let checkout = leases::Checkout::identify(&root).unwrap();
+        let path = leases::RelativePath::new("file.txt").unwrap();
+        let epoch = leases::EditorEpoch::new();
+        let editor = leases::Editor { epoch: &epoch, session: "fixture-owner" };
+        store.write(|db| {
+            leases::activate_editor_tx(db, &epoch)?;
+            let token = leases::acquire_tx(db, editor, &checkout, &path)?;
+            db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1", [])?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'write','worker-backend-dev','Write','[]','[\"file.txt\"]','execution','pending',NULL,NULL)", [])?;
+            lifecycle::event_tx(db, "t", "NATIVE_WRITE_CONFLICT_WAITING",
+                json!({"node":"write","reason":"owner_file_lease_held","paths":["file.txt"]}))?;
+            let root = root.to_str().unwrap();
+            let wait = super::files_wait(db, "p", "t", root)?.unwrap();
+            assert_eq!(wait.0, "Waiting for you to finish editing file.txt in Code");
+            assert!(wait.1.is_none());
+            leases::release_tx(db, editor, &checkout, &path, token.expose())?;
+            assert_eq!(super::files_wait(db, "p", "t", root)?, None);
+            leases::acquire_tx(db, editor, &checkout, &path)?;
+            db.execute("UPDATE code_owner_file_leases SET expires_at=0", [])?;
+            assert_eq!(super::files_wait(db, "p", "t", root)?, None);
+            Ok(())
+        }).unwrap();
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

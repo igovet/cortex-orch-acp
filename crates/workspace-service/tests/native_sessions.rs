@@ -6815,6 +6815,20 @@ async fn recovery_project_operations_and_structured_tool_errors() {
     std::fs::create_dir_all(p.0.join("src")).unwrap();
     std::fs::write(p.0.join("src/file.txt"), "remove me").unwrap();
     let file_sha = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(b"remove me"));
+    use cortex_core::store::owner_file_leases as leases;
+    let checkout = leases::Checkout::identify(&p.0).unwrap();
+    let epoch = leases::EditorEpoch::new();
+    let editor = leases::Editor { epoch: &epoch, session: "fixture-editor" };
+    // Model an effect that reaches the gateway after a lease was granted,
+    // independent of whether normal scheduler admission would have held it.
+    std::fs::create_dir_all(p.0.join(".claude/skills")).unwrap();
+    std::fs::create_dir_all(p.0.join(".agents/skills/lease-demo")).unwrap();
+    std::fs::write(p.0.join(".agents/skills/lease-demo/SKILL.md"), "fixture").unwrap();
+    let held = ["src/file.txt", "src/fenced-dir", ".claude/skills/lease-demo"].map(|p| leases::RelativePath::new(p).unwrap());
+    let token = s.write(|db| {
+        leases::activate_editor_tx(db, &epoch)?;
+        held.iter().map(|path| leases::acquire_tx(db, editor, &checkout, path)).collect::<cortex_core::CoreResult<Vec<_>>>()
+    }).unwrap();
     s.write(|db| {
         db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'", [])?;
         db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]','[\"src\",\".claude\",\".gitignore\"]','execution','running','a',NULL)", [])?;
@@ -6842,6 +6856,36 @@ async fn recovery_project_operations_and_structured_tool_errors() {
         "end_turn",
     )
     .await;
+    let fenced = [
+        ("project_write", json!({"path":"src/file.txt","content":"bad","expected_sha256":file_sha,"request_key":"lease-write"})),
+        ("project_edit", json!({"path":"src/file.txt","edits":[{"old_string":"remove me","new_string":"bad"}],"request_key":"lease-edit"})),
+        ("project_delete", json!({"path":"src/file.txt","expected_sha256":file_sha,"request_key":"lease-delete"})),
+        ("project_mkdir", json!({"path":"src/fenced-dir","request_key":"lease-mkdir"})),
+        ("project_skill_link", json!({"action":"link","name":"lease-demo","request_key":"lease-link"})),
+    ];
+    for replay in [false, true] {
+        if replay {
+            s.write(|db| {
+                for (path, token) in held.iter().zip(&token) {
+                    leases::release_tx(db, editor, &checkout, path, token.expose())?;
+                }
+                Ok(())
+            }).unwrap();
+        }
+        for (name, args) in &fenced {
+            checked(&w, name, args.clone(), json!({
+                "/result/isError":true,
+                "/result/structuredContent/code":"owner_file_lease_held",
+                "/result/structuredContent/hint":"The owner is editing this file in Code. Leave it unchanged and report the conflict. Read it again after the lease is released before making a new request."
+            }), "end_turn").await;
+        }
+        assert_eq!(std::fs::read(p.0.join("src/file.txt")).unwrap(), b"remove me");
+        assert!(!p.0.join("src/fenced-dir").exists());
+        assert!(!p.0.join(".claude/skills/lease-demo").exists());
+    }
+    checked(&w, "project_mkdir", json!({"path":"src/fenced-dir","request_key":"after-lease"}),
+        json!({"/result/structuredContent/created":true}), "end_turn").await;
+
     // A fully rendered text page exceeds the batch inline bound without
     // crossing project_read's own paging/truncation limits.
     let large_text = (0..5)
@@ -7182,6 +7226,154 @@ async fn recovery_project_operations_and_structured_tool_errors() {
     w.shutdown().await.unwrap();
     close(h).await;
 }
+async fn linked_checkout_command_journey() {
+    let scratch = Project::new();
+    let p = Project::new_at(&scratch.0, "logical");
+    let trees = Project::new_at(&scratch.0, "checkouts");
+    let state = Project::new_at(&scratch.0, "state");
+    let home = Project::new_at(&scratch.0, "engine-home");
+    std::fs::create_dir(home.0.join(".claude")).unwrap();
+    let git = |argv: &[&str]| {
+        let out = std::process::Command::new("/usr/bin/git").args(argv).current_dir(&p.0)
+            .env_clear().env("PATH", "/usr/bin:/bin").env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+        assert!(out.status.success(), "{argv:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q"]);
+    std::fs::write(p.0.join("fixture.txt"), "checkout bytes\n").unwrap();
+    git(&["add", "fixture.txt"]);
+    git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "base"]);
+    let store = Store::open(p.key(), OpenMode::Initialize).unwrap();
+    store.write(|db| {
+        db.execute("INSERT INTO workspace_projects VALUES ('p',?,'owner','now',1)", [p.0.to_str()])?;
+        Ok(())
+    }).unwrap();
+    let make = |id: &str| {
+        use cortex_core::workspace::{create_draft, start_native_worktree, worktrees::resolve};
+        let draft = create_draft(&store, "p", "owner", &json!({
+            "protocol":{"major":1,"minor":8},"requestId":format!("draft-{id}"),"projectId":"p",
+            "actorId":"owner","operation":"tasks.create","target":"p","expectedVersion":"0","ownerEpoch":null,
+            "payload":{"description":format!("Linked task {id}"),"checkout":{"kind":"worktree"}}
+        })).unwrap();
+        let started = start_native_worktree(&store, "p", "owner", &json!({
+            "protocol":{"major":1,"minor":8},"requestId":format!("start-{id}"),"projectId":"p",
+            "actorId":"owner","operation":"tasks.start","target":draft.receipt["target"],
+            "expectedVersion":"1","ownerEpoch":null,"payload":{}
+        }), &trees.0).unwrap();
+        let task = started["task"].as_str().unwrap().to_owned();
+        let owner = cortex_core::ownership::OwnerEpoch {
+            owner:"owner".into(), epoch:started["owner"]["epoch"].as_i64().unwrap(),
+        };
+        let checkout = resolve(&store, &task, &owner).unwrap().worktree.unwrap();
+        (task, owner, checkout)
+    };
+    let (task, owner, checkout) = make("writer");
+    let (sibling_task, sibling_owner, sibling) = make("sibling");
+    let assignment = store.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING', revision=1 WHERE task_id IN (?,?)", (&task,&sibling_task))?;
+        for id in [&task, &sibling_task] {
+            db.execute("INSERT INTO runtime_nodes VALUES (?,1,'writer','worker-backend-dev','Work','[]','[\"fixture.txt\"]','execution','pending',NULL,NULL)", [id])?;
+        }
+        let policy = cortex_core::scheduler::policy::NativePolicy::default();
+        let first = cortex_core::scheduler::claim_ready_tx(db, &task, &owner, "fixture", &policy)?;
+        let second = cortex_core::scheduler::claim_ready_tx(db, &sibling_task, &sibling_owner, "fixture", &policy)?;
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        Ok(first.into_iter().next().unwrap())
+    }).unwrap();
+    drop(store);
+    std::fs::write(p.0.join("fixture.txt"), "main bytes\n").unwrap();
+    let subdir = checkout.path.join("sub");
+    std::fs::create_dir(&subdir).unwrap();
+    let key = p.key();
+    let state_path = state.0.clone();
+    let host = tokio::task::spawn_blocking(move || NativeHost::open_workspace(key, Default::default(), state_path))
+        .await.unwrap().unwrap();
+    let mut route = p.legacy_route();
+    route.launch.native_home = home.0.clone();
+    route.launch.credential_directory = home.0.join(".claude");
+    route.launch.base_environment.insert("PATH".into(), "/usr/bin:/bin".into());
+    let driver = host.dispatch(task.clone(), owner.clone(), SessionRole::Worker { assignment }, route).await.unwrap();
+    async fn probe(driver: &workspace_service::native_sessions::SessionDriver, name: &str, args: Value, expected: Value) {
+        let key = args["request_key"].as_str().unwrap_or("-").to_owned();
+        let prompt = format!("call:{}", json!({"name":name,"arguments":args,"__fixture_expect":expected}));
+        tokio::time::timeout(Duration::from_secs(20), driver.prompt(&prompt)).await
+            .unwrap_or_else(|_| panic!("{name} {key} did not settle"))
+            .unwrap_or_else(|e| panic!("{name} {key}: {e:?}"));
+    }
+    probe(&driver, "project_read", json!({"path":"fixture.txt","line_numbers":false}),
+        json!({"/result/structuredContent/content":"checkout bytes\n"})).await;
+    let main_only = p.0.join("main-only");
+    std::fs::write(&main_only, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&main_only, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    probe(&driver, "check_preflight", json!({"argv":["/usr/bin/git","diff","--check","HEAD"]}),
+        json!({"/result/structuredContent/available":true,"/result/structuredContent/evidence":false})).await;
+    probe(&driver, "check_preflight", json!({"argv":[main_only]}),
+        json!({"/result/structuredContent/available":false,"/result/structuredContent/reason":"program_missing"})).await;
+    probe(&driver, "command_run", json!({"argv":["/usr/bin/pwd"],"request_key":"linked-pwd"}),
+        json!({"/result/structuredContent/exit_code":0,"/result/structuredContent/cwd":checkout.path,
+            "/result/structuredContent/output":format!("{}\n",checkout.path.display()),
+            "/result/structuredContent/checkout/id":checkout.id,"/result/structuredContent/checkout/owner_epoch":owner.epoch,
+            "/result/structuredContent/profile":"worktree_read_only"})).await;
+    probe(&driver, "command_run", json!({"argv":["/usr/bin/bash","-ec",r#"
+        [ "$(pwd -P)" = "$1" ]
+        [ "$(cat ../fixture.txt)" = "checkout bytes" ]
+        [ ! -e "$2/fixture.txt" ] && [ ! -e "$3/fixture.txt" ]
+        [ ! -e "$2/.cortex-dev" ] && [ ! -e "$2/.cortex" ]
+        ! (printf bad > ../fixture.txt) && ! (printf bad > ../.git)
+        printf done > "$TMPDIR/only-here"
+    "#,"check",subdir,p.0,sibling.path],"cwd":subdir,"request_key":"linked-boundary"}),
+        json!({"/result/structuredContent/exit_code":0,"/result/structuredContent/cwd":subdir,
+            "/result/structuredContent/checkout/id":checkout.id})).await;
+    for (name, args, error) in [
+        ("command_run", json!({"argv":["/usr/bin/true"],"cwd":p.0,"request_key":"main-cwd"}), "worktree_command_cwd_refused"),
+        ("command_run", json!({"argv":["/usr/bin/true"],"cwd":sibling.path,"request_key":"sibling-cwd"}), "worktree_command_cwd_refused"),
+        ("command_run", json!({"argv":["sudo","/usr/bin/true"],"request_key":"sudo"}), "worktree_host_effect_unavailable"),
+        ("outside_command", json!({"argv":["/usr/bin/true"],"request_key":"outside"}), "worktree_host_effect_unavailable"),
+    ] {
+        probe(&driver, name, args, json!({"/result/isError":true,"/result/structuredContent/code":error})).await;
+    }
+    probe(&driver, "project_git", json!({"kind":"status","request_key":"linked-git"}),
+        json!({"/result/structuredContent/exit_code":0,"/result/structuredContent/cwd":checkout.path,
+            "/result/structuredContent/checkout/id":checkout.id})).await;
+    // The shell above only inspects the view, so it must not count as a
+    // nontrivial check. Use a real Git check to exercise work-set evidence.
+    probe(&driver, "command_run", json!({"argv":["/usr/bin/git","diff","--check","HEAD"],
+        "cwd":subdir,"request_key":"linked-check"}),
+        json!({"/result/structuredContent/exit_code":0,"/result/structuredContent/cwd":subdir,
+            "/result/structuredContent/checkout/id":checkout.id})).await;
+    let store = p.store();
+    let binding = store.read(|db| {
+        let raw: String = db.query_row("SELECT result_json FROM runtime_requests WHERE task_id=? AND request_key='linked-check'", [&task], |r|r.get(0))?;
+        let run: Value = serde_json::from_str(&raw)?;
+        assert_eq!(run["checkout"]["root"], json!(checkout.path));
+        assert_eq!(run["cwd"], json!(subdir));
+        Ok(run)
+    }).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let record = store.read(|db| cortex_core::lifecycle::worker_checks::work_set_record(
+            db, &task, binding["tool_call_ref"].as_str().unwrap())).unwrap();
+        if let Some(record) = record {
+            assert_eq!(record["checkout"], binding["checkout"]);
+            assert_eq!(record["cwd"], binding["cwd"]);
+            // Main deliberately has different bytes at the same relative path.
+            // Compute the expected work-set witness from the fixture's Git file.
+            use sha2::{Digest, Sha256};
+            let leaf = Sha256::digest(b"checkout bytes\n");
+            let expected = Sha256::digest(format!("cortex-work-set-v1\nfixture.txt\n\0fixture.txt\0file:644:{leaf:x}\n"));
+            assert_eq!(record["end_digest"], format!("{expected:x}"));
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no retained work-set observation");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    driver.shutdown().await.unwrap();
+    assert_eq!(std::fs::read_to_string(p.0.join("fixture.txt")).unwrap(), "main bytes\n");
+    assert_eq!(std::fs::read_to_string(checkout.path.join("fixture.txt")).unwrap(), "checkout bytes\n");
+    assert_eq!(std::fs::read_to_string(sibling.path.join("fixture.txt")).unwrap(), "checkout bytes\n");
+}
+
 fn main() {
     // The askpass helper and the sudo shim of host commands are this executable too.
     workspace_service::native_askpass::dispatch();
@@ -7227,6 +7419,12 @@ fn main() {
     )
     .then(command_acceptance::Inputs::new);
     tokio::runtime::Runtime::new().unwrap().block_on(async {
+        if mode == "linked-checkout-command" {
+            tokio::time::timeout(Duration::from_secs(90), linked_checkout_command_journey())
+                .await.expect("linked checkout journey exceeded deadline");
+            println!("linked checkout: supervised cwd, mounts, work-set receipts and refusals passed");
+            return;
+        }
         if mode == "prompt-usage" {
             tokio::time::timeout(
                 Duration::from_secs(30),

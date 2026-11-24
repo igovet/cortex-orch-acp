@@ -166,6 +166,7 @@ fn build_package(p: &Package) -> Res<()> {
         .unwrap_or_else(|| p.target.parent().unwrap().join("engines"));
     validate_lock(root)?;
     let manifest = validate_tree(&engines)?;
+    crate::engines::language::validate(root, &engines, &manifest)?;
     if manifest.get("lock_sha256").and_then(Value::as_str)
         != Some(file_digest(&root.join("packaging/engines/package-lock.json"))?.as_str())
     {

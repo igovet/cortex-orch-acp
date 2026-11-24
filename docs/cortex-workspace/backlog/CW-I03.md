@@ -1,6 +1,6 @@
 # CW-I03: Hash-checked save, create and rename
 
-**Status:** Partly implemented: hash-checked save through the machine service, with no lease; create, rename and save-as are not implemented · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: hash-checked save through the machine service, with a file lease; create, rename and save-as are not implemented · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Make file save, create and rename service operations. Each one is checked against the base hash or an explicit non-existence precondition. Writes replace the target atomically. Conflicts return typed results with the choices compare, reload and save-as. A granted lease from CW-I02 is required.
@@ -12,7 +12,7 @@ Make file save, create and rename service operations. Each one is checked agains
 See [requirements](../requirements.md).
 
 ## Inputs
-- [IDE and Git](../ide-and-git.md): save requires the current content hash and a runtime-confirmed lease; conflicts offer compare, reload or save-as, never silent overwrite.
+- [Editing files](../local-task-execution.md#editing-files): current save and conflict behavior; compare and save-as remain proposed.
 - [ADR 0006](../adr/0006-human-edit-git.md).
 - CW-I01 (read and hash) and CW-I02 (lease).
 

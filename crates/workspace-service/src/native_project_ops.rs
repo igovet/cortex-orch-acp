@@ -7,7 +7,7 @@
 //! Effects use no-follow directory descriptors. A durable started receipt
 //! precedes each effect, so an uncertain outcome is never repeated.
 use crate::{
-    native_project::{digest, missing_parents, open_project_root, openat, safe, writable_target},
+    native_project::{digest, lease_denial, missing_parents, open_project_root, openat, safe, writable_target, WorkerLeaseFence},
     native_sessions::ClientPermissions,
 };
 use cortex_core::{
@@ -286,6 +286,7 @@ fn plan(root: &PathBuf, name: &str, args: &Value) -> CoreResult<Plan> {
     }
 }
 /// The effect itself. `possible` is set before the first mutating syscall.
+#[cfg(test)]
 fn apply(
     root: &PathBuf,
     rule: &str,
@@ -293,6 +294,17 @@ fn apply(
     plan: &Plan,
     missing: &[String],
     possible: &mut bool,
+) -> CoreResult<Value> {
+    apply_fenced(root, rule, args, plan, missing, possible, || Ok(()))
+}
+fn apply_fenced(
+    root: &PathBuf,
+    rule: &str,
+    args: &Value,
+    plan: &Plan,
+    missing: &[String],
+    possible: &mut bool,
+    fence: impl Fn() -> CoreResult<()>,
 ) -> CoreResult<Value> {
     match plan {
         Plan::Unchanged(v) => Ok(v.clone()),
@@ -347,6 +359,7 @@ fn apply(
                 let written = (|| -> CoreResult<()> {
                     file.write_all(body.as_bytes())?;
                     file.sync_all()?;
+                    fence()?;
                     *possible = true;
                     let dest = cstr(&leaf)?;
                     if unsafe {
@@ -417,6 +430,10 @@ fn apply(
                     *possible = true;
                     if unsafe { libc::symlinkat(t.as_ptr(), dir.as_raw_fd(), temp.as_ptr()) } < 0 {
                         return Err(std::io::Error::last_os_error().into());
+                    }
+                    if let Err(error) = fence() {
+                        unsafe { libc::unlinkat(dir.as_raw_fd(), temp.as_ptr(), 0) };
+                        return Err(error);
                     }
                     let rc = unsafe {
                         libc::renameat(
@@ -545,7 +562,16 @@ pub(super) async fn execute(
         hash.clone(),
     );
     let initial_root = root.clone();
-    let (identity, saved, mode, session, rule) = recv(executor.publication(move |store| {
+    let (identity, saved, mode, session, rule, binding, ru) = recv(executor.publication(move |store| {
+        let binding = if scoped && initial_root != store.key().root() {
+            let i = store.read(|db| channels::authenticate(db, &c.channel_id, c.secret(), true))?;
+            let binding = super::native_project::checkout_binding(store, &i)?
+                .ok_or(CoreError::Refused("worktree_binding_invalid"))?;
+            if binding["root"].as_str().map(std::path::Path::new) != Some(initial_root.as_path()) {
+                return refused("worktree_binding_invalid");
+            }
+            Some(binding)
+        } else { None };
         let rule = format!(
             "/{}/",
             store.key().directory().file_name().unwrap_or_default().to_string_lossy()
@@ -560,10 +586,23 @@ pub(super) async fn execute(
                     return refused("request_key_conflict");
                 }
                 let v: Value = serde_json::from_str(&result)?;
+                if binding.is_some() && v.get("checkout") != binding.as_ref() {
+                    return refused("worktree_receipt_binding_mismatch");
+                }
                 if v["complete"] != true {
                     return refused("project_effect_outcome_unknown");
                 }
-                return Ok((i, Some(v), String::new(), None, rule.clone()));
+                return Ok((i, Some(v), String::new(), None, rule.clone(), binding, false));
+            }
+            match WorkerLeaseFence::new(&initial_root, &p, &[])?.check(db) {
+                Ok(()) => {}
+                Err(CoreError::OwnerFileLeaseHeld { .. }) => {
+                    let denial = lease_denial(binding.as_ref());
+                    db.execute("INSERT INTO runtime_requests VALUES (?,?,?,?,?,?)",
+                        (&i.task, &k, &c.channel_id, &n, &h, denial.to_string()))?;
+                    return Ok((i, Some(denial), String::new(), None, rule.clone(), binding, false));
+                }
+                Err(error) => return Err(error),
             }
             let mode = access::current(db, &i.task)?;
             let sessions = db.prepare("SELECT session_id FROM acp_host_sessions WHERE task_id=? AND json_extract(client_info,'$.name')='cortex-rust-acp'")?
@@ -571,7 +610,8 @@ pub(super) async fn execute(
             if sessions.len() > 1 {
                 return refused("incoming_session_binding_conflict");
             }
-            Ok((i, None, mode, sessions.into_iter().next(), rule.clone()))
+            let ru = cortex_core::lifecycle::domain::task_language_tx(db, &i.task)? == "ru";
+            Ok((i, None, mode, sessions.into_iter().next(), rule.clone(), binding, ru))
         })
     })?)
     .await?;
@@ -585,17 +625,19 @@ pub(super) async fn execute(
     }
     let mut possible = false;
     let mut started = false;
+    let mut denied_by_lease = false;
     let outcome: CoreResult<Value> = async {
         let planned = plan(&root, &name, &args)?;
         let confirm = matches!(planned, Plan::Delete | Plan::Link { replace: Some(_) });
         if confirm && mode != "auto" {
-            let (title, kind) = if name == "project_delete" {
-                (format!("Delete {path}"), "delete")
-            } else {
-                (format!("Replace the skill link {path}"), "edit")
+            let (title, kind) = match (name.as_str(), ru) {
+                ("project_delete", false) => (format!("Delete {path}"), "delete"),
+                ("project_delete", true) => (format!("Удалить {path}"), "delete"),
+                (_, false) => (format!("Replace the skill link {path}"), "edit"),
+                (_, true) => (format!("Заменить ссылку на навык {path}"), "edit"),
             };
             let request = json!({"toolCall":{"toolCallId":key,"title":title,"kind":kind,"rawInput":args},
-                "options":[{"optionId":"allow","name":"Allow once","kind":"allow_once"},{"optionId":"deny","name":"Deny","kind":"reject_once"}]});
+                "options":cortex_engine::permission::one_shot_options(ru)});
             let allowed = match (&permissions, &session) {
                 (Some(p), Some(s)) => {
                     matches!(p.decide(s, &request).await, Ok(PermissionDecision::Selected(id)) if id == "allow")
@@ -611,13 +653,16 @@ pub(super) async fn execute(
         let (c, p, n, k, h, m) = (credential.clone(), path.clone(), name.clone(), key.clone(), hash.clone(), mode.clone());
         let expected = identity.clone();
         let intent_root = root.clone();
+        let started_binding = binding.clone();
         recv(executor.write(move |db| {
             let i = authorized(db, &c, Some(&expected), &intent_root, &p, scoped)?;
             if access::current(db, &i.task)? != m {
                 return refused("access_mode_changed");
             }
+            let mut receipt = json!({"complete":false,"path":p});
+            if let Some(binding) = started_binding { receipt["checkout"] = binding; }
             db.execute("INSERT INTO runtime_requests VALUES (?,?,?,?,?,?)",
-                (&i.task, &k, &c.channel_id, &n, &h, json!({"complete":false,"path":p}).to_string()))?;
+                (&i.task, &k, &c.channel_id, &n, &h, receipt.to_string()))?;
             Ok(())
         })?)
         .await?;
@@ -625,7 +670,15 @@ pub(super) async fn execute(
         let (c, p, m, effect_root, effect_args, expected) = (
             credential.clone(), path.clone(), mode.clone(), root.clone(), args.clone(), identity.clone(),
         );
-        let (effect, maybe_changed) = recv(executor.write(move |db| {
+        let effect_binding = binding.clone();
+        let effect_key = key.clone();
+        let (effect, maybe_changed, denied) = recv(executor.publication(move |store| {
+            if let Some(binding) = &effect_binding {
+                if !super::native_project::retained_checkout_matches(store, &expected.task, binding)? {
+                    return refused("worktree_binding_invalid");
+                }
+            }
+            store.write(|db| {
             let i = authorized(db, &c, Some(&expected), &effect_root, &p, scoped)?;
             if access::current(db, &i.task)? != m {
                 return refused("access_mode_changed");
@@ -637,12 +690,29 @@ pub(super) async fn execute(
             } else {
                 Vec::new()
             };
+            let lease_fence = WorkerLeaseFence::new(&effect_root, &p, &missing)?;
+            let fence = || lease_fence.check(db);
+            match fence() {
+                Ok(()) => {}
+                Err(CoreError::OwnerFileLeaseHeld { .. }) => {
+                    let denial = lease_denial(effect_binding.as_ref());
+                    db.execute("UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?",
+                        (denial.to_string(), &i.task, &c.channel_id, &effect_key))?;
+                    return Ok((Ok(denial["reply"].clone()), false, true));
+                }
+                Err(error) => return Err(error),
+            }
             let mut maybe_changed = false;
-            let value = apply(&effect_root, &rule, &effect_args, &planned, &missing, &mut maybe_changed);
-            Ok((value, maybe_changed))
+            let value = apply_fenced(&effect_root, &rule, &effect_args, &planned, &missing, &mut maybe_changed, fence);
+            Ok((value, maybe_changed, false))
+            })
         })?).await?;
         possible = maybe_changed;
+        denied_by_lease = denied;
         let mut value = effect?;
+        if denied {
+            return Ok(value);
+        }
         if name == "project_skill_link" && args["action"] == "link" {
             // Observed after the effect, outside every store transaction.
             value["git"] = git_retention(&root, args["name"].as_str().unwrap_or_default()).await;
@@ -654,6 +724,7 @@ pub(super) async fn execute(
     let (n, k, h, p) = (name.clone(), key.clone(), hash.clone(), path.clone());
     let task = identity.task.clone();
     match outcome {
+        Ok(reply) if denied_by_lease => Ok(reply),
         Ok(value) => {
             let reply = crate::native_sources::reply(value.clone());
             let r = reply.clone();
@@ -662,11 +733,16 @@ pub(super) async fn execute(
                 || value["changed"] == true
                 || value["gitignore_guard"] == true;
             recv(executor.write(move |db| {
+                let mut receipt = json!({"complete":true,"reply":r});
+                let mut event = json!({"channel_id":c.channel_id,"operation":n,"path":p,"request_key":k});
+                if let Some(binding) = binding {
+                    receipt["checkout"] = binding.clone();
+                    event["checkout"] = binding;
+                }
                 db.execute("UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=? AND operation=?",
-                    (json!({"complete":true,"reply":r}).to_string(), &task, &c.channel_id, &k, &n))?;
+                    (receipt.to_string(), &task, &c.channel_id, &k, &n))?;
                 if changed {
-                    lifecycle::event_tx(db, &task, "NATIVE_PROJECT_CHANGED",
-                        json!({"channel_id":c.channel_id,"operation":n,"path":p,"request_key":k}))?;
+                    lifecycle::event_tx(db, &task, "NATIVE_PROJECT_CHANGED", event)?;
                 }
                 Ok(())
             })?)
@@ -690,7 +766,8 @@ pub(super) async fn execute(
                     db.execute("DELETE FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=? AND operation=?",
                         (&task, &c.channel_id, &k, &n))?;
                 }
-                if let Some(retained) = retained {
+                if let Some(mut retained) = retained {
+                    if let Some(binding) = binding { retained["checkout"] = binding; }
                     db.execute("INSERT OR IGNORE INTO runtime_requests VALUES (?,?,?,?,?,?)",
                         (&task, &k, &c.channel_id, &n, &h, retained.to_string()))?;
                 }

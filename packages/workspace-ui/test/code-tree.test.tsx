@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { emptyWorkspace, LOCAL_MACHINE_ID, type FolderEntry } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { createRealPort } from "../src/port/real";
-import { codeTree, treeRows } from "../src/review-model";
+import { checkoutFiles, codeTree, sourceOf, treeRows } from "../src/review-model";
 import { capabilitiesWire, flush, scriptedTransport, snapshot, wireTask } from "./support";
 
 /**
@@ -66,14 +66,53 @@ const settled = async () => { for (let i = 0; i < 14; i++) await flush(); };
 const rows = () => [...document.querySelectorAll<HTMLElement>(".tree[role=tree] .tn")];
 const row = (name: string) => rows().find(r => r.querySelector(".trunc")?.textContent === name);
 
-async function openCode(m: ReturnType<typeof machine>) {
-  history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}/p/p/code?file=a.txt`);
+async function openCode(m: ReturnType<typeof machine>, path = "p/p/code?file=a.txt") {
+  history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}/${path}`);
   const root = document.createElement("div");
   document.body.append(root);
-  dispose = render(() => <Workspace port={createRealPort({ transport: m.transport, actorId: "owner", registry: true })} />, root);
+  dispose = render(() => <Workspace port={createRealPort({ transport: m.transport, actorId: "owner", registry: true, localCode: true })} />, root);
   for (let i = 0; i < 40 && !document.querySelector(".cm-content"); i++) await settled();
   await settled();
 }
+
+it.each([["task", false], ["task", true], ["project", true]] as const)("uses only the bound checkout in %s (lost: %s)", async (view, unavailable) => {
+  const m = machine(), original = m.answers["machine.call"]!;
+  const binding = { kind: "worktree", id: "p:wt:task", path: "/work/task", branch: "cw/task", unavailable };
+  const reads: { checkoutId: string; dirs?: string[]; file?: string }[] = [];
+  m.answers["machine.call"] = async message => {
+    const { op, params } = message as { op: string; params: (typeof reads)[number] };
+    const reply = await original(message) as { ok: boolean; result: any };
+    if (op === "product.read") reply.result.tasks["task-1"] = { checkout: binding };
+    if (op === "repo.snapshot") {
+      const main = reply.result.checkouts[0], checkout = { ...main, ...binding, taskId: "task-1" };
+      main.sources = {};
+      reply.result.sources = { "a.txt": "main only" };
+      expect(checkoutFiles(emptyWorkspace(), reply.result, checkout).tree).toEqual([]);
+      expect(sourceOf(reply.result, checkout, [], "a.txt")).toBeNull();
+      reply.result.checkouts = [main, checkout];
+    }
+    if (op === "repo.list") {
+      reads.push(params);
+      return { ok: true, result: { overview: null, folders: [{ dir: "", entries: [entry("own.txt", false, false)], more: 0, exact: true }] } };
+    }
+    if (op === "repo.file") {
+      reads.push(params);
+      return { ok: true, result: { file: params.file, text: "worktree content", revision: "r1", readOnly: null, writer: null } };
+    }
+    return reply;
+  };
+  await openCode(m, view === "task" ? "t/task-1/code?file=own.txt" : "p/p/git?checkout=p%3Awt%3Atask");
+  if (unavailable) {
+    expect(document.body.textContent).toContain("Restore the original checkout and refresh");
+    expect(reads).toEqual([]);
+    expect(document.querySelector(".cm-content")).toBeNull();
+  } else {
+    expect(reads).toContainEqual(expect.objectContaining({ checkoutId: binding.id, dirs: [""] }));
+    expect(reads).toContainEqual(expect.objectContaining({ checkoutId: binding.id, file: "own.txt" }));
+    expect(row("own.txt")).toBeDefined();
+    expect(row("a.txt")).toBeUndefined();
+  }
+});
 
 describe("Code's tree of the whole project folder", () => {
   it("shows .env and an ignored folder, dimmed, from one read on open, and reads that folder only when it is opened", async () => {

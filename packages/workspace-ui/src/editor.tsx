@@ -2,8 +2,10 @@ import { createEffect, createMemo, on, onCleanup, onMount } from "solid-js";
 import { defaultKeymap, history, historyKeymap, indentWithTab, isolateHistory } from "@codemirror/commands";
 import { bracketMatching, HighlightStyle, indentOnInput, LanguageDescription, LanguageSupport, StreamLanguage, syntaxHighlighting, type StreamParser } from "@codemirror/language";
 import { search, searchKeymap } from "@codemirror/search";
-import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField, Transaction, type Extension, type TransactionSpec } from "@codemirror/state";
-import { Decoration, drawSelection, EditorView, keymap, lineNumbers, type DecorationSet } from "@codemirror/view";
+import { Annotation, Compartment, RangeSet, EditorState, RangeSetBuilder, StateEffect, StateField, Transaction, type Extension, type TransactionSpec } from "@codemirror/state";
+import { Decoration, drawSelection, EditorView, gutter, GutterMarker, keymap, lineNumbers, type DecorationSet } from "@codemirror/view";
+import type { CodeLspDiagnostic, CodeLspPosition } from "@cortex/workspace-contract";
+import { diagnosticRanges, diagnosticSeverity } from "./code-lsp";
 import { tags } from "@lezer/highlight";
 import { useWs } from "./ctx";
 import type { Buffers, FileBuffer } from "./editor-buffers";
@@ -62,6 +64,13 @@ const appearance = EditorView.theme({
   ".cm-searchMatch": { backgroundColor: "var(--warn-tint)", outline: "none" },
   ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: "var(--bg-selected)" },
   ".cm-chg": { backgroundColor: "var(--add-bg)" },
+  ".cm-diag-gutter": { minWidth: "1ch", textAlign: "center", fontWeight: "bold" },
+  ".cm-diag-error": { color: "var(--danger)" },
+  ".cm-diag-note": { color: "var(--warn)" },
+  ".cm-diag-range": { color: "inherit", textDecoration: "underline wavy var(--warn)", textUnderlineOffset: "3px" },
+  ".cm-diag-range.cm-diag-error": { textDecorationColor: "var(--danger)" },
+  ".cm-diag-point.cm-diag-error": { backgroundColor: "var(--danger-tint)", color: "inherit" },
+  ".cm-diag-point.cm-diag-note": { backgroundColor: "var(--warn-tint)", color: "inherit" },
   ".cm-panels": { color: "var(--fg)", backgroundColor: "var(--bg-sidebar)" },
   ".cm-panels.cm-panels-top": { borderBottom: "1px solid var(--line)" },
   ".cm-panel.cm-search": { padding: "6px 8px", fontFamily: "var(--font)", fontSize: "var(--t-cap)" },
@@ -88,12 +97,55 @@ const changedLines = StateField.define<DecorationSet>({
   provide: field => EditorView.decorations.from(field),
 });
 
+const setDiagnostics = StateEffect.define<readonly CodeLspDiagnostic[]>();
+const diskUpdate = Annotation.define<boolean>();
+class DiagnosticMarker extends GutterMarker {
+  constructor(readonly severity: number) { super(); }
+  eq(other: DiagnosticMarker) { return this.severity === other.severity; }
+  toDOM() {
+    const node = document.createElement("span");
+    node.className = this.severity === 1 ? "cm-diag-error" : "cm-diag-note";
+    node.textContent = "!";
+    node.setAttribute("aria-hidden", "true");
+    return node;
+  }
+}
+const diagnosticField = StateField.define<{ marks: DecorationSet; gutter: RangeSet<GutterMarker> }>({
+  create: () => ({ marks: Decoration.none, gutter: RangeSet.empty }),
+  update(value, tr) {
+    const effect = tr.effects.find(e => e.is(setDiagnostics));
+    if (!effect) return tr.docChanged ? { marks: Decoration.none, gutter: RangeSet.empty } : value;
+    const rows = diagnosticRanges(effect.value, tr.state.doc);
+    const lines = new Map<number, number>();
+    for (const row of rows) {
+      const at = tr.state.doc.lineAt(row.from).from;
+      lines.set(at, Math.min(row.severity, lines.get(at) ?? row.severity));
+    }
+    return {
+      marks: Decoration.set(rows.map(row => {
+        const cls = row.severity === 1 ? "cm-diag-error" : "cm-diag-note";
+        const mark = row.from === row.to ? Decoration.line({ class: "cm-diag-point " + cls }) : Decoration.mark({
+          class: "cm-diag-range " + cls, attributes: { title: diagnosticSeverity(row.severity) + ": " + row.message },
+        });
+        const from = row.from === row.to ? tr.state.doc.lineAt(row.from).from : row.from;
+        return mark.range(from, row.to === row.from ? from : row.to);
+      }), true),
+      gutter: RangeSet.of([...lines].map(([from, severity]) => new DiagnosticMarker(severity).range(from)), true),
+    };
+  },
+  provide: field => EditorView.decorations.from(field, value => value.marks),
+});
+const diagnosticsGutter = gutter({ class: "cm-diag-gutter", markers: view => view.state.field(diagnosticField).gutter });
+const positionOf = (view: EditorView, at: number): CodeLspPosition => {
+  const line = view.state.doc.lineAt(at);
+  return { line: line.number - 1, character: at - line.from };
+};
 const locked = new Compartment();
-const lockOf = (path: string, reason: boolean) => [EditorState.readOnly.of(reason), EditorView.editable.of(!reason), EditorView.contentAttributes.of({ "aria-label": `${reason ? "Read" : "Edit"} ${path}` })];
+const lockOf = (path: string, reason: boolean) => [EditorState.readOnly.of(reason), EditorView.editable.of(!reason), EditorView.contentAttributes.of({ "aria-label": `${reason ? "Read" : "Edit"} ${path}`, tabindex: "0" })];
 
 type Session = { state: EditorState; scroll?: ReturnType<EditorView["scrollSnapshot"]> };
 /** Each open file's editor state, undo history included, kept while its tab is in the background. */
-type Held = { sessions: Map<string, Session>; listen: Extension; shown: { key: string; view: EditorView; onSave: () => void } | null };
+type Held = { sessions: Map<string, Session>; listen: Extension; shown: { key: string; view: EditorView; onSave: () => void; definition: (position: CodeLspPosition) => boolean } | null };
 const held = new WeakMap<Buffers, Held>();
 function heldBy(buffers: Buffers) {
   const have = held.get(buffers);
@@ -105,6 +157,7 @@ function heldBy(buffers: Buffers) {
     if (!update.docChanged || !shown || shown.view !== update.view) return;
     const session = made.sessions.get(shown.key);
     if (session) session.state = update.state;
+    if (update.transactions.some(tr => tr.annotation(diskUpdate))) return;
     buffers.edit(shown.key, update.state.doc.sliceString(0, undefined, buffers.find(shown.key)?.eol ?? "\n"));
   });
   held.set(buffers, made);
@@ -113,7 +166,7 @@ function heldBy(buffers: Buffers) {
     const session = made.sessions.get(key);
     if (!session) return;
     // Only the span that differs is replaced, so the reader's position (mapped through the change) stays where it was.
-    const spec = (state: EditorState): TransactionSpec => ({ changes: changedSpan(state.doc.toString(), text), annotations: undoable ? [isolateHistory.of("full")] : [Transaction.addToHistory.of(false)] });
+    const spec = (state: EditorState): TransactionSpec => ({ changes: changedSpan(state.doc.toString(), text), annotations: undoable ? [diskUpdate.of(true), isolateHistory.of("full")] : [diskUpdate.of(true), Transaction.addToHistory.of(false)] });
     if (made.shown?.key === key) made.shown.view.dispatch(spec(made.shown.view.state));
     else session.state = session.state.update(spec(session.state)).state;
   });
@@ -131,7 +184,7 @@ export function changedSpan(before: string, after: string) {
 }
 
 /** The editable file. The text it holds belongs to the buffer store, so this view can come and go without losing any. */
-export default function CodeEditor(props: { buffer: FileBuffer; locked: boolean; line?: number; changed: Set<number>; onSave: () => void }) {
+export default function CodeEditor(props: { buffer: FileBuffer; locked: boolean; line?: number; changed: Set<number>; onSave: () => void; diagnostics?: readonly CodeLspDiagnostic[]; jump?: { line: number; column: number }; onDefinition?: (position: CodeLspPosition) => void }) {
   const ws = useWs();
   const buffers = ws.buffers, keep = heldBy(buffers), sessions = keep.sessions;
   let host!: HTMLDivElement, view: EditorView | undefined, current: string | null = null, opening = 0;
@@ -139,14 +192,23 @@ export default function CodeEditor(props: { buffer: FileBuffer; locked: boolean;
   const keyOf = createMemo(() => props.buffer.key), lock = createMemo(() => props.locked), lineOf = createMemo(() => props.line);
   const changed = createMemo(() => props.changed, undefined, { equals: (a, b) => a.size === b.size && [...a].every(n => b.has(n)) });
   const remember = () => { if (view && current) { const session = sessions.get(current); if (session) { session.state = view.state; session.scroll = view.scrollSnapshot(); } } };
-  const commands = keymap.of([{ key: "Mod-s", preventDefault: true, run: () => { keep.shown?.onSave(); return true; } }, ...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]);
+  const commands = keymap.of([{ key: "Mod-s", preventDefault: true, run: () => { keep.shown?.onSave(); return true; } }, { key: "F12", run: v => keep.shown?.definition(positionOf(v, v.state.selection.main.head)) ?? false }, ...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]);
+
+  const navigation = EditorView.domEventHandlers({
+    mousedown(event, v) {
+      if (!(event.ctrlKey || event.metaKey) || event.button !== 0) return false;
+      const at = v.posAtCoords({ x: event.clientX, y: event.clientY });
+      return at !== null && (keep.shown?.definition(positionOf(v, at)) ?? false);
+    },
+  });
+  const guard = EditorState.changeFilter.of(tr => !tr.startState.readOnly || !!tr.annotation(diskUpdate));
 
   async function stateFor(buffer: FileBuffer) {
     const have = sessions.get(buffer.key);
     if (have) return have;
     const grammar = await languageFor(buffer.path);
     const made = sessions.get(buffer.key) ?? { state: EditorState.create({ doc: buffers.text(buffer.key), extensions: [
-      lineNumbers(), history(), drawSelection(), indentOnInput(), bracketMatching(), search({ top: true }), syntaxHighlighting(highlighting), appearance, changedLines, commands, keep.listen, grammar,
+      lineNumbers(), diagnosticField, diagnosticsGutter, guard, navigation, history(), drawSelection(), indentOnInput(), bracketMatching(), search({ top: true }), syntaxHighlighting(highlighting), appearance, changedLines, commands, keep.listen, grammar,
       locked.of(lockOf(buffer.path, props.locked)),
     ] }) };
     sessions.set(buffer.key, made);
@@ -156,8 +218,11 @@ export default function CodeEditor(props: { buffer: FileBuffer; locked: boolean;
   const goTo = () => {
     const line = props.line;
     if (!view || line === undefined || line < 1 || line > view.state.doc.lines) return;
-    const at = view.state.doc.line(line).from;
+    if (current !== keyOf()) return;
+    const row = view.state.doc.line(line);
+    const at = Math.min(row.to, row.from + (props.jump?.column ?? 0));
     view.dispatch({ selection: { anchor: at }, effects: EditorView.scrollIntoView(at, { y: "center" }) });
+    if (props.jump) view.focus();
   };
 
   onMount(() => { view = new EditorView({ parent: host }); });
@@ -168,16 +233,24 @@ export default function CodeEditor(props: { buffer: FileBuffer; locked: boolean;
     void stateFor(props.buffer).then(session => {
       if (turn !== opening || !view) return;
       current = key;
-      keep.shown = { key, view, onSave: () => props.onSave() };
+      keep.shown = { key, view, onSave: () => { if (keyOf() === key) props.onSave(); },
+        definition: position => { if (keyOf() !== key || !props.onDefinition) return false; props.onDefinition(position); return true; } };
       view.setState(session.state);
       if (session.scroll) view.dispatch({ effects: session.scroll });
       view.dispatch({ effects: locked.reconfigure(lockOf(props.buffer.path, props.locked)) });
       markChanged();
+      view.dispatch({ effects: setDiagnostics.of(props.diagnostics ?? []) });
       goTo();
     });
   }));
+  createEffect(on(() => props.diagnostics, diagnostics => {
+    // Clearing a snapshot may be triggered by the editor's own document update.
+    queueMicrotask(() => {
+      if (view && current === keyOf() && props.diagnostics === diagnostics) view.dispatch({ effects: setDiagnostics.of(diagnostics ?? []) });
+    });
+  }, { defer: true }));
   createEffect(on(lock, off => { if (view && current) view.dispatch({ effects: locked.reconfigure(lockOf(props.buffer.path, off)) }); }, { defer: true }));
   createEffect(on(changed, () => { if (current) markChanged(); }, { defer: true }));
-  createEffect(on(lineOf, () => { if (current) goTo(); }, { defer: true }));
+  createEffect(on([lineOf, () => props.jump], () => { if (current) goTo(); }, { defer: true }));
   return <div class="ws-cm" ref={host} />;
 }

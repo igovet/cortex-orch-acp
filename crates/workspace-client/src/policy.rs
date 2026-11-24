@@ -47,11 +47,21 @@ const MACHINE_OPERATIONS: &[&str] = &[
     "repo.snapshot",
     "repo.file",
     "repo.file.save",
+    "repo.file.lease.acquire",
+    "repo.file.lease.renew",
+    "repo.file.lease.release",
+    "repo.lsp.open",
+    "repo.lsp.change",
+    "repo.lsp.status",
+    "repo.lsp.definition",
+    "repo.lsp.close",
+    "repo.lsp.settings",
     // One level of named checkout folders for Code's tree; the service confines every name.
     "repo.list",
     // Names and descriptions of the project's own skills, for the composer's `/` list.
     "repo.skills",
     "git",
+    "command.output",
     "workers",
     "product.read",
     "product.board",
@@ -295,10 +305,16 @@ pub fn authorize_phone(body: Value) -> Result<Call, String> {
 
 /// `machine.call` operations a phone never sends, beyond those the desktop list lacks.
 fn phone_machine_operation(op: &str, params: &Value) -> bool {
+    if op == "command.output" {
+        return false;
+    }
     let action = params.get("action").and_then(Value::as_str);
     match op {
         // Code is read-only from the phone; every Git action is a write; the logs folder
         // exists for the desktop's own opener.
+        op if op.starts_with("repo.lsp.") || op.starts_with("repo.file.lease.") => false,
+        "machine.update" => !params["patch"].as_object().is_some_and(|patch|
+            ["rustAnalyzerPath", "typescriptLanguageServerPath"].iter().any(|key| patch.contains_key(*key))),
         "repo.file.save" | "git" | "logs.folder" => false,
         // A native login opens a terminal on the machine.
         "engine.connection" => matches!(action, Some("recheck" | "add_key")),
@@ -349,7 +365,7 @@ pub fn phone_method(operation: &str) -> bool {
         || (operation.starts_with("native.")
             && !matches!(operation, "native.query" | "native.board"))
         || operation.starts_with("notifications.")
-        || operation == "service.stop")
+        || matches!(operation, "service.stop" | "service.subscribe.code"))
 }
 
 fn authorize_body(body: Value, phone: bool) -> Result<Call, String> {
@@ -490,7 +506,7 @@ fn authorize_body(body: Value, phone: bool) -> Result<Call, String> {
     }
     if matches!(
         call.operation.as_str(),
-        "projects.remove" | "native.open_editor"
+        "projects.remove" | "native.open_editor" | "native.reveal_file"
     ) {
         let map = call.message.as_object().ok_or_else(refused)?;
         workspace_protocol::validate("Identity", &call.message["projectId"])
@@ -500,7 +516,7 @@ fn authorize_body(body: Value, phone: bool) -> Result<Call, String> {
                 return Err(refused());
             }
         } else {
-            // A checkout, file and line only name what to open. The service still resolves and confines the file.
+            // These fields only name the target. The service still resolves and confines the file.
             let bounded = |key: &str, limit: usize| {
                 map.get(key).is_none_or(|v| {
                     v.as_str().is_some_and(|text| {
@@ -511,6 +527,8 @@ fn authorize_body(body: Value, phone: bool) -> Result<Call, String> {
             if map
                 .keys()
                 .any(|key| !matches!(key.as_str(), "projectId" | "checkoutId" | "file" | "line"))
+                || (call.operation == "native.reveal_file"
+                    && (map.len() != 3 || !map.contains_key("checkoutId") || !map.contains_key("file")))
                 || !bounded("checkoutId", 256)
                 || !bounded("file", 4096)
                 || map.get("line").is_some_and(|line| {
@@ -629,6 +647,46 @@ fn authorize_body(body: Value, phone: bool) -> Result<Call, String> {
             }
             workspace_protocol::validate("Identity", &call.message["projectId"])
                 .map_err(|_| refused())?;
+        }
+        "executions.control"
+            if matches!(
+                call.message["action"].as_str(),
+                Some("handoff_merge" | "inspect_merge" | "request_merge_checks")
+            ) =>
+        {
+            let map = call.message.as_object().ok_or_else(refused)?;
+            let action = call.message["action"].as_str();
+            let handoff = action == Some("handoff_merge");
+            if phone
+                || map.keys().any(|key| {
+                    !matches!(
+                        key.as_str(),
+                        "projectId" | "executionId" | "requestId" | "action" | "conflictId"
+                    ) && !(handoff && matches!(key.as_str(), "text" | "attachments"))
+                })
+                || call
+                    .message
+                    .get("text")
+                    .is_some_and(|text| text.as_str().is_none_or(|text| text.len() > 12_000))
+            {
+                return Err(refused());
+            }
+            for key in ["projectId", "executionId", "requestId"] {
+                workspace_protocol::validate("Identity", &call.message[key])
+                    .map_err(|_| refused())?;
+            }
+            if action != Some("inspect_merge") || !call.message["conflictId"].is_null() {
+                workspace_protocol::validate("Identity", &call.message["conflictId"])
+                    .map_err(|_| refused())?;
+            }
+            if let Some(items) = call.message.get("attachments") {
+                workspace_protocol::validate(
+                    "Attachments",
+                    &references_as_bodies(&serde_json::json!({"attachments":items}))?
+                        ["attachments"],
+                )
+                .map_err(|_| refused())?;
+            }
         }
         "executions.control" => {
             let map = call.message.as_object().ok_or_else(refused)?;
@@ -879,6 +937,10 @@ mod tests {
 
     #[test]
     fn the_desktop_keeps_its_machine_bound_operations() {
+        let output = json!({"op":"command.output","projectId":"p",
+            "params":{"taskId":"t","attemptId":"a","toolCallRef":"native-command:a"}});
+        assert!(desktop("machine.call", output.clone()));
+        assert!(!phone("machine.call", output));
         assert!(desktop("native.pick_folder", json!({})));
         // A pull request is named by its task only; an address from the page is refused.
         assert!(desktop(
@@ -942,6 +1004,28 @@ mod tests {
     }
 
     #[test]
+    fn desktop_reveal_requires_exactly_a_project_checkout_and_file() {
+        let target = json!({"projectId":"p","checkoutId":"p:main","file":"src/é #%.txt"});
+        assert!(desktop("native.reveal_file", target.clone()));
+        for (key, invalid) in [
+            ("projectId", json!(null)),
+            ("checkoutId", json!("")),
+            ("file", json!("a\0b")),
+            ("line", json!(2)),
+            ("program", json!("/bin/sh")),
+        ] {
+            let mut bad = target.clone();
+            bad[key] = invalid;
+            assert!(!desktop("native.reveal_file", bad), "{key}");
+        }
+        for key in ["projectId", "checkoutId", "file"] {
+            let mut bad = target.clone();
+            bad.as_object_mut().unwrap().remove(key);
+            assert!(!desktop("native.reveal_file", bad), "{key}");
+        }
+    }
+
+    #[test]
     fn a_phone_never_sends_machine_bound_or_owner_only_operations() {
         for (operation, message) in [
             ("remote.status", json!({})),
@@ -959,6 +1043,10 @@ mod tests {
             ("native.engine_login", json!({"engine":"codex-acp"})),
             ("native.open_logs", json!({})),
             ("native.open_editor", json!({"projectId":"p"})),
+            (
+                "native.reveal_file",
+                json!({"projectId":"p","checkoutId":"p:main","file":"src/a.txt"}),
+            ),
             (
                 "native.open_pull_request",
                 json!({"projectId":"p","taskId":"t"}),
@@ -978,6 +1066,18 @@ mod tests {
             "repo.file.save",
             json!({"file":"a","text":"","revision":null})
         ));
+        for op in [
+            "repo.file.lease.acquire",
+            "repo.file.lease.renew",
+            "repo.file.lease.release",
+        ] {
+            let params = json!({"checkoutId":"p:main","file":"a.txt","leaseToken":"a".repeat(64)});
+            assert!(!machine(op, params.clone()), "{op}");
+            assert!(
+                desktop("machine.call", json!({"op":op,"projectId":"p","params":params})),
+                "{op}"
+            );
+        }
         for action in [
             "commit",
             "stage",

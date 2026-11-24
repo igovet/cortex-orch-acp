@@ -5,6 +5,14 @@ pub type CoreResult<T> = Result<T, CoreError>;
 pub enum CoreError {
     #[error("{0}")]
     Refused(&'static str),
+    #[error("owner_file_lease_held")]
+    OwnerFileLeaseHeld {
+        path: crate::store::owner_file_leases::RelativePath,
+    },
+    #[error("task_file_lease_held")]
+    TaskFileLeaseHeld { task: String },
+    #[error("unsupported_storage")]
+    UnsupportedStorageFormat10,
     #[error("storage_unavailable")]
     Sql(#[from] rusqlite::Error),
     #[error("storage_unavailable")]
@@ -16,6 +24,9 @@ impl CoreError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Refused(code) => code,
+            Self::OwnerFileLeaseHeld { .. } => "owner_file_lease_held",
+            Self::TaskFileLeaseHeld { .. } => "task_file_lease_held",
+            Self::UnsupportedStorageFormat10 => "unsupported_storage",
             Self::Sql(rusqlite::Error::SqliteFailure(e, _))
                 if matches!(
                     e.code,

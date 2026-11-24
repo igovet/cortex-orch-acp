@@ -20,8 +20,8 @@ pub const FRAME_BUDGET: usize = workspace_protocol::FRAME_BYTES - 65536;
 pub struct Refused {
     pub code: &'static str,
     pub message: String,
-    /// Management-API refusal details (`field`, `errors`, `current_revision`)
-    /// that the desktop protocol's flat `{code, message}` envelope never shows.
+    /// Structured refusal details. The machine envelope publishes only the
+    /// explicitly allowed holderTaskId for a Code lease refusal.
     pub detail: Option<Box<Value>>,
 }
 impl Refused {
@@ -201,13 +201,12 @@ pub fn supported(op: &str) -> bool {
             | "project.config.save"
             | "cleanup.run"
             | "workers"
+            | "command.output"
             | "maintenance"
             | "workflow.describe"
             | "product.board"
             | "repo.context"
             | "repo.snapshot"
-            | "repo.file"
-            | "repo.file.save"
             | "repo.locate"
             | "repo.list"
             | "repo.skills"
@@ -251,7 +250,12 @@ pub async fn run(
         "maintenance" => super::maintenance::action(state, params, projects).await,
         "workflow.describe" => super::workflow::describe(params),
         "product.board" => {
-            let saved = product(state, project)?;
+            let mut saved = product(state, project)?;
+            if let Some(root) = root {
+                if let Some(store) = context::open(root, cortex_core::OpenMode::LiveReadOnly)? {
+                    super::task_rework::project(&store, project, &mut saved, true)?;
+                }
+            }
             Ok(
                 json!({"tasks":saved["tasks"],"sprints":saved["sprints"],"messages":[],"comments":{},"drafts":{}}),
             )
@@ -288,14 +292,27 @@ pub async fn run(
                 params,
             )
         }
-        "product.sprint" => private_product::sprint(state, project, params),
-        "automatic.queue" => private_product::automatic_queue(state, project, params),
+        "product.sprint" if super::sprint_live::handles(params) => {
+            super::sprint_live::owner_action(
+                root.ok_or_else(|| refuse("project_required", "Unknown project."))?,
+                state, project, params,
+            )
+        }
+        "product.sprint" => private_product::sprint(state, project, params, root),
+        "automatic.queue" => private_product::automatic_queue(state, project, params, root),
         _ => {
             let root = root.ok_or_else(|| refuse("project_required", "Unknown project."))?;
             let mut git = git::Git::for_service(config);
             match op {
                 "product.read" if params["attachments"] == true => {
                     context::attachments(root, state, project, string(params, "taskId")?)
+                }
+                "command.output" => {
+                    use crate::owner_command_output::{self, ReadOutput};
+                    let request = ReadOutput::parse(params).map_err(context::core)?;
+                    let store = context::open(root, cortex_core::OpenMode::LiveReadOnly)?
+                        .ok_or_else(|| refuse("command_receipt_not_found", "The command receipt is unavailable."))?;
+                    owner_command_output::read(&store, project, request).map_err(context::core)
                 }
                 "project.config.read" => super::project_config::read(root, config),
                 "project.config.save" => super::project_config_save::save(root, config, params),
@@ -360,17 +377,6 @@ pub async fn run(
                     };
                     git.action(root, project, state, &p).await
                 }
-                "repo.file" | "repo.file.save" => {
-                    context::file(
-                        root,
-                        state,
-                        project,
-                        params,
-                        op == "repo.file.save",
-                        &mut git,
-                    )
-                    .await
-                }
                 // The recorded pull request address of a task, for the desktop's opener.
                 "repo.locate" if params.get("pullRequest").is_some() => {
                     super::integration::pull_request_address(root, project, state, params, &mut git)
@@ -411,6 +417,12 @@ pub async fn run(
 pub fn envelope(result: Result<Value>) -> Value {
     match result {
         Ok(value) => json!({"ok":true,"result":value}),
+        Err(e) if e.code == "task_file_lease_held" && e.detail.is_some() => {
+            json!({"ok":false,"code":e.code,"message":e.message,"holderTaskId":e.detail.unwrap()["holderTaskId"]})
+        }
+        Err(e) if e.code == "lsp_unavailable" && e.detail.is_some() => {
+            json!({"ok":false,"code":e.code,"message":e.message,"reason":e.detail.unwrap()["reason"]})
+        }
         Err(e) => json!({"ok":false,"code":e.code,"message":e.message}),
     }
 }

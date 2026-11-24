@@ -315,33 +315,63 @@ fn resolved(path: &Path) -> Result<PathBuf> {
     Ok(real)
 }
 pub fn machine(state: &Path) -> Result<Value> {
-    let mut value = json!({"name":"This machine","retentionDays":30,"autoArchiveDays":7,"worktreeRoot":default_root(state)});
+    let mut value = json!({"name":"This machine","retentionDays":30,"autoArchiveDays":7,"automaticArchivePurge":true,"unreferencedAttachmentRetentionDays":1,"worktreeRoot":default_root(state)});
     let saved = read_json(&state.join("machine.json"), json!({}))?;
     if let Some(map) = saved.as_object() {
         for (k, v) in map {
-            value[k] = v.clone();
+            if !super::code_lsp::SETTINGS.contains(&k.as_str()) {
+                value[k] = v.clone();
+            }
         }
     }
     Ok(value)
 }
+
+pub(super) fn language_paths(state: &Path) -> Result<Value> {
+    let mut value = json!({});
+    if workspace_protocol::channel::current().is_dev() {
+        let saved = read_json(&state.join("machine.json"), json!({}))?;
+        for key in super::code_lsp::SETTINGS {
+            value[key] = saved[key].clone();
+        }
+    }
+    Ok(value)
+}
+
 pub async fn update(state: &Path, p: &Value, projects: &Value) -> Result<Value> {
     let mut patch = p["patch"]
         .as_object()
         .cloned()
         .ok_or_else(|| refuse("invalid_setting", "That setting is not supported."))?;
     if patch.keys().any(|k| {
-        !["name", "retentionDays", "autoArchiveDays", "worktreeRoot"].contains(&k.as_str())
+        ![
+            "name", "retentionDays", "autoArchiveDays", "automaticArchivePurge",
+            "unreferencedAttachmentRetentionDays", "worktreeRoot",
+        ].contains(&k.as_str())
+            && !(workspace_protocol::channel::current().is_dev()
+                && super::code_lsp::SETTINGS.contains(&k.as_str()))
     }) {
         return Err(refuse("invalid_setting", "That setting is not supported."));
     }
-    for k in ["retentionDays", "autoArchiveDays"] {
+    for key in super::code_lsp::SETTINGS {
+        if patch.get(key).is_some_and(|value| !value.is_null()
+            && !value.as_str().is_some_and(|path| path.starts_with('/') && path.len() <= 4096
+                && !path.chars().any(char::is_control)))
+        {
+            return Err(refuse("invalid_setting", "Use an absolute executable path, or clear it."));
+        }
+    }
+    if patch.get("automaticArchivePurge").is_some_and(|v| !v.is_boolean()) {
+        return Err(refuse("invalid_setting", "Choose whether to delete expired archives automatically."));
+    }
+    for k in ["retentionDays", "autoArchiveDays", "unreferencedAttachmentRetentionDays"] {
         if patch
             .get(k)
             .is_some_and(|v| !v.as_u64().is_some_and(|n| (1..=3650).contains(&n)))
         {
             return Err(refuse(
                 "invalid_setting",
-                "Use a whole number of days from 1.",
+                "Use a whole number of days from 1 to 3650.",
             ));
         }
     }

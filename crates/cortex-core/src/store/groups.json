@@ -1,5 +1,10 @@
 [
   [
+    "code_editor_epoch",
+    "code_owner_file_leases",
+    "code_writer_reservations"
+  ],
+  [
     "source_events",
     "task_owners",
     "trusted_channels"

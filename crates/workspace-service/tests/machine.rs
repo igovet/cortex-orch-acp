@@ -1106,6 +1106,114 @@ async fn code_lease_gates_save_and_heartbeat_without_persisting_the_token() {
     f.stop().await;
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_save_does_not_block_unrelated_start() {
+    use std::{
+        ffi::CString,
+        os::{
+            fd::{AsRawFd, FromRawFd, OwnedFd},
+            unix::fs::OpenOptionsExt,
+        },
+    };
+
+    let f = Arc::new(Fixture::plain().await);
+    f.write("a.txt", b"original");
+    let revision = f.ok("repo.file", json!({"file":"a.txt"})).await["revision"].clone();
+    let token = f.lease("a.txt").await;
+    let store = f.store();
+    let actor: String = store
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT activated_by FROM workspace_projects WHERE project_id=?",
+                [&f.id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    let create = json!({
+        "protocol":{"major":1,"minor":8},"requestId":"create","projectId":f.id,"actorId":actor,
+        "operation":"tasks.create","target":f.id,"expectedVersion":"0","ownerEpoch":null,
+        "payload":{"description":"Write only other.txt","checkout":{"kind":"main"}}
+    });
+    let draft = cortex_core::workspace::create_draft(&store, &f.id, &actor, &create)
+        .unwrap()
+        .receipt;
+    let start = json!({
+        "protocol":{"major":1,"minor":8},"requestId":"start","projectId":f.id,"actorId":actor,
+        "operation":"tasks.start","target":draft["target"],"expectedVersion":draft["entityVersion"],
+        "ownerEpoch":null,"payload":{}
+    });
+    store
+        .write(|db| Ok(db.busy_timeout(Duration::from_secs(1))?))
+        .unwrap();
+
+    // Stage the real Start publication while holding its outer machine lock.
+    // Watch for Save opening that lock file, so Start enters SQLite only once
+    // Save has reached the contention point. Before the fix Save already holds
+    // the SQLite writer at that point and admission returns SQLITE_BUSY.
+    let lock_path = f.state.join("machine.lock");
+    let machine_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(machine_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+    assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+    let watch = unsafe { OwnedFd::from_raw_fd(fd) };
+    let path = CString::new(lock_path.as_os_str().as_encoded_bytes()).unwrap();
+    let watch_id = unsafe { libc::inotify_add_watch(watch.as_raw_fd(), path.as_ptr(), libc::IN_OPEN) };
+    assert!(watch_id >= 0, "{}", std::io::Error::last_os_error());
+
+    let save = {
+        let f = f.clone();
+        let token = token.clone();
+        tokio::spawn(async move {
+            f.ok(
+                "repo.file.save",
+                json!({"file":"a.txt","text":"new","revision":revision,"leaseToken":token}),
+            )
+            .await
+        })
+    };
+    let mut pending = libc::pollfd {
+        fd: watch.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(
+        unsafe { libc::poll(&mut pending, 1, 10_000) },
+        1,
+        "Save did not reach the machine lock"
+    );
+    assert_eq!(pending.revents, libc::POLLIN);
+    let admitted = cortex_core::workspace::start_native_input_with_policy(
+        &store, &f.id, &actor, &start, None, None, None,
+    );
+    assert_eq!(fs::read(f.repo.join("a.txt")).unwrap(), b"original");
+    drop(machine_lock);
+    let saved = tokio::time::timeout(Duration::from_secs(10), save)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(admitted.unwrap()["fresh"], true);
+    assert_eq!(saved["outcome"], "saved");
+    assert_eq!(fs::read(f.repo.join("a.txt")).unwrap(), b"new");
+    let status = f
+        .ok("repo.file.lease.status", json!({"file":"a.txt","leaseToken":token}))
+        .await;
+    assert_eq!(status["status"], "yours");
+    drop(store);
+    f.stop().await;
+}
+
 #[tokio::test]
 async fn files_refuse_escapes_symlinks_binary_oversize_and_missing_base() {
     let f = Fixture::new().await;

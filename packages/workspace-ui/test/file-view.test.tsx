@@ -172,7 +172,7 @@ function repoTransport(files: Record<string, FileRead>) {
 async function openCode(file: string, files: Record<string, FileRead>) {
   const d = repoTransport(files);
   history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}/p/p/code?file=${encodeURIComponent(file)}`);
-  mount(() => <Workspace port={createRealPort({ transport: d.transport, actorId: "owner", registry: true })} />);
+  mount(() => <Workspace port={createRealPort({ transport: d.transport, actorId: "owner", registry: true, localCode: true })} />);
   for (let i = 0; i < 40 && !document.querySelector(".fv-body, .cm-content"); i++) await settled();
   await settled();
   return d;

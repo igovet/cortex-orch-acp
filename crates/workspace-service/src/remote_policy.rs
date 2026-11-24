@@ -153,8 +153,17 @@ pub fn machine_operation_allowed(op: &str, params: &Value) -> bool {
             ),
             _ => false,
         },
-        // Refused on purpose: `repo.file.save` (file saves and new files in a
-        // checkout), `git` and `git_init` (every Git write: commit, stage, revert,
+        // Checkout-level Git drafts are desktop controls; task drafts retain their existing policy.
+        "product.task" => match action {
+            Some("draft_checkout_commit" | "draft_push_summary") => false,
+            Some("short_text_poll") => params["taskId"].is_string(),
+            _ => true,
+        },
+        "product.sprint" if crate::machine::sprint_live::handles(params) => false,
+        "machine.update" => !params["patch"].as_object().is_some_and(|patch|
+            ["rustAnalyzerPath", "typescriptLanguageServerPath"].iter().any(|key| patch.contains_key(*key))),
+        // Refused on purpose: `repo.lsp.*`, `repo.file.save` and all `repo.file.lease.*`
+        // operations, `git` and `git_init` (every Git write: commit, stage, revert,
         // push, pull, fetch, branch, drafts, worktree deletion), `repo.locate` and
         // `logs.folder` (absolute paths for the desktop's own openers).
         _ => MACHINE_OPERATIONS.contains(&op),
@@ -175,6 +184,7 @@ mod tests {
 
     #[test]
     fn owner_only_and_machine_bound_methods_are_refused() {
+        assert!(!machine("command.output", json!({"taskId":"t","attemptId":"a","toolCallRef":"native-command:a"})));
         for method in [
             "remote.status",
             "remote.enable",
@@ -210,11 +220,32 @@ mod tests {
         ] {
             assert!(!allowed(method, &json!({})), "{method}");
         }
+        assert!(!allowed(
+            "native.reveal_file",
+            &json!({"projectId":"p","checkoutId":"p:main","file":"a.txt"})
+        ));
         assert!(!allowed("machine.call", &Value::Null));
         assert!(!allowed("machine.call", &json!({})));
         assert!(!allowed("machine.call", &json!({"op":7})));
         assert!(!allowed("machine.call", &json!(["op", "overview"])));
         assert!(!machine("brand.new.op", json!({})));
+    }
+
+    #[test]
+    fn sprint_live_graph_and_mutations_are_desktop_only() {
+        for action in ["live_graph", "set_dependency", "move_priority"] {
+            assert!(!machine("product.sprint", json!({"action":action,"sprintId":"sp"})));
+        }
+        assert!(machine("product.sprint", json!({"action":"patch","sprintId":"sp"})));
+    }
+
+    #[test]
+    fn checkout_drafts_and_their_polls_are_desktop_only() {
+        for action in ["draft_checkout_commit", "draft_push_summary", "short_text_poll"] {
+            assert!(!machine("product.task", json!({"action":action,"checkoutId":"p:main"})));
+        }
+        assert!(machine("product.task", json!({"action":"draft_integration_text","taskId":"task"})));
+        assert!(machine("product.task", json!({"action":"short_text_poll","taskId":"task"})));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::{error::refuse, CoreResult};
+use crate::{error::refuse, CoreError, CoreResult};
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::BTreeSet;
 pub const APPLICATION_ID: i64 = 1129467218;
@@ -11,11 +11,20 @@ pub fn tables(db: &Connection) -> CoreResult<BTreeSet<String>> {
         .collect::<Result<_, _>>()?)
 }
 pub fn validate_groups(db: &Connection) -> CoreResult<()> {
+    validate_shape(db, false)
+}
+
+/// Unlike inspection, an upgrade has just installed every known group.
+pub(super) fn validate_installed(db: &Connection) -> CoreResult<()> {
+    validate_shape(db, true)
+}
+
+fn validate_shape(db: &Connection, installed: bool) -> CoreResult<()> {
     let names = tables(db)?;
     let groups: Vec<Vec<String>> = serde_json::from_str(include_str!("groups.json"))?;
     for group in groups {
         let n = group.iter().filter(|s| names.contains(*s)).count();
-        if n != 0 && n != group.len() {
+        if (installed || n != 0) && n != group.len() {
             return refuse("partial_storage_schema");
         }
     }
@@ -26,6 +35,9 @@ pub fn validate_groups(db: &Connection) -> CoreResult<()> {
         serde_json::from_str(include_str!("columns.json"))?;
     for (table, expected) in columns {
         if !names.contains(&table) {
+            if installed {
+                return refuse("partial_storage_schema");
+            }
             continue;
         }
         let actual = db
@@ -47,6 +59,9 @@ pub fn validate_header(db: &Connection, initialize: bool) -> CoreResult<i64> {
     if app != APPLICATION_ID {
         return refuse("unsupported_storage");
     }
+    if version == 10 {
+        return Err(CoreError::UnsupportedStorageFormat10);
+    }
     if version == 11 {
         return Ok(11);
     }
@@ -55,9 +70,54 @@ pub fn validate_header(db: &Connection, initialize: bool) -> CoreResult<i64> {
     }
     Ok(version)
 }
+/// An already initialized store is empty only if it has the expected shape and
+/// none of its tables contain records (including settings, history or upgrades).
+pub(super) fn is_empty_store(db: &Connection) -> CoreResult<bool> {
+    // The common populated case does not need to enumerate SQLite's schema.
+    if !tables(db)?.contains("tasks")
+        || db
+            .query_row("SELECT 1 FROM tasks LIMIT 1", [], |_| Ok(()))
+            .optional()?
+            .is_some()
+    {
+        return Ok(false);
+    }
+    let mut statement = db.prepare(
+        "SELECT name,type FROM pragma_table_list
+         WHERE schema='main' AND name NOT GLOB 'sqlite_*' AND name<>'tasks'",
+    )?;
+    for table in statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })? {
+        let (name, kind) = table?;
+        // Do not execute views or virtual tables just to classify an empty store.
+        if kind != "table" {
+            return Ok(false);
+        }
+        let identifier = name.replace('"', "\"\"");
+        if db
+            .query_row(
+                &format!("SELECT 1 FROM main.\"{identifier}\" LIMIT 1"),
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+        {
+            return Ok(false);
+        }
+    }
+    validate_groups(db)?;
+    Ok(true)
+}
 pub fn validate_project(db: &Connection, root: &str) -> CoreResult<()> {
+    validate_project_has_tasks(db, root).map(|_| ())
+}
+
+/// Validate path binding and tell the opener if the project already has tasks.
+pub(super) fn validate_project_has_tasks(db: &Connection, root: &str) -> CoreResult<bool> {
     if !tables(db)?.contains("tasks") {
-        return Ok(());
+        return Ok(false);
     }
     let bounds: (Option<String>, Option<String>) = db.query_row(
         "SELECT min(project_root),max(project_root) FROM tasks",
@@ -67,7 +127,7 @@ pub fn validate_project(db: &Connection, root: &str) -> CoreResult<()> {
     if bounds.0.iter().chain(bounds.1.iter()).any(|s| s != root) {
         return refuse("project_storage_mismatch");
     }
-    Ok(())
+    Ok(bounds.0.is_some())
 }
 fn add(db: &Connection, table: &str, column: &str, decl: &str) -> CoreResult<bool> {
     let exists = db
@@ -92,6 +152,8 @@ pub fn install(db: &Connection) -> CoreResult<()> {
         db.execute_batch(&format!("DROP TRIGGER {name};"))?;
     }
     db.execute_batch(SQL)?;
+    db.execute_batch(crate::workspace::worktrees::SCHEMA)?;
+    db.execute_batch(super::owner_file_leases::SCHEMA)?;
     for (t, c, d) in [
         (
             "work_requirement_revisions",
@@ -125,6 +187,9 @@ pub fn install(db: &Connection) -> CoreResult<()> {
         ("task_orchestration", "language", "TEXT"),
         ("source_events", "meta_json", "TEXT"),
         ("attempt_revisions", "manifest_json", "TEXT"),
+        // Python format 11 did not record a message identity. Preserve NULL
+        // for those rows rather than grouping distinct chunks under a made-up ID.
+        ("host_transcript", "message_id", "TEXT"),
     ] {
         add(db, t, c, d)?;
     }

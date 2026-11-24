@@ -21,10 +21,44 @@ use tokio::{
 
 use crate::frames::{read_frame, write_frame};
 
+fn with_refusal_text(code: String) -> String {
+    match refusal(&code) {
+        Some(text) => format!("{REFUSED}{text}"),
+        None => code,
+    }
+}
+
+/// Carry a typed store refusal across the shells' existing string error channel.
+fn storage_refusal(reply: &Value) -> Option<String> {
+    let error = &reply["error"];
+    let data = &error["data"];
+    if reply.get("result").is_some() || error["code"] != -32000 || data["kind"] != "project_store" {
+        return None;
+    }
+    let reason = data["reason"].as_str()?;
+    let message = error["message"].as_str()?;
+    if reason.len() > 64
+        || !reason.as_bytes().first()?.is_ascii_lowercase()
+        || !reason
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        || message.is_empty()
+        || message.len() > 1024
+        || message.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(format!("{REFUSED}project_store:{reason}: {message}"))
+}
+
 /// What the owner is told for a refusal. A refusal changed nothing and the service is still there:
 /// it is reported as itself, never as a lost service or an unknown outcome.
 fn refusal(code: &str) -> Option<&'static str> {
     Some(match code {
+        "version_mismatch" | "service_protocol_mismatch" | "bridge_invalid_capabilities"
+        | "unsupported_protocol" => "This app and the machine service are different versions. Reinstall the package so both are the same version.",
+        #[cfg(feature = "remote")]
+        workspace_remote::INCOMPATIBLE_VERSION_CODE => crate::remote::UPDATE_NEEDED,
         "project_folder_not_directory" => "This path is a file, not a folder.",
         "project_folder_unreadable" => "Cortex has no permission to open this folder.",
         "project_folder_not_writable" => {
@@ -173,7 +207,7 @@ impl Bridge {
         self
     }
     async fn connection(&self) -> Result<Stream, String> {
-        self.connector.connect().await
+        self.connector.connect().await.map_err(with_refusal_text)
     }
     async fn send(
         &self,
@@ -191,6 +225,11 @@ impl Bridge {
         let reply = read_frame(stream)
             .await
             .map_err(|_| "service_disconnected")?;
+        if method == "service.subscribe.code" && reply["jsonrpc"] == "2.0"
+            && reply["id"] == id && reply["error"]["message"] == "unsupported_method"
+        {
+            return Err("unsupported_method".into());
+        }
         if method.starts_with("voice.") && reply["jsonrpc"] == "2.0" && reply["id"] == id {
             if let Some(
                 code @ ("voice_busy"
@@ -236,6 +275,9 @@ impl Bridge {
             return Err(format!("{REFUSED}Cortex Workspace Dev did not open this folder: its .cortex-dev store was not created by Dev on this machine, so it was left untouched. Released Cortex data in .cortex is never the reason."));
         }
         if reply["jsonrpc"] == "2.0" && reply["id"] == id {
+            if let Some(refusal) = storage_refusal(&reply) {
+                return Err(refusal);
+            }
             match reply["error"]["message"].as_str() {
                 // These two steer the caller, so they stay codes.
                 Some(
@@ -357,7 +399,7 @@ impl Bridge {
                 Ok(value)
             }
             "capabilities.get" => {
-                let mut value = self.capabilities().await?;
+                let mut value = self.capabilities().await.map_err(with_refusal_text)?;
                 if call.message["protocol"]["minor"]
                     .as_u64()
                     .is_some_and(|minor| minor <= 6)
@@ -436,12 +478,15 @@ impl Bridge {
     }
     async fn subscription(&self, notify: &impl Fn(Value)) -> Result<(), String> {
         let mut stream = self.connection().await?;
-        let ack = timeout(
-            Duration::from_secs(5),
-            self.send(&mut stream, "service.subscribe", json!({})),
-        )
-        .await
-        .map_err(|_| "service_timeout")??;
+        let ack = timeout(Duration::from_secs(5), async {
+            if !self.phone {
+                match self.send(&mut stream, "service.subscribe.code", json!({})).await {
+                    Err(error) if error == "unsupported_method" => {}
+                    result => return result,
+                }
+            }
+            self.send(&mut stream, "service.subscribe", json!({})).await
+        }).await.map_err(|_| "service_timeout")??;
         if ack["subscribed"] != true {
             return Err("service_invalid_response".into());
         }
@@ -456,7 +501,7 @@ impl Bridge {
             match incoming(&message) {
                 // Notification clicks belong to the desktop that raised them, never a phone.
                 Ok(Incoming::Forward(event))
-                    if self.phone && event["type"] == "notification_open" => {}
+                    if self.phone && matches!(event["type"].as_str(), Some("notification_open" | "code_lsp" | "code_lsp_resync")) => {}
                 Ok(Incoming::Forward(event)) => notify(event),
                 Ok(Incoming::Resync) => self.resync(notify).await?,
                 // One delta this window cannot apply says nothing about the connection. The
@@ -613,6 +658,12 @@ pub fn incoming(message: &Value) -> Result<Incoming, Refused> {
             project_named(event).ok_or(refused("invalid_project"))?;
             Ok(Incoming::Forward(event.clone()))
         }
+        Some("code_lsp") => {
+            workspace_protocol::validate("CodeLspEvent", event)
+                .map_err(|_| refused("invalid_code_event"))?;
+            Ok(Incoming::Forward(event.clone()))
+        }
+        Some("code_lsp_resync") if *event == json!({"type":"code_lsp_resync"}) => Ok(Incoming::Forward(event.clone())),
         Some("resync_required") => Ok(Incoming::Resync),
         // A click on one of the service's desktop notifications: a bounded nonce and the
         // target the service kept for it. The desktop shell checks the target's exact shape.
@@ -688,8 +739,32 @@ fn log_line(what: &str, reason: &str, after: Option<Duration>) {
 
 #[cfg(test)]
 mod tests {
-    use super::Bridge;
+    use super::{with_refusal_text, Bridge, REFUSED};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn protocol_refusals_explain_how_to_recover() {
+        for code in [
+            "version_mismatch",
+            "service_protocol_mismatch",
+            "bridge_invalid_capabilities",
+            "unsupported_protocol",
+        ] {
+            assert_eq!(
+                with_refusal_text(code.into()),
+                format!("{REFUSED}This app and the machine service are different versions. Reinstall the package so both are the same version.")
+            );
+        }
+        #[cfg(feature = "remote")]
+        assert_eq!(
+            with_refusal_text(workspace_remote::INCOMPATIBLE_VERSION_CODE.into()),
+            format!("{REFUSED}{}", crate::remote::UPDATE_NEEDED)
+        );
+        assert_eq!(
+            with_refusal_text("service_timeout".into()),
+            "service_timeout"
+        );
+    }
 
     // Keep each socket in its private fixture directory even if the caller's
     // TMPDIR makes the real pathname too long for sockaddr_un.
@@ -750,7 +825,7 @@ mod tests {
                     let request = crate::frames::read_frame(&mut stream).await.unwrap();
                     let result = match request["method"].as_str().unwrap() {
                         "projects.list" => json!([{"projectId":"p","activation":{}}]),
-                        "service.subscribe" => json!({"subscribed":true}),
+                        "service.subscribe.code" => json!({"subscribed":true}),
                         _ => panic!("unexpected method"),
                     };
                     let _ = crate::frames::write_frame(
@@ -758,7 +833,7 @@ mod tests {
                         &json!({"jsonrpc":"2.0","id":request["id"],"result":result}),
                     )
                     .await;
-                    if request["method"] == "service.subscribe" {
+                    if request["method"] == "service.subscribe.code" {
                         let ordinal =
                             subscriptions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         // The subscriber resyncs before it reads events.
@@ -1036,7 +1111,7 @@ mod tests {
                 tokio::spawn(async move {
                     let request = read_frame(&mut stream).await.unwrap();
                     let result = match request["method"].as_str().unwrap() {
-                        "service.subscribe" => json!({"subscribed":true}),
+                        "service.subscribe.code" => json!({"subscribed":true}),
                         "projects.list" => json!((0..50)
                             .map(|i| json!({"projectId":format!("p{i}"),"activation":{}}))
                             .collect::<Vec<_>>()),
@@ -1047,7 +1122,7 @@ mod tests {
                         &json!({"jsonrpc":"2.0","id":request["id"],"result":result}),
                     )
                     .await;
-                    if request["method"] == "service.subscribe" {
+                    if request["method"] == "service.subscribe.code" {
                         std::future::pending::<()>().await;
                     }
                 });
@@ -1126,6 +1201,57 @@ mod tests {
                 assert!(error.contains("Edit the task to work in the project folder"));
                 assert!(error.ends_with("Nothing was started."));
             }
+        }
+        serving.await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn storage_refusal_carries_human_guidance_and_reason_across_the_bridge() {
+        use serde_json::json;
+
+        let root = std::env::temp_dir().join(format!("cw-storage-refusal-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("service.sock");
+        let listener = bind_socket(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let message = "This project uses format 10. Keep the original files.";
+        let serving = tokio::spawn(async move {
+            for (kind, mismatched_id) in [
+                ("project_store", false),
+                ("other", false),
+                ("project_store", true),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = crate::frames::read_frame(&mut stream).await.unwrap();
+                assert_eq!(request["method"], "projects.activate");
+                let id = if mismatched_id {
+                    json!(null)
+                } else {
+                    request["id"].clone()
+                };
+                crate::frames::write_frame(
+                    &mut stream,
+                    &json!({"jsonrpc":"2.0","id":id,
+                        "error":{"code":-32000,"message":message,
+                            "data":{"kind":kind,"reason":"unsupported_storage","retryable":false}}}),
+                ).await.unwrap();
+            }
+        });
+        let bridge = bridge(path);
+        for expected in [
+            format!("refused:project_store:unsupported_storage: {message}"),
+            "service_request_failed".into(),
+            "service_request_failed".into(),
+        ] {
+            assert_eq!(
+                bridge
+                    .rpc("projects.activate", json!({"projectId":"p"}))
+                    .await
+                    .unwrap_err(),
+                expected
+            );
         }
         serving.await.unwrap();
         std::fs::remove_dir_all(root).unwrap();

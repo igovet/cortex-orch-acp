@@ -11,11 +11,12 @@ mod runtime_files;
 #[path = "native_command_git.rs"]
 mod git;
 pub(crate) const CODEX_SCRATCH: &str = "codex_scratch";
+pub(crate) const WORKTREE_READ_ONLY: &str = "worktree_read_only";
 use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs, io,
-    os::unix::fs::DirBuilderExt,
+    os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -42,7 +43,117 @@ fn unavailable(reason: &str) -> io::Error {
     io::Error::other(format!("native_command_sandbox_unavailable: {reason}"))
 }
 
+/// A language process gets the checkout bytes, never a host write relay or
+/// the owner's environment. Paths named by the package/Dev resolver are the
+/// only extra mounts. No process is started if bubblewrap cannot set this up.
 impl Sandbox {
+    pub(crate) fn prepare_language(
+        root: &Path,
+        mounts: &[(PathBuf, PathBuf)],
+        rust: bool,
+    ) -> io::Result<Self> {
+        use std::sync::Arc;
+        let binary = PathBuf::from("/usr/bin/bwrap");
+        if fs::metadata(&binary)?.permissions().mode() & 0o6000 != 0
+            || root.canonicalize()? != root
+            || ["/", "/dev", "/proc", "/run", "/usr", "/opt", "/sys"].iter()
+                .any(|p| root == Path::new(p) || *p != "/" && root.starts_with(p))
+            || Path::new("/tmp").starts_with(root)
+        {
+            return Err(unavailable("invalid_language_view"));
+        }
+        let owner: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+        let owner_home = policy::env_path(&owner, "HOME").filter(|path| path.is_absolute());
+        // The app's HOME may be disposable (including qualification); a
+        // provisioned standard Cargo home can name the real toolchain parent.
+        // runtime_inputs still grants only its audited toolchain subpaths.
+        let rust_home = owner_home.clone().filter(|path| path.join(".cargo/bin/cargo").is_file())
+            .or_else(|| policy::env_path(&owner, "CARGO_HOME")
+                .filter(|path| path.is_absolute() && path.file_name().is_some_and(|name| name == ".cargo"))
+                .and_then(|path| path.parent().map(Path::to_path_buf)));
+        if owner_home.iter().chain(rust_home.iter()).filter_map(|path| path.canonicalize().ok())
+            .any(|home| home.starts_with(root))
+        {
+            return Err(unavailable("project_overlaps_owner_home"));
+        }
+        let scratch = Path::new("/tmp").join(format!("cortex-language-{}", crate::identity()?));
+        fs::DirBuilder::new().mode(0o700).create(&scratch)?;
+        let mut view = Self {
+            binary,
+            args: [
+                "--die-with-parent", "--unshare-all", "--unshare-user", "--disable-userns", "--clearenv",
+                "--cap-drop", "ALL", "--dev", "/dev", "--proc", "/proc", "--remount-ro", "/proc",
+                "--size", "134217728", "--tmpfs", "/tmp", "--dir", "/tmp/home",
+            ].map(OsString::from).to_vec(),
+            scratch,
+            environment: if rust {
+                rust_home.map(|home| BTreeMap::from([("HOME".into(), home.into_os_string())]))
+                    .unwrap_or_default()
+            } else { BTreeMap::new() },
+            pins: Vec::new(),
+            scoped_root: None,
+            git_context: None,
+        };
+        if root.starts_with("/tmp/home") {
+            return Err(unavailable("scratch_overlaps_checkout"));
+        }
+        let hidden = policy::controls(root, &owner)?;
+        if hidden.iter().any(|path| root.starts_with(path) ||
+            path.canonicalize().is_ok_and(|real| root.starts_with(real)))
+        {
+            return Err(unavailable("protected_project_mount"));
+        }
+        view.runtime_inputs_at(root, &hidden, Path::new("/tmp/home"))?;
+        let checkout = Arc::new(policy::pin(root)?);
+        let scan = policy::scan(root, &checkout, &hidden, &[], &[])?;
+        cortex_engine::filesystem_view::bind_pinned(
+            &mut view.args, &mut view.pins, checkout, root, true,
+        )?;
+        let mut masks = std::collections::BTreeSet::new();
+        for path in scan.private.iter().chain(&scan.private_targets).chain(&hidden) {
+            if let Ok(real) = path.canonicalize() {
+                if real.starts_with(root) { masks.insert(real); }
+            }
+        }
+        masks.extend(policy::external_link_paths(&scan, &masks).into_iter().map(Path::to_path_buf).collect::<Vec<_>>());
+        let mut covered: Vec<PathBuf> = Vec::new();
+        for path in masks {
+            if !covered.iter().any(|base| path.starts_with(base)) {
+                view.hide_project_input(root, &path)?;
+                covered.push(path);
+            }
+        }
+        for (source, target) in mounts {
+            let source = source.canonicalize()?;
+            if source.starts_with(root) || root.starts_with(&source)
+                || hidden.iter().any(|p| p.starts_with(&source) || source.starts_with(p)
+                    || p.canonicalize().is_ok_and(|p| p.starts_with(&source) || source.starts_with(&p)))
+                || source.components().any(|part| policy::private(part.as_os_str()))
+            {
+                return Err(unavailable("unsafe_language_runtime"));
+            }
+            let pin = Arc::new(policy::pin(&source)?);
+            cortex_engine::filesystem_view::bind_pinned(
+                &mut view.args, &mut view.pins, pin, target, true,
+            )?;
+        }
+        view.environment = BTreeMap::from([
+            ("HOME".into(), "/tmp/home".into()),
+            ("XDG_CACHE_HOME".into(), "/tmp/cache".into()),
+            ("XDG_CONFIG_HOME".into(), "/tmp/config".into()),
+            ("XDG_DATA_HOME".into(), "/tmp/data".into()),
+            ("RUSTUP_HOME".into(), "/tmp/home/.rustup".into()),
+            ("CARGO_HOME".into(), "/tmp/home/.cargo".into()),
+            ("CARGO_TARGET_DIR".into(), "/tmp/target".into()),
+            ("CARGO_NET_OFFLINE".into(), "true".into()),
+            ("PATH".into(), "/tmp/home/.cargo/bin:/usr/bin:/bin".into()),
+            ("TMPDIR".into(), "/tmp".into()),
+            ("LANG".into(), "C.UTF-8".into()),
+        ]);
+        view.args.extend(["--remount-ro".into(), "/".into(), "--chdir".into(), root.as_os_str().into()]);
+        Ok(view)
+    }
+
     pub(crate) fn prepare_scoped(root: &Path, protected: &[PathBuf]) -> io::Result<Self> {
         let binary = ["/usr/bin/bwrap", "/bin/bwrap"]
             .into_iter()
@@ -50,6 +161,23 @@ impl Sandbox {
             .find(|p| p.is_file())
             .ok_or_else(|| unavailable("bubblewrap_missing"))?;
         Self::scoped(binary, root, protected)
+    }
+
+    pub(crate) fn prepare_worktree(root: &Path, logical: &Path, protected: &[PathBuf]) -> io::Result<Self> {
+        let siblings = root.parent().ok_or_else(|| unavailable("invalid_project_mount"))?;
+        let binary = ["/usr/bin/bwrap", "/bin/bwrap"].into_iter().map(PathBuf::from)
+            .find(|p| p.is_file()).ok_or_else(|| unavailable("bubblewrap_missing"))?;
+        if fs::metadata(&binary)?.permissions().mode() & 0o6000 != 0
+            || root.canonicalize()? != root || logical.canonicalize()? != logical
+            || root.starts_with(logical) || logical.starts_with(root)
+            || !cortex_core::ProjectKey::new(root, cortex_core::StoreChannel::Release)
+                .is_ok_and(|key| key.root() == logical) {
+            return Err(unavailable("invalid_worktree_view"));
+        }
+        Self::with_binary_authorized(
+            binary, root, Profile::ReadOnly, &[], protected, false, crate::tool_path::environment(),
+            &mut || Ok(()), &mut BTreeMap::new(), &[logical.to_owned(), siblings.to_owned()],
+        )
     }
 
     pub(crate) fn prepare(
@@ -137,6 +265,7 @@ impl Sandbox {
             environment,
             before_write,
             timings,
+            &[],
         );
         timings.insert("preparation_ms", started.elapsed().as_millis() as u64);
         result
@@ -162,6 +291,7 @@ impl Sandbox {
             environment,
             &mut || Ok(()),
             &mut BTreeMap::new(),
+            &[],
         )
     }
 
@@ -176,6 +306,7 @@ impl Sandbox {
         environment: BTreeMap<OsString, OsString>,
         _before_write: &mut dyn FnMut() -> io::Result<()>,
         timings: &mut BTreeMap<&'static str, u64>,
+        runtime_excluded: &[PathBuf],
     ) -> io::Result<Self> {
         let root = root.canonicalize()?;
         if ["/", "/proc", "/dev", "/run"].iter().any(|p| {
@@ -237,8 +368,9 @@ impl Sandbox {
         if hidden.iter().any(|p| root.starts_with(p)) {
             return Err(unavailable("protected_project_mount"));
         }
-        s.runtime_inputs(&root, &hidden)?;
-        let extra = s.extra_tools(&root, &hidden)?;
+        let runtime_hidden = hidden.iter().chain(runtime_excluded).cloned().collect::<Vec<_>>();
+        s.runtime_inputs(&root, &runtime_hidden)?;
+        let extra = s.extra_tools(&root, &runtime_hidden)?;
         s.project_inputs(&root, &hidden, controls, timings)?;
         s.environment = BTreeMap::from([
             ("HOME".into(), runtime_files::HOME.into()),
@@ -508,7 +640,6 @@ impl Sandbox {
 /// inputs and private masks as a command view (`home` names the engine's own
 /// HOME so its controls are masked when they lie inside the checkout). The view
 /// arguments and pinned sources are appended to the caller's view.
-#[cfg(test)]
 pub(crate) fn engine_project_view(
     root: &Path,
     home: &Path,

@@ -5,6 +5,8 @@ use crate::{error::refuse, store::append_public_tx, CoreError, CoreResult, Store
 pub mod control;
 #[path = "workspace_edits.rs"]
 pub mod edits;
+#[path = "workspace_worktrees.rs"]
+pub mod worktrees;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
@@ -125,10 +127,13 @@ pub fn replay_native_start_with_policy(
         if binding != Some((store.key().root().to_string_lossy().into_owned(),actor.into())) {
             return refuse("unauthorized");
         }
+        let request = command["requestId"].as_str().ok_or(CoreError::Refused("invalid_request"))?;
         let prior: Option<(String,String)> = db.query_row(
             "SELECT digest,receipt_json FROM workspace_requests WHERE project_id=? AND actor_id=? AND request_id=?",
-            (project,actor,command["requestId"].as_str().ok_or(CoreError::Refused("invalid_request"))?),
-            |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+            (project,actor,request), |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+        if prior.is_none() {
+            worktrees::check_request(db, project, actor, request, &digest, true)?;
+        }
         prior.map(|(old,encoded)| {
             if old != digest { return refuse("payload_conflict"); }
             Ok(serde_json::from_str(&encoded)?)
@@ -215,6 +220,18 @@ pub fn draft_settings(
     })
 }
 
+/// A registered desktop host reads the saved kind; a request never supplies
+/// checkout authority or selects a filesystem path.
+pub fn draft_worktree_selected(store: &Store, project: &str, actor: &str, task: &str) -> CoreResult<bool> {
+    store.read(|db| Ok(db.query_row(
+        "SELECT json_extract(o.options_json,'$.checkout.kind') IS 'worktree'
+         FROM workspace_task_options o JOIN workspace_tasks t USING(task_id)
+         JOIN workspace_projects p USING(project_id)
+         WHERE t.task_id=? AND p.project_id=? AND p.project_root=? AND p.activated_by=?",
+        (task,project,store.key().root().to_str(),actor), |r| r.get(0),
+    ).optional()?.unwrap_or(false)))
+}
+
 /// Trusted host option; deliberately not deserializable from commands, plans or tools.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeExecutionPolicy {
@@ -285,6 +302,155 @@ pub fn start_native_input_with_policy(
     capture: Option<&crate::input::Capture>,
     policy: Option<NativeExecutionPolicy>,
 ) -> CoreResult<Value> {
+    admit_native_start(store, project, actor, command, client, capture, policy, None, None)
+}
+
+/// The first execution of a never-started Workspace task closed from the board.
+struct StartRework<'a> {
+    request: &'a Value,
+    capture: Option<&'a crate::input::Capture>,
+    history: Value,
+}
+
+fn start_rework_digest(request: &Value) -> CoreResult<String> {
+    Ok(crate::digest(&serde_json::to_vec(
+        &json!({"operation":"workspace_draft_rework","request":request}),
+    )?))
+}
+
+pub fn initial_rework_replay(
+    store: &Store, project: &str, actor: &str, request: &Value,
+) -> CoreResult<Option<Value>> {
+    let root = store.key().root().to_string_lossy();
+    store.read(|db| {
+        let prior: Option<(String,String)> = db.query_row(
+            "SELECT r.digest,r.receipt_json FROM workspace_requests r JOIN workspace_projects p USING(project_id)
+             WHERE r.project_id=? AND p.project_root=? AND p.activated_by=? AND r.actor_id=? AND r.request_id=?",
+            (project, &*root, actor, actor, request["requestId"].as_str()), |r| Ok((r.get(0)?,r.get(1)?)),
+        ).optional()?;
+        prior.map(|(digest,body)| {
+            if digest != start_rework_digest(request)? {
+                return refuse("payload_conflict");
+            }
+            Ok(serde_json::from_str(&body)?)
+        }).transpose()
+    })
+}
+
+/// Only the Workspace owner adapter supplies closed-draft evidence, after
+/// checking its archive and disposition under both its Git and machine locks.
+pub fn start_native_rework(
+    store: &Store,
+    project: &str,
+    actor: &str,
+    request: &Value,
+    capture: Option<&crate::input::Capture>,
+    history: Value,
+    machine_root: Option<&std::path::Path>,
+) -> CoreResult<Value> {
+    let capture = capture.filter(|c| !c.blocks.is_empty());
+    if request["action"] != "rework" || request["projectId"] != project
+        || !request["executionId"].is_null() || !request["ownerEpoch"].is_null()
+    {
+        return refuse("invalid_request");
+    }
+    if request.get("capture") != capture.map(|c| c.fingerprint()).as_ref() {
+        return refuse("invalid_input_capture");
+    }
+    control::checked_owner_text(request)?;
+    let command = json!({"protocol":{"major":1,"minor":8},"operation":"tasks.start",
+        "projectId":project,"actorId":actor,"target":request["taskId"],
+        "requestId":request["requestId"],"expectedVersion":request["expectedVersion"],
+        "ownerEpoch":null,"payload":{}});
+    let rework = Some(StartRework { request, capture, history });
+    if let Some(machine_root) = machine_root {
+        return start_worktree(store, project, actor, &command, machine_root, rework);
+    }
+    admit_native_start(store, project, actor, &command, None, None, None, None, rework)
+}
+
+/// Provision a saved worktree draft before admitting it. Only a checkout-aware
+/// desktop host may call this entry point. It must hold its logical repository
+/// Git lock through the whole call. Incoming ACP and automatic Sprint starts
+/// must continue to use the non-provisioning entry point.
+pub fn start_native_worktree(
+    store: &Store,
+    project: &str,
+    actor: &str,
+    command: &Value,
+    machine_root: &std::path::Path,
+) -> CoreResult<Value> {
+    start_worktree(store, project, actor, command, machine_root, None)
+}
+
+fn start_worktree(
+    store: &Store,
+    project: &str,
+    actor: &str,
+    command: &Value,
+    machine_root: &std::path::Path,
+    rework: Option<StartRework<'_>>,
+) -> CoreResult<Value> {
+    workspace_protocol::validate("Command", command)
+        .map_err(|_| CoreError::Refused("invalid_workspace_request"))?;
+    if command["operation"] != "tasks.start" || command["projectId"] != project
+        || command["actorId"] != actor || command["protocol"]["major"] != 1
+    {
+        return refuse("unauthorized");
+    }
+    let request = command["requestId"].as_str().ok_or(CoreError::Refused("invalid_request"))?;
+    let draft = command["target"].as_str().ok_or(CoreError::Refused("invalid_target"))?;
+    let digest = match &rework {
+        Some(r) => start_rework_digest(r.request)?,
+        None => start_digest(command, None, None, None)?,
+    };
+    let reserve = worktrees::reserve(store, project, actor, request, draft, &digest, command)?;
+    use worktrees::Reservation::*;
+    let (plan, witness) = match reserve {
+        Replay(receipt) => return Ok(json!({"receipt":receipt,"fresh":false})),
+        Refused(error) => return refuse(error),
+        Observed(plan, witness) => {
+            if plan.verify_initial(store.key().root(), &witness).is_err() {
+                worktrees::mark(store, project, actor, request, "uncertain", "worktree_uncertain")?;
+                return refuse("worktree_uncertain");
+            }
+            (plan, witness)
+        }
+        New(title) => {
+            let plan = match worktrees::plan(store.key().root(), machine_root, project, draft, &title) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    worktrees::mark(store, project, actor, request, "failed-known", error.code())?;
+                    return Err(error);
+                }
+            };
+            worktrees::save_plan(store, project, actor, request, &plan)?;
+            let witness = match plan.provision(store.key().root()) {
+                Ok(witness) => witness,
+                Err(_) => {
+                    worktrees::mark(store, project, actor, request, "uncertain", "worktree_uncertain")?;
+                    return refuse("worktree_uncertain");
+                }
+            };
+            worktrees::save_witness(store, project, actor, request, &witness)?;
+            (plan, witness)
+        }
+    };
+    admit_native_start(store, project, actor, command, None, None, None, Some((&plan, &witness)), rework)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_native_start(
+    store: &Store,
+    project: &str,
+    actor: &str,
+    command: &Value,
+    client: Option<(&str, &Value)>,
+    capture: Option<&crate::input::Capture>,
+    policy: Option<NativeExecutionPolicy>,
+    worktree: Option<(&worktrees::Worktree, &worktrees::Witness)>,
+    rework: Option<StartRework<'_>>,
+) -> CoreResult<Value> {
     workspace_protocol::validate("Command", command)
         .map_err(|_| CoreError::Refused("invalid_workspace_request"))?;
     if command["operation"] != "tasks.start"
@@ -300,7 +466,10 @@ pub fn start_native_input_with_policy(
     let draft = command["target"]
         .as_str()
         .ok_or(CoreError::Refused("invalid_target"))?;
-    let digest = start_digest(command, client, capture, policy)?;
+    let digest = match &rework {
+        Some(r) => start_rework_digest(r.request)?,
+        None => start_digest(command, client, capture, policy)?,
+    };
     store.write(|db| {
         let binding: Option<(String,String)> = db.query_row(
             "SELECT project_root,activated_by FROM workspace_projects WHERE project_id=?",
@@ -315,6 +484,9 @@ pub fn start_native_input_with_policy(
             return if old == digest { Ok(json!({"receipt":serde_json::from_str::<Value>(&encoded)?,"fresh":false})) }
                 else { refuse("payload_conflict") };
         }
+        if worktree.is_none() {
+            worktrees::check_request(db, project, actor, request, &digest, false)?;
+        }
         let row: Option<(String,i64,Option<String>,String)> = db.query_row(
             "SELECT t.description,t.version,t.execution_id,o.options_json FROM workspace_tasks t
              JOIN workspace_task_options o USING(task_id) WHERE t.project_id=? AND t.task_id=?",
@@ -323,12 +495,20 @@ pub fn start_native_input_with_policy(
         if command["expectedVersion"] != version.to_string() { return refuse("stale_version"); }
         if existing.is_some() { return refuse("busy"); }
         if !command["ownerEpoch"].is_null() { return refuse("stale_owner_epoch"); }
-        let options: Value = serde_json::from_str(&options)?;
+        let mut options: Value = serde_json::from_str(&options)?;
         if options.get("deletingSprint").is_some() {return refuse("sprint_deleting");}
-        // A native host runs every engine session, command and verification in the
-        // project folder; a separate task worktree is refused before any effect.
-        if options["checkout"]["kind"].as_str().is_some_and(|v| v != "main") {
-            return refuse("native_worktree_unavailable");
+        match (options["checkout"]["kind"].as_str(), worktree) {
+            (Some("worktree"), Some((plan, _))) => {
+                options["checkout"] = plan.projection();
+                options["baseRevision"] = json!(plan.base_sha);
+            }
+            (None | Some("main"), None) => {
+                if worktrees::has_unresolved(db, project, draft)? {
+                    return refuse("worktree_uncertain");
+                }
+            }
+            (_, Some(_)) => return refuse("worktree_binding_invalid"),
+            _ => return refuse("native_worktree_unavailable"),
         }
         // Saved owner settings are honoured as in Python `_dispatch_workspace_start`;
         // the host qualified their route before admission. Incoming clients bring
@@ -342,6 +522,8 @@ pub fn start_native_input_with_policy(
         let draft_capture = if has_files { Some(crate::input::capture_from_wire(&options["attachments"])?) } else { None };
         let saved = if client.is_none() { saved_settings(&options)? } else { None };
         let task = format!("t_{}",uuid::Uuid::new_v4().simple());
+        // Start does not hold the whole checkout: structured writers are
+        // admitted by their effective write scope and fenced at the effect.
         // File bodies stay in private retention; the event keeps only their descriptors.
         let mut event_options = options.clone();
         if let Some(m) = event_options.as_object_mut() { m.remove("attachments"); }
@@ -359,6 +541,11 @@ pub fn start_native_input_with_policy(
         crate::routing::snapshot_tx(db, &task, store.key().root())?;
         crate::lifecycle::event_tx(db,&task,"TASK_STATE_CHANGED",json!({"previous":"CREATED","state":"PLANNING"}))?;
         crate::lifecycle::event_tx(db,&task,"NATIVE_START_ADMITTED",json!({"draft":draft,"request":request,"goal":goal,"options":event_options}))?;
+        if let Some((plan, witness)) = worktree {
+            worktrees::bind_tx(db, project, actor, request, draft, version, &task, plan, witness)?;
+            db.execute("UPDATE workspace_task_options SET options_json=? WHERE task_id=?",
+                (options.to_string(), draft))?;
+        }
         let execution = bind_native_execution_tx(db,store,project,actor,draft,&task,&owner)?;
         if let Some(settings) = &saved {
             let session: String = db.query_row("SELECT acp_session_id FROM workspace_executions WHERE execution_id=?",
@@ -400,7 +587,19 @@ pub fn start_native_input_with_policy(
         db.execute("INSERT INTO workspace_starts(execution_id,task_id,project_id,actor_id,request_id,source_origin,source_event_id,state,created_at)
             VALUES (?,?,?,?,?,?,?,'claimed',?)",
             (&execution,draft,project,actor,request,"native-desktop",format!("native:{execution}"),crate::now()))?;
-        let reply = receipt(command,"recorded",&execution,1);
+        let mut reply = receipt(command,"recorded",&execution,1);
+        if let Some(rework) = rework {
+            let b = control::binding(db, &store.key().root().to_string_lossy(), project, actor, &execution)?;
+            let event = crate::lifecycle::event_tx(db, &task, "TASK_REOPENED", json!({
+                "origin":"owner_rework","previous":"NOT_STARTED","revision":0,
+                "request":request,"closed":rework.history,"baseRevision":options["baseRevision"]
+            }))?;
+            control::owner_message_tx(store, db, &b, rework.request, rework.capture, crate::TaskState::Planning, false)?;
+            reply["done"] = json!(true);
+            reply["state"] = json!("PLANNING");
+            reply["reworkEvent"] = json!(event.to_string());
+            reply["baseRevision"] = options["baseRevision"].clone();
+        }
         db.execute("INSERT INTO workspace_requests VALUES (?,?,?,?,?,?)",
             (project,actor,request,"tasks.start",digest,serde_json::to_string(&reply)?))?;
         Ok(json!({"receipt":reply,"fresh":true,"task":task,"owner":{"owner":owner.owner,"epoch":owner.epoch},"goal":goal}))
@@ -423,6 +622,29 @@ pub fn create_draft(
     project: &str,
     actor: &str,
     command: &Value,
+) -> CoreResult<DraftReply> {
+    create_draft_with_planner(store, project, actor, command, None)
+}
+
+/// Trusted service entry point; the marker is not a command payload field and
+/// does not select an execution policy or link the task to the sprint's run.
+pub fn create_sprint_planning_draft(
+    store: &Store,
+    project: &str,
+    actor: &str,
+    command: &Value,
+    sprint: &str,
+) -> CoreResult<DraftReply> {
+    workspace_protocol::core::identity(sprint).map_err(CoreError::Refused)?;
+    create_draft_with_planner(store, project, actor, command, Some(sprint))
+}
+
+fn create_draft_with_planner(
+    store: &Store,
+    project: &str,
+    actor: &str,
+    command: &Value,
+    planning_sprint: Option<&str>,
 ) -> CoreResult<DraftReply> {
     workspace_protocol::validate("Command", command)
         .map_err(|_| CoreError::Refused("invalid_workspace_request"))?;
@@ -448,8 +670,12 @@ pub fn create_draft(
         .as_str()
         .ok_or(CoreError::Refused("invalid_request"))?;
     // serde_json's default sorted map and compact UTF-8 encoding match storage.encode.
-    // This payload contains no floating-point fields.
-    let digest = crate::digest(&serde_json::to_vec(command)?);
+    // Keep the digest of ordinary creates unchanged for retained receipts. A
+    // planner receipt is replayable only with the same trusted sprint identity.
+    let digest = crate::digest(&match planning_sprint {
+        Some(sprint) => serde_json::to_vec(&(command, sprint))?,
+        None => serde_json::to_vec(command)?,
+    });
     store.write(|db| {
         let binding: Option<(String,String)> = db.query_row(
             "SELECT project_root,activated_by FROM workspace_projects WHERE project_id=?",
@@ -476,6 +702,9 @@ pub fn create_draft(
                 (&id,project,description,crate::now()))?;
             let mut options = command["payload"].clone();
             options.as_object_mut().unwrap().remove("description");
+            if let Some(sprint) = planning_sprint {
+                options["planningSprintId"] = json!(sprint);
+            }
             db.execute("INSERT INTO workspace_task_options VALUES (?,?)",(&id,serde_json::to_string(&options)?))?;
             db.execute("UPDATE workspace_projects SET version=version+1 WHERE project_id=?",[project])?;
             append_public_tx(db,project,&id,"task",1)?;

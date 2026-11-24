@@ -43,6 +43,7 @@ mod native_command_sandbox;
 #[doc(hidden)]
 pub mod native_command_supervisor;
 mod native_commands;
+mod owner_command_output;
 mod native_context_tools;
 mod native_controls;
 mod native_documents;
@@ -76,6 +77,7 @@ mod notifier;
 mod project_guard;
 mod remote;
 pub mod remote_policy;
+mod storage_retention;
 mod session_bus;
 pub mod short_text_engine;
 mod terminal;
@@ -164,6 +166,7 @@ pub struct Project {
 /// Why an activated project has no working child, and when the service tries again.
 struct Failure {
     reason: String,
+    message: Option<&'static str>,
     attempts: u32,
     retry_at: tokio::time::Instant,
 }
@@ -190,7 +193,10 @@ pub struct Service {
     events: broadcast::Sender<Value>,
     /// Wakes the sprint loop for one project after a change that can move a sprint on.
     sprint_wake: native_driver::sprints::SprintWake,
+    retention_wake: tokio::sync::Notify,
     helper: machine::Helper,
+    editor: Arc<machine::EditorAuthority>,
+    code_lsp: machine::code_lsp::Manager,
     searches: directories::Searches,
     core: Arc<core_host::Registry>,
     terminals: Mutex<terminal::Manager>,
@@ -296,7 +302,10 @@ impl Service {
             shutdown,
             events,
             sprint_wake: Default::default(),
+            retention_wake: Default::default(),
             helper: machine::Helper::default(),
+            editor: Arc::default(),
+            code_lsp: Default::default(),
             searches: directories::Searches::default(),
             core: Arc::new(core_host::Registry::default()),
             terminals: Mutex::new(terminal::Manager::default()),
@@ -420,7 +429,8 @@ impl Service {
     pub async fn status(&self) -> Value {
         json!({"stopping":self.stopping.load(Ordering::SeqCst),"actorId":actor(),
             "channel":workspace_protocol::channel::current().name,"application":workspace_protocol::channel::current().title,
-            "engines":self.engine_setup(),"notifications":self.notifier.status(),"transport":"unix","protocol":{"major":1,"minor":0}})
+            "engines":self.engine_setup(),"notifications":self.notifier.status(),"transport":"unix",
+            "protocol":{"major":workspace_protocol::WIRE_MAJOR,"minor":workspace_protocol::WIRE_MINOR}})
     }
     pub async fn project_status(&self, id: &str) -> io::Result<Value> {
         let state = self.state.lock().await;
@@ -433,14 +443,18 @@ impl Service {
                 "capabilities":native_runtime::capabilities()?}),
             );
         }
-        let failed = state.failures.get(id).map(|f| f.reason.as_str());
-        Ok(if state.activating.contains(id) {
-            json!({"ready":false,"state":"starting","recovery":"unknown","reason":failed})
-        } else if let Some(reason) = failed {
-            json!({"ready":false,"state":"failed","recovery":"unknown","reason":reason})
+        let failed = state.failures.get(id);
+        let mut reply = if state.activating.contains(id) {
+            json!({"ready":false,"state":"starting","recovery":"unknown","reason":failed.map(|f| &f.reason)})
+        } else if let Some(failure) = failed {
+            json!({"ready":false,"state":"failed","recovery":"unknown","reason":failure.reason})
         } else {
             json!({"ready":false,"state":"inactive","recovery":"unknown","reason":"project_inactive_or_activation_unavailable"})
-        })
+        };
+        if let Some(message) = failed.and_then(|f| f.message) {
+            reply["message"] = json!(message);
+        }
+        Ok(reply)
     }
     fn home_path(&self, path: &Path) -> io::Result<PathBuf> {
         let path = match path.strip_prefix("~") {
@@ -646,6 +660,7 @@ impl Service {
             state.projects = updated;
             state.failures.remove(id);
         }
+        self.code_lsp.close(Some(id)).await;
         self.terminals.lock().await.remove(id).await;
         Ok(json!({"outcome":"removed"}))
     }
@@ -697,7 +712,7 @@ impl Service {
         }
         result
     }
-    fn note_failure(state: &mut State, id: &str, reason: String) {
+    fn note_failure(state: &mut State, id: &str, error: &io::Error) {
         let attempts = state
             .failures
             .get(id)
@@ -709,7 +724,8 @@ impl Service {
         state.failures.insert(
             id.into(),
             Failure {
-                reason,
+                reason: error.to_string(),
+                message: local::storage_diagnostic(error).map(|d| d.message),
                 attempts,
                 retry_at: tokio::time::Instant::now() + wait,
             },
@@ -726,7 +742,7 @@ impl Service {
                     "project_activation_running" | "project_not_found" | "service_stopping"
                 ) {
                     let mut state = self.state.lock().await;
-                    Self::note_failure(&mut state, id, error.to_string());
+                    Self::note_failure(&mut state, id, &error);
                     drop(state);
                     self.project_changed(id);
                 }
@@ -753,10 +769,11 @@ impl Service {
                 })
                 .await
                 .map_err(|_| failure("storage_unavailable"))?
-                .map_err(|e| failure(e.code()))
+                .map_err(local::core_failure)
             };
             let opened = match opened {
-                Ok(runtime) => {
+                Ok(mut runtime) => {
+                    runtime.workspace_updates = Some(self.events.clone());
                     let runtime = Arc::new(runtime);
                     match runtime.recover_from(engine_proc).await {
                         // An answered stop question whose relaunch a restart interrupted
@@ -766,7 +783,7 @@ impl Service {
                             let _ = runtime.continue_owed_tasks().await;
                             Ok(runtime)
                         }
-                        Err(error) => Err(failure(error.code())),
+                        Err(error) => Err(local::core_failure(error)),
                     }
                 }
                 Err(error) => Err(error),
@@ -780,11 +797,12 @@ impl Service {
                     drop(state);
                     // A project that just opened gets its first sprint pass now, not on some later wake.
                     self.sprint_wake.project(id);
+                    self.retention_wake.notify_one();
                     self.project_changed(id);
                     return Ok(json!({"projectId":id,"executionHost":"rust","recovery":"fresh"}));
                 }
                 Err(e) => {
-                    Self::note_failure(&mut state, id, e.to_string());
+                    Self::note_failure(&mut state, id, &e);
                     drop(state);
                     self.project_changed(id);
                     return Err(e);
@@ -921,7 +939,9 @@ impl Service {
         self.accepting()?;
         let native = self.state.lock().await.native.get(id).cloned();
         if let Some(native) = native {
-            return native.stop_execution(id.into(), execution.into()).await;
+            let result = native.stop_execution(id.into(), execution.into()).await;
+            self.notifier.touch(id);
+            return result;
         }
         Err(self.inactive(id).await)
     }
@@ -971,15 +991,36 @@ impl Service {
         self.accepting()?;
         let project = params["projectId"]
             .as_str()
-            .ok_or_else(|| failure("invalid_project"))?;
+            .ok_or_else(|| failure("invalid_project"))?.to_owned();
         params["executionId"]
             .as_str()
             .ok_or_else(|| failure("invalid_execution"))?;
-        let native = self.state.lock().await.native.get(project).cloned();
+        let native = self.state.lock().await.native.get(&project).cloned();
         if let Some(native) = native {
-            return native.control(project.to_owned(), params).await;
+            if params["action"] == "handoff_merge" {
+                let capture = match params.get("attachments") {
+                    None => None,
+                    Some(Value::Array(items)) if items.is_empty() => None,
+                    Some(items) => Some(
+                        cortex_core::input::capture_from_wire(
+                            &self.resolved_attachments(json!({"attachments":items})).await?["attachments"],
+                        ).map_err(|e| failure(e.code()))?,
+                    ),
+                };
+                let result = native.control_input(project.clone(), params, capture).await;
+                self.notifier.touch(&project);
+                self.project_changed(&project);
+                return result;
+            }
+            let merge = matches!(params["action"].as_str(), Some("inspect_merge" | "request_merge_checks"));
+            let result = native.control(project.clone(), params).await;
+            if merge {
+                self.notifier.touch(&project);
+                self.project_changed(&project);
+            }
+            return result;
         }
-        Err(self.inactive(project).await)
+        Err(self.inactive(&project).await)
     }
     pub async fn stop(&self) -> io::Result<()> {
         if self.stopping.swap(true, Ordering::SeqCst) {
@@ -998,6 +1039,7 @@ impl Service {
         if let Some(remote::Remote::Running(host)) = self.remote.get() {
             host.shutdown().await;
         }
+        self.code_lsp.close(None).await;
         self.voice.lock().await.stop().await;
         self.terminals.lock().await.stop().await;
         let _activations = self.native_activation.write().await;
@@ -1009,15 +1051,24 @@ impl Service {
         Ok(())
     }
     pub async fn serve(self: Arc<Self>) -> io::Result<()> {
+        self.serve_with_retention_clock(SystemTime::now).await
+    }
+
+    async fn serve_with_retention_clock(
+        self: Arc<Self>,
+        wall_clock: impl Fn() -> SystemTime + Send + 'static,
+    ) -> io::Result<()> {
         let mut shutdown = self.shutdown.subscribe();
         let mut connections = JoinSet::new();
         let supervisor = tokio::spawn(self.clone().supervise());
         let native_events = tokio::spawn(self.clone().native_events());
         // Native projects have no child queue loop; this plans and runs their sprints.
         let native_sprints = tokio::spawn(self.clone().native_sprints());
-        loop {
+        let (retention_stop, stop_retention) = watch::channel(());
+        let retention = tokio::spawn(self.clone().storage_retention(stop_retention, wall_clock));
+        let result = loop {
             if *shutdown.borrow() {
-                break;
+                break Ok(());
             }
             tokio::select! {
                 _=shutdown.changed()=>(),
@@ -1025,29 +1076,37 @@ impl Service {
                 // connection ends. Accepting and dropping it would read as a lost service to a
                 // client whose own busy reads hold the other connections.
                 accepted=self.endpoint.listener.accept(),if connections.len()<CONNECTION_LIMIT=>{
-                    let (stream,_)=accepted?;
+                    let (stream, _) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) => break Err(error),
+                    };
                     if local::authorize(&stream).is_err() { continue; }
                     let service=self.clone();
                     connections.spawn(async move { let _=service.client(stream).await; });
                 }
                 _=connections.join_next(),if !connections.is_empty()=>(),
             }
-        }
+        };
+        drop(retention_stop);
         supervisor.abort();
         native_events.abort();
         native_sprints.abort();
         connections.abort_all();
         while connections.join_next().await.is_some() {}
+        self.code_lsp.close(None).await;
         // Abort requests alone do not drop task-owned Arcs or the endpoint lock.
         // Observe both background owners before reporting the server settled.
         let _ = supervisor.await;
         let _ = native_events.await;
-        Ok(())
+        let _ = native_sprints.await;
+        let _ = retention.await;
+        result
     }
     async fn client(self: Arc<Self>, stream: UnixStream) -> io::Result<()> {
         local::authorize(&stream)?;
         let (mut reader, mut writer) = stream.into_split();
         let mut subscription = None;
+        let mut code_events = None;
         loop {
             let message = {
                 // read_exact is not cancellation-safe after consuming a frame prefix.
@@ -1058,6 +1117,19 @@ impl Service {
                     if let Some(receiver) = subscription.as_mut() {
                         tokio::select! {
                             message=&mut frame=>break message?,
+                            event=async {
+                                match code_events.as_mut() {
+                                    Some(receiver) => match self.receive_event(receiver).await? {
+                                        event if event["type"] == "resync_required" => Ok::<Value, io::Error>(json!({"type":"code_lsp_resync"})),
+                                        event => Ok(event),
+                                    },
+                                    None => std::future::pending().await,
+                                }
+                            }=>{
+                                let event: Value = event?;
+                                timeout(self.config.request_timeout,write_frame(&mut writer,&json!({"jsonrpc":"2.0","method":"service.event","params":event})))
+                                    .await.map_err(|_|failure("client_write_timeout"))??;
+                            },
                             event=self.receive_event(receiver)=>{
                                 let event=event?;
                                 timeout(self.config.request_timeout,write_frame(&mut writer,&json!({"jsonrpc":"2.0","method":"service.event","params":event})))
@@ -1081,6 +1153,13 @@ impl Service {
             };
             let stopping = request.method == "service.stop" && request.params == json!({});
             let result = match request.method.as_str() {
+                // The remote tunnel allowlists ordinary service.subscribe only.
+                "service.subscribe.code" if request.params == json!({}) => {
+                    self.accepting()?;
+                    subscription = Some(self.subscribe());
+                    code_events = Some(self.code_lsp.subscribe());
+                    Ok(json!({"subscribed":true}))
+                }
                 "service.subscribe" if request.params == json!({}) => {
                     self.accepting()?;
                     subscription = Some(self.subscribe());
@@ -1099,7 +1178,13 @@ impl Service {
             let response = match result {
                 Ok(value) => json!({"jsonrpc":"2.0","id":request.id,"result":value}),
                 Err(error) => {
-                    json!({"jsonrpc":"2.0","id":request.id,"error":{"code":-32000,"message":error.to_string()}})
+                    let error = if let Some(d) = local::storage_diagnostic(&error) {
+                        json!({"code":-32000,"message":d.message,
+                            "data":{"kind":"project_store","reason":d.reason,"retryable":d.retryable}})
+                    } else {
+                        json!({"code":-32000,"message":error.to_string()})
+                    };
+                    json!({"jsonrpc":"2.0","id":request.id,"error":error})
                 }
             };
             timeout(
@@ -1119,9 +1204,8 @@ impl Service {
             "service.status" if params == json!({}) => Ok(self.status().await),
             "service.stop" if params == json!({}) => Ok(json!({"outcome":"stop_requested"})),
             "service.capabilities" if params == json!({}) => Ok(
-                json!({"channel":workspace_protocol::channel::current().name,"application":workspace_protocol::channel::current().title,"methods":["native.query","native.board","service.status","service.capabilities","service.subscribe","service.stop","projects.list","projects.register","projects.rename","projects.remove","projects.activate","projects.status","workspace","executions.cancel","executions.prompt","executions.control","machine.call","directories.search","directories.cancel","terminal.open","terminal.read","terminal.write","terminal.resize","terminal.close","voice.start","voice.read","voice.stop","voice.cancel","remote.status","remote.enable","remote.pairing.start","remote.pairing.cancel","remote.pairing.decide","remote.devices.revoke","remote.relay.set","remote.sudo.set","askpass.list","askpass.answer","owner_actions.list","owner_actions.act","notifications.report","notifications.opened","notifications.take"],"machine":true,"permissions":false,"sessionOptions":false,
-                    // The native host runs every task in the project folder (no task worktrees).
-                    "taskWorktrees":false}),
+                json!({"channel":workspace_protocol::channel::current().name,"application":workspace_protocol::channel::current().title,"methods":["native.query","native.board","service.status","service.capabilities","service.subscribe","service.subscribe.code","service.stop","projects.list","projects.register","projects.rename","projects.remove","projects.activate","projects.status","workspace","executions.cancel","executions.prompt","executions.control","machine.call","directories.search","directories.cancel","terminal.open","terminal.read","terminal.write","terminal.resize","terminal.close","voice.start","voice.read","voice.stop","voice.cancel","remote.status","remote.enable","remote.pairing.start","remote.pairing.cancel","remote.pairing.decide","remote.devices.revoke","remote.relay.set","remote.sudo.set","askpass.list","askpass.answer","owner_actions.list","owner_actions.act","notifications.report","notifications.opened","notifications.take"],"machine":true,"permissions":false,"sessionOptions":false,
+                    "taskWorktrees":true,"codeLsp":true,"codeLspDevOverrides":workspace_protocol::channel::current().is_dev()}),
             ),
             "projects.list" if params == json!({}) => Ok(self.projects().await),
             "projects.register" => {
