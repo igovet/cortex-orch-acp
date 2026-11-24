@@ -2,6 +2,7 @@ import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Mat
 import { automaticQueueOf, dependencyProblem, queueDrivenMode, runBlocker, SPRINT_RUN_MODES, type PlanItem, type Sprint, type TaskSettings, type WorkspaceState } from "@cortex/workspace-domain";
 import { AttachChips, createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
 import { useWs } from "./ctx";
+import { REQUESTING, RequestLabel } from "./request-feedback";
 import { FieldEdit } from "./field-edit";
 import { createFollow } from "./follow";
 import { Pill } from "./worker";
@@ -11,12 +12,13 @@ import { ActionBar, Page, revealCutIn, revealWhenCut, SectionHead, StatusLane, T
 import { Hint } from "./settings-kit";
 import { Answered, QuestionForm, type AskAnswer } from "./questions";
 import type { Route } from "./router";
-import { clock, decisionRoute, humanStatus, planningTaskOf, sprintModeDescription, sprintModeLabel, sprintTitle, sprintView, stopReason, type ProjectSummary } from "./selectors";
+import { activePlanningWarning, clock, decisionRoute, humanStatus, classifiedPlanningFailure, planningChangeRequired, planningFailureDetails, savedPlanningText, stoppedPlanningComposerText, stoppedPlanningText, planningTaskOf, sprintModeDescription, sprintModeLabel, sprintTitle, sprintView, stopReason, type ProjectSummary } from "./selectors";
 import { Conversation as TaskConversation, firstWorker, TaskWorkers, useSessionClock } from "./session";
 import { sessionModel, type SessionModel } from "./session-model";
 import { PlanningPlace } from "./task-place";
 import { share } from "./stable";
 import { ResultText } from "./result-text";
+import { ResultScope } from "./result-links";
 import { CopySource, MessageTools } from "./message-copy";
 import { SentMessages } from "./sent";
 import { createLabel, itemTitle, planCaption, planGraph, planningAsks, planningThread, planRows, queueStall, sprintGap, sprintSummary, type PlanRow } from "./sprint-model";
@@ -90,7 +92,7 @@ export function QueueButton(props: { sprint: Sprint; line?: boolean; small?: boo
   // label, and beside the other outlined controls of the board bar a disabled Continue queue read as usable.
   const runCls = () => blocker() || ws.gate("run_sprint") ? `btn btn-primary${size()}` : cls();
   return <Show when={!props.sprint.archivedAt && props.sprint.planning === "created"}>
-    <Show when={queueDrivenMode(props.sprint.runMode)} fallback={<Show when={next()}>{v => <button class={cls()} aria-describedby={described("start_task")} {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: v().id, now: ws.store.clock() })}>Start task {number()}</button>}</Show>}>
+    <Show when={queueDrivenMode(props.sprint.runMode)} fallback={<Show when={next()}>{v => <button class={cls()} aria-describedby={described("start_task")} {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: v().id, now: ws.store.clock() })}><RequestLabel pending={ws.store.pendingTask("start_task", v().id)} text={REQUESTING.start_task}>Start task {number()}</RequestLabel></button>}</Show>}>
       <Show when={props.sprint.queueState === "running"} fallback={<Show when={!complete()}>
         <button class={runCls()} aria-disabled={blocker() ? "true" : undefined} data-why={blocker()} aria-describedby={described("run_sprint", blocker())} {...ws.needs("run_sprint")} onClick={run}>{props.sprint.queueState === "paused" ? "Continue queue" : "Run sprint"}</button>
       </Show>}>
@@ -170,9 +172,10 @@ export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }
     // A refusal is shown once, on the run's own error line (with any kept worktree paths), not repeated in the body.
     // A deletion that started but still waits for a task's stop has happened in part: the dialog closes, the receipt
     // says what is left, and the sprint's own Deleting strip and Retry delete… carry it on.
-    ws.open({kind:"confirm",title:"Delete this sprint and its tasks?",action:"Delete sprint",danger:true,note,
+    const command = {type:"delete_sprint",projectId,sprintId:id,confirmed:true} as const;
+    ws.open({kind:"confirm",title:"Delete this sprint and its tasks?",action:"Delete sprint",danger:true,note,pending: () => ws.store.pendingRequest(command) ? REQUESTING.delete_sprint : undefined,
       go:async () => {
-        const r = await ws.run({type:"delete_sprint",projectId,sprintId:id,confirmed:true});
+        const r = await ws.run(command);
         if (r.ok) ws.go({name:"home",machine:ws.machine().id});
         return r.ok || r.outcome === "partial_effect";
       }});
@@ -184,11 +187,11 @@ export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }
     <Show when={props.tab === "summary"}><QueueButton sprint={props.sprint} line /></Show>
     <Show when={props.sprint.planning === "created"}><button class="btn btn-line tb-fold" onClick={() => ws.newItem("task", props.sprint.projectId, props.sprint.id)}><I n="plus" s={14} />New task</button></Show>
     <button class="btn btn-line tb-fold" {...ws.needs("close_sprint")} onClick={close}>Close sprint…</button>
-    <button class="ib" popovertarget="m-sprint-menu" aria-label="Sprint actions"><I n="more" /></button>
+    <button data-tooltip="" class="ib" popovertarget="m-sprint-menu" aria-label="Sprint actions"><I n="more" /></button>
     <Pop id="m-sprint-menu" class="pop-right" align="right" label="Sprint actions">
       <Show when={props.sprint.planning === "created"}><div class="tb-fold-only"><MenuItem icon="plus" label="New task" onSelect={() => ws.newItem("task", props.sprint.projectId, props.sprint.id)} /></div></Show>
       <Show when={planning() && props.sprint.planning !== "cancelled"}><MenuItem icon="x" label="Cancel planning" needs="cancel_planning" onSelect={() => ws.run({ type: "cancel_planning", sprintId: props.sprint.id })} /></Show>
-      <Show when={props.sprint.planning === "cancelled"}><MenuItem icon="play" label="Resume planning" needs="resume_planning" onSelect={() => ws.run({ type: "resume_planning", sprintId: props.sprint.id })} /></Show>
+      <Show when={props.sprint.planning === "cancelled" && !planningChangeRequired(props.sprint)}><MenuItem icon="play" label={props.sprint.planningFailure ? "Retry planning" : "Resume planning"} needs="resume_planning" onSelect={() => ws.run({ type: "resume_planning", sprintId: props.sprint.id })} /></Show>
       <MenuItem icon="archive" label="Close sprint…" needs="close_sprint" onSelect={close} />
       <MenuItem icon="trash" label="Delete sprint…" needs="delete_sprint" onSelect={remove} />
     </Pop>
@@ -220,7 +223,7 @@ const planningRoute = (machine: string, sprint: Sprint, tab: "planning" | "worke
  * plan stands for approval on the Plan tab, and what the service said about planning (a failure, a time limit) reads after
  * the conversation. Stays mounted while hidden, so a half-written message and its attachments survive.
  */
-function PlanningTaskConversation(props: { sprint: Sprint; taskId: string; hidden?: boolean; onOpenPlan: () => void }) {
+function PlanningTaskConversation(props: { sprint: Sprint; taskId: string; hidden?: boolean; changingRequest: Accessor<boolean>; onOpenPlan: () => void }) {
   const ws = useWs();
   const model = createMemo<SessionModel | null>(prev => sessionModel(ws.store.index(), props.taskId) ?? prev ?? null);
   const now = useSessionClock();
@@ -236,7 +239,7 @@ function PlanningTaskConversation(props: { sprint: Sprint; taskId: string; hidde
       <div class="ai"><ResultText breaks text={n().text} /><AttachChips files={n().attachments} open /></div><MessageTools text={n().text} /></Show>}</Keyed>
     <PlanLine sprint={props.sprint} onOpenPlan={props.onOpenPlan} />
   </>;
-  return <Show when={model()}>{m => <PlanningPlace.Provider value={{ sprint: () => props.sprint }}>
+  return <Show when={model()}>{m => <PlanningPlace.Provider value={{ sprint: () => props.sprint, changingRequest: props.changingRequest }}>
     <TaskConversation model={m} now={now()} pick={firstWorker(m())} onPick={onPick} hidden={props.hidden} brief={<SprintBrief sprint={props.sprint} />} tail={tail} />
   </PlanningPlace.Provider>}</Show>;
 }
@@ -254,7 +257,7 @@ function PlanningTaskWorkers(props: { sprint: Sprint; taskId: string; worker?: s
 }
 
 /** Stays mounted while hidden, so a half-written message and its attachments survive. `onUnsent` says whether any is waiting. */
-function Conversation(props: { sprint: Sprint; hidden?: boolean; onUnsent?: (unsent: boolean) => void; onOpenPlan?: () => void }) {
+function Conversation(props: { sprint: Sprint; hidden?: boolean; changingRequest: Accessor<boolean>; onUnsent?: (unsent: boolean) => void; onOpenPlan?: () => void }) {
   const ws = useWs();
   const s = () => props.sprint;
   const [text, setText] = createSignal("");
@@ -275,9 +278,9 @@ function Conversation(props: { sprint: Sprint; hidden?: boolean; onUnsent?: (uns
   // As in a task: while the planner works and the field is empty the button stops planning; stopped, it resumes it.
   const planEmpty = () => !text().trim() && files.files().length === 0;
   const planControl = () => s().planning === "planning" && asks().length === 0 && planEmpty() ? { label: "Stop", icon: "stop", needs: "cancel_planning" as const, go: () => void ws.run({ type: "cancel_planning", sprintId: s().id }), effect: "Stop cancels planning and keeps the conversation; Resume continues it. Write a message to send it instead." }
-    : s().planning === "cancelled" ? { label: "Resume", icon: "play", needs: "resume_planning" as const, go: () => void ws.run({ type: "resume_planning", sprintId: s().id }), effect: "Resume continues planning." }
+    : s().planning === "cancelled" && !s().planningFailure && !props.changingRequest() ? { label: "Resume", icon: "play", needs: "resume_planning" as const, go: () => void ws.run({ type: "resume_planning", sprintId: s().id }), effect: "Resume continues planning." }
     : null;
-  const closed = () => s().planning === "created" ? "Tasks are created. Edit them on the Board." : s().planning === "cancelled" ? "Planning is cancelled. Resume it to continue." : null;
+  const closed = () => s().planning === "created" ? "Tasks are created. Edit them on the Board." : s().planning === "cancelled" && !props.changingRequest() ? stoppedPlanningComposerText(s()) : null;
   // A message to the planner reads in the conversation from the press and leaves the field then; one that does not arrive
   // keeps its text and files on its line, with Retry and Edit.
   const sentHere = () => ({ kind: "sprint" as const, sprintId: s().id });
@@ -286,7 +289,6 @@ function Conversation(props: { sprint: Sprint; hidden?: boolean; onUnsent?: (uns
     const attachments = files.files();
     setText(""); files.clear();
     void ws.run({ type: "plan_message", sprintId: s().id, text: value, attachments, now: ws.store.clock() });
-    follow.jump();
   };
   createEffect(() => {
     const back = ws.store.sends.returned(sentHere());
@@ -300,6 +302,9 @@ function Conversation(props: { sprint: Sprint; hidden?: boolean; onUnsent?: (uns
   let timeline: HTMLDivElement | undefined;
   // A conversation reads from its latest line, as the task's does: it opens at its end and stays there until the owner scrolls up.
   const follow = createFollow(() => timeline, () => thread().length + ws.store.sends.shown(sentHere()).length + asks().length + (s().plan ? 1 : 0));
+  // A message or an answer the owner sends here brings the end into view and turns following on, as in a task's conversation.
+  let pressedSeen = ws.store.sends.pressed(sentHere());
+  createEffect(() => { const n = ws.store.sends.pressed(sentHere()); if (n > pressedSeen) follow.jump(); pressedSeen = n; });
   return <section class="sp-conv" aria-label="Planning conversation" hidden={props.hidden}>
     <div class="timeline" ref={timeline} onScroll={follow.onScroll}><div class="tl-in">
       <SprintBrief sprint={s()} />
@@ -320,9 +325,9 @@ function Conversation(props: { sprint: Sprint; hidden?: boolean; onUnsent?: (uns
       <MessageComposer label="Message the planner" inputId="ws-plan-input" placeholder="Ask for changes to the plan, tag @files…" text={text()} onText={setText} files={files} mic={mic} off={closed() ?? undefined}
         suggest={{ projectId: s().projectId }}
         route={<RouteBar id="plan" up compact needs="set_sprint_settings" settings={settings()} onChange={patch => ws.run({ type: "set_sprint_settings", sprintId: s().id, settings: patch })} />}
-        effect={planControl()?.effect}
+        effect={props.changingRequest() ? (classifiedPlanningFailure(s()) ? "Sending your amendment starts planning again." : "Sending your changes resumes planning.") : planControl()?.effect}
         send={planControl() ? { label: planControl()!.label, needs: planControl()!.needs, go: planControl()!.go, run: { icon: planControl()!.icon } }
-          : { label: "Send to the planner", needs: "plan_message", why: files.busy() ? "Attachments are still loading" : text().trim() ? undefined : "Write a message first", go: () => send(text()), insertAndSend: send }} />
+          : { label: props.changingRequest() ? (classifiedPlanningFailure(s()) ? "Send amendment and retry" : "Send and resume planning") : "Send to the planner", needs: "plan_message", why: files.busy() ? "Attachments are still loading" : text().trim() ? undefined : "Write a message first", go: () => send(text()), insertAndSend: send }} />
     </div>
   </section>;
 }
@@ -378,7 +383,7 @@ function PlanItemPanel(props: { row: PlanRow; total: number; onClose: () => void
   onCleanup(() => document.removeEventListener("keydown", onKey));
   queueMicrotask(() => placeFocus(close, { preventScroll: true }));
   return <aside class="ws-read" aria-label="Task details">
-    <SectionHead class="ws-read-h" lead={props.back ? <button class="btn btn-sm" onClick={shut}><I n="arrow-left" s={14} />{props.back}</button> : undefined} title={`Task ${props.row.no} of ${props.total}`}><button ref={close} class="ib ws-ib" aria-label="Close task details" onClick={shut}><I n="x" s={14} /></button></SectionHead>
+    <SectionHead class="ws-read-h" lead={props.back ? <button class="btn btn-sm" onClick={shut}><I n="arrow-left" s={14} />{props.back}</button> : undefined} title={`Task ${props.row.no} of ${props.total}`}><button data-tooltip="Close task details · Esc" ref={close} class="ib ws-ib" aria-label="Close task details" onClick={shut}><I n="x" s={14} /></button></SectionHead>
     <div class="ws-read-b selectable">
       <h2 class="ws-read-t">{itemTitle(props.row.item)}</h2>
       <dl class="kv">
@@ -495,7 +500,7 @@ function Plan(props: PlanProps) {
       <ActionBar class="sp-foot" hint="Every task waits for your final confirmation.">
         <Show when={!created() && !past()}><button class="btn btn-line btn-sm" aria-disabled={props.request.why ? "true" : undefined} data-why={props.request.why ?? undefined} onClick={() => { if (!props.request.why) props.request.run(); }}>Request changes</button></Show>
         <Show when={selectedRow()?.view}>{v => <>
-          <Show when={startable()}><button class="btn btn-line btn-sm" {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: v().id, now: ws.store.clock() })}>Start</button></Show>
+          <Show when={startable()}><button class="btn btn-line btn-sm" {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: v().id, now: ws.store.clock() })}><RequestLabel pending={ws.store.pendingTask("start_task", v().id)} text={REQUESTING.start_task}>Start</RequestLabel></button></Show>
           <A class="btn btn-line btn-sm" to={decisionRoute(v())}>Open task</A>
         </>}</Show>
       </ActionBar>
@@ -546,11 +551,16 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
   const read = () => rows().find(r => r.item.key === reading());
   const created = () => s().planning === "created";
   const cancelled = () => s().planning === "cancelled";
+  const failure = createMemo(() => planningFailureDetails(s()));
+  const warning = () => activePlanningWarning(s());
+  const [editingRequest, setEditingRequest] = createSignal(false);
+  const changingRequest = () => editingRequest() && cancelled() && !!failure();
+  createEffect(() => { if (!cancelled() || !failure()) setEditingRequest(false); });
   const createBlocked = () => !s().plan ? "No plan yet"
     : draft() ? "Finish editing the plan first"
     : s().planning === "question" ? "Answer the open question first"
     : s().planning === "planning" ? "Still working on the plan"
-    : cancelled() ? "Resume planning first" : null;
+    : cancelled() ? (planningChangeRequired(s()) ? "Change the request first" : failure() ? "Retry planning first" : "Resume planning first") : null;
   const create = () => { if (!createBlocked()) ws.run({ type: "materialize_plan", sprintId: s().id, version: s().plan!.version, now: ws.store.clock() }); };
   const n = () => s().plan?.items.length ?? 0;
   // The toolbar has no room for words: why its controls are off is said by the strips under it, which they name.
@@ -563,13 +573,40 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
   const planning: StripItem = { id: "planning", tone: "info", domId: why, icon: <I n="layers" s={14} class="faint" />,
     get text() { const r = createBlocked(); return r ? `Create tasks: ${r}. ${info()}` : info(); },
     action: <button class="btn btn-sm" {...ws.needs("cancel_planning")} onClick={() => ws.run({ type: "cancel_planning", sprintId: s().id })}>Cancel planning</button> };
-  const stopped: StripItem = { id: "cancelled", tone: "info", domId: why, icon: <I n="x" s={14} class="faint" />,
-    get role() { return s().planningFailure ? "alert" as const : undefined; }, get text() { return (s().planningFailure ? humanStatus(s().planningFailure) : null) ?? "Planning is cancelled. Your draft, answers and plan are kept."; },
-    action: <button class="btn btn-sm" {...ws.needs("resume_planning")} onClick={() => ws.run({ type: "resume_planning", sprintId: s().id })}>{s().planningFailure ? "Retry planning" : "Resume planning"}</button> };
+  const retry = () => ws.run({ type: "resume_planning", sprintId: s().id });
+  const stopped: StripItem = { id: "cancelled", tone: "info", domId: why, readable: true, icon: <I n="x" s={14} class="faint" />,
+    text: `${stoppedPlanningText} ${savedPlanningText}`,
+    action: <button class="btn btn-sm" {...ws.needs("resume_planning")} onClick={retry}>Resume planning</button> };
+  const ownerStopped = () => failure()?.kind === "owner_stopped";
+  const changeRequired = () => planningChangeRequired(s());
+  const failed: StripItem = { id: "planning-failure", domId: why,
+    get readable() { return !!failure()?.kind; },
+    get tone() { return ownerStopped() ? "info" : "fail"; },
+    get role() { return ownerStopped() ? "status" : "alert"; },
+    get icon() { return ownerStopped() ? <I n="x" s={14} class="faint" /> : <I n="alert" s={14} />; },
+    get text() {
+      const f = failure();
+      if (!f) return;
+      const reason = f.kind ? f.text : f.step ? `${f.step}: ${f.text}` : f.text;
+      const retryEffect = ownerStopped() ? " Retry starts a new planning task." : "";
+      const changeEffect = !f.kind ? "" : changeRequired() ? " Send an amendment to start planning again."
+        : " Change request lets you send an amendment before starting again.";
+      return `${reason}${retryEffect}${changeEffect} ${savedPlanningText}`;
+    },
+    action: <>
+      <Show when={!changeRequired()}><button class="btn btn-sm" {...ws.needs("resume_planning")} onClick={retry}>Retry planning</button></Show>
+      <button class={changeRequired() ? "btn btn-primary btn-sm" : "btn btn-sm"} {...ws.needs("plan_message")} onClick={() => {
+        if (ws.gate("plan_message")) return;
+        setEditingRequest(true);
+        requestChanges();
+      }}>Change request</button>
+    </> };
+  const warned: StripItem = { id: "planning-warning", tone: "warn", role: "status", icon: <I n="alert" s={14} />,
+    get text() { return warning()?.text; } };
   const line: StripItem = { id: "created", tone: "info", icon: <I n="play" s={14} class="faint" />, text: <CreatedLine sprint={s()} /> };
   const status = createMemo<StripItem[]>(() => created()
     ? [line, ...(gapStrip() ? [gapStrip()!] : []), ...(queueStrip() ? [queueStrip()!] : [])]
-    : [cancelled() ? stopped : planning]);
+    : cancelled() ? [failure() ? failed : stopped] : warning() ? [warned, planning] : [planning]);
 
   // ---------- Space: the chat and the plan are tabs; in the plan, one yield rule and Full view ----------
   const panels = ws.panels;
@@ -665,8 +702,8 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
     </Show>}
     status={<StatusLane items={lane()} />}>
     <div ref={body} class="sp-body" data-reading={details() ? "true" : undefined} data-full={fullOn() ? "" : undefined} style={{ "grid-template-columns": columns() }}>
-      <Show when={planningTask()} keyed fallback={<Conversation sprint={s()} hidden={!chatTab()} onUnsent={setUnsent} onOpenPlan={() => ws.go(at("plan"))} />}>{task =>
-        <PlanningTaskConversation sprint={s()} taskId={task} hidden={!chatTab() || workersTab()} onOpenPlan={() => ws.go(at("plan"))} />}</Show>
+      <Show when={planningTask()} keyed fallback={<Conversation sprint={s()} hidden={!chatTab()} changingRequest={changingRequest} onUnsent={setUnsent} onOpenPlan={() => ws.go(at("plan"))} />}>{task =>
+        <PlanningTaskConversation sprint={s()} taskId={task} hidden={!chatTab() || workersTab()} changingRequest={changingRequest} onOpenPlan={() => ws.go(at("plan"))} />}</Show>
       <Show when={workersTab() && planningTask()} keyed>{task => <PlanningTaskWorkers sprint={s()} taskId={task} worker={props.route.worker} />}</Show>
       <Plan sprint={s()} draft={draft()} setDraft={setDraft} reading={reading()} onRead={key => { if (key) setOpened("details"); setReading(key); }} rows={setRows}
         hidden={chatTab() || (space().replaced && details())} full={fullOn()} setFull={setFull} conv={conv}
@@ -719,8 +756,11 @@ function SummaryTab(props: { route: SprintRoute; sprint: Sprint }) {
 
 /** Chat, Plan and Summary. The Board tab is the project board scoped to this sprint. */
 export function SprintPage(props: { route: SprintRoute; summary: ProjectSummary }) {
+  const ws = useWs();
   const sprint = useSprint(() => props.route.sprint);
   return <Show when={sprint()} fallback={<div class="note-panel"><span class="w500">Sprint not found</span></div>}>{s =>
-    <Show when={!s().archivedAt} fallback={<SummaryTab route={props.route} sprint={s()} />}><Show when={props.route.tab !== "summary"} fallback={<SummaryTab route={props.route} sprint={s()} />}><PlanningTab route={props.route} sprint={s()} summary={props.summary} /></Show></Show>
+    <ResultScope.Provider value={() => ({ projectId: s().projectId, taskId: planningTaskOf(ws.store.state(), s()) ?? undefined, projectCode: true })}>
+      <Show when={!s().archivedAt} fallback={<SummaryTab route={props.route} sprint={s()} />}><Show when={props.route.tab !== "summary"} fallback={<SummaryTab route={props.route} sprint={s()} />}><PlanningTab route={props.route} sprint={s()} summary={props.summary} /></Show></Show>
+    </ResultScope.Provider>
   }</Show>;
 }

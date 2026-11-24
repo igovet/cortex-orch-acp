@@ -22,7 +22,7 @@ const pressByKey = (e: KeyboardEvent) => {
 
 /**
  * For a ref: a box whose text may be cut. While it is cut it can be reached by keyboard, and a press, Enter, Space or keyboard focus opens
- * the whole text beside it (ReasonTip). Never a hover. `data-whole` holds the whole text, or is empty to use what is shown.
+ * the whole text beside it (ReasonTip). Desktop hover and delayed focus use Tooltip. `data-whole` holds the whole text, or is empty to use what is shown.
  */
 export function revealWhenCut(el: HTMLElement) {
   const mark = () => { if (isCut(el)) { el.tabIndex = 0; el.setAttribute("role", "button"); } else { el.removeAttribute("tabindex"); el.removeAttribute("role"); } };
@@ -158,7 +158,7 @@ export function SectionHead(props: { title: JSX.Element; count?: number; lead?: 
 
 export type StripTone = "fail" | "warn" | "info" | "ok";
 /** `domId` names the strip for a control it describes, through aria-describedby. */
-export type StripItem = { id: string; tone: StripTone; icon?: JSX.Element; text: JSX.Element; action?: JSX.Element; role?: "status" | "alert"; domId?: string };
+export type StripItem = { id: string; tone: StripTone; icon?: JSX.Element; text: JSX.Element; action?: JSX.Element; role?: "status" | "alert"; domId?: string; readable?: boolean };
 
 /** A notice of at most two lines with its one action pinned right. */
 export function Strip(props: { tone?: StripTone; icon?: JSX.Element; action?: JSX.Element; children: JSX.Element; id?: string; role?: "status" | "alert"; class?: string }) {
@@ -177,7 +177,7 @@ export function StatusLane(props: { items: readonly StripItem[] }) {
   const shown = () => open() ? ordered() : ordered().slice(0, 2);
   const folded = () => ordered().length - 2;
   return <div class="l-lane" data-open={open() ? "" : undefined}>
-    <For each={shown()}>{item => <Strip id={item.domId} role={item.role} tone={item.tone} icon={item.icon} action={item.action}>{item.text}</Strip>}</For>
+    <For each={shown()}>{item => <Strip id={item.domId} class={item.readable ? "l-strip-readable" : undefined} role={item.role} tone={item.tone} icon={item.icon} action={item.action}>{item.text}</Strip>}</For>
     <Show when={folded() > 0}><button class="lnk l-lane-more" aria-expanded={open()} onClick={() => setOpen(v => !v)}>{open() ? "Show less" : `${folded()} more`}</button></Show>
   </div>;
 }
@@ -271,7 +271,13 @@ export function ReasonTip() {
   const target = (e: Event) => (e.target as Element | null)?.closest?.<HTMLElement>(TARGET) ?? null;
   // On the window, so a bar's own slot has already taken this press into account.
   const onClick = (e: MouseEvent) => { const el = target(e); if (el) show(el); };
-  const onFocus = (e: FocusEvent) => { const el = target(e); if (el && document.documentElement.hasAttribute("data-keyboard")) show(el); };
+  const onFocus = (e: FocusEvent) => {
+    const el = target(e);
+    if (!el || !document.documentElement.hasAttribute("data-keyboard")) return;
+    // On desktop the shared tooltip owns delayed focus for cut text; press still opens the full-text box.
+    if (!el.matches(DISABLED) && document.querySelector(".ws-tooltip-host")) return;
+    show(el);
+  };
   const onBlur = (e: FocusEvent) => { if (owner && e.target === owner) hide(); };
   const onPress = (e: Event) => { if (owner && !owner.contains(e.target as Node)) hide(); };
   const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") hide(); };

@@ -7,24 +7,26 @@ import { readOwnerActionReply, readOwnerActions, type OwnerActionRequests } from
 import { applyNativeTaskDelta, weeklyUsage } from "@cortex/workspace-domain";
 import type { NativeTaskDelta, NativeTaskSnapshot } from "@cortex/workspace-domain";
 import { conversationOf, shownFold } from "./history";
+import { CODE_LANGUAGE, CodeRefusal, type CodeEvent, type CodeFile, type LocalCodePort } from "../code-support";
 import { same } from "../stable";
+import { plainReason } from "../status-text";
 import { classifiedPlanningFailure } from "../selectors";
 import { readBoards, writeBoards, type BoardStorage, type CachedBoard } from "./board-cache";
 import { liveMembers, presentSprint, unreadMembers, type SavedSprint } from "./sprint-members";
-import type { Attachment, AttachmentRef, CatalogueState, CommandEnvelope, CommandReceipt, DirectorySearch, GitInterest, EngineConnection, EngineWeeklyUsage, FileDiff, FileRead, FileSaveResult, FolderListing, IntegrationText, Machine, MachineConfig, MachineFacts, Message, PlanItem, PortCapabilities, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectRepo, ProjectSkills, ProjectSlice, QueryOperation, QueryParameters, QueryResults, SessionOptions, Sprint, TaskChanges, TaskOverlay, Worker, WorkspaceCommand, WorkspacePort } from "@cortex/workspace-domain";
+import type { Attachment, AttachmentRef, CatalogueState, CommandEnvelope, CommandOutput, CommandReceipt, DirectorySearch, GitInterest, EngineConnection, EngineWeeklyUsage, FileDiff, FileRead, FolderListing, IntegrationText, Machine, MachineConfig, MachineFacts, Message, PlanItem, PortCapabilities, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectRepo, ProjectSkills, ProjectSlice, QueryOperation, QueryParameters, QueryResults, SessionOptions, Sprint, TaskChanges, TaskOverlay, Worker, WorkspaceCommand, WorkspacePort } from "@cortex/workspace-domain";
 
 /** Whether two facts reads say the same thing: their place in the read order is not part of what they say. */
 const sameFacts = (a: ProjectFacts | undefined, b: ProjectFacts) => !!a && same({ ...a, readOrder: undefined }, { ...b, readOrder: undefined });
 
 /** How the native bridge reaches the machine service. The bridge owns the socket; this side only ever sees typed messages. */
-export type TransportEvent = { type: "connection"; state: "connecting" | "connected" | "disconnected" | "unavailable"; reason?: string } | { type: "invalidated"; projectId: string; source?: "runtime" } | { type: "refresh" } | ({ type: "native_delta" } & NativeTaskDelta) | { type: "native_resync"; projectId: string };
+export type TransportEvent = CodeEvent | { type: "connection"; state: "connecting" | "connected" | "disconnected" | "unavailable"; reason?: string } | { type: "invalidated"; projectId: string; source?: "runtime" } | { type: "refresh" } | ({ type: "native_delta" } & NativeTaskDelta) | { type: "native_resync"; projectId: string };
 export type RealTransport = {
   request(operation: string, message: unknown): Promise<unknown>;
   subscribe(listener: (event: TransportEvent) => void): () => void;
 };
 /** One project the service has registered. Listing them is the service's; here they arrive already resolved. */
 export type ProjectLocator = { projectId: string; name: string; repository: string; openBranch: string; defaultBranch: string; activated?: boolean };
-export type RealPortOptions = { transport: RealTransport; actorId: string; projects?: ProjectLocator[]; registry?: boolean; boardStorage?: BoardStorage;
+export type RealPortOptions = { transport: RealTransport; actorId: string; projects?: ProjectLocator[]; registry?: boolean; boardStorage?: BoardStorage; localCode?: boolean;
   /** Least time between the end of one streamed facts read of a project and the start of the next (default `STREAM_FACTS_MS`). */
   streamFactsMs?: number };
 /** While a task streams updates, the facts of a project on screen are reread at most this often. */
@@ -43,7 +45,9 @@ export function unavailableTransport(): RealTransport {
  */
 export const CONTROL_ACTIONS = ["pause", "resume", "retry", "worker_message", "worker_stop", "allow_write", "command_stop", "rerun_check", "task_settings", "close_task", "handoff_merge", "inspect_merge", "request_merge_checks"] as const;
 export const MACHINE_OPS = ["overview", "logs.folder", "maintenance", "workflow.describe", "engine.connection", "machine.update", "diagnostics.run", "cleanup.run", "config.read", "config.save", "config.action", "config.mcp.discover",
-  "project.config.read", "project.config.save", "repo.snapshot", "repo.file", "repo.file.save", "repo.list", "repo.skills", "git", "workers",
+  "project.config.read", "project.config.save", "repo.snapshot", "repo.file", "repo.file.save", "repo.list", "repo.skills", "git", "workers", "command.output",
+  "repo.file.lease.acquire", "repo.file.lease.renew", "repo.file.lease.release",
+  "repo.lsp.open", "repo.lsp.change", "repo.lsp.close", "repo.lsp.status", "repo.lsp.definition",
   "product.read", "product.board", "product.facts", "product.task", "product.integrate", "product.sprint", "product.message", "product.comment", "product.attachment"] as const;
 type ControlAction = typeof CONTROL_ACTIONS[number];
 type MachineOp = typeof MACHINE_OPS[number];
@@ -228,9 +232,12 @@ export function sessionOptions(config: MachineConfig, rules = config.surfaces?.r
 }
 /** The files a task in the project folder left there, once per path. */
 function changesOf(repo: ProjectRepo | null, taskId?: string, overlay?: TaskOverlay): FileDiff[] {
-  const main = repo?.checkouts.find(c => overlay?.checkout?.kind === "worktree" ? c.taskId === taskId : c.kind === "main");
+  const binding = overlay?.checkout;
+  const checkout = binding?.kind === "worktree"
+    ? !binding.unavailable && repo?.checkouts.find(c => c.kind === "worktree" && (binding.id ? c.id === binding.id : c.taskId === taskId))
+    : repo?.checkouts.find(c => c.kind === "main");
   const byPath = new Map<string, FileDiff>();
-  for (const file of main?.files ?? []) {
+  for (const file of (checkout || null)?.files ?? []) {
     const seen = byPath.get(file.path);
     byPath.set(file.path, seen ? { ...seen, add: seen.add + file.add, del: seen.del + file.del, hunks: [...seen.hunks, ...file.hunks] } : { path: file.path, status: file.status, add: file.add, del: file.del, hunks: file.hunks });
   }
@@ -241,7 +248,7 @@ function changesOf(repo: ProjectRepo | null, taskId?: string, overlay?: TaskOver
  * The production port. It speaks only the public contract, validates every response, and holds the wire identities the
  * view models leave out. A command gets one attempt: a lost response is an unknown outcome and is never sent again.
  */
-export function createRealPort(options: RealPortOptions): WorkspacePort {
+export function createRealPort(options: RealPortOptions): WorkspacePort & LocalCodePort {
   const { transport, actorId } = options, projects = options.projects ?? [];
   const observers = new Set<(update: PortUpdate) => void>();
   const cachedBoards = new Map(readBoards(options.boardStorage,actorId).map(b => [b.project.projectId,b]));
@@ -301,11 +308,24 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   let overviewWatchers = 0;
   /** A Git screen came on view: its periodic refresh starts (see `subscribe`). */
   const gitShown = new Set<() => void>();
-  let offered: string[] = [], serviceMethods: string[] = [], machineOn = false, taskWorktrees = true, configTokens: Record<string, unknown> = {}, configRead: ConfigRead | null = null;
+  let offered: string[] = [], serviceMethods: string[] = [], machineOn = false, taskWorktrees = false, configTokens: Record<string, unknown> = {}, configRead: ConfigRead | null = null;
+
+  let codeLanguageOn = false;
+  const fileParams = ({ checkoutId, path }: CodeFile) => ({ checkoutId, file: path });
+  async function codeCall<K extends keyof Pick<WireTypes, "CodeLeaseAcquireResult" | "CodeLeaseRenewResult" | "CodeLeaseReleaseResult" | "CodeSaveResult" | "CodeLspOpenResult" | "CodeLspSnapshot" | "CodeLspCloseResult" | "CodeLspDefinitionResult">>(shape: K, op: MachineOp, projectId: string, params: unknown) {
+    if (!options.localCode) throw new CodeRefusal("not_available", "");
+    const result = await machine<unknown>(op, projectId, params);
+    return decodeResponse(shape, result).value;
+  }
 
   async function machine<T>(op: MachineOp, projectId?: string, params?: unknown): Promise<T> {
-    const reply = await transport.request("machine.call", { op, ...(projectId ? { projectId } : {}), ...(params === undefined ? {} : { params }) }) as { ok?: boolean; result?: T; code?: string; message?: string };
-    if (reply?.ok !== true) throw new Refusal(reply?.code ?? "refused", reply?.message ?? OUTCOME_WORDS.unsupported);
+    const reply = await transport.request("machine.call", { op, ...(projectId ? { projectId } : {}), ...(params === undefined ? {} : { params }) }) as { ok?: boolean; result?: T; code?: string; message?: string; holderTaskId?: unknown };
+    if (reply?.ok !== true) {
+      const code = reply?.code ?? "refused", message = reply?.message ?? OUTCOME_WORDS.unsupported;
+      if (op.startsWith("repo.file.lease.") || op === "repo.file.save" || op.startsWith("repo.lsp."))
+        throw new CodeRefusal(code, message, typeof reply?.holderTaskId === "string" ? reply.holderTaskId : undefined);
+      throw new Refusal(code, message);
+    }
     if (projectId && ["git", "git_init", "repo.file.save", "product.task", "product.integrate"].includes(op)) {
       const cached = repoReads.get(projectId);
       // Retain the last confirmed repository while a post-action read catches up.
@@ -560,12 +580,13 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
 
   async function negotiateCapabilities(): Promise<PortCapabilities> {
     if (options.registry) {
-      const service = await transport.request("service.capabilities", {}) as { methods?: unknown };
+      const service = await transport.request("service.capabilities", {}) as { methods?: unknown; codeLsp?: unknown };
       if (!Array.isArray(service.methods) || !service.methods.every(m => typeof m === "string")) throw new Error("Invalid service capabilities");
       serviceMethods = service.methods;
+      codeLanguageOn = options.localCode === true && service.codeLsp === true;
       machineOn = (service as { machine?: unknown }).machine === true;
-      // A native host runs tasks only in the project folder; it says so explicitly.
-      taskWorktrees = (service as { taskWorktrees?: unknown }).taskWorktrees !== false;
+      // Older services omit this field; only explicit support enables the feature.
+      taskWorktrees = (service as { taskWorktrees?: unknown }).taskWorktrees === true;
       const registry = await transport.request("projects.list", {});
       if (!Array.isArray(registry)) throw new Error("Invalid project registry");
       const next: ProjectLocator[] = registry.map(p => {
@@ -583,7 +604,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     const shared = negotiate(localCapabilities("workspace-ui", "0", remote.operations), remote);
     offered = shared.operations;
     attachmentSupport = remote.attachments === true;
-    return { everything: false, operations: [...(attachmentSupport ? ["workspace.attachments"] : []), ...WIRE_OPERATIONS.filter(operation => offered.includes(operation)), ...(serviceMethods.includes("native.pick_folder") ? ["workspace.pick_folder"] : []), ...(serviceMethods.includes("directories.search") ? ["workspace.search_folders"] : []), ...(serviceMethods.includes("projects.register") ? ["workspace.add_project"] : []), ...(serviceMethods.includes("projects.rename") ? ["workspace.rename_project"] : []), ...(serviceMethods.includes("projects.activate") ? ["workspace.activate_project"] : []), ...(serviceMethods.includes("projects.remove") ? ["workspace.remove_project"] : []), ...(serviceMethods.includes("native.open_editor") ? ["workspace.open_editor"] : []), ...(serviceMethods.includes("native.open_editor.vscode") ? ["workspace.open_vscode"] : []), ...(serviceMethods.includes("native.open_logs") ? ["workspace.open_logs"] : []), ...(serviceMethods.includes("native.open_pull_request") ? ["workspace.open_pull_request"] : []), ...(serviceMethods.includes("remote.status") ? [FEATURES.remoteAccess] : []), ...(machineOn ? [...MACHINE_COMMANDS.map(capabilityOf), FEATURES.editFiles, "workspace.worker_messages", ...(serviceMethods.includes("native.query") ? [] : [FEATURES.workerAttachments]), ...(taskWorktrees ? ["workspace.task_worktrees"] : []), "workspace.task_route"] : [])] };
+    return { everything: false, operations: [...(attachmentSupport ? ["workspace.attachments"] : []), ...WIRE_OPERATIONS.filter(operation => offered.includes(operation)), ...(serviceMethods.includes("native.pick_folder") ? ["workspace.pick_folder"] : []), ...(serviceMethods.includes("directories.search") ? ["workspace.search_folders"] : []), ...(serviceMethods.includes("projects.register") ? ["workspace.add_project"] : []), ...(serviceMethods.includes("projects.rename") ? ["workspace.rename_project"] : []), ...(serviceMethods.includes("projects.activate") ? ["workspace.activate_project"] : []), ...(serviceMethods.includes("projects.remove") ? ["workspace.remove_project"] : []), ...(serviceMethods.includes("native.open_editor") ? ["workspace.open_editor"] : []), ...(serviceMethods.includes("native.open_editor.vscode") ? ["workspace.open_vscode"] : []), ...(serviceMethods.includes("native.reveal_file") ? ["workspace.reveal_file"] : []), ...(serviceMethods.includes("native.open_logs") ? ["workspace.open_logs"] : []), ...(serviceMethods.includes("native.open_pull_request") ? ["workspace.open_pull_request"] : []), ...(serviceMethods.includes("remote.status") ? [FEATURES.remoteAccess] : []), ...(machineOn ? [...MACHINE_COMMANDS.map(capabilityOf), ...(options.localCode ? [FEATURES.editFiles] : []), ...(codeLanguageOn ? [CODE_LANGUAGE] : []), "workspace.worker_messages", ...(serviceMethods.includes("native.query") ? [] : [FEATURES.workerAttachments]), ...(taskWorktrees ? ["workspace.task_worktrees"] : []), "workspace.task_route"] : [])] };
   }
 
   async function projectTasks(project: ProjectLocator, cached = false) {
@@ -1061,7 +1082,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     // task in review after every board read, until a facts read brought it back.
     const overlays = Object.fromEntries(Object.entries(product.tasks).map(([id, saved]) => {
       const known = previous?.overlays[id];
-      if (!known) return [id, saved];
+      if (!known || saved.reworkEvent !== known.reworkEvent) return [id, saved];
       // `workspaceDigest` rides in the machine's overlay beside the result (it is not one of the saved fields).
       const { result, reviewActions, integrationFacts } = known, workspaceDigest = (known as { workspaceDigest?: unknown }).workspaceDigest;
       return [id, { ...(result !== undefined ? { result } : {}), ...(reviewActions !== undefined ? { reviewActions } : {}),
@@ -1294,6 +1315,13 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   async function machineCommand(envelope: CommandEnvelope): Promise<CommandReceipt | null> {
     const { requestId } = envelope, command = envelope.payload;
     const ok = () => done(requestId);
+    const withCleanup = (receipt: CommandReceipt, reply: unknown, prefix: string): CommandReceipt => {
+      const cleanup = (reply as { worktreeCleanup?: { status?: string; reason?: string } } | null)?.worktreeCleanup;
+      if (!cleanup) return receipt;
+      const message = cleanup.status === "removed" ? "Worktree folder deleted." : cleanup.status === "retained"
+        ? "Worktree folder was kept." : "Worktree folder deletion is not confirmed.";
+      return { ...receipt, worktreeCleanupNotice: true, message: [prefix, message, plainReason(cleanup.reason, cleanup.reason ? "Safe cleanup could not be confirmed." : "")].filter(Boolean).join(" ") };
+    };
     const task = (taskId: string) => { const id = projectOfTask(taskId); if (!id) throw new Refusal("unknown_task", "Unknown task."); return id; };
     // Screens apply machine result facts over the wire slice. Commands must use
     // that same identity, including an explicit null that clears an older result.
@@ -1317,6 +1345,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     const dirty = async <T>(run: Promise<T>) => { try { return await run; } finally { configRead = null; } };
     switch (command.type) {
       case "open_editor": await transport.request("native.open_editor", {projectId:command.projectId, ...(command.checkoutId ? {checkoutId:command.checkoutId} : {}), ...(command.file ? {file:command.file} : {}), ...(command.line ? {line:command.line} : {})}); return ok();
+      case "reveal_file": await transport.request("native.reveal_file", {projectId:command.projectId, checkoutId:command.checkoutId, file:command.file}); return ok();
       case "remove_project": {
         if (!command.confirmed) return {requestId,ok:false,outcome:"invalid_request",message:"Confirm removing the project first."};
         await transport.request("projects.remove", {projectId:command.projectId,confirmed:true});
@@ -1360,6 +1389,19 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         return ok();
       }
       case "request_changes": return say(command.taskId, command.text, command.attachments);
+      case "rework_task": {
+        const { taskId, executionId, expectedVersion, ownerEpoch, text, attachments } = command;
+        historyChanged(taskId);
+        const result = await machine<{ done?: boolean; outcome?: string; state?: string } | null>("product.task", task(taskId), {
+          action: "rework", taskId, requestId, executionId, expectedVersion, ownerEpoch, text,
+          ...(attachments?.length ? { attachments: wireAttachments(attachments) } : {}),
+        }).catch(error => {
+          if (error instanceof Refusal) throw new Refusal(error.code, plainReason(error.message, plainReason(error.code, "The task could not be returned for rework.")));
+          throw error;
+        });
+        if (result?.done !== true || result.outcome !== "recorded" || result.state !== "PLANNING") throw new Refusal("unknown_outcome", OUTCOME_WORDS.unknown_outcome);
+        return ok();
+      }
       case "rerun_check": {
         const displayed = displayedResult(command.taskId);
         const result = displayed !== undefined ? displayed : (await machine<Product>("product.read", task(command.taskId))).tasks[command.taskId]?.result;
@@ -1385,7 +1427,10 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         return ok();
       // Bound to the result the owner reviewed; the machine merges the target into the task branch, never the other way.
       case "update_from_target": await machine("product.integrate", task(command.taskId), { requestId, taskId: command.taskId, method: "update", confirmed: command.confirmed, digest: command.digest }); return ok();
-      case "abort_merge": await taskCall(task(command.taskId), {action:"abort_merge",taskId:command.taskId}); return ok();
+      case "abort_merge":
+        await taskCall(task(command.taskId), {action:"abort_merge",taskId:command.taskId,
+          ...(command.discardLegacy === true ? {discardLegacy:true,requestId} : {})});
+        return ok();
       case "resolve_with_cortex":
       case "inspect_merge":
       case "request_merge_checks": {
@@ -1467,6 +1512,11 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       }
       case "purge_many": for (const id of command.taskIds) await taskCall(task(id), { action: "purge", taskId: id, confirmed: command.confirmed }); return ok();
       case "close_task": {
+        if (command.choice === "remove_worktree") {
+          if (!taskWorktrees) throw new Refusal("capability_unavailable", "Task worktree cleanup is not supported by this service.");
+          const reply = await taskCall(task(command.taskId), { action: "close_remove_worktree", taskId: command.taskId, confirmed: command.confirmed });
+          return withCleanup(ok(), reply, "Task closed.");
+        }
         if (command.choice === "unconfirmed") {
           await taskCall(task(command.taskId), { action: "close_unconfirmed", taskId: command.taskId,
             executionId: command.executionId, expectedVersion: command.expectedVersion, confirmed: command.confirmed });
@@ -1502,7 +1552,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         });
         return ok();
       }
-      case "integrate": await machine("product.integrate", task(command.taskId), { taskId: command.taskId, method: command.method, confirmed: command.confirmed, digest: command.digest, targetBranch: command.targetBranch, message: command.method === "pr" ? command.title ?? "" : command.message ?? "", body: command.message ?? "", draft: command.draft, deleteWorktree: command.deleteWorktree }); return ok();
+      case "integrate": { const reply = await machine("product.integrate", task(command.taskId), { taskId: command.taskId, method: command.method, confirmed: command.confirmed, digest: command.digest, targetBranch: command.targetBranch, message: command.method === "pr" ? command.title ?? "" : command.message ?? "", body: command.message ?? "", draft: command.draft, deleteWorktree: command.deleteWorktree }); return withCleanup(ok(), reply, "Integration recorded."); }
       case "set_target":
         if (command.taskId) { await taskCall(task(command.taskId), { action: "target", taskId: command.taskId, branch: command.branch }); return ok(); }
         await sprintPatch(await projectOfSprint(command.sprintId!), command.sprintId!, { targetBranch: command.branch });
@@ -1879,6 +1929,9 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     async cancelDirectorySearch(machineId, session) {
       if (machineId === LOCAL_MACHINE_ID && serviceMethods.includes("directories.cancel")) await transport.request("directories.cancel", { session }).catch(() => undefined);
     },
+    async readCommandOutput({ projectId, ...params }) {
+      return machine<CommandOutput>("command.output", projectId, params);
+    },
     async readTaskAttachments(taskId) {
       // A page restored at launch is painted from the cached board before the service has
       // confirmed its task. Its files are read once that project's first read says where it is.
@@ -2011,11 +2064,23 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       if (!machineOn) return { overview: null, folders: [] };
       return machine<FolderListing>("repo.list", projectOfCheckout(checkoutId), { checkoutId, dirs: request.dirs, overview: !!request.overview });
     },
-    async saveFile(checkoutId, file, text, revision) {
-      // Only the machine's own answer says what happened. Anything else may be a write whose reply never came.
-      try { return await machine<FileSaveResult>("repo.file.save", projectOfCheckout(checkoutId), { checkoutId, file, text, revision }); }
-      catch (error) { return error instanceof Refusal ? { outcome: "refused", message: error.message } : { outcome: "unknown" }; }
-    },
+    ...(options.localCode ? {
+      codeLease: {
+        acquire: (file: CodeFile) => codeCall("CodeLeaseAcquireResult", "repo.file.lease.acquire", projectOfCheckout(file.checkoutId), fileParams(file)),
+        renew: (file: CodeFile, leaseToken: string) => codeCall("CodeLeaseRenewResult", "repo.file.lease.renew", projectOfCheckout(file.checkoutId), { ...fileParams(file), leaseToken }),
+        release: (file: CodeFile, leaseToken: string) => codeCall("CodeLeaseReleaseResult", "repo.file.lease.release", projectOfCheckout(file.checkoutId), { ...fileParams(file), leaseToken }),
+        save: (file: CodeFile, text: string, revision: string | null, leaseToken: string) =>
+          codeCall("CodeSaveResult", "repo.file.save", projectOfCheckout(file.checkoutId), { ...fileParams(file), text, revision, leaseToken }),
+      },
+      codeLanguage: {
+        open: (project, params) => codeCall("CodeLspOpenResult", "repo.lsp.open", project, params),
+        change: (project, documentId, text, version) => codeCall("CodeLspSnapshot", "repo.lsp.change", project, { documentId, text, version }),
+        status: (project, documentId) => codeCall("CodeLspSnapshot", "repo.lsp.status", project, { documentId }),
+        definition: (project, params) => codeCall("CodeLspDefinitionResult", "repo.lsp.definition", project, params),
+        close: (project, documentId) => codeCall("CodeLspCloseResult", "repo.lsp.close", project, { documentId }),
+        subscribe: listener => transport.subscribe(event => { if (event.type === "code_lsp" || event.type === "code_lsp_resync") listener(event); }),
+      },
+    } satisfies LocalCodePort : {}),
     subscribe(listener: (update: PortUpdate) => void) {
       observers.add(listener);
       for (const cached of cachedBoards.values()) {
@@ -2139,6 +2204,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
           invalidated.add(event.projectId);
           listener({ kind: "refresh" }); return;
         }
+        if (event.type === "code_lsp" || event.type === "code_lsp_resync") return;
         if (event.type === "invalidated" && event.source === "runtime" && nativeSnapshots.has(event.projectId)) return;
         const project = projects.find(p => p.projectId === event.projectId);
         if (!project) return;

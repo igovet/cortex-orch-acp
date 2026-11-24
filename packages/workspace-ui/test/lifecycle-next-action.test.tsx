@@ -39,13 +39,77 @@ async function mount(state: WorkspaceState, path: string, capabilities: PortCapa
 
 it("a failed native plan exposes its reason beside Retry, outside the scrollable conversation", async () => {
   const reason = "The model replied with prose instead of the required task-plan JSON. Resume planning to retry.";
-  const sp = { ...sprint({ planning: "cancelled", materializedVersion: null }), planningFailure: reason };
+  const sp = { ...sprint({ planning: "cancelled", materializedVersion: null }), planningFailure: { text: reason, step: "start" as const, code: "planning_start_refused", at: 123 } };
   const p = await mount(world({}, {}, [sp]), `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/planning`);
   const alert = document.querySelector('[role="alert"]');
   expect(alert?.textContent).toContain(reason);
+  expect(alert?.textContent).toContain("While starting the planning task");
+  expect(alert?.textContent).toContain("Change request");
   expect(alert?.closest(".sp-body")).toBeNull();
   control("Retry planning")!.click(); await settle();
   expect(ops(p)).toEqual(["resume_planning"]);
+});
+
+const planningPath = `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/planning`;
+const terminalSprint = (kind: "limit" | "unknown" | "owner_stopped", code: string, reason: string, recommendedAction = "retry") => ({
+  ...sprint({ planning: "cancelled", materializedVersion: null }),
+  planningFailure: { text: reason, step: "run" as const, code, at: 123, kind, recommendedAction },
+});
+
+it("a classified planning failure names the limit and what Retry changes", async () => {
+  const sp = terminalSprint("limit", "plan_part_too_large",
+    "The planning task ended after a plan part was rejected for exceeding the size limit. Retry starts a new planning task using smaller parts from the outset.");
+  const p = await mount(world({}, {}, [sp]), planningPath);
+  const reason = document.querySelector('[role="alert"]')?.textContent;
+  expect(reason).toContain("size limit");
+  expect(reason).toContain("using smaller parts");
+  expect(reason).toContain("saved request, attachments and answers");
+  expect(reason).toContain("previously approved proposal");
+  expect(text()).not.toContain("Resume to continue");
+  control("Retry planning")!.click(); await settle();
+  expect(ops(p)).toEqual(["resume_planning"]);
+});
+
+it("an unknown planning failure says the cause is unknown", async () => {
+  const sp = terminalSprint("unknown", "planning_task_stopped",
+    "The planning task ended without a known cause. Retry starts a new planning task.");
+  await mount(world({}, {}, [{...sp, planningTaskId: "t"}]), planningPath);
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain("without a known cause");
+  expect(text()).not.toContain("Resume to continue");
+  expect(control("Retry planning")).toBeTruthy();
+});
+
+it("a repeated limit failure offers Change request instead of Retry", async () => {
+  const sp = terminalSprint("limit", "plan_part_too_large",
+    "The planning task ended after a plan part was rejected for exceeding the size limit. The smaller-parts retry met the same limit. Change the request before trying again.",
+    "change_request");
+  const p = await mount(world({}, {}, [sp]), planningPath);
+  const change = control("Change request")!;
+  expect(change.classList.contains("btn-primary")).toBe(true);
+  expect(control("Retry planning")).toBeUndefined();
+  expect(control("Resume planning")).toBeUndefined();
+  change.click(); await settle();
+  const input = document.querySelector<HTMLTextAreaElement>("#ws-plan-input")!;
+  expect(document.activeElement).toBe(input);
+  input.value = "Cover phase one only";
+  input.dispatchEvent(new Event("input", {bubbles:true}));
+  document.querySelector<HTMLButtonElement>('button[aria-label="Send amendment and retry"]')!.click(); await settle();
+  expect(p.commands.at(-1)?.payload).toMatchObject({type:"plan_message", text:"Cover phase one only"});
+});
+
+it("owner Stop stays neutral and does not promise unsaved parts", async () => {
+  const sp = sprint({ planning:"cancelled", materializedVersion:null });
+  const p = await mount(world({}, {}, [sp]), planningPath);
+  expect(text()).toContain("You stopped planning.");
+  expect(text()).toContain("previously approved proposal");
+  expect(text()).not.toMatch(/parts|planning failed/i);
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+  expect(control("Resume planning")).toBeTruthy();
+  const terminal = terminalSprint("owner_stopped", "planning_stopped_by_owner", "You stopped the planning task.");
+  p.emit(projection("2", world({}, {}, [terminal]))); await settle();
+  expect(text()).toContain("You stopped the planning task.");
+  expect(text()).toContain("Retry starts a new planning task");
+  expect(document.querySelector('[role="alert"]')).toBeNull();
 });
 
 it("a paused queue names the blocked review and offers its task before Continue queue", async () => {
@@ -155,7 +219,7 @@ it("a new task in a folder without Git works in the folder and offers no branch 
   await mount(world({}, { hasGit: false }), `/m/${LOCAL_MACHINE_ID}/new?project=p`);
   const worktree = document.querySelector<HTMLInputElement>('input[name="checkout"]')!;
   expect(worktree.disabled).toBe(true);
-  expect(text()).toContain("A worktree needs Git");
+  expect(text()).toContain("A separate worktree needs a Git repository.");
   expect(text()).not.toContain("Merge into");
 });
 

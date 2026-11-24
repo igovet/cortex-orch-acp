@@ -4,6 +4,7 @@ use super::{
     native::*,
     settings::{self, Lock},
 };
+use crate::native_driver::sprints::PlanningFailure;
 use serde_json::{json, Value};
 use std::path::Path;
 /// A sprint's saved files together: at most 8 references totaling 4 MiB.
@@ -192,6 +193,7 @@ mod tests {
             &state,
             "p",
             &json!({"action":"create","description":"New","runMode":"automatic"}),
+            None,
         )
         .unwrap();
         let loaded = product(&state, "p").unwrap();
@@ -217,6 +219,7 @@ mod tests {
             &state,
             "p",
             &json!({"action":"create","description":"Default"}),
+            None,
         )
         .unwrap();
         let id = created["sprintId"].clone();
@@ -229,12 +232,14 @@ mod tests {
                 &state,
                 "p",
                 &json!({"action":"create","description":"Valid","runMode":mode}),
+                None,
             )
             .unwrap();
             sprint(
                 &state,
                 "p",
                 &json!({"action":"patch","sprintId":id,"patch":{"runMode":mode}}),
+                None,
             )
             .unwrap();
             assert_eq!(product(&state, "p").unwrap()["sprints"][0]["runMode"], mode);
@@ -250,13 +255,14 @@ mod tests {
                 sprint(
                     &state,
                     "p",
-                    &json!({"action":"create","description":"Invalid","runMode":mode})
+                    &json!({"action":"create","description":"Invalid","runMode":mode}),
+                    None,
                 )
                 .unwrap_err()
                 .code,
                 "invalid_sprint"
             );
-            assert_eq!(sprint(&state, "p", &json!({"action":"patch","sprintId":id,"patch":{"runMode":mode,"title":"Not saved"}})).unwrap_err().code, "invalid_sprint");
+            assert_eq!(sprint(&state, "p", &json!({"action":"patch","sprintId":id,"patch":{"runMode":mode,"title":"Not saved"}}), None).unwrap_err().code, "invalid_sprint");
         }
         assert_eq!(product(&state, "p").unwrap(), before);
         std::fs::remove_dir_all(state).unwrap();
@@ -631,11 +637,261 @@ pub(super) fn automatic_sprint(sprint: &Value) -> bool {
         && (sprint["deleting"].is_null() || sprint["deleting"] == false)
 }
 
-pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
+impl crate::Service {
+    // Internal driver writes share the same lock as owner changes. A diagnostic
+    // and its conversation event are always persisted together.
+    async fn write_planning_state(
+        &self,
+        project: &str,
+        id: &str,
+        update: impl FnOnce(&mut Value) -> Result<bool> + Send + 'static,
+    ) -> std::io::Result<bool> {
+        let state = self.config.state_dir.clone();
+        let (project_id, id) = (project.to_owned(), id.to_owned());
+        let changed = tokio::task::spawn_blocking(move || -> Result<bool> {
+            let _lock = Lock::new(&state, "machine.lock")?;
+            let mut product = product(&state, &project_id)?;
+            let sprints = product["sprints"]
+                .as_array_mut()
+                .ok_or_else(|| refuse("state_unreadable", "Invalid sprint state."))?;
+            let Some(sprint) = sprints.iter_mut().find(|s| s["id"] == id) else {
+                return Ok(false); // Deleted since the driver's board read.
+            };
+            if !update(sprint)? {
+                return Ok(false);
+            }
+            settings::write_json(&product_path(&state, &project_id)?, &product)?;
+            Ok(true)
+        })
+        .await
+        .map_err(|_| crate::failure("planning_unavailable"))?
+        .map_err(|e| crate::failure(e.code))?;
+        if changed {
+            let _ = self
+                .events
+                .send(json!({"projectId":project,"type":"invalidation"}));
+        }
+        Ok(changed)
+    }
+
+    // Change links only while the same run is still being planned. A stopped or
+    // closed sprint must not be woken by a late create or start result.
+    pub(crate) async fn set_planning_task(
+        &self,
+        project: &str,
+        id: &str,
+        expected: Option<String>,
+        task: Option<String>,
+        retry: Option<PlanningFailure>,
+    ) -> std::io::Result<bool> {
+        self.write_planning_state(project, id, move |sprint| {
+            if !planning_open(sprint)
+                || sprint["planning"] != "planning"
+                || sprint["planningTaskId"].as_str() != expected.as_deref()
+            {
+                return Ok(false);
+            }
+            sprint["planningTaskId"] = json!(task);
+            sprint["planningRun"] = Value::Null;
+            let saved = sprint.as_object_mut().unwrap();
+            saved.remove("planningRetry");
+            saved.remove("planningLimitRetry");
+            if let Some(limit) = retry {
+                saved.insert("planningLimitRetry".into(), json!(limit.code()));
+            }
+            Ok(true)
+        })
+        .await
+    }
+
+    pub(crate) async fn consume_planning_retry(
+        &self,
+        project: &str,
+        id: &str,
+        task: String,
+    ) -> std::io::Result<bool> {
+        self.write_planning_state(project, id, move |sprint| {
+            Ok(planning_open(sprint)
+                && sprint["planning"] == "planning"
+                && sprint["planningTaskId"] == task
+                && sprint
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("planningRetry")
+                    .is_some())
+        })
+        .await
+    }
+
+    pub(crate) async fn record_planning_failure(
+        &self,
+        project: &str,
+        id: &str,
+        text: String,
+        step: &'static str,
+        code: &'static str,
+        run: Option<Value>,
+        unstarted: Option<String>,
+        terminal: Option<(String, PlanningFailure)>,
+    ) -> std::io::Result<()> {
+        let changed = self
+            .write_planning_state(project, id, move |sprint| {
+                // Do not turn an owner stop, close or deletion into a failure.
+                if !matches!(
+                    sprint["planning"].as_str(),
+                    Some("planning" | "question" | "ready")
+                ) || !planning_open(sprint)
+                    || unstarted
+                        .as_ref()
+                        .is_some_and(|task| sprint["planningTaskId"] != *task)
+                    || terminal
+                        .as_ref()
+                        .is_some_and(|(task, _)| sprint["planningTaskId"] != *task)
+                {
+                    return Ok(false);
+                }
+                let at = now_ms();
+                let mut diagnostic = json!({"text":text,"step":step,"code":code,"at":at});
+                if let Some((_, failure)) = terminal {
+                    let repeated = failure.is_limit() && sprint["planningLimitRetry"] == code;
+                    diagnostic["kind"] = json!(failure.kind());
+                    diagnostic["consecutiveLimitReplacementFailures"] = json!(u8::from(repeated));
+                    diagnostic["recommendedAction"] = json!(if repeated {
+                        "change_request"
+                    } else {
+                        "retry"
+                    });
+                    let next = match (repeated, failure) {
+                        (true, _) => " The smaller-parts retry met the same limit. Change the request before trying again.",
+                        (false, PlanningFailure::OwnerStopped) => "",
+                        (false, limit) if limit.is_limit() => " Retry starts a new planning task using smaller parts from the outset.",
+                        (false, _) => " Retry starts a new planning task.",
+                    };
+                    diagnostic["text"] = json!(format!("{text}{next}"));
+                }
+                append_planning_event(sprint, diagnostic["text"].as_str().unwrap(), at)?;
+                let saved = sprint.as_object_mut().unwrap();
+                saved.remove("planningAttempt");
+                saved.remove("planningRetry");
+                saved.remove("planningWarning");
+                saved.remove("planningLimitRetry");
+                if unstarted.is_some() {
+                    saved.insert("planningTaskId".into(), Value::Null);
+                    saved.insert("planningRun".into(), Value::Null);
+                }
+                saved.insert("planning".into(), json!("cancelled"));
+                saved.insert("planningFailure".into(), diagnostic);
+                if let Some(run) = run {
+                    saved.insert("planningRun".into(), run);
+                }
+                Ok(true)
+            })
+            .await?;
+        if changed {
+            self.sprint_wake.project(project);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn update_planning_warning(&self, project: &str, id: &str, count: Option<u8>) {
+        let written = self
+            .write_planning_state(project, id, move |sprint| {
+                let Some(count) = count else {
+                    return Ok(sprint.as_object_mut().unwrap().remove("planningWarning").is_some());
+                };
+                if !sprint["planningWarning"].is_null() {
+                    return Ok(false);
+                }
+                let text = "The service could not check or advance sprint planning. It will keep retrying.";
+                let at = now_ms();
+                append_planning_event(sprint, text, at)?;
+                sprint["planningWarning"] = json!({"text":text,"step":"internal",
+                    "code":"planning_pass_failed","at":at,"count":count});
+                Ok(true)
+            })
+            .await;
+        if written.is_err() {
+            let state = self.config.state_dir.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                settings::service_log(&state, "scheduler_failed")
+            })
+            .await;
+        }
+    }
+}
+
+fn append_planning_event(sprint: &mut Value, text: &str, at: u64) -> Result<()> {
+    sprint["conversation"]
+        .as_array_mut()
+        .ok_or_else(|| refuse("state_unreadable", "Invalid conversation state."))?
+        .push(json!({"kind":"event","text":text,"at":at,"attachments":[]}));
+    Ok(())
+}
+
+fn planning_recovery_text<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
+    p[key]
+        .as_str()
+        .filter(|text| !text.trim().is_empty() && text.chars().count() <= 32_000)
+        .ok_or_else(|| {
+            refuse(
+                "invalid_sprint",
+                "Enter non-blank sprint text of at most 32,000 characters.",
+            )
+        })
+}
+
+fn planning_open(sprint: &Value) -> bool {
+    sprint["archivedAt"].is_null() && (sprint["deleting"].is_null() || sprint["deleting"] == false)
+}
+
+fn planning_change_required(sprint: &Value) -> bool {
+    sprint["planningFailure"]["recommendedAction"] == "change_request"
+}
+
+fn planning_change_refusal() -> Refused {
+    refuse(
+        "planning_change_request_required",
+        "The smaller-parts retry met the same limit. Change the request before trying again.",
+    )
+}
+
+pub(super) fn check_planning_recovery(sprint: &Value, action: &str) -> Result<()> {
+    if !planning_open(sprint)
+        || sprint["planning"] != "cancelled"
+        || sprint["planningFailure"].is_null()
+        || !sprint["materializedVersion"].is_null()
+        || (action == "replace_planning_request"
+            && sprint["planningFailure"]["code"] != "planning_request_invalid"
+            && !planning_change_required(sprint))
+    {
+        return Err(refuse(
+            "planning_recovery_unavailable",
+            "This sprint is not waiting for that planning recovery. Refresh the sprint.",
+        ));
+    }
+    Ok(())
+}
+
+pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Result<Value> {
     let _lock = Lock::new(state, "machine.lock")?;
     let mut product = product(state, project)?;
-    let before = files::held(&product);
     let action = string(p, "action")?;
+    if action == "close" {
+        if let Some(root) = root {
+            if let Some(store) = super::context::open(root, cortex_core::OpenMode::LiveReadOnly)? {
+                // Project into a copy: only the owner disposition below is saved.
+                let mut current = product.clone();
+                super::task_rework::project(&store, project, &mut current, false)?;
+                if current["sprints"].as_array().into_iter().flatten()
+                    .find(|s| s["id"] == p["sprintId"])
+                    .is_some_and(|s| super::task_rework::sprint_has_open_rework(&current, s))
+                {
+                    return Err(super::task_rework::error("rework_pending"));
+                }
+            }
+        }
+    }
+    let before = files::held(&product);
     if action == "create" {
         let description = p["description"]
             .as_str()
@@ -708,6 +964,7 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
                 "pauseKind",
                 "questionExecutions",
                 "planningAttempt",
+                "planningRetry",
                 "automaticQueue",
             ] {
                 sprint.as_object_mut().unwrap().remove(key);
@@ -791,9 +1048,27 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
             )
             .map_err(|_| refuse("invalid_sprint", "Invalid sprint settings."))?;
         }
-        if patch.contains_key("planning") {
-            for key in ["planningAttempt", "planningFailure"] {
-                sprint.as_object_mut().unwrap().remove(key);
+        if let Some(next) = patch.get("planning") {
+            let change_required = planning_change_required(sprint);
+            if next == "planning" && change_required {
+                return Err(planning_change_refusal());
+            }
+            // A late duplicate Stop cannot discard the already-recorded limit.
+            if !(next == "cancelled" && sprint["planning"] == "cancelled" && change_required) {
+                let retry = next == "planning"
+                    && (sprint["planning"] == "cancelled" || sprint["planningRetry"] == true)
+                    && sprint["planningTaskId"].is_string()
+                    && !patch.contains_key("planningTaskId");
+                let saved = sprint.as_object_mut().unwrap();
+                for key in ["planningAttempt", "planningFailure", "planningRetry"] {
+                    saved.remove(key);
+                }
+                if next != "planning" || patch.contains_key("planningTaskId") {
+                    saved.remove("planningLimitRetry");
+                }
+                if retry {
+                    saved.insert("planningRetry".into(), json!(true));
+                }
             }
         }
         if patch.contains_key("queueState") {
@@ -805,6 +1080,56 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
             sprint[key] = value.clone();
         }
         target = patch.get("targetBranch").cloned();
+    } else if matches!(
+        action,
+        "recover_planning_message" | "replace_planning_request"
+    ) {
+        check_planning_recovery(sprint, action)?;
+        // machine() supplies this checked snapshot, never trusting the caller's values.
+        if p.get("expectedPlanningTaskId") != Some(&sprint["planningTaskId"])
+            || p.get("expectedPlanningFailure") != Some(&sprint["planningFailure"])
+        {
+            return Err(refuse(
+                "planning_recovery_unavailable",
+                "The sprint planning state changed. Refresh before retrying.",
+            ));
+        }
+        if action == "replace_planning_request" {
+            let description = planning_recovery_text(p, "description")?;
+            if planning_change_required(sprint)
+                && sprint["description"].as_str().map(str::trim) == Some(description.trim())
+            {
+                return Err(planning_change_refusal());
+            }
+            sprint["description"] = json!(description);
+        } else {
+            let items = p.get("attachments").cloned().unwrap_or_else(|| json!([]));
+            files::checked_references(state, &items)?;
+            let text = p["text"]
+                .as_str()
+                .filter(|text| {
+                    text.chars().count() <= 32_000
+                        && (!text.trim().is_empty() || items != json!([]))
+                })
+                .ok_or_else(|| {
+                    refuse(
+                        "invalid_sprint",
+                        "Send a message of at most 32,000 characters or attach a file.",
+                    )
+                })?;
+            sprint["conversation"]
+                .as_array_mut()
+                .ok_or_else(|| refuse("state_unreadable", "Invalid conversation state."))?
+                .push(json!({"kind":"message","text":text,"at":now_ms(),"attachments":items}));
+        }
+        // The request/note and the restart intent commit together; the next pass
+        // can now create a fresh draft, without deleting the previous task.
+        for key in ["planningAttempt", "planningFailure", "planningRetry", "planningLimitRetry"] {
+            sprint.as_object_mut().unwrap().remove(key);
+        }
+        sprint["planningTaskId"] = Value::Null;
+        sprint["planningRun"] = Value::Null;
+        sprint["planning"] = json!("planning");
     } else if action == "note" {
         let items = p.get("attachments").cloned().unwrap_or_else(|| json!([]));
         files::checked_references(state, &items)?;

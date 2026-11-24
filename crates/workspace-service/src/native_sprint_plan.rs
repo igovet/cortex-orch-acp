@@ -36,6 +36,22 @@ fn refused(error: PlanError) -> Value {
     )
 }
 
+pub(crate) const REJECTED: &str = "SPRINT_PLAN_SUBMISSION_REFUSED";
+
+fn refused_submission(db: &Transaction<'_>, task: &str, error: PlanError) -> CoreResult<Value> {
+    // Keep only the runtime's rule code, never the proposed items or error detail.
+    // Other validation refusals supersede older size refusals for diagnostics.
+    let state: String = db.query_row(
+        "SELECT state FROM runtime_tasks WHERE task_id=?",
+        [task],
+        |row| row.get(0),
+    )?;
+    if matches!(state.as_str(), "PLANNING" | "RECONCILING") {
+        cortex_core::lifecycle::event_tx(db, task, REJECTED, json!({"code":error.code}))?;
+    }
+    Ok(refused(error))
+}
+
 /// The MCP reply: a receipt, or a correctable refusal naming the task and rule.
 pub(super) async fn execute(
     executor: Arc<StoreExecutor>,
@@ -90,25 +106,25 @@ pub(crate) fn submit_in_tx(
         .is_some();
     if !replay {
         if tasks.to_string().len() > MAX_PART_BYTES {
-            return Ok(refused(PlanError {
+            return refused_submission(db, task, PlanError {
                 code: "plan_part_too_large",
                 detail: format!(
                     "this part exceeds {MAX_PART_BYTES} UTF-8 bytes; send fewer tasks per part"
                 ),
-            }));
+            });
         }
         let (next, so_far) = sprint_planning::draft(db, task)?;
         if part != 1 && part != next {
-            return Ok(refused(PlanError {
+            return refused_submission(db, task, PlanError {
                 code: "sprint_plan_part_out_of_order",
                 detail: format!("part {part} does not follow the plan being assembled; send part {next}, or part 1 to start over"),
-            }));
+            });
         }
         let mut assembled = if part == 1 { Vec::new() } else { so_far };
         assembled.extend(tasks.as_array().cloned().unwrap_or_default());
         let checked = match check_tasks(&json!(assembled), last) {
             Ok(items) => items,
-            Err(error) => return Ok(refused(error)),
+            Err(error) => return refused_submission(db, task, error),
         };
         if last {
             let value =

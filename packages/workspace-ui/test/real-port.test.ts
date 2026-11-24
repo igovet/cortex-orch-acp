@@ -321,6 +321,59 @@ describe("real port", () => {
       return { s, p, asked, ready: async () => { await p.query("capabilities.get", {}); await p.query("project.snapshot", {}); await p.query("project.facts", {}); await p.query("machine.facts", {}); } };
     };
 
+    it("sends the explicit rework action with the projected binding, never a late prompt", async () => {
+      const { p, ready, s } = helper();
+      await ready();
+      let reply: unknown = { ok: true, result: { done: true, state: "PLANNING", outcome: "recorded" } };
+      s.answers["machine.call"] = () => reply;
+      s.calls.length = 0;
+      const payload = { type: "rework_task", taskId: "task-1", expectedVersion: "16", executionId: "e", ownerEpoch: "3", text: "Rework the result" } as const;
+      expect(await p.command(envelope(payload))).toMatchObject({ ok: true });
+      expect(s.calls).toEqual([{ operation: "machine.call", message: { op: "product.task", projectId: "p", params: {
+        action: "rework", taskId: "task-1", expectedVersion: "16", executionId: "e", ownerEpoch: "3", requestId: "req-1", text: "Rework the result",
+      } } }]);
+      const neverStarted = { ...payload, executionId: null, ownerEpoch: null };
+      expect(await p.command(envelope(neverStarted, "req-2"))).toMatchObject({ ok: true });
+      expect(s.calls.at(-1)?.message).toMatchObject({ params: { executionId: null, ownerEpoch: null, requestId: "req-2" } });
+      reply = { ok: false, code: "task_archived", message: "task_archived" };
+      expect(await p.command(envelope(payload, "req-3"))).toMatchObject({ ok: false, message: "Restore the task first." });
+      reply = { ok: true, result: { done: false } };
+      expect(await p.command(envelope(payload, "req-4"))).toMatchObject({ ok: false, outcome: "unknown_outcome" });
+    });
+
+    it("does not carry old result facts across the board's rework event", async () => {
+      const { p, s } = helper();
+      const old = { version: 3, digest: "old", checks: [], summary: "Old result" };
+      let reopened = false;
+      s.answers["service.capabilities"] = () => ({ methods: ["native.board", "native.query", "machine.call"], machine: true });
+      s.answers["native.board"] = () => {
+        const version = reopened ? "5" : "4";
+        const item = wireTask({ executionId: "e", version, ...(reopened
+          ? { phase: "planning", executionState: "executing", runtimeState: "PLANNING" }
+          : { phase: "result", executionState: "result", runtimeState: "COMPLETED" }) });
+        return { protocol: { major: 2, mapping: 2 }, projectId: "p", generation: "g", version, highWatermark: version,
+          data: { type: "board", value: { items: [item], nextCursor: null, highWatermark: version } } };
+      };
+      s.answers["native.query"] = () => { throw Error("No detail read in this test"); };
+      s.answers["machine.call"] = raw => {
+        const { op } = raw as { op: string };
+        if (op === "repo.snapshot") return { ok: true, result: null };
+        if (op === "workers") return { ok: true, result: [] };
+        return { ok: true, result: { tasks: { "task-1": reopened ? { reworkEvent: "22", reworkAvailable: false }
+          : op === "product.board" ? { status: "done" } : { status: "done", result: old } }, sprints: [] } };
+      };
+      await p.query("capabilities.get", {});
+      await p.query("project.snapshot", {});
+      await p.query("project.facts", {});
+      const [closed] = await p.query("project.facts", { projectId: "p", fresh: true, git: false });
+      expect(closed.overlays["task-1"].result).toEqual(old);
+      reopened = true;
+      await p.query("project.snapshot", {});
+      const [work] = await p.query("project.facts", {});
+      expect(work.overlays["task-1"]).toMatchObject({ reworkEvent: "22", reworkAvailable: false });
+      expect(work.overlays["task-1"].result).toBeUndefined();
+    });
+
     it("routes sprint controls from held facts without scanning project products", async () => {
       const sprint = {id:"sp",projectId:"p",planning:"created",materializedVersion:1,taskIds:[],conversation:[],history:[]};
       const {p,ready,s} = helper({sprints:[sprint]});
@@ -680,15 +733,26 @@ describe("real port", () => {
       expect(s.calls.find(c => c.operation === "executions.prompt")!.message).toEqual({ projectId: "p", executionId: "e", text: "Use the other file", requestId:"req-1" });
     });
 
-    // Live D3 remainder: a native host cannot run a task in a separate worktree, so the
-    // composer must not offer one (it showed the option and Start was then refused).
-    it("offers task worktrees only when the service does not rule them out", async () => {
+    it("offers task worktrees only on an explicit positive capability", async () => {
       const { s, p } = helper();
+      expect((await p.query("capabilities.get", {})).operations).not.toContain("workspace.task_worktrees");
+      s.answers["service.capabilities"] = () => ({ methods: ["machine.call"], machine: true, taskWorktrees: true });
       expect((await p.query("capabilities.get", {})).operations).toContain("workspace.task_worktrees");
       s.answers["service.capabilities"] = () => ({ methods: ["machine.call"], machine: true, taskWorktrees: false });
       const native = (await p.query("capabilities.get", {})).operations;
       expect(native).not.toContain("workspace.task_worktrees");
       expect(native).toContain("workspace.close_task");
+    });
+
+    it("sends the separately confirmed close-and-delete action and shows retained worktree feedback", async () => {
+      const { s, p, ready } = helper();
+      s.answers["service.capabilities"] = () => ({ methods: ["machine.call"], machine: true, taskWorktrees: true });
+      await ready();
+      s.calls.length = 0;
+      s.answers["machine.call"] = () => ({ ok: true, result: { done: true, worktreeCleanup: { status: "retained", reason: "worktree_dirty" } } });
+      const receipt = await p.command(envelope({ type: "close_task", choice: "remove_worktree", taskId: "task-1", confirmed: true, now: 1 }));
+      expect(s.calls).toEqual([{ operation: "machine.call", message: { op: "product.task", projectId: "p", params: { action: "close_remove_worktree", taskId: "task-1", confirmed: true } } }]);
+      expect(receipt).toMatchObject({ ok: true, worktreeCleanupNotice: true, message: expect.stringContaining("Worktree folder was kept") });
     });
 
     // Live N3/N4: on a native execution, Request changes and Close task reached the runtime

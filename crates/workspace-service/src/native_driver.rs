@@ -147,9 +147,11 @@ impl NativeHost {
                     // lets a clean first-review path list the files the work changed.
                     // The same pass also gives the per-file manifest: the execution
                     // baseline keeps it, and a review packet lists the files changed since.
+                    let checkout = self.execution_checkout(&task, &owner).await?;
+                    let review_root = checkout.path().to_owned();
                     let (mut e, baseline_manifest, raw_manifest) =
-                        native_effects::observe_review_manifest(self.root.clone()).await?;
-                    let review_root = self.root.clone();
+                        native_effects::observe_review_manifest(review_root.clone()).await?;
+                    e.checkout_evidence = checkout.evidence(owner.epoch);
                     let t = task.clone();
                     let o = owner.clone();
                     let step=recv(self.executor.write(move|db|{
@@ -290,7 +292,10 @@ impl NativeHost {
                     continue;
                 }
                 TaskState::AnswerReady | TaskState::Reconciling => {
-                    let (e, manifest) = native_effects::observe_manifest(self.root.clone()).await?;
+                    let checkout = self.execution_checkout(&task, &owner).await?;
+                    let root = checkout.path().to_owned();
+                    let (mut e, manifest) = native_effects::observe_manifest(root.clone()).await?;
+                    e.checkout_evidence = checkout.evidence(owner.epoch);
                     let ignored = e.ignored_digest.clone();
                     let t = task.clone();
                     let o = owner.clone();
@@ -341,7 +346,7 @@ impl NativeHost {
                                 .query_map([&t],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
                             for a in workers{e.workers.insert(a,ProcessObservation::ConfirmedExited);}
                             // Completion compares what the approving review bound.
-                            crate::native_change_set::bind_task_files_tx(db,store.key().root(),&t,&mut e)?;
+                            crate::native_change_set::bind_task_files_tx(db,&root,&t,&mut e)?;
                             // Owner messages recorded while this revision ran apply here, after its
                             // workers, review and verification: the coordinator replans with them
                             // instead of the result completing past them.
@@ -445,8 +450,11 @@ impl NativeHost {
         // digest, every post-command drift check and the final record.
         // Verification compares what the approving review bound: the task's own files
         // (identified in the observation) or the whole checkout.
-        let mut e = native_effects::observe(self.root.clone()).await?;
-        crate::native_change_set::bind_task_files(&self.executor, &self.root, task, &mut e).await?;
+        let checkout = self.execution_checkout(task, owner).await?;
+        let root = checkout.path().to_owned();
+        let mut e = native_effects::observe(root.clone()).await?;
+        e.checkout_evidence = checkout.evidence(owner.epoch);
+        crate::native_change_set::bind_task_files(&self.executor, &root, task, &mut e).await?;
         let e = std::sync::Arc::new(e);
         let digest = e.project_digest.clone();
         let t = task.to_owned();
@@ -519,8 +527,11 @@ impl NativeHost {
             }
             // Drift is a change of what the review bound: with a task-file binding,
             // another actor's edit elsewhere in the checkout is not drift.
-            let mut fresh = native_effects::observe(self.root.clone()).await?;
-            crate::native_change_set::bind_task_files(&self.executor, &self.root, task, &mut fresh)
+            let current = self.execution_checkout(task, owner).await?;
+            if current.path() != root { return Err(CoreError::Refused("worktree_binding_invalid")); }
+            let mut fresh = native_effects::observe(root.clone()).await?;
+            fresh.checkout_evidence = current.evidence(owner.epoch);
+            crate::native_change_set::bind_task_files(&self.executor, &root, task, &mut fresh)
                 .await?;
             let t = task.to_owned();
             let (fresh, fresh_bound) = recv(self.executor.read(move |db| {
@@ -645,7 +656,7 @@ impl NativeHost {
             lifecycle::request_tx(db,&t,"native-verifier-output",&output_key,"native_command_output",&raw,||Ok(raw.clone()))?;
             let observation=&raw["observation"];
             let failed=observation["complete"]==true && observation["exit_code"].as_i64().is_some_and(|c|c!=0);
-            let worker_passed=failed && completion::worker_passed_tx(db,&t,&argv,&[digests[0].as_str(),digests[1].as_str()])?;
+            let worker_passed=failed && completion::worker_passed_tx(db,&t,&argv,&[digests[0].as_str(),digests[1].as_str()],&raw)?;
             Ok(completion::verifier_environment(observation,worker_passed))
         })?).await?;
         Ok((receipt, environment))
@@ -761,8 +772,19 @@ while IFS= read -r line; do
         printf '{{"jsonrpc":"2.0","id":%s,"result":{{"configOptions":%s}}}}\n' "$id" "$(config)" ;;
     *'"method":"session/prompt"'*)
         case "$line" in
+        *'Sprint owner load hold'*)
+            printf 'held\n' >> "$0/load-entered"
+            while [ ! -f "$0/load-release" ]; do /usr/bin/sleep .02; done
+            update '{fixture}' ;;
         *'Sprint task t1'*)
             printf '%s\n' "$line" > "$0/.git/sprint-child-prompt"
+            update '{fixture}' ;;
+        *'Merge manifest:'*)
+            printf '%s\n' "$line" >> "$0/.git/merge-handoff-prompts"
+            while [ ! -f "$0/.git/release-merge-handoff" ]; do /usr/bin/sleep .02; done
+            update '{fixture}' ;;
+        *'Run a fresh independent review and runtime verification for the resolved task merge'*)
+            printf '%s\n' "$line" >> "$0/.git/merge-fresh-check-prompts"
             update '{fixture}' ;;
         *'Automatic recovery. Inspect the current task'*)
             printf '%s\n' "$line" > "$0/.git/automatic-repair-prompt"
@@ -808,6 +830,10 @@ done
     pub(super) struct Peer(pub(super) Option<std::path::PathBuf>);
     impl NativeRoutes for Peer {
         fn route(&self, root: &Path, _: &str) -> CoreResult<SessionRoute> {
+            if root.join(".git/refuse-merge-route").is_file() {
+                return Err(cortex_core::CoreError::Refused("fixture_merge_route_refused"));
+            }
+            let load_route = root.join("load-route-enabled").is_file();
             Ok(SessionRoute {
                 launch: EngineLaunch {
                     engine: EngineKind::Codex,
@@ -832,8 +858,16 @@ done
                 }),
                 connection: "fixture".into(),
                 connection_limit: 4,
-                model: "fixture-model".into(),
-                parameters: BTreeMap::new(),
+                model: if load_route {
+                    "load-model".into()
+                } else {
+                    "fixture-model".into()
+                },
+                parameters: if load_route {
+                    BTreeMap::from([("thought_level".into(), "high".into())])
+                } else {
+                    BTreeMap::new()
+                },
                 instructions: "No-paid fixture.".into(),
                 deadline: Duration::from_secs(3),
             })
@@ -1565,7 +1599,10 @@ pub(crate) mod sprints {
     /// What the planning task is asked to do. The sprint description and the
     /// conversation are the owner's request; the plan's shape is the advertised
     /// `sprint_plan_submit` schema, never restated here.
-    pub(crate) fn planning_request(sprint: &Value) -> Result<String, String> {
+    pub(crate) fn planning_request(
+        sprint: &Value,
+        retry: Option<PlanningFailure>,
+    ) -> Result<String, String> {
         let language = match sprint["settings"]["language"].as_str() {
             Some("ru") => "Russian",
             Some("en") => "English",
@@ -1579,12 +1616,27 @@ pub(crate) mod sprints {
              - Ask the owner with your question tool when an essential decision is missing, and \
              always when the description explicitly requires a question before implementation. \
              Never decide on the owner's behalf.\n\
-             - Base the plan on what you found and submit it with sprint_plan_submit. The runtime \
-             verifies and independently reviews it; after approval finish the task. The owner then \
-             approves the plan and creates the tasks.\n\
-             - Write in {language}.\n\nSprint description:\n{}",
-            sprint["description"].as_str().unwrap_or("")
+             - Base the plan on what you found and submit it with sprint_plan_submit. For a large \
+             plan, submit small ordered parts as you work (part 1, 2, and so on). Use final:false \
+             on each intermediate part and final:true on the last. Follow the tool's advertised \
+             limits. Keep each item compact while \
+             preserving scope, dependencies, owner decisions and acceptance criteria. Do not echo \
+             the full plan in prose.\n\
+             - The runtime verifies and independently reviews the plan; after approval finish the \
+             task. The owner then approves the plan and creates the tasks.\n\
+             - Write in {language}."
         );
+        if let Some(limit) = retry {
+            text.push_str(&format!(
+                "\n- Retry strategy: {} Start with small ordered sprint_plan_submit parts from \
+                 the outset, even if the whole plan might fit in one call. Submit the first part \
+                 as soon as its items are ready; do not wait to draft the whole plan. Keep each \
+                 item compact without dropping requirements.",
+                limit.reason()
+            ));
+        }
+        text.push_str("\n\nSprint description:\n");
+        text.push_str(sprint["description"].as_str().unwrap_or(""));
         let earlier: Vec<String> = sprint["conversation"]
             .as_array()
             .into_iter()
@@ -1603,8 +1655,9 @@ pub(crate) mod sprints {
             text.push_str("\n\nEarlier sprint conversation:\n");
             text.push_str(&earlier.join("\n"));
         }
-        if text.chars().count() > MAX_REQUEST_CHARS {
-            return Err("The planning request is too long. Shorten the description or conversation before retrying.".into());
+        let length = text.chars().count();
+        if length > MAX_REQUEST_CHARS {
+            return Err(format!("The planning request is too long ({length} characters; limit {MAX_REQUEST_CHARS}, including instructions and saved conversation). Shorten the sprint description before retrying."));
         }
         Ok(text)
     }
@@ -1657,12 +1710,114 @@ pub(crate) mod sprints {
         Ok(items)
     }
 
+    /// Only exact runtime codes enter this allowlist; engine text and generic
+    /// cancellation/refusal codes never supply a cause.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub(crate) enum PlanningFailure {
+        OwnerStopped,
+        PartSize,
+        TotalSize,
+        CapacityTimeout,
+        StepLimit,
+        NoProgressLimit,
+        #[default]
+        Unknown,
+    }
+
+    impl PlanningFailure {
+        pub(crate) fn code(self) -> &'static str {
+            match self {
+                Self::OwnerStopped => "planning_stopped_by_owner",
+                Self::PartSize => "plan_part_too_large",
+                Self::TotalSize => "plan_too_large",
+                Self::CapacityTimeout => "scheduler_capacity_timeout",
+                Self::StepLimit => "native_progress_limit",
+                Self::NoProgressLimit => "coordinator_no_progress_limit",
+                Self::Unknown => "planning_task_stopped",
+            }
+        }
+
+        pub(crate) fn kind(self) -> &'static str {
+            match self {
+                Self::OwnerStopped => "owner_stopped",
+                Self::Unknown => "unknown",
+                _ => "limit",
+            }
+        }
+
+        pub(crate) fn reason(self) -> &'static str {
+            match self {
+                Self::OwnerStopped => "You stopped the planning task.",
+                Self::PartSize => "The planning task ended after a plan part was rejected for exceeding the size limit.",
+                Self::TotalSize => "The planning task ended after the assembled plan was rejected for exceeding the total size limit.",
+                Self::CapacityTimeout => "The planning task timed out waiting for runtime capacity.",
+                Self::StepLimit => "The planning task reached the runtime's step limit.",
+                Self::NoProgressLimit => "The planning task reached the runtime's limit for turns without progress.",
+                Self::Unknown => "The planning task ended without a known cause.",
+            }
+        }
+
+        pub(crate) fn is_limit(self) -> bool {
+            self.kind() == "limit"
+        }
+    }
+
+    fn recorded_planning_failure(
+        db: &rusqlite::Connection,
+        task: &str,
+        state: &str,
+        blocker: Option<&str>,
+    ) -> cortex_core::CoreResult<PlanningFailure> {
+        use rusqlite::OptionalExtension;
+        let transition: Option<(i64, Option<String>)> = db.query_row(
+            "SELECT id,json_extract(payload_json,'$.blocker') FROM runtime_events
+             WHERE id=(SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='TASK_STATE_CHANGED')
+             AND actor='runtime' AND json_extract(payload_json,'$.state')=?2",
+            (task, state),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        let Some((event, recorded)) = transition.filter(|(_, code)| code.as_deref() == blocker) else {
+            return Ok(PlanningFailure::Unknown);
+        };
+        Ok(match recorded.as_deref() {
+            Some("owner_resolved_without_certification" | "user_force_finished") if state == "CANCELLED" => {
+                PlanningFailure::OwnerStopped
+            }
+            Some("scheduler_capacity_timeout") => PlanningFailure::CapacityTimeout,
+            Some("native_progress_limit") => PlanningFailure::StepLimit,
+            Some("coordinator_no_progress_limit") => PlanningFailure::NoProgressLimit,
+            // Generic cancellation carries no owner attribution. Only use a
+            // size refusal that was not superseded in the final planning phase.
+            None | Some("cancelled") => {
+                let code: Option<String> = db.query_row(
+                    "SELECT CASE WHEN type=?3 THEN json_extract(payload_json,'$.code') END
+                     FROM runtime_events
+                     WHERE task_id=?1 AND id<?2 AND actor='runtime' AND type IN (
+                         ?3,?4,?5,'TASK_STATE_CHANGED','NATIVE_TURN_DEGENERATE','USER_ANSWER_RECEIVED'
+                     )
+                     ORDER BY id DESC LIMIT 1",
+                    (task, event, crate::native_sprint_plan::REJECTED,
+                        cortex_core::lifecycle::sprint_planning::PART,
+                        cortex_core::lifecycle::sprint_planning::SUBMITTED),
+                    |r| r.get(0),
+                ).optional()?.flatten();
+                match code.as_deref() {
+                    Some("plan_part_too_large") => PlanningFailure::PartSize,
+                    Some("plan_too_large") => PlanningFailure::TotalSize,
+                    _ => PlanningFailure::Unknown,
+                }
+            }
+            _ => PlanningFailure::Unknown,
+        })
+    }
+
     /// The runtime facts of a planning task's current execution.
     #[derive(Debug, Default, Clone)]
     pub(crate) struct PlanningFact {
         pub(crate) execution: Option<String>,
         pub(crate) runtime_task: Option<String>,
         pub(crate) state: Option<String>,
+        failure: PlanningFailure,
         /// The event that completed the current run (or the latest event of a completed one).
         pub(crate) completion: Option<i64>,
         pub(crate) plan: Option<(i64, Value)>,
@@ -1674,16 +1829,17 @@ pub(crate) mod sprints {
             .executor
             .read(move |db| {
                 use rusqlite::OptionalExtension;
-                let row: Option<(Option<String>, Option<String>, Option<String>)> = db
+                let row = db
                     .query_row(
-                        "SELECT w.execution_id,e.runtime_task_id,r.state FROM workspace_tasks w
+                        "SELECT w.execution_id,e.runtime_task_id,r.state,r.blocker FROM workspace_tasks w
                          LEFT JOIN workspace_executions e ON e.execution_id=w.execution_id
                          LEFT JOIN runtime_tasks r ON r.task_id=e.runtime_task_id WHERE w.task_id=?",
                         [&task],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                        |r| Ok((r.get(0)?, r.get::<_, Option<String>>(1)?,
+                            r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?)),
                     )
                     .optional()?;
-                let Some((execution, runtime_task, state)) = row else {
+                let Some((execution, runtime_task, state, blocker)) = row else {
                     return Ok(PlanningFact::default());
                 };
                 let mut fact = PlanningFact {
@@ -1700,6 +1856,9 @@ pub(crate) mod sprints {
                             [&rt],
                             |r| r.get(0),
                         )?;
+                    }
+                    if let Some(state @ ("FAILED" | "CANCELLED")) = state.as_deref() {
+                        fact.failure = recorded_planning_failure(db, &rt, state, blocker.as_deref())?;
                     }
                     fact.plan = cortex_core::lifecycle::sprint_planning::latest(db, &rt)?;
                 }
@@ -1724,14 +1883,19 @@ pub(crate) mod sprints {
         },
         Cancel {
             note: String,
+            code: &'static str,
             run: Value,
         },
         Continue {
             text: String,
             run: Value,
         },
+        Terminal {
+            failure: PlanningFailure,
+            run: Value,
+        },
         Replace {
-            note: String,
+            retry: Option<PlanningFailure>,
         },
         /// A finished turn without a new plan keeps the current proposal (the owner asked
         /// something and the coordinator answered).
@@ -1810,6 +1974,7 @@ pub(crate) mod sprints {
                             },
                             Err(note) => PlanningStep::Cancel {
                                 note,
+                                code: "plan_rejected",
                                 run: run(completion, "cancelled", corrections, *event),
                             },
                         }
@@ -1825,6 +1990,7 @@ pub(crate) mod sprints {
                     },
                     _ => PlanningStep::Cancel {
                         note: "The planning task finished twice without a sprint plan.".into(),
+                        code: "plan_missing",
                         run: run(completion, "cancelled", corrections, consumed),
                     },
                 }
@@ -1832,13 +1998,13 @@ pub(crate) mod sprints {
             Some("FAILED" | "CANCELLED") => {
                 let stopped = json!(format!("stopped:{rt}"));
                 if handled != stopped {
-                    PlanningStep::Cancel {
-                        note: "The planning task stopped before it produced a plan.".into(),
+                    PlanningStep::Terminal {
+                        failure: fact.failure,
                         run: run(stopped, "cancelled", corrections, consumed),
                     }
                 } else if resumed {
                     PlanningStep::Replace {
-                        note: "Planning continues in a new planning task.".into(),
+                        retry: fact.failure.is_limit().then_some(fact.failure),
                     }
                 } else {
                     PlanningStep::Wait
@@ -1851,7 +2017,10 @@ pub(crate) mod sprints {
     /// Background jobs of a pass; dropping the pass aborts them. Planning itself is
     /// an ordinary runtime task, so no planner job runs here.
     #[derive(Default)]
-    struct Jobs(HashMap<(String, String), tokio::task::JoinHandle<()>>);
+    struct Jobs(
+        HashMap<(String, String), tokio::task::JoinHandle<()>>,
+        HashMap<String, HashMap<String, u8>>,
+    );
     impl Drop for Jobs {
         fn drop(&mut self) {
             for job in self.0.values() {
@@ -1983,6 +2152,90 @@ pub(crate) mod sprints {
                 {"key":"t2","title":"Second","description":"Do the second part","dependsOn":["t1"]}])
         }
 
+        async fn native_board(service: &Service, project: &str) -> Value {
+            let reply = service
+                .native_query(json!({"protocol":{"major":2,"mapping":2},
+                    "requestId":"read-planning-board","projectId":project,
+                    "operation":"tasks.board","payload":{"id":project}}))
+                .await
+                .unwrap();
+            assert_eq!(reply["data"]["type"], "board");
+            reply["data"]["value"]["items"].clone()
+        }
+
+        async fn native_board_task(service: &Service, project: &str, task: &str) -> Value {
+            native_board(service, project)
+                .await
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["taskId"] == task)
+                .expect("task on the native board")
+                .clone()
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn sprint_planner_identity_is_public_with_the_draft_before_the_sprint_link() {
+            let (_scratch, service, runtime, project) = planning_fixture("planner-identity").await;
+            let sprint_id = task_sprint(
+                &service,
+                &project,
+                json!({"action":"create","description":"Plan a change"}),
+            )
+            .await;
+            let id = sprint_id.as_str().unwrap();
+            assert_eq!(native_board(&service, &project).await, json!([]));
+
+            let create = json!({"protocol":{"major":1,"minor":8},"requestId":"planner-draft",
+                "projectId":project,"actorId":actor(),"operation":"tasks.create","target":project,
+                "expectedVersion":"0","ownerEpoch":null,
+                "payload":{"description":"Plan a change","checkout":{"kind":"main"}}});
+            // This is the driver's create step, deliberately without the later CAS or Start.
+            let first = runtime
+                .create_draft(project.clone(), create.clone(), Some(id.to_owned()))
+                .await
+                .unwrap();
+            assert_eq!(first["outcome"], "recorded");
+            assert!(sprint(&service, &project, &sprint_id).await["planningTaskId"].is_null());
+            let draft = first["target"].as_str().unwrap();
+            let row = native_board_task(&service, &project, draft).await;
+            assert_eq!(row["planningSprintId"], id);
+            assert_eq!(row["version"], "1");
+            assert!(row["executionId"].is_null());
+
+            let replay = runtime
+                .create_draft(project.clone(), create.clone(), Some(id.to_owned()))
+                .await
+                .unwrap();
+            assert_eq!(replay, first);
+            let conflict = runtime
+                .command(project.clone(), create.clone())
+                .await
+                .unwrap();
+            assert_eq!(conflict["outcome"], "payload_conflict");
+
+            let mut ordinary = create;
+            ordinary["requestId"] = json!("ordinary-draft");
+            ordinary["payload"]["planningSprintId"] = json!(id);
+            let forged = runtime
+                .command(project.clone(), ordinary.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(forged.to_string(), "invalid_workspace_request");
+            ordinary["payload"]
+                .as_object_mut()
+                .unwrap()
+                .remove("planningSprintId");
+            let ordinary = runtime.command(project.clone(), ordinary).await.unwrap();
+            assert_eq!(ordinary["outcome"], "recorded");
+            let task = ordinary["target"].as_str().unwrap();
+            assert!(native_board_task(&service, &project, task)
+                .await
+                .get("planningSprintId")
+                .is_none());
+            service.stop().await.unwrap();
+        }
+
         #[tokio::test(flavor = "multi_thread")]
         async fn a_sprint_plans_in_a_read_only_task_revises_on_request_and_approval_closes_it() {
             let (_scratch, service, runtime, project) = planning_fixture("sprint-task").await;
@@ -1999,7 +2252,11 @@ pub(crate) mod sprints {
                 .expect("a planning task")
                 .to_owned();
             assert_eq!(started["planning"], "planning");
-            // An ordinary task in the project folder, asked to study and plan read-only.
+            assert_eq!(
+                native_board_task(&service, &project, &draft).await["planningSprintId"],
+                id
+            );
+            // A task in the project folder, asked to study and plan read-only.
             let text = draft_text(&runtime, &draft).await;
             assert!(text.starts_with("Sprint planning (read-only)"), "{text}");
             assert!(text.contains("Build the two parts"), "{text}");
@@ -2173,6 +2430,18 @@ pub(crate) mod sprints {
                 "{note}"
             );
             assert!(note.contains("Resume planning"), "{note}");
+            let event = cancelled["conversation"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap();
+            assert_eq!(event["kind"], "event");
+            assert!(event["at"].as_u64().is_some_and(|at| at > 0));
+            assert_eq!(
+                cancelled["planningFailure"],
+                json!({"text":note,"step":"run",
+                "code":"plan_missing","at":event["at"]})
+            );
             // Another pass leaves the cancelled sprint as it is.
             service
                 .sprint_pass(&project, &runtime, &mut jobs, false)
@@ -2196,6 +2465,7 @@ pub(crate) mod sprints {
                 .unwrap();
             let resumed = sprint(&service, &project, &id).await;
             assert_eq!(resumed["planning"], "planning", "{resumed}");
+            assert!(resumed.get("planningFailure").is_none());
             assert_eq!(resumed["planningRun"]["outcome"], "continued");
             assert_eq!(resumed["planningTaskId"], draft.as_str());
             settled(&runtime, &draft).await;
@@ -2205,6 +2475,570 @@ pub(crate) mod sprints {
                 .await
                 .unwrap();
             assert_eq!(sprint(&service, &project, &id).await["planning"], "ready");
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn sprint_planning_diagnostics_preserve_saved_work_and_owner_cancel_is_neutral() {
+            let (_scratch, service, runtime, project) =
+                planning_fixture("sprint-diagnostics").await;
+            let mut jobs = Jobs::default();
+            let id = task_sprint(
+                &service,
+                &project,
+                json!({"action":"create","description":"Keep the saved request"}),
+            )
+            .await;
+            let sprint_id = id.as_str().unwrap();
+            let plan =
+                json!({"version":1,"items":[{"key":"saved","description":"Previously proposed"}]});
+            service
+                .sprint_patch(&project, sprint_id, json!({"plan":plan,"history":[plan]}))
+                .await
+                .unwrap();
+            service
+                .sprint_note(&project, sprint_id, "answer", "Keep this answer")
+                .await
+                .unwrap();
+            let before = sprint(&service, &project, &id).await;
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, true)
+                .await
+                .unwrap();
+            let failed = sprint(&service, &project, &id).await;
+            assert_eq!(failed["planning"], "cancelled");
+            let conversation = failed["conversation"].as_array().unwrap();
+            assert_eq!(conversation.len(), 2);
+            assert_eq!(conversation[0], before["conversation"][0]);
+            assert_eq!(conversation[1]["text"], failed["planningFailure"]["text"]);
+            for key in ["description", "attachments", "plan", "history"] {
+                assert_eq!(failed[key], before[key], "{key}");
+            }
+
+            service
+                .sprint_patch(&project, sprint_id, json!({"planning":"planning"}))
+                .await
+                .unwrap();
+            assert!(sprint(&service, &project, &id)
+                .await
+                .get("planningFailure")
+                .is_none());
+            for field in ["planningFailure", "planningWarning"] {
+                let patch = json!({(field):{"text":"Not a service diagnostic"}});
+                let request = serde_json::from_value(json!({
+                    "op":"product.sprint","projectId":project,
+                    "params":{"action":"patch","sprintId":sprint_id,"patch":patch}
+                }))
+                .unwrap();
+                let reply = service.machine(request).await.unwrap();
+                assert_eq!(reply["ok"], false);
+                assert_eq!(reply["code"], "invalid_sprint");
+            }
+            service
+                .sprint_patch(&project, sprint_id, json!({"planning":"cancelled"}))
+                .await
+                .unwrap();
+            // A failure from an in-flight pass cannot overwrite the owner's stop.
+            service
+                .cancel_planning(
+                    &project,
+                    sprint_id,
+                    "start",
+                    "planning_start_failed",
+                    "Planning did not start.",
+                    None,
+                )
+                .await
+                .unwrap();
+            let stopped = sprint(&service, &project, &id).await;
+            assert_eq!(stopped["planning"], "cancelled");
+            assert!(stopped.get("planningFailure").is_none());
+            assert_eq!(stopped["conversation"], failed["conversation"]);
+            service.stop().await.unwrap();
+        }
+
+        async fn linked_unstarted(
+            service: &Service,
+            runtime: &Arc<Runtime>,
+            project: &str,
+            id: &Value,
+        ) -> String {
+            let created = runtime.command(
+                project.to_owned(),
+                json!({"protocol":{"major":1,"minor":8},"requestId":"fixture-create",
+                    "projectId":project,"actorId":actor(),"operation":"tasks.create","target":project,
+                    "expectedVersion":"0","ownerEpoch":null,"payload":{"description":"Old draft"}}),
+            ).await.unwrap();
+            assert_eq!(created["outcome"], "recorded", "{created}");
+            let draft = created["target"].as_str().unwrap().to_owned();
+            call(
+                service,
+                "product.sprint",
+                project,
+                json!({"action":"patch","sprintId":id,
+                "patch":{"planningTaskId":draft,"planningRun":{"outcome":"fixture"}}}),
+            )
+            .await;
+            draft
+        }
+
+        async fn recover_sprint(service: &Service, project: &str, params: Value) -> Value {
+            let request = serde_json::from_value(json!({
+                "op":"product.sprint","projectId":project,"params":params
+            }))
+            .unwrap();
+            service.machine(request).await.unwrap()
+        }
+
+        async fn started_draft(
+            service: &Service,
+            runtime: &Runtime,
+            project: &str,
+            id: &Value,
+        ) -> String {
+            let saved = sprint(service, project, id).await;
+            let task = saved["planningTaskId"].as_str().expect("linked draft");
+            assert!(planning_fact(runtime, task)
+                .await
+                .unwrap()
+                .execution
+                .is_some());
+            task.to_owned()
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn refused_planning_start_unlinks_the_draft_and_owner_retry_starts_a_new_one() {
+            let (_scratch, service, runtime, project) = planning_fixture("sprint-retry").await;
+            let mut jobs = Jobs::default();
+            let id = task_sprint(
+                &service,
+                &project,
+                json!({"action":"create","description":"Current owner description"}),
+            )
+            .await;
+            let old = linked_unstarted(&service, &runtime, &project, &id).await;
+
+            // Start with an outdated version: the runtime refuses without committing execution.
+            let refused = runtime
+                .start_sprint_planning(
+                    project.clone(),
+                    json!({"protocol":{"major":1,"minor":8},"requestId":"fixture-start-stale",
+                    "projectId":project,"actorId":actor(),"operation":"tasks.start","target":old,
+                    "expectedVersion":"2","ownerEpoch":null,"payload":{}}),
+                )
+                .await;
+            assert_eq!(refused.as_ref().unwrap_err().to_string(), "stale_version");
+            service
+                .finish_planning_start(&project, &runtime, id.as_str().unwrap(), &old, refused)
+                .await
+                .unwrap();
+
+            let failed = sprint(&service, &project, &id).await;
+            assert_eq!(failed["planning"], "cancelled");
+            assert!(failed["planningTaskId"].is_null());
+            assert!(failed["planningRun"].is_null());
+            assert_eq!(failed["planningFailure"]["code"], "planning_start_failed");
+            assert_eq!(
+                failed["conversation"][0]["text"],
+                failed["planningFailure"]["text"]
+            );
+            assert_eq!(draft_text(&runtime, &old).await, "Old draft");
+            assert!(planning_fact(&runtime, &old)
+                .await
+                .unwrap()
+                .execution
+                .is_none());
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                sprint(&service, &project, &id).await,
+                failed,
+                "no automatic retry"
+            );
+
+            call(
+                &service,
+                "product.sprint",
+                &project,
+                json!({"action":"note","sprintId":id,
+                "kind":"answer","text":"Use option A"}),
+            )
+            .await;
+            call(
+                &service,
+                "product.sprint",
+                &project,
+                json!({"action":"patch","sprintId":id,
+                "patch":{"planning":"planning"}}),
+            )
+            .await;
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let new = started_draft(&service, &runtime, &project, &id).await;
+            assert_ne!(new, old);
+            let text = draft_text(&runtime, &new).await;
+            assert!(
+                text.contains("Current owner description")
+                    && text.contains("Owner answer: Use option A")
+            );
+            assert!(sprint(&service, &project, &id).await["planningFailure"].is_null());
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn retry_recovers_an_old_failed_sprint_with_a_linked_unstarted_draft() {
+            let (_scratch, service, runtime, project) = planning_fixture("sprint-stuck").await;
+            let mut jobs = Jobs::default();
+            let id = task_sprint(
+                &service,
+                &project,
+                json!({"action":"create","description":"Legacy sprint"}),
+            )
+            .await;
+            let old = linked_unstarted(&service, &runtime, &project, &id).await;
+            service
+                .cancel_planning(
+                    &project,
+                    id.as_str().unwrap(),
+                    "start",
+                    "planning_start_refused",
+                    "Legacy failure.",
+                    None,
+                )
+                .await
+                .unwrap();
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                sprint(&service, &project, &id).await["planningTaskId"],
+                old.as_str()
+            );
+
+            for _ in 0..2 {
+                call(
+                    &service,
+                    "product.sprint",
+                    &project,
+                    json!({"action":"patch","sprintId":id,
+                    "patch":{"planning":"planning"}}),
+                )
+                .await;
+            }
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let fresh = started_draft(&service, &runtime, &project, &id).await;
+            assert_ne!(fresh, old);
+            assert_eq!(draft_text(&runtime, &old).await, "Old draft");
+            assert!(planning_fact(&runtime, &old)
+                .await
+                .unwrap()
+                .execution
+                .is_none());
+            assert!(sprint(&service, &project, &id).await["planningRetry"].is_null());
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn planning_message_recovers_a_failed_sprint_and_passes_the_saved_note() {
+            let (_scratch, service, runtime, project) = planning_fixture("sprint-change").await;
+            let mut jobs = Jobs::default();
+            let id = task_sprint(
+                &service,
+                &project,
+                json!({"action":"create","description":"Keep the original"}),
+            )
+            .await;
+            let old = linked_unstarted(&service, &runtime, &project, &id).await;
+            service
+                .cancel_planning(
+                    &project,
+                    id.as_str().unwrap(),
+                    "start",
+                    "planning_start_refused",
+                    "Legacy failure.",
+                    None,
+                )
+                .await
+                .unwrap();
+            let params = json!({"action":"recover_planning_message","sprintId":id,
+                "text":"Use the smaller version", "attachments":[]});
+            let reply = recover_sprint(&service, &project, params.clone()).await;
+            assert_eq!(reply["result"], json!({"done":true}), "{reply}");
+            let accepted = sprint(&service, &project, &id).await;
+            assert_eq!(accepted["planning"], "planning");
+            assert!(accepted["planningTaskId"].is_null());
+            assert!(accepted["planningFailure"].is_null());
+            let repeated = recover_sprint(&service, &project, params).await;
+            assert_eq!(repeated["code"], "planning_recovery_unavailable");
+            assert_eq!(sprint(&service, &project, &id).await, accepted);
+
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let fresh = started_draft(&service, &runtime, &project, &id).await;
+            assert_ne!(fresh, old);
+            let text = draft_text(&runtime, &fresh).await;
+            assert!(
+                text.contains("Keep the original")
+                    && text.contains("Owner message: Use the smaller version")
+            );
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn recovery_message_refuses_to_replace_a_live_planner() {
+            let (_scratch, service, runtime, project) = planning_fixture("sprint-live-guard").await;
+            let mut jobs = Jobs::default();
+            let id = task_sprint(
+                &service,
+                &project,
+                json!({"action":"create","description":"Keep the live task"}),
+            )
+            .await;
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let task = started_draft(&service, &runtime, &project, &id).await;
+            let runtime_task = settled(&runtime, &task).await;
+            runtime
+                .host
+                .executor
+                .write(move |db| {
+                    db.execute(
+                        "UPDATE runtime_tasks SET state='PLANNING' WHERE task_id=?",
+                        [&runtime_task],
+                    )?;
+                    Ok(())
+                })
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap();
+            service
+                .cancel_planning(
+                    &project,
+                    id.as_str().unwrap(),
+                    "continue",
+                    "planning_continue_failed",
+                    "Fixture failure.",
+                    None,
+                )
+                .await
+                .unwrap();
+            let before = sprint(&service, &project, &id).await;
+            let reply = recover_sprint(
+                &service,
+                &project,
+                json!({"action":"recover_planning_message","sprintId":id,"text":"Do not detach"}),
+            )
+            .await;
+            assert_eq!(reply["code"], "planning_execution_live", "{reply}");
+            assert_eq!(sprint(&service, &project, &id).await, before);
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn replacing_an_overlong_request_preserves_saved_work_and_starts_planning() {
+            let (_scratch, service, runtime, project) =
+                planning_fixture("sprint-edit-request").await;
+            let mut jobs = Jobs::default();
+            let files = call(&service, "product.attachment", &project, json!({
+                "action":"upload","files":[{"name":"owner.txt","mimeType":"text/plain","data":"YQ=="}]
+            })).await;
+            let id = task_sprint(
+                &service,
+                &project,
+                json!({"action":"create",
+                "description":format!("old request {}", "x".repeat(31_900)), "attachments":files}),
+            )
+            .await;
+            call(
+                &service,
+                "product.sprint",
+                &project,
+                json!({"action":"note","sprintId":id,
+                "kind":"answer","text":"Preserved answer"}),
+            )
+            .await;
+            let plan = json!({"version":1,"items":two_parts()});
+            call(
+                &service,
+                "product.sprint",
+                &project,
+                json!({"action":"patch","sprintId":id,
+                "patch":{"plan":plan,"history":[plan]}}),
+            )
+            .await;
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let failed = sprint(&service, &project, &id).await;
+            assert_eq!(
+                failed["planningFailure"]["code"],
+                "planning_request_invalid"
+            );
+            assert!(failed["planningFailure"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("limit 32000"));
+
+            let reply = recover_sprint(
+                &service,
+                &project,
+                json!({
+                    "action":"replace_planning_request","sprintId":id,"description":" "
+                }),
+            )
+            .await;
+            assert_eq!(reply["code"], "invalid_sprint");
+            assert_eq!(sprint(&service, &project, &id).await, failed);
+
+            let reply = recover_sprint(&service, &project, json!({
+                "action":"replace_planning_request","sprintId":id,"description":"Short new request"
+            })).await;
+            assert_eq!(reply["result"], json!({"done":true}), "{reply}");
+            let edited = sprint(&service, &project, &id).await;
+            assert_eq!(edited["description"], "Short new request");
+            assert!(edited["planningFailure"].is_null());
+            for key in ["attachments", "conversation", "plan", "history"] {
+                assert_eq!(edited[key], failed[key], "{key}");
+            }
+
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let task = started_draft(&service, &runtime, &project, &id).await;
+            let text = draft_text(&runtime, &task).await;
+            assert!(
+                text.contains("Short new request")
+                    && text.contains("Owner answer: Preserved answer")
+            );
+            assert!(!text.contains("old request"));
+            assert_eq!(
+                runtime.draft_attachments(project, task).await.unwrap()[0]["name"],
+                "owner.txt"
+            );
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn ambiguous_planning_start_keeps_a_committed_execution_link() {
+            let (_scratch, service, runtime, project) = planning_fixture("sprint-lost-reply").await;
+            let mut jobs = Jobs::default();
+            let id = task_sprint(
+                &service,
+                &project,
+                json!({"action":"create","description":"Started planning"}),
+            )
+            .await;
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let draft = started_draft(&service, &runtime, &project, &id).await;
+
+            // Drive the same readback used on a lost Start reply after a real commit.
+            service
+                .finish_planning_start(
+                    &project,
+                    &runtime,
+                    id.as_str().unwrap(),
+                    &draft,
+                    Err(crate::failure("native_host_closed")),
+                )
+                .await
+                .unwrap();
+            let saved = sprint(&service, &project, &id).await;
+            assert_eq!(saved["planningTaskId"], draft.as_str());
+            assert_eq!(saved["planning"], "planning");
+            assert!(saved["planningFailure"].is_null());
+
+            let runtime_task = settled(&runtime, &draft).await;
+            complete(&runtime, &runtime_task, Some(two_parts())).await;
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            assert_eq!(sprint(&service, &project, &id).await["planning"], "ready");
+            assert_eq!(
+                sprint(&service, &project, &id).await["planningTaskId"],
+                draft.as_str()
+            );
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn sprint_planning_warning_is_once_per_streak_and_clears_on_success() {
+            let (_scratch, service, runtime, project) = planning_fixture("sprint-warning").await;
+            let mut jobs = Jobs::default();
+            let id = task_sprint(
+                &service,
+                &project,
+                json!({"action":"create","description":"Check a stalled sprint"}),
+            )
+            .await;
+            let sprint_id = id.as_str().unwrap();
+            service
+                .sprint_patch(&project, sprint_id, json!({"planning":"question"}))
+                .await
+                .unwrap();
+            // Inject pass results, while exercising the real warning writer and board read.
+            for attempt in 1..=5 {
+                let snapshot = sprint(&service, &project, &id).await;
+                service
+                    .observe_planning_pass(
+                        &project,
+                        &snapshot,
+                        jobs.1.entry(project.clone()).or_default(),
+                        Err(crate::failure("planning_unavailable")),
+                    )
+                    .await;
+                let saved = sprint(&service, &project, &id).await;
+                assert_eq!(saved["planning"], "question");
+                assert_eq!(
+                    saved["conversation"].as_array().unwrap().len(),
+                    usize::from(attempt >= 3)
+                );
+                if attempt >= 3 {
+                    let note = &saved["conversation"][0];
+                    assert_eq!(note["kind"], "event");
+                    assert!(note["at"].as_u64().is_some_and(|at| at > 0));
+                    assert_eq!(
+                        saved["planningWarning"],
+                        json!({"text":note["text"],"step":"internal",
+                        "code":"planning_pass_failed","at":note["at"],"count":3})
+                    );
+                } else {
+                    assert!(saved.get("planningWarning").is_none());
+                }
+            }
+            // This older saved sprint has no planning task; a real pass succeeds without starting one.
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let recovered = sprint(&service, &project, &id).await;
+            assert!(recovered.get("planningWarning").is_none());
+            assert_eq!(recovered["planning"], "question");
+            assert_eq!(recovered["conversation"].as_array().unwrap().len(), 1);
+            assert!(!jobs.1[&project].contains_key(sprint_id));
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            assert_eq!(sprint(&service, &project, &id).await, recovered);
             service.stop().await.unwrap();
         }
 
@@ -2226,6 +3060,8 @@ pub(crate) mod sprints {
                 .unwrap();
             let old = sprint(&service, &project, &id).await;
             assert_eq!(old["planning"], "cancelled");
+            assert_eq!(old["planningFailure"]["step"], "restart");
+            assert_eq!(old["planningFailure"]["code"], "planning_interrupted");
             assert!(old["planningTaskId"].is_null());
             assert!(old["conversation"]
                 .to_string()
@@ -2269,6 +3105,10 @@ pub(crate) mod sprints {
                 .as_str()
                 .expect("a planning task")
                 .to_owned();
+            assert_eq!(
+                native_board_task(&service, &project, &draft).await["planningSprintId"],
+                id
+            );
             let text = draft_text(&runtime, &draft).await;
             assert!(
                 text.contains("Old sprint") && text.contains("Owner answer: Part A first"),
@@ -2329,6 +3169,171 @@ pub(crate) mod sprints {
                 .unwrap()
                 .unwrap()["structuredContent"]
                 .clone()
+        }
+
+
+        #[test]
+        fn sprint_plan_large_request_prompt_directs_ordered_parts_without_prose() {
+            let request = planning_request(
+                &json!({"description":"Plan at least fifty-five items",
+                    "conversation":[{"kind":"answer","text":"Keep the shared dependency"}]}),
+                None,
+            )
+            .unwrap();
+            for fragment in [
+                "submit small ordered parts as you work",
+                "part 1, 2, and so on",
+                "final:false on each intermediate part and final:true on the last",
+                "advertised limits",
+                "scope, dependencies, owner decisions and acceptance criteria",
+                "Do not echo the full plan in prose.",
+                "Owner answer: Keep the shared dependency",
+            ] {
+                assert!(request.contains(fragment), "missing {fragment}");
+            }
+            assert!(!request.contains("Retry strategy:"));
+        }
+
+        async fn sprint_plan_set_state(
+            runtime: &Runtime,
+            task: &str,
+            state: &'static str,
+            blocker: Option<&'static str>,
+        ) {
+            let task = task.to_owned();
+            runtime.host.executor.write(move |db| {
+                let previous: String = db.query_row(
+                    "SELECT state FROM runtime_tasks WHERE task_id=?", [&task], |r| r.get(0),
+                )?;
+                db.execute(
+                    "UPDATE pending_questions SET status='cancelled' WHERE task_id=? AND status='open'",
+                    [&task],
+                )?;
+                db.execute("UPDATE runtime_tasks SET state=?,blocker=? WHERE task_id=?",
+                    (state, blocker, &task))?;
+                cortex_core::lifecycle::event_tx(db, &task, "TASK_STATE_CHANGED",
+                    json!({"state":state,"previous":previous,"blocker":blocker}))?;
+                Ok(())
+            }).unwrap().await.unwrap().unwrap();
+        }
+
+        async fn sprint_plan_reject_large_part(runtime: &Runtime, task: &str) {
+            sprint_plan_set_state(runtime, task, "PLANNING", None).await;
+            let tasks: Vec<_> = (0..32).map(|n| json!({
+                "key":format!("t{n}"),"title":format!("Item {n}"),"description":"x".repeat(4096),
+            })).collect();
+            let refusal = submit(runtime, task,
+                json!({"request_key":"oversize","part":1,"final":false,"tasks":tasks})).await;
+            assert_eq!(refusal["code"], "plan_part_too_large");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn sprint_plan_unknown_failure_stays_unknown() {
+            let (_scratch, service, runtime, project) = planning_fixture("sprint-unknown").await;
+            let mut jobs = Jobs::default();
+            let id = task_sprint(&service, &project,
+                json!({"action":"create","description":"Plan a sprint"})).await;
+            service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap();
+            let draft = started_draft(&service, &runtime, &project, &id).await;
+            let task = settled(&runtime, &draft).await;
+            // A later accepted part supersedes an earlier size refusal. A raw
+            // blocker containing timeout-like text is never projected verbatim.
+            sprint_plan_reject_large_part(&runtime, &task).await;
+            let accepted = submit(&runtime, &task,
+                json!({"request_key":"corrected","part":1,"final":false,"tasks":two_parts()})).await;
+            assert_eq!(accepted["recorded"], true);
+            sprint_plan_set_state(&runtime, &task, "FAILED", None).await;
+            assert_eq!(planning_fact(&runtime, &draft).await.unwrap().failure, PlanningFailure::Unknown);
+            sprint_plan_set_state(&runtime, &task, "FAILED", Some("timeout: raw engine detail")).await;
+            service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap();
+            let saved = sprint(&service, &project, &id).await;
+            assert_eq!(saved["planningFailure"]["kind"], "unknown");
+            assert_eq!(saved["planningFailure"]["recommendedAction"], "retry");
+            assert_eq!(saved["planningFailure"]["consecutiveLimitReplacementFailures"], 0);
+            let text = saved["planningFailure"]["text"].as_str().unwrap();
+            assert!(text.contains("without a known cause") && !text.contains("timeout"), "{text}");
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn sprint_plan_terminal_failure_reason_is_classified_from_exact_runtime_blockers() {
+            let (_scratch, service, runtime, project) = planning_fixture("sprint-blockers").await;
+            let mut jobs = Jobs::default();
+            let id = task_sprint(&service, &project,
+                json!({"action":"create","description":"Plan a sprint"})).await;
+            service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap();
+            let draft = started_draft(&service, &runtime, &project, &id).await;
+            let task = settled(&runtime, &draft).await;
+            sprint_plan_set_state(&runtime, &task, "FAILED", Some("scheduler_capacity_timeout")).await;
+            assert_eq!(planning_fact(&runtime, &draft).await.unwrap().failure, PlanningFailure::CapacityTimeout);
+            sprint_plan_reject_large_part(&runtime, &task).await;
+            // Explicit owner action outranks the plan refusal.
+            let t = task.clone();
+            runtime.host.executor.write(move |db| {
+                cortex_core::lifecycle::domain::cancel_task_tx(db, &t, "user_force_finished")
+            }).unwrap().await.unwrap().unwrap();
+            service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap();
+            let saved = sprint(&service, &project, &id).await;
+            assert_eq!(saved["planningFailure"]["kind"], "owner_stopped");
+            assert_eq!(saved["planningFailure"]["text"], "You stopped the planning task.");
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn sprint_plan_retry_changes_strategy_and_repeated_limit_recommends_change_request() {
+            let (_scratch, service, runtime, project) = planning_fixture("sprint-limit-retry").await;
+            let mut jobs = Jobs::default();
+            let id = task_sprint(&service, &project,
+                json!({"action":"create","description":"Keep the owner's large request"})).await;
+            service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap();
+            let draft = started_draft(&service, &runtime, &project, &id).await;
+            let task = settled(&runtime, &draft).await;
+            service.sprint_note(&project, id.as_str().unwrap(), "answer", "Keep option A").await.unwrap();
+            sprint_plan_reject_large_part(&runtime, &task).await;
+            sprint_plan_set_state(&runtime, &task, "FAILED", None).await;
+            service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap();
+            let failed = sprint(&service, &project, &id).await;
+            assert_eq!(failed["planning"], "cancelled");
+            assert_eq!(failed["planningFailure"]["kind"], "limit");
+            assert_eq!(failed["planningFailure"]["code"], "plan_part_too_large");
+            assert_eq!(failed["planningFailure"]["recommendedAction"], "retry");
+            assert_eq!(failed["planningFailure"]["consecutiveLimitReplacementFailures"], 0);
+
+            let retry = json!({"action":"patch","sprintId":id,"patch":{"planning":"planning"}});
+            assert_eq!(recover_sprint(&service, &project, retry.clone()).await["ok"], true);
+            service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap();
+            let replacement = started_draft(&service, &runtime, &project, &id).await;
+            assert_ne!(draft, replacement);
+            let new_text = draft_text(&runtime, &replacement).await;
+            assert!(new_text.contains(PlanningFailure::PartSize.reason()));
+            assert!(new_text.contains("from the outset, even if the whole plan might fit in one call"));
+            assert!(new_text.contains("Owner answer: Keep option A"));
+            let new_task = settled(&runtime, &replacement).await;
+            sprint_plan_reject_large_part(&runtime, &new_task).await;
+            sprint_plan_set_state(&runtime, &new_task, "FAILED", None).await;
+            service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap();
+            let repeated = sprint(&service, &project, &id).await;
+            assert_eq!(repeated["planning"], "cancelled");
+            assert_eq!(repeated["planningFailure"]["recommendedAction"], "change_request");
+            assert_eq!(repeated["planningFailure"]["consecutiveLimitReplacementFailures"], 1);
+            let refusal = recover_sprint(&service, &project, retry).await;
+            assert_eq!(refusal["code"], "planning_change_request_required");
+            service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap();
+            assert_eq!(sprint(&service, &project, &id).await, repeated);
+
+            let unchanged = recover_sprint(&service, &project,
+                json!({"action":"replace_planning_request","sprintId":id,"description":"Keep the owner's large request"})).await;
+            assert_eq!(unchanged["code"], "planning_change_request_required");
+            let change = recover_sprint(&service, &project,
+                json!({"action":"replace_planning_request","sprintId":id,"description":"Plan only the first milestone"})).await;
+            assert_eq!(change["ok"], true, "{change}");
+            service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap();
+            let changed = started_draft(&service, &runtime, &project, &id).await;
+            assert_ne!(changed, replacement);
+            let text = draft_text(&runtime, &changed).await;
+            assert!(text.contains("Plan only the first milestone"));
+            assert!(!text.contains("Retry strategy:"));
+            service.stop().await.unwrap();
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -2461,6 +3466,7 @@ pub(crate) mod sprints {
                 execution: Some("e".into()),
                 runtime_task: Some("rt".into()),
                 state: Some(state.into()),
+                failure: PlanningFailure::Unknown,
                 completion: Some(completion),
                 plan,
             };
@@ -2535,7 +3541,8 @@ pub(crate) mod sprints {
                 PlanningStep::Ready { .. }
             ));
             // A stopped task cancels planning once; Resume planning then starts a new task.
-            let PlanningStep::Cancel { run, .. } = planning_step(&base, &fact("FAILED", 0, None))
+            let PlanningStep::Terminal { run, .. } =
+                planning_step(&base, &fact("FAILED", 0, None))
             else {
                 panic!()
             };
@@ -2647,6 +3654,212 @@ pub(crate) mod sprints {
                 tasks[draft.as_str().unwrap()]["automaticContinuation"]["policy"],
                 cortex_core::lifecycle::automatic::POLICY
             );
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn sprint_owner_writes_survive_a_full_writer_queue() {
+            let (_scratch, folder, service, runtime, project, sprint_id, _) =
+                automatic_fixture("dev", "main", "main").await;
+            let create = |request: String, description: &str| {
+                json!({"protocol":{"major":1,"minor":8},"requestId":request,
+                    "projectId":project,"actorId":actor(),"operation":"tasks.create",
+                    "target":project,"expectedVersion":"0","ownerEpoch":null,
+                    "payload":{"description":description,"checkout":{"kind":"main"}}})
+            };
+            let mut live = Vec::new();
+            for index in 0..4 {
+                let draft = service
+                    .workspace(create(format!("load-live-{index}"), "Sprint owner load hold"))
+                    .await
+                    .unwrap();
+                let task = draft["target"].as_str().unwrap().to_owned();
+                call(&service, "product.task", &project, json!({
+                    "action":"sprint","taskId":task,"sprintId":sprint_id,"dependencies":[]
+                })).await;
+                assert_eq!(service.workspace(json!({"protocol":{"major":1,"minor":8},
+                    "requestId":format!("load-start-{index}"),"projectId":project,"actorId":actor(),
+                    "operation":"tasks.start","target":task,"expectedVersion":draft["entityVersion"],
+                    "ownerEpoch":null,"payload":{}})).await.unwrap()["outcome"], "recorded");
+                let bound = task.clone();
+                live.push(runtime.host.executor.read(move |db| {
+                    Ok(db.query_row("SELECT execution_id FROM workspace_tasks WHERE task_id=?",
+                        [bound], |row| row.get::<_, String>(0))?)
+                }).unwrap().await.unwrap().unwrap());
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if std::fs::read_to_string(folder.join("load-entered"))
+                        .is_ok_and(|s| s.lines().count() == live.len()) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("four real sprint turns held");
+
+            // Offer a different model/effort for later turns while each live peer
+            // is still on the original fixture route.
+            std::fs::write(folder.join("load-route-enabled"), "").unwrap();
+            let settings = json!({"model":"load-model","effort":"high","mode":"guarded","language":"auto"});
+            assert_eq!(runtime.routes.task_route(&folder, &settings).unwrap().model, "load-model");
+
+            // Hold the lane *before* a transaction starts. Fill its backlog with
+            // read-only jobs so a refusal here cannot originate in SQLite locking.
+            let writer = &runtime.host.executor;
+            let (entered, observed) = tokio::sync::oneshot::channel();
+            let (release, gate) = std::sync::mpsc::channel();
+            let blocker = writer.publication(move |_| {
+                entered.send(()).unwrap();
+                gate.recv_timeout(Duration::from_secs(3)).unwrap();
+                Ok(())
+            }).unwrap();
+            observed.await.unwrap();
+            let mut queued = Vec::new();
+            for _ in 0..129 {
+                match writer.publication(|s| s.read(|db| Ok(db.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?))) {
+                    Ok(job) => queued.push(job),
+                    Err(error) => {
+                        assert_eq!(error.code(), "busy");
+                        break;
+                    }
+                }
+            }
+            assert_eq!(queued.len(), 128, "the physical writer queue is full");
+            let key = crate::native_runtime::key(&folder).unwrap();
+            let unlocked = tokio::task::spawn_blocking(move || {
+                let store = cortex_core::Store::open(key, cortex_core::OpenMode::RuntimeValidate).unwrap();
+                store.write(|_| Ok(())).unwrap();
+            });
+            tokio::time::timeout(Duration::from_millis(500), unlocked)
+                .await.expect("SQLite permits BEGIN IMMEDIATE while executor is full").unwrap();
+
+            let start = tokio::time::Instant::now();
+            let mut requests = tokio::task::JoinSet::new();
+            for (index, execution) in live.into_iter().enumerate() {
+                let update = json!({"projectId":project,"executionId":execution,
+                    "requestId":format!("load-settings-{index}"),"action":"task_settings","settings":settings});
+                let draft = create(format!("load-new-{index}"), "Created during the held sprint");
+                let svc = service.clone();
+                let (project_id, sprint) = (project.clone(), sprint_id.clone());
+                requests.spawn(async move {
+                    let result = svc.workspace(draft.clone()).await;
+                    if let Ok(receipt) = &result {
+                        if receipt["outcome"] == "recorded" {
+                            call(&svc, "product.task", &project_id, json!({
+                                "action":"sprint","taskId":receipt["target"],"sprintId":sprint,"dependencies":[]
+                            })).await;
+                        }
+                    }
+                    (false, draft, result, start.elapsed())
+                });
+                let svc = service.clone();
+                requests.spawn(async move {
+                    let result = svc.control_execution(update.clone()).await;
+                    (true, update, result, start.elapsed())
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            release.send(()).unwrap();
+            blocker.await.unwrap().unwrap();
+            for job in queued {
+                assert_eq!(job.await.unwrap().unwrap(), 1);
+            }
+            let mut replies = Vec::new();
+            let mut counts = [0; 2];
+            let mut busy = [0; 2];
+            let mut max = [Duration::ZERO; 2];
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while let Some(reply) = requests.join_next().await {
+                    let reply = reply.unwrap();
+                    let lane = usize::from(reply.0);
+                    counts[lane] += usize::from(reply.2.is_ok());
+                    busy[lane] += usize::from(reply.2.as_ref().is_err_and(|e| e.to_string() == "busy"));
+                    max[lane] = max[lane].max(reply.3);
+                    replies.push(reply);
+                }
+            }).await.expect("bounded owner acknowledgement");
+            std::fs::write(folder.join("load-release"), "").unwrap();
+            eprintln!("sprint owner load: recorded API replies create/settings={counts:?}; busy={busy:?}; max latency={max:?}");
+            let stored = writer.read(|db| {
+                Ok((
+                    db.query_row("SELECT count(*) FROM workspace_requests WHERE request_id LIKE 'load-new-%'", [], |r| r.get::<_, i64>(0))?,
+                    db.query_row("SELECT count(*) FROM runtime_events WHERE type='NATIVE_TASK_SETTINGS'
+                        AND json_extract(payload_json,'$.settings.model') = 'load-model'", [], |r| r.get::<_, i64>(0))?,
+                ))
+            }).unwrap().await.unwrap().unwrap();
+            eprintln!("sprint owner load: persisted new drafts and task-local settings={stored:?}");
+            let errors: Vec<_> = replies.iter().filter_map(|reply| reply.2.as_ref().err()).collect();
+            assert_eq!(counts, [4, 4], "{errors:?}");
+            assert_eq!(stored, (4, 4));
+
+            // Exact duplicates acknowledge the retained original and do not repeat it.
+            let retry_target = replies.iter().find(|reply| reply.0).unwrap().1.clone();
+            for (settings, request, result, _) in replies {
+                let receipt = result.unwrap();
+                assert_eq!(receipt["outcome"], "recorded", "{receipt}");
+                if settings {
+                    assert_eq!(service.control_execution(request.clone()).await.unwrap(), receipt);
+                    let execution = request["executionId"].as_str().unwrap().to_owned();
+                    let persisted = writer.read(move |db| {
+                        Ok(db.query_row("SELECT count(*), max(e.payload_json) FROM runtime_events e
+                            JOIN workspace_executions w ON w.runtime_task_id=e.task_id
+                            WHERE w.execution_id=? AND e.type='NATIVE_TASK_SETTINGS'", [execution],
+                            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?)
+                    }).unwrap().await.unwrap().unwrap();
+                    assert_eq!(persisted.0, 1, "duplicate must not record another settings change");
+                    assert_eq!(serde_json::from_str::<Value>(&persisted.1).unwrap(),
+                        json!({"settings":request["settings"],"activation":"next_use"}));
+                    let mut conflicting = request;
+                    conflicting["settings"]["language"] = json!("en");
+                    assert_eq!(service.control_execution(conflicting).await.unwrap_err().to_string(),
+                        "payload_conflict");
+                } else {
+                    assert_eq!(service.workspace(request.clone()).await.unwrap(), receipt);
+                    let request_id = request["requestId"].as_str().unwrap().to_owned();
+                    let persisted = writer.read(move |db| {
+                        Ok(db.query_row("SELECT r.receipt_json FROM workspace_requests r
+                            JOIN workspace_tasks t ON json_extract(r.receipt_json,'$.target')=t.task_id
+                            WHERE r.request_id=? AND r.project_id=t.project_id", [request_id],
+                            |row| row.get::<_, String>(0))?)
+                    }).unwrap().await.unwrap().unwrap();
+                    assert_eq!(serde_json::from_str::<Value>(&persisted).unwrap(), receipt);
+                    let mut conflicting = request;
+                    conflicting["payload"]["description"] = json!("Not a replay");
+                    assert_eq!(service.workspace(conflicting).await.unwrap()["outcome"], "payload_conflict");
+                    // The desktop links the replayed receipt again; membership is still unique.
+                    call(&service, "product.task", &project, json!({
+                        "action":"sprint","taskId":receipt["target"],"sprintId":sprint_id,"dependencies":[]
+                    })).await;
+                }
+            }
+            let current = sprint(&service, &project, &sprint_id).await;
+            assert_eq!(current["taskIds"].as_array().unwrap().len(), 10);
+            let drafts = writer.read(|db| {
+                Ok(db.query_row("SELECT count(*) FROM workspace_tasks WHERE description='Created during the held sprint'",
+                    [], |row| row.get::<_, i64>(0))?)
+            }).unwrap().await.unwrap().unwrap();
+            assert_eq!(drafts, 4, "duplicates must not create extra drafts");
+
+            // A failure writing the settings must also roll back the admission record.
+            writer.write(|db| {
+                db.execute_batch("CREATE TEMP TRIGGER load_abort_setting BEFORE INSERT ON runtime_events
+                    WHEN NEW.type='NATIVE_TASK_SETTINGS' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END")?;
+                Ok(())
+            }).unwrap().await.unwrap().unwrap();
+            let mut uncommitted = retry_target;
+            uncommitted["requestId"] = json!("load-settings-unavailable");
+            uncommitted["settings"]["model"] = json!("not-an-offered-model");
+            assert_eq!(service.control_execution(uncommitted.clone()).await.unwrap_err().to_string(),
+                "native_task_route_unavailable");
+            uncommitted["settings"]["model"] = json!("load-model");
+            uncommitted["requestId"] = json!("load-settings-rollback");
+            uncommitted["settings"]["language"] = json!("en");
+            assert!(service.control_execution(uncommitted).await.is_err());
+            let rollback_count = writer.read(|db| {
+                Ok(db.query_row("SELECT count(*) FROM runtime_requests WHERE request_key='load-settings-rollback'",
+                    [], |row| row.get::<_, i64>(0))?)
+            }).unwrap().await.unwrap().unwrap();
+            assert_eq!(rollback_count, 0, "failed local change must not leave partial admission");
             service.stop().await.unwrap();
         }
 
@@ -2852,6 +4065,367 @@ pub(crate) mod sprints {
                     Ok(())
                 })
             }).unwrap().await.unwrap().unwrap();
+        }
+
+        fn merge_request(project: &str, execution: &Value, conflict: &Value, action: &str, id: &str) -> Value {
+            json!({"projectId":project,"executionId":execution,"conflictId":conflict,"action":action,"requestId":id})
+        }
+
+        async fn delivered_fixture_prompt(path: &Path) -> String {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Ok(text) = std::fs::read_to_string(path) {
+                        if text.ends_with('\n') {
+                            assert_eq!(text.lines().count(), 1, "request was dispatched more than once");
+                            let body: Value = serde_json::from_str(text.trim_end()).unwrap();
+                            break body["params"]["prompt"].as_array().unwrap()
+                                .iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n");
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("the no-paid peer did not receive a coordinator prompt")
+        }
+
+        struct MergeFixture {
+            _scratch: Scratch,
+            folder: std::path::PathBuf,
+            target: std::path::PathBuf,
+            target_head: String,
+            service: Arc<Service>,
+            runtime: Arc<Runtime>,
+            project: String,
+            draft: String,
+            task: String,
+            execution: Value,
+            conflict: Value,
+            sprint_id: Value,
+            jobs: Jobs,
+            old_actions: Value,
+        }
+
+        async fn merge_handoff_fixture() -> MergeFixture {
+            let (_scratch, folder, service, runtime, project, sprint_id, drafts) =
+                automatic_fixture("main", "main", "main").await;
+            let draft = &drafts[0];
+            let mut jobs = Jobs::default();
+            service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap();
+            let task = settled_peer(&runtime, draft).await;
+            let target = folder.with_file_name("target");
+            git_fixture(&folder, &["worktree", "add", target.to_str().unwrap(), "main"]);
+            std::fs::write(target.join("work.txt"), "Target conflict\n").unwrap();
+            git_fixture(&target, &["commit", "-qam", "Target changes work"]);
+            let target_head = git_fixture(&target, &["rev-parse", "HEAD"]);
+            verified_fixture(&runtime, task.clone(), true).await;
+            service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap();
+            let board = call(&service, "product.board", &project, json!({})).await;
+            let accepted = &board["tasks"][draft]["acceptance"];
+            assert!(accepted["digest"].is_string(), "{accepted}");
+            let old_actions = call(&service, "product.read", &project, json!({"taskIds":[draft]})).await
+                ["tasks"][draft]["reviewActions"].clone();
+            let integrate = service.machine(serde_json::from_value(json!({
+                "op":"product.integrate","projectId":project,"params":{
+                    "confirmed":true,"taskId":draft,"method":"squash","message":"Owner integrates",
+                    "digest":accepted["digest"],"requestId":"integration-conflict"}
+                })).unwrap()).await.unwrap();
+            assert_eq!(integrate["code"], "merge_conflict", "{integrate}");
+            let record = call(&service, "product.board", &project, json!({})).await["tasks"][draft].clone();
+            assert_eq!(record["conflict"], "conflict", "{record}");
+            assert!(record["merge"]["handoff"].is_null());
+            assert!(!folder.join(".git/merge-handoff-prompts").exists());
+            let conflict = record["merge"]["conflictId"].clone();
+            let execution = service.native_tasks(&project).await.unwrap()[draft]["executionId"].clone();
+            MergeFixture { _scratch, folder, target, target_head, service, runtime,
+                project, draft: draft.clone(), task, execution, conflict, sprint_id, jobs, old_actions }
+        }
+
+        #[tokio::test]
+        async fn owner_merge_handoff_sends_git_manifest_stop_restores_manual_finish_and_checks_request() {
+            let MergeFixture { _scratch, folder, target, target_head, service, runtime, project,
+                draft, task, execution, conflict, sprint_id, mut jobs, old_actions } = merge_handoff_fixture().await;
+            let (draft, conflict) = (&draft, &conflict);
+            let head = git_fixture(&folder, &["rev-parse", "HEAD"]);
+            let handoff = merge_request(&project, &execution, conflict, "handoff_merge", "explicit-handoff");
+            let started = service.control_execution(handoff.clone()).await.unwrap();
+            assert_eq!(started["conflict"], "resolving", "{started}");
+            let prompt = delivered_fixture_prompt(&folder.join(".git/merge-handoff-prompts")).await;
+            let manifest: Value = serde_json::from_str(prompt.lines()
+                .find_map(|line| line.strip_prefix("Merge manifest: ")).expect("manifest on the wire")).unwrap();
+            assert_eq!(manifest, json!({
+                "sourceRevision":head,"targetRevision":target_head,
+                "paths":["work.txt"],"complete":true,"truncated":false
+            }));
+            assert!(!prompt.contains("Target conflict\n"));
+            let replay = service.control_execution(handoff.clone()).await.unwrap();
+            assert_eq!(replay["merge"]["handoff"]["requestId"], "explicit-handoff");
+            let mut changed = handoff;
+            changed["text"] = json!("Different guidance with the same request ID");
+            assert_eq!(service.control_execution(changed).await.unwrap_err().to_string(), "payload_conflict");
+            let duplicate = merge_request(&project, &execution, conflict, "handoff_merge", "another-handoff");
+            assert_eq!(service.control_execution(duplicate).await.unwrap_err().to_string(), "stop_required");
+
+            service.cancel_execution(&project, execution.as_str().unwrap()).await.unwrap();
+            let board = call(&service, "product.board", &project, json!({})).await;
+            assert_eq!(board["tasks"][draft]["conflict"], "conflict", "{board}");
+            assert_eq!(board["tasks"][draft]["merge"]["handoff"]["state"], "stopped");
+            assert_eq!(git_fixture(&folder, &["rev-parse", "HEAD"]), head);
+            assert_eq!(git_fixture(&folder, &["rev-parse", "MERGE_HEAD"]), target_head);
+            let unknown_prompt_count = std::fs::read_to_string(folder.join(".git/merge-handoff-prompts")).unwrap().lines().count();
+            let inspected = service.control_execution(merge_request(
+                &project, &execution, conflict, "inspect_merge", "inspect-stopped"
+            )).await.unwrap();
+            assert_eq!(inspected["merge"]["gitState"], "stopped");
+            assert_eq!(unknown_prompt_count, 1);
+            std::fs::write(folder.join("work.txt"), "Manually resolved\n").unwrap();
+            git_fixture(&folder, &["add", "work.txt"]);
+            call(&service, "product.task", &project, json!({
+                "taskId":draft,"action":"finish_merge","requestId":"manual-finish"
+            })).await;
+            let resolved = git_fixture(&folder, &["rev-parse", "HEAD"]);
+            let record = call(&service, "product.board", &project, json!({})).await["tasks"][draft].clone();
+            assert_eq!(record["resolvedBy"], "you");
+            assert_eq!(record["merge"]["freshChecks"]["revision"], resolved);
+            assert_eq!(record["merge"]["freshChecks"]["state"], "not_requested");
+            assert_eq!(record["acceptance"], Value::Null);
+            assert_eq!(git_fixture(&target, &["rev-parse", "HEAD"]), target_head);
+            // Nothing was sent on Finish or the queue pass while checks await the owner.
+            service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap();
+            assert_eq!(sprint(&service, &project, &sprint_id).await["automaticQueue"]["code"], "different_target");
+            assert!(!folder.join(".git/merge-fresh-check-prompts").exists());
+            let old = service.machine(serde_json::from_value(json!({"op":"product.task","projectId":project,
+                "params":{"action":"accept","taskId":draft,"digest":old_actions["digest"],"version":old_actions["version"]}}))
+                .unwrap()).await.unwrap();
+            assert_eq!(old["ok"], false, "{old}");
+            let checks = merge_request(&project, &execution, conflict, "request_merge_checks", "explicit-checks");
+            let request = service.control_execution(checks.clone()).await.unwrap();
+            assert_eq!(request["merge"]["freshChecks"]["state"], "requested");
+            let fresh = delivered_fixture_prompt(&folder.join(".git/merge-fresh-check-prompts")).await;
+            assert!(fresh.contains(&resolved));
+            assert!(!fresh.contains("Merge manifest:"));
+            assert_eq!(service.control_execution(checks).await.unwrap()["merge"]["freshChecks"]["state"], "requested");
+            let count = runtime.host.executor.read(move |db| {
+                Ok(db.query_row("SELECT count(*) FROM runtime_events WHERE task_id=? AND type='USER_STEERING'
+                    AND json_extract(payload_json,'$.text') LIKE 'Run a fresh independent review%'", [&task],
+                    |row| row.get::<_,i64>(0))?)
+            }).unwrap().await.unwrap().unwrap();
+            assert_eq!(count, 1);
+            assert_eq!(git_fixture(&target, &["rev-parse", "HEAD"]), target_head);
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn owner_merge_handoff_settled_completion_finishes_the_exact_staged_merge() {
+            let MergeFixture { _scratch, folder, target, target_head, service, runtime, project,
+                draft, task, execution, conflict, .. } = merge_handoff_fixture().await;
+            let source = git_fixture(&folder, &["rev-parse", "HEAD"]);
+            let started = service.control_execution(merge_request(&project, &execution, &conflict,
+                "handoff_merge", "complete-handoff")).await.unwrap();
+            let request = started["merge"]["handoff"]["runtimeRequestId"].as_str().unwrap();
+            delivered_fixture_prompt(&folder.join(".git/merge-handoff-prompts")).await;
+            std::fs::write(folder.join("work.txt"), "Resolved and staged\n").unwrap();
+            git_fixture(&folder, &["add", "work.txt"]);
+            let staged_tree = git_fixture(&folder, &["write-tree"]);
+            let mut updates = service.events.subscribe();
+
+            // Keep coordinator authority until the real ACP reply is recorded.
+            // Marking the task COMPLETED first can close the live ACP transport.
+            // Fence the next driver step so the fixture can finish before it advances.
+            let driver = runtime.host.driver.lock().await;
+            std::fs::write(folder.join(".git/release-merge-handoff"), "").unwrap();
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let (task, request) = (task.clone(), request.to_owned());
+                    let delivered: bool = runtime.host.executor.read(move |db| {
+                        Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events
+                            WHERE task_id=? AND type='WORKSPACE_MERGE_HANDOFF_DELIVERED'
+                            AND json_extract(payload_json,'$.request')=?)",
+                            (&task, &request), |row| row.get(0))?)
+                    }).unwrap().await.unwrap().unwrap();
+                    if delivered {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }).await.expect("the exact merge handoff reply was not recorded");
+
+            // Only the completed task phase is injected; the service finishes Git.
+            let fixture_task = task.clone();
+            runtime.host.executor.write(move |db| {
+                db.execute("UPDATE pending_questions SET status='cancelled'
+                    WHERE task_id=? AND status='open'", [&fixture_task])?;
+                db.execute("UPDATE runtime_tasks SET state='COMPLETED', blocker=NULL,
+                    synthesis='Staged the resolution.' WHERE task_id=?", [&fixture_task])?;
+                Ok(())
+            }).unwrap().await.unwrap().unwrap();
+            drop(driver);
+            let observed = tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let board = call(&service, "product.board", &project, json!({})).await;
+                    let record = &board["tasks"][&draft];
+                    if record["merge"]["finished"] == true {
+                        break record.clone();
+                    }
+                    loop {
+                        use tokio::sync::broadcast::error::RecvError;
+                        match updates.recv().await {
+                            Ok(update) if update["type"] == "project_state"
+                                && update["projectId"] == project => break,
+                            Ok(_) => {}
+                            Err(RecvError::Lagged(_)) => break,
+                            Err(RecvError::Closed) => panic!("workspace updates closed before merge settlement"),
+                        }
+                    }
+                }
+            }).await;
+            let record = match observed {
+                Ok(record) => record,
+                Err(_) => {
+                    let board = call(&service, "product.board", &project, json!({})).await;
+                    let record = &board["tasks"][&draft];
+                    let trace = runtime.host.executor.read(move |db| {
+                        let phase: String = db.query_row("SELECT state FROM runtime_tasks WHERE task_id=?",
+                            [&task], |row| row.get(0))?;
+                        let mut stmt = db.prepare("SELECT type FROM runtime_events WHERE task_id=? ORDER BY id DESC LIMIT 20")?;
+                        let events = stmt.query_map([&task], |row| row.get::<_,String>(0))?
+                            .collect::<Result<Vec<_>,_>>()?;
+                        Ok((phase, events))
+                    }).unwrap().await.unwrap().unwrap();
+                    panic!("merge did not settle: phase/events={trace:?}, conflict={}, handoff={}, Git={}",
+                        record["conflict"], record["merge"]["handoff"]["state"], record["merge"]["gitState"]);
+                }
+            };
+            assert_eq!(record["resolvedBy"], "cortex");
+            assert_eq!(record["merge"]["handoff"]["state"], "completed");
+            assert_eq!(record["merge"]["freshChecks"]["state"], "not_requested");
+            assert_eq!(record["acceptance"], Value::Null);
+            assert_eq!(git_fixture(&folder, &["show", "-s", "--format=%P", "HEAD"]),
+                format!("{source} {target_head}"));
+            assert_eq!(git_fixture(&folder, &["show", "-s", "--format=%T", "HEAD"]), staged_tree);
+            assert_eq!(git_fixture(&target, &["rev-parse", "HEAD"]), target_head);
+            assert!(!folder.join(".git/merge-fresh-check-prompts").exists());
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn owner_merge_handoff_refusal_leaves_the_exact_merge_available_to_abort() {
+            let MergeFixture { _scratch, folder, target, target_head, service, project,
+                draft, execution, conflict, .. } = merge_handoff_fixture().await;
+            let head = git_fixture(&folder, &["rev-parse", "HEAD"]);
+            let mut invalid = merge_request(&project, &execution, &conflict, "handoff_merge", "rule");
+            invalid["text"] = json!("deny-write: work.txt");
+            assert_eq!(service.control_execution(invalid).await.unwrap_err().to_string(), "merge_guidance_write_rule");
+            std::fs::write(folder.join(".git/refuse-merge-route"), "").unwrap();
+            let refused = merge_request(&project, &execution, &conflict, "handoff_merge", "refused-handoff");
+            assert!(service.control_execution(refused).await.is_err());
+            let board = call(&service, "product.board", &project, json!({})).await;
+            assert_eq!(board["tasks"][&draft]["conflict"], "conflict");
+            assert_eq!(board["tasks"][&draft]["merge"]["handoff"]["state"], "refused");
+            assert!(!folder.join(".git/merge-handoff-prompts").exists());
+            call(&service, "product.task", &project,
+                json!({"action":"abort_merge","taskId":draft,"requestId":"abort-refused"})).await;
+            assert_eq!(git_fixture(&folder, &["rev-parse", "HEAD"]), head);
+            assert_eq!(git_fixture(&target, &["rev-parse", "HEAD"]), target_head);
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn owner_merge_handoff_inspection_of_a_replaced_operation_never_dispatches() {
+            let MergeFixture { _scratch, folder, target, target_head, service, project,
+                draft, execution, conflict, .. } = merge_handoff_fixture().await;
+            git_fixture(&folder, &["merge", "--abort"]);
+            git_fixture(&folder, &["commit", "--allow-empty", "-qm", "Unrelated commit"]);
+            let head = git_fixture(&folder, &["rev-parse", "HEAD"]);
+            let inspected = service.control_execution(merge_request(&project, &execution, &conflict,
+                "inspect_merge", "inspect-replaced")).await.unwrap();
+            assert_eq!(inspected["merge"]["gitState"], "unknown");
+            assert_eq!(inspected["conflict"], "failed");
+            assert!(!folder.join(".git/merge-handoff-prompts").exists());
+            let reply = service.machine(serde_json::from_value(json!({"op":"product.task","projectId":project,
+                "params":{"action":"abort_merge","taskId":draft,"requestId":"abort-replaced"}}))
+                .unwrap()).await.unwrap();
+            assert_eq!(reply["ok"], false, "{reply}");
+            assert_eq!(git_fixture(&folder, &["rev-parse", "HEAD"]), head);
+            assert_eq!(git_fixture(&target, &["rev-parse", "HEAD"]), target_head);
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn legacy_merge_external_abort_cannot_restore_the_old_result() {
+            let MergeFixture {
+                _scratch,
+                folder,
+                target,
+                target_head,
+                service,
+                runtime,
+                project,
+                draft,
+                task,
+                old_actions,
+                ..
+            } = merge_handoff_fixture().await;
+            let clear = |request| json!({
+                "op":"product.task", "projectId":project,
+                "params":{"action":"abort_merge","taskId":draft,"requestId":request,"discardLegacy":true}
+            });
+            let bound = service.machine(serde_json::from_value(clear("bound-merge")).unwrap())
+                .await.unwrap();
+            assert_eq!(bound["code"], "stale_conflict", "{bound}");
+
+            // Pair the original branch-only overlay shape with a real owning execution.
+            let product_path = _scratch.0.join("state/product").join(format!("{project}.json"));
+            let mut product: Value = serde_json::from_slice(&std::fs::read(&product_path).unwrap()).unwrap();
+            let record = &mut product["tasks"][&draft];
+            let merge = record["merge"].as_object_mut().unwrap();
+            for key in ["conflictId", "kind", "sourceRevision", "targetRevision", "gitState"] {
+                assert!(merge.remove(key).is_some());
+            }
+            let before = merge.get_mut("before").unwrap().as_object_mut().unwrap();
+            before.remove("abortSnapshot");
+            before.remove("requiresFreshResult");
+            // Model the old UI having started a resolution without a typed handoff.
+            record["conflict"] = json!("resolving");
+            std::fs::write(&product_path, product.to_string()).unwrap();
+
+            let head = git_fixture(&folder, &["rev-parse", "HEAD"]);
+            git_fixture(&folder, &["merge", "--abort"]);
+            let phase = |phase: &'static str| {
+                let task = task.clone();
+                runtime.host.executor.write(move |db| {
+                    db.execute("UPDATE runtime_tasks SET state=? WHERE task_id=?", (phase, task))?;
+                    Ok(())
+                }).unwrap()
+            };
+            phase("REVIEWING").await.unwrap().unwrap();
+            let refused = service.machine(serde_json::from_value(clear("review-in-progress")).unwrap())
+                .await.unwrap();
+            assert_eq!(refused["code"], "stop_required", "{refused}");
+            assert_eq!(std::fs::read(&product_path).unwrap(), product.to_string().as_bytes());
+            phase("COMPLETED").await.unwrap().unwrap();
+
+            let request = clear("externally-aborted-legacy");
+            let reply = service.machine(serde_json::from_value(request.clone()).unwrap()).await.unwrap();
+            assert_eq!(reply["ok"], true, "{reply}");
+            assert_eq!(service.machine(serde_json::from_value(request).unwrap()).await.unwrap(), reply);
+            let product: Value = serde_json::from_slice(&std::fs::read(product_path).unwrap()).unwrap();
+            let record = &product["tasks"][&draft];
+            assert_eq!(record["conflict"], "none");
+            assert_eq!(record["merge"], Value::Null);
+            assert_eq!(record["acceptance"], Value::Null);
+            assert_eq!(record["requiresFreshResult"]["after"], json!({"task":task,"revision":0}));
+            assert_eq!(git_fixture(&folder, &["rev-parse", "HEAD"]), head);
+            assert_eq!(git_fixture(&target, &["rev-parse", "HEAD"]), target_head);
+            assert!(!folder.join(".git/merge-handoff-prompts").exists());
+            assert!(!folder.join(".git/merge-fresh-check-prompts").exists());
+
+            let old = service.machine(serde_json::from_value(json!({
+                "op":"product.task","projectId":project,"params":{
+                    "action":"accept","taskId":draft,"digest":old_actions["digest"],
+                    "version":old_actions["version"]
+                }
+            })).unwrap()).await.unwrap();
+            assert_eq!(old["code"], "review_required", "{old}");
+            service.stop().await.unwrap();
         }
 
         #[tokio::test]
@@ -5700,6 +7274,32 @@ pub(crate) mod sprints {
         Start(&'a str),
     }
 
+    #[cfg(test)]
+    #[test]
+    fn owner_merge_handoff_requires_explicit_checks_in_both_queue_modes() {
+        let members = vec!["t".to_owned()];
+        let tasks = HashMap::from([("t".to_owned(), json!({"phase":"result"}))]);
+        for state in ["not_requested", "request_unknown"] {
+            let records = json!({"t":{"conflict":"none","merge":{"freshChecks":{"state":state}}}});
+            for hybrid in [false, true] {
+                let QueueStep::Hold(hold) =
+                    automatic_queue_step(&members, &tasks, &records, &HashMap::new(), hybrid)
+                else {
+                    panic!("fresh checks require the owner in both modes");
+                };
+                assert_eq!(hold["code"], "task_conflict");
+                assert_eq!(hold["nextActor"], BY_OWNER);
+                assert_eq!(hold["ownerActions"][0], "resolve_conflict");
+            }
+        }
+    }
+
+    fn awaiting_owner_merge_checks(record: &Value) -> bool {
+        matches!(record["merge"]["freshChecks"]["state"].as_str(),
+            Some("not_requested" | "request_unknown"))
+            && record["reviewActions"]["accept"] != true
+    }
+
     fn automatic_queue_step<'a>(
         members: &'a [String],
         tasks: &HashMap<String, Value>,
@@ -5732,7 +7332,26 @@ pub(crate) mod sprints {
                     &none,
                 ));
             };
-            match records[id]["conflict"].as_str() {
+            let record = &records[id];
+            if matches!(record["merge"]["handoff"]["state"].as_str(), Some("unknown" | "dispatch_unknown"))
+                || record["merge"]["gitState"] == "unknown"
+            {
+                return QueueStep::Hold(automatic_hold(
+                    "settlement_blocked", Some(id), "task_conflict",
+                    "Inspect the retained merge. Cortex will not repeat the handoff or touch the target.",
+                    &none,
+                ));
+            }
+            if awaiting_owner_merge_checks(record) && matches!(
+                task["phase"].as_str(), Some("result" | "failed" | "paused" | "stopped")
+            ) {
+                return QueueStep::Hold(automatic_hold(
+                    "settlement_blocked", Some(id), "task_conflict",
+                    "This merge needs a request for fresh independent review and verification.",
+                    &none,
+                ));
+            }
+            match record["conflict"].as_str() {
                 Some("resolving") => {
                     return QueueStep::Hold(automatic_hold(
                         "settlement_blocked",
@@ -6107,6 +7726,8 @@ pub(crate) mod sprints {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 jobs.0.retain(|_, j| !j.is_finished());
+                jobs.1
+                    .retain(|project, _| native.iter().any(|(id, _)| id == project));
                 schedule.known(native.iter().map(|(k, _)| k.as_str()));
                 for project in self.sprint_wake.take() {
                     schedule.wake(&project);
@@ -6477,7 +8098,7 @@ pub(crate) mod sprints {
             self: &Arc<Self>,
             project: &str,
             runtime: &Arc<Runtime>,
-            _jobs: &mut Jobs,
+            jobs: &mut Jobs,
             first: bool,
         ) -> io::Result<bool> {
             // Exits a session could not confirm are looked at again first (bounded, with
@@ -6493,10 +8114,16 @@ pub(crate) mod sprints {
             let product = self
                 .product_call("product.board", project, json!({}))
                 .await?;
-            for sprint in product["sprints"].as_array().cloned().unwrap_or_default() {
+            let sprints = product["sprints"].as_array().into_iter().flatten();
+            let ids: BTreeSet<_> = sprints.clone().filter_map(|s| s["id"].as_str()).collect();
+            let failures = jobs.1.entry(project.to_owned()).or_default();
+            failures.retain(|id, _| ids.contains(id.as_str()));
+            for sprint in sprints {
                 // One sprint's planning failure never stops the others.
-                let _ = self
-                    .planning_pass(project, runtime, &sprint, &product, first)
+                let result = self
+                    .planning_pass(project, runtime, sprint, &product, first)
+                    .await;
+                self.observe_planning_pass(project, sprint, failures, result)
                     .await;
             }
             // Settle waiting results in queue-driven modes, even when the queue
@@ -6560,6 +8187,34 @@ pub(crate) mod sprints {
                 || exits_pending;
             Ok(live)
         }
+        async fn observe_planning_pass(
+            &self,
+            project: &str,
+            sprint: &Value,
+            failures: &mut HashMap<String, u8>,
+            result: io::Result<()>,
+        ) {
+            const WARNING_THRESHOLD: u8 = 3;
+            let Some(id) = sprint["id"].as_str() else {
+                return;
+            };
+            if result.is_ok() {
+                failures.remove(id);
+                if !sprint["planningWarning"].is_null() {
+                    self.update_planning_warning(project, id, None).await;
+                }
+            } else {
+                let count = failures.entry(id.to_owned()).or_default();
+                if *count < WARNING_THRESHOLD {
+                    *count += 1;
+                    if *count == WARNING_THRESHOLD && sprint["planningWarning"].is_null() {
+                        self.update_planning_warning(project, id, Some(*count))
+                            .await;
+                    }
+                }
+            }
+        }
+
         /// Planning of one sprint: an ordinary read-only runtime task in the project
         /// folder, created and started by the service, observed here. Its validated
         /// plan becomes the sprint's proposal once the task completed.
@@ -6619,6 +8274,39 @@ pub(crate) mod sprints {
                 if !matches!(planning, "planning" | "question" | "ready") {
                     return Ok(());
                 }
+                let retry = planning == "planning" && sprint["planningRetry"] == true;
+                if fact.execution.is_none() {
+                    if retry {
+                        if self
+                            .set_planning_task(project, id, Some(task.to_owned()), None, None)
+                            .await?
+                        {
+                            let mut unlinked = sprint.clone();
+                            unlinked["planningTaskId"] = Value::Null;
+                            unlinked["planningRun"] = Value::Null;
+                            return self.start_planning(project, runtime, &unlinked, None).await;
+                        }
+                        return Ok(());
+                    }
+                    // A prior create/link may have survived a restart or an unresolved
+                    // Start reply. Without an owner retry, report it, never start again.
+                    return self
+                        .cancel_unstarted_planning(
+                            project,
+                            id,
+                            task,
+                            "planning_start_failed",
+                            "The planning task did not start.",
+                        )
+                        .await;
+                }
+                if retry
+                    && !self
+                        .consume_planning_retry(project, id, task.to_owned())
+                        .await?
+                {
+                    return Ok(());
+                }
                 return match planning_step(sprint, &fact) {
                     PlanningStep::Wait => Ok(()),
                     PlanningStep::Ready { items, run } => {
@@ -6662,18 +8350,34 @@ pub(crate) mod sprints {
                                 self.cancel_planning(
                                     project,
                                     id,
+                                    "continue",
+                                    "planning_continue_failed",
                                     "The planning task could not be asked to continue.",
-                                    json!({"runtimeTask":run["runtimeTask"],"handled":run["handled"],
-                                        "outcome":"cancelled","corrections":run["corrections"],"planEvent":run["planEvent"]}),
+                                    Some(json!({"runtimeTask":run["runtimeTask"],"handled":run["handled"],
+                                        "outcome":"cancelled","corrections":run["corrections"],"planEvent":run["planEvent"]})),
                                 )
                                 .await
                             }
                         }
                     }
-                    PlanningStep::Cancel { note, run } => {
-                        self.cancel_planning(project, id, &note, run).await
+                    PlanningStep::Cancel { note, code, run } => {
+                        self.cancel_planning(project, id, "run", code, &note, Some(run))
+                            .await
                     }
-                    PlanningStep::Replace { note } => {
+                    PlanningStep::Terminal { failure, run } => {
+                        self.record_planning_failure(
+                            project,
+                            id,
+                            failure.reason().into(),
+                            "run",
+                            failure.code(),
+                            Some(run),
+                            None,
+                            Some((task.to_owned(), failure)),
+                        )
+                        .await
+                    }
+                    PlanningStep::Replace { retry } => {
                         if record["status"] != "done" && record["purged"] != true {
                             let _ = self
                                 .product_call(
@@ -6683,8 +8387,11 @@ pub(crate) mod sprints {
                                 )
                                 .await;
                         }
-                        self.sprint_note(project, id, "event", &note).await?;
-                        self.start_planning(project, runtime, sprint).await
+                        self.sprint_note(
+                            project, id, "event", "Planning continues in a new planning task.",
+                        )
+                        .await?;
+                        self.start_planning(project, runtime, sprint, retry).await
                     }
                 };
             }
@@ -6695,35 +8402,48 @@ pub(crate) mod sprints {
             }
             if first {
                 // An attempt claimed before a restart is never silently rerun.
-                self.sprint_note(
-                    project,
-                    id,
-                    "event",
-                    "Planning was interrupted. Resume planning to try again.",
-                )
-                .await?;
                 return self
-                    .sprint_patch(project, id, json!({"planning":"cancelled"}))
+                    .cancel_planning(
+                        project,
+                        id,
+                        "restart",
+                        "planning_interrupted",
+                        "Planning was interrupted.",
+                        None,
+                    )
                     .await;
             }
-            self.start_planning(project, runtime, sprint).await
+            self.start_planning(project, runtime, sprint, None).await
         }
         async fn cancel_planning(
             &self,
             project: &str,
             id: &str,
+            step: &'static str,
+            code: &'static str,
             note: &str,
-            run: Value,
+            run: Option<Value>,
         ) -> io::Result<()> {
             let text = format!("{note} Resume planning to try again.");
-            self.sprint_note(project, id, "event", &text).await?;
-            self.sprint_patch(
-                project,
-                id,
-                json!({"planning":"cancelled","planningRun":run}),
+            self.record_planning_failure(project, id, text, step, code, run, None, None)
+                .await
+        }
+
+        async fn cancel_unstarted_planning(
+            &self,
+            project: &str,
+            id: &str,
+            task: &str,
+            code: &'static str,
+            reason: &str,
+        ) -> io::Result<()> {
+            let text = format!("{reason} Resume planning to try again.");
+            self.record_planning_failure(
+                project, id, text, "start", code, None, Some(task.into()), None,
             )
             .await
         }
+
         /// Create the read-only planning draft in the project folder, record it on the
         /// sprint, then start it bound to the sprint planning policy.
         async fn start_planning(
@@ -6731,6 +8451,7 @@ pub(crate) mod sprints {
             project: &str,
             runtime: &Arc<Runtime>,
             sprint: &Value,
+            retry: Option<PlanningFailure>,
         ) -> io::Result<()> {
             let id = sprint["id"].as_str().unwrap_or("");
             // Saved files are references; their bodies are read for this draft only.
@@ -6745,9 +8466,20 @@ pub(crate) mod sprints {
                 .await
                 .map_err(|_| crate::failure("planning_unavailable"))?
             };
-            let description = match planning_request(&inlined) {
+            let description = match planning_request(&inlined, retry) {
                 Ok(text) => text,
-                Err(note) => return self.cancel_planning(project, id, &note, Value::Null).await,
+                Err(note) => {
+                    return self
+                        .cancel_planning(
+                            project,
+                            id,
+                            "request",
+                            "planning_request_invalid",
+                            &note,
+                            Some(Value::Null),
+                        )
+                        .await
+                }
             };
             let mut payload = json!({"description":description,"checkout":{"kind":"main"}});
             let files = planning_files(&inlined);
@@ -6763,11 +8495,12 @@ pub(crate) mod sprints {
             }
             let request = format!("sprint-planning-{}", crate::identity()?);
             let created = runtime
-                .command(
+                .create_draft(
                     project.to_owned(),
                     json!({"protocol":{"major":1,"minor":8},"requestId":request,"projectId":project,
                         "actorId":actor(),"operation":"tasks.create","target":project,
                         "expectedVersion":"0","ownerEpoch":null,"payload":payload}),
+                    Some(id.to_owned()),
                 )
                 .await;
             let task = match created {
@@ -6782,17 +8515,25 @@ pub(crate) mod sprints {
                     .cancel_planning(
                         project,
                         id,
+                        "create",
+                        "planning_task_create_failed",
                         "The planning task could not be created. Check the selected model and attached files.",
-                        Value::Null,
+                        Some(Value::Null),
                     )
                     .await;
             };
-            self.sprint_patch(
-                project,
-                id,
-                json!({"planningTaskId":task,"planningRun":null,"planning":"planning"}),
-            )
-            .await?;
+            if !self
+                .set_planning_task(
+                    project,
+                    id,
+                    sprint["planningTaskId"].as_str().map(str::to_owned),
+                    Some(task.clone()),
+                    retry,
+                )
+                .await?
+            {
+                return Ok(());
+            }
             let started = runtime
                 .start_sprint_planning(
                     project.to_owned(),
@@ -6802,23 +8543,36 @@ pub(crate) mod sprints {
                         "ownerEpoch":null,"payload":{}}),
                 )
                 .await;
-            match started {
-                Ok(receipt) if receipt["outcome"] == "recorded" => Ok(()),
-                Ok(receipt) => {
-                    let code = receipt["outcome"].as_str().unwrap_or("refused").to_owned();
-                    self.cancel_planning(project, id, &planning_start_reason(&code), Value::Null)
-                        .await
-                }
-                Err(error) => {
-                    self.cancel_planning(
-                        project,
-                        id,
-                        &planning_start_reason(&error.to_string()),
-                        Value::Null,
-                    )
-                    .await
-                }
+            self.finish_planning_start(project, runtime, id, &task, started)
+                .await
+        }
+
+        async fn finish_planning_start(
+            &self,
+            project: &str,
+            runtime: &Runtime,
+            id: &str,
+            task: &str,
+            started: io::Result<Value>,
+        ) -> io::Result<()> {
+            let (code, reason) = match started {
+                Ok(receipt) if receipt["outcome"] == "recorded" => return Ok(()),
+                Ok(receipt) => (
+                    "planning_start_refused",
+                    planning_start_reason(receipt["outcome"].as_str().unwrap_or("refused")),
+                ),
+                Err(error) => (
+                    "planning_start_failed",
+                    planning_start_reason(&error.to_string()),
+                ),
+            };
+            // A lost reply is not proof that Start did not commit. An unreadable
+            // runtime is not proof either; leave the link for the next pass to check.
+            if planning_fact(runtime, task).await?.execution.is_some() {
+                return Ok(());
             }
+            self.cancel_unstarted_planning(project, id, task, code, &reason)
+                .await
         }
         async fn native_tasks(&self, project: &str) -> io::Result<HashMap<String, Value>> {
             let mut tasks = HashMap::new();
@@ -7142,6 +8896,7 @@ pub(crate) mod sprints {
             for task in members.iter().filter(|id| !settled(id)) {
                 let record = &records[task];
                 if tasks.get(task).is_none_or(|t| t["phase"] != "result")
+                    || awaiting_owner_merge_checks(record)
                     || matches!(
                         record["conflict"].as_str(),
                         Some("conflict" | "failed" | "resolving")
@@ -7574,6 +9329,7 @@ pub(crate) mod sprints {
                 if settled
                     || automatic_skip(&records[task], disposition.get(task))
                     || tasks.get(task).is_none_or(|t| t["phase"] != "result")
+                    || awaiting_owner_merge_checks(&records[task])
                     || records[task]["conflict"]
                         .as_str()
                         .is_some_and(|c| c != "none")

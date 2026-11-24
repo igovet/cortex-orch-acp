@@ -3,7 +3,7 @@
 Conversation waits explain when decision details are unavailable and point to Answer in the header. Open decisions also render before their timeline reference arrives. Sent attachment chips tolerate the whitespace normalization used by runtime history.
 
 **Status: implemented source slice, not full product or installed-package qualification.**
-The local wire version is 1.8. See [protocol](protocol.md) and
+See the [protocol](protocol.md#local-desktop-slice-built) for the current local wire version, and
 [IDE and Git](ide-and-git.md) for the wider contract.
 
 For update, native/API-key connection, voice-settings and command-control behavior,
@@ -164,8 +164,8 @@ bound completed-runtime prerequisite. The refusal order and envelopes are compar
 with 57 offline Python cases in `crates/workspace-service/tests/integration_admission.rs`,
 captured by the former generator `generate_integration_fixture` (removed with the Python runtime) beside it. Refusals preserve overlay,
 SQL authority, real index, HEAD and user bytes; missing stores are not initialized.
-A bound completed result can now use the existing native result/source validator
-and a narrow local squash: the source must be the clean, already-committed project
+The earlier project-folder squash comparison used the native result/source validator
+for a narrow case: the source must be the clean, already-committed project
 folder, the target an existing clean worktree and ancestor of that source, and
 cleanup must not be requested. Report/review/check validation, current source,
 fresh-result and accepted-revision fences precede every effect. The machine lock
@@ -184,8 +184,9 @@ file-conflict choice, a Git action) is refused at once with
 `integration_in_progress`: one runs per repository from admission to the
 recorded outcome.
 A known target-commit failure restores its exact previous index only if HEAD is
-unchanged. A real `git merge --squash` content conflict (unmerged index entries)
-is reported as `integration_conflict`, not as a hook failure: because a squash
+unchanged. A real target-side `git merge --squash` content conflict (unmerged index entries)
+is reported as `integration_conflict`, not as a hook failure. It is not eligible for
+Cortex handoff. Because a squash
 writes no `MERGE_HEAD`, `git reset --merge` undoes the conflict markers, staged
 task files and `SQUASH_MSG`, and only a then-clean target gets its exact previous
 index back; otherwise the reply says the target may still hold the conflict. A
@@ -263,11 +264,11 @@ task refuses it with `not_editable`. Sprint linking preserves dependency order, 
 target/reopen/restore changes neither start work nor certify a result. The unchanged response and persistence shapes are compared with offline Python fixtures in
 `crates/workspace-service/tests/task_actions.rs`, captured by the former generator `generate_task_action_fixture` (removed with the Python runtime). Legacy unmaterialized checkout
 projections, and structured or floating-point rename titles outside the native text-title surface, still delegate before any effect. Owner `close` (including external/already-in-target),
-`archive`, `merged` and `resolution_started` now run in Rust as private presentation actions. External closure preserves the confirmation/conflict/settlement/containment refusal order,
+`archive` and `merged` run in Rust as private presentation actions. External closure preserves the confirmation/conflict/settlement/containment refusal order,
 checks session/root/epoch, unknown launches and live workers, and rechecks settlement under the Core immediate transaction through overlay replacement. Archive preserves the unmerged-work
-question, including dirty/changed-head and missing/removed worktree cases. Conflict handoff retains guidance and clears acceptance, without resolving files. These actions never transition
-the scheduler, certify checks or mutate Git/user files. Their replies and persisted JSON/SQLite state are compared with the 87-case offline capture from the former generator
-`generate_task_lifecycle_fixture` (removed with the Python runtime) in `tests/task_actions.rs` (both under `crates/workspace-service/`). Owner acceptance and archive-discard answers now also
+question, including dirty/changed-head and missing/removed worktree cases. These presentation actions never transition the scheduler, certify checks or mutate Git/user files.
+The old unbound `resolution_started` action is refused; use the conflict-bound owner control described in [Integration and conflicts](#integration-and-conflicts).
+The lifecycle fixture in `crates/workspace-service/tests/task_actions.rs` was captured by the former generator `generate_task_lifecycle_fixture` (removed with the Python runtime). Owner acceptance and archive-discard answers now also
 run in Rust within the native evidence/materialized-checkout boundary described below. Manual file choices and merge finish/abort now use Rust as described below; integration
 validation/effects outside the committed-source local squash slice are refused natively (the former Python provider was removed). An uncertain native mutation never falls back or
 automatically replays.
@@ -351,20 +352,9 @@ process-kill crash timing or positive native sandbox capabilities.
 
 ### Native merge finish and abort
 
-`product.task / finish_merge` and `abort_merge` now use Rust for the existing
-materialized-checkout boundary. Busy Cortex handoff, checkout identity and
-missing-conflict refusals precede effects. Finish refuses unmerged entries or
-a failed staged diff check (including markers/whitespace), commits with the
-existing message only when MERGE_HEAD exists, clears acceptance/status and
-records the finished merge. It does not stage additional paths. For a stopped
-target update with a saved target, if MERGE_HEAD is gone, Finish requires HEAD
-to have exactly the saved pre-update task commit and the saved target commit as
-its parents, in that order. Otherwise it refuses without changing Git or the
-task record. A confirmed finish compares Changes against that target commit;
-the original integration base and fresh-result requirement do not change.
-Abort invokes only `git merge --abort` and clears the retained merge/acceptance
-without advancing the comparison base. Neither action certifies a result or
-completes runtime work.
+`product.task / finish_merge` and `abort_merge` require the saved checkout and merge identity. Active or unconfirmed writers block both. Finish refuses unmerged entries or a failed staged diff check (including markers/whitespace). It does not stage additional paths. It commits only the exact stopped merge; if Git already committed it, Finish requires HEAD to have exactly the saved source and target commits as parents, in that order. A confirmed finish compares Changes against the merged target commit and requires fresh evidence for the resolved revision.
+
+Abort uses `git merge --abort` only for the exact stopped merge, or recognizes that it was already aborted. It refuses a replacement operation and does not advance the comparison base. The earlier freshness marker can be restored only if both the pre-merge deliverable and the staged-index snapshot match. Neither Finish nor Abort certifies a result or completes runtime work.
 
 The machine lock spans reads and intent persistence, and each private JSON save,
 which writes the task's merge-related fields (including the Changes base on a
@@ -444,10 +434,10 @@ and destructive sprint deletion now run in Rust. Sprint deletion freezes members
 retained deletion intent and exclusive cooperative store-access lock cover per-task file/row teardown; active, unknown or process-protected executions refuse purge. Dirty or unproven
 worktrees remain kept, never force-removed. Reclamation outcomes are explicit and do not turn a committed deletion into a failure. Qualified native-owned controls and their
 worker/check/settings facts use the Rust path described below. Repository snapshots and `repo.context` read Core-owned task baseline/checkout options through a validated Rust Core live
-read-only store; missing stores are not initialized. Overview resolves the channel-specific logical store through Core, including verified linked worktrees. File read/save operations use the
-same native store boundary to check runtime writers. For an existing store, save holds a Core immediate transaction across the writer check and descriptor-relative replacement, serializing
-it with Start admission. Missing runtime bindings, unreadable stores or unresolved active worktree paths refuse rather than proving the checkout quiet. Plain standalone file saves use
-descriptor-relative no-follow traversal, a required base digest, a second pre-replacement check and atomic replacement; binary/non-UTF-8/oversized writes are refused. These machine
+read-only store; missing stores are not initialized for those reads. Overview resolves the channel-specific logical store through Core, including verified linked worktrees. Code save holds a
+Core immediate transaction across lease validation and descriptor-relative replacement, serializing it with managed writer admission and structured file effects. Missing runtime bindings,
+unreadable stores or unresolved conflicting writers do not permit a save. Native saves use descriptor-relative no-follow traversal, a required base digest, a second pre-replacement check
+and atomic replacement; binary/non-UTF-8/oversized writes are refused. These machine
 operations introduce no second scheduler. The same service now hosts a reusable Core draft writer and claims a cooperative project/channel lease before controller launch. Draft creation
 without attachments bypasses ACP using the existing wire contract; other task mutations retain their handlers. See [native draft
 writes](protocol.md#native-draft-writes-through-the-existing-desktop-contract) for the limits.
@@ -680,12 +670,7 @@ task access mode, and coordinator turns use it. An unavailable model refuses wit
 `native_task_route_unavailable`, an effort the route does not advertise with
 `unsupported_dependent_setting`, and malformed saved settings with
 `native_task_settings_invalid`, all before any task is admitted. Sprint tasks inherit the
-sprint's settings and start the same way. Creation-time attachments are retained with the task and delivered to its engine sessions. A native host runs every engine session, command
-and verification in the project folder, so it cannot run a task in a separate worktree:
-`service.capabilities` reports `taskWorktrees: false`, the composer and Edit task do not
-offer **Separate worktree** there, and Start of a draft already saved with one refuses with
-`native_worktree_unavailable` ("Edit the task to work in the project folder") before any
-task is admitted.
+sprint's settings and start the same way. Creation-time attachments are retained with the task and delivered to its engine sessions. The desktop service advertises `taskWorktrees: true`. The composer and Edit task require explicit support to enable **Separate worktree**; the standalone incoming ACP host does not admit linked checkouts.
 
 The no-paid `cargo test --locked --offline -p workspace-service --test native_desktop`
 test enters the actual command handler with Rust fake coordinator/worker/reviewer
@@ -795,10 +780,10 @@ the send's `requestId` as its id; a history `user` row carries no request
 identity, so it is matched by text among the rows that arrived after the send.
 A refused send keeps its text and files on its line with Retry; the local copy
 is display only and never stands for a recorded message. Attachments of an owner message are validated before admission and retained with it (see Attachments); an invalid file refuses before mutation. Retry is allowed only for waiting/blocked/recovering work, not a
-completed task. As with Python steering, an owner message (Request changes) to a
-COMPLETED or FAILED result reopens it in the same transaction: `TASK_REOPENED`,
-unsettled result text and blocker cleared, then a fresh plan. A cancelled task, or
-one the owner already closed, refuses with `task_not_resumable`.
+completed task. An ordinary owner message (Request changes) can reopen a
+COMPLETED or FAILED result that is still open. A plain late message to a closed
+or cancelled execution still refuses with `task_not_resumable`; use the separate
+[Return for rework](#return-for-rework) action.
 
 Questions are projected through bounded, execution-version-bound pages (up to
 100 items per page, with an explicit refusal above 1,000 retained questions).
@@ -941,6 +926,28 @@ from any session stream, and a worker's question carries `askedBy` (the worker
 role recorded for its assignment) and reads "Asked by <role>". The result and
 review entries come from the task's results, and the coordinator's own tool calls
 that start, wait for or stop a worker stay coordinator rows.
+A command run through the broker (`command_run` or the approved `outside_command` route) is
+linked to its retained output without putting the output in history. The broker records, in the
+Workspace-only display history, a small start and settlement marker holding status, identity and a
+tool label (no argv, cwd, output or large-output ID); the Conversation row, the worker page and the
+coordinator activity carry the resulting reference (`commandOutputRef`: attempt and call), and
+history pages keep their existing budgets. The owner read is the local machine operation
+`command.output` (port method `readCommandOutput`), keyed by project, Workspace task, attempt and
+call (`native-command:…`); a bare output ID never selects output. The service resolves the
+Workspace task to its runtime task and requires one broker start and one matching broker request on
+the same channel and attempt, and an output file belonging to that task and channel. It opens the
+file read-only and checks the expected name, size and SHA-256 before returning bytes. Omitting
+`offset` and `limit` returns a 4,096-byte preview; `offset` (zero or more, end of file allowed) and
+`limit` (1 to 16,384, default 16,384) page it. The reply carries the operation, status
+(`running`, `passed`, `failed` or `stopped`), argv, cwd, exit code, signal and failure, and an
+`output` of `pending` (still running), `unavailable` (never captured, removed or failing the
+integrity check; no bytes are delivered) or `available` with the chunk, `utf-8` or `base64`
+encoding, offset, byte length, total bytes, `nextOffset` (null at the end), and the `truncated`,
+`captureComplete` and `complete` flags. Unknown request fields are refused. The read is registered
+only on the local machine path: the desktop bridge allows it, the phone policy and the remote
+allowlist refuse it, and it is not a model-facing tool. Host verification and `project_git` rows get
+no link, and an engine's own shell call has none either. It adds no retention: it reads output the
+broker already kept.
 The coordinator's own message text is recorded in full around its question: every
 chunk the engine emits, including chunks processed after `user_question_request`
 committed `WAITING_USER`, is kept in order (`record` in
@@ -992,6 +999,33 @@ create → plan → worker result → independent review → actual sandboxed ve
 and truncated-output rejection. Observer bounds currently refuse symlink/special
 files, files above 16 MiB, trees above 64 MiB, lists above 100,000 files or bounded
 Git output overflow; such refusals are not successful observations.
+
+## Return for rework
+
+The owner can return closed work for rework, including accepted, closed-as-is
+(including unverified), integrated, cancelled and failed work. Restore archived
+items first. Closing without verification does not itself prevent rework, but
+the service must confirm the exact execution and owner. A conflicting binding,
+an unconfirmed worker termination or an unresolved external effect still blocks
+the operation. A draft closed before its first run can start through this action.
+
+Choose **Return for rework** and submit a nonblank owner message (up to 32,000
+characters) with optional attachments. The service checks the current task
+version and, for existing executions, the owner epoch. For a bound execution,
+Core records `TASK_REOPENED` with origin `owner_rework`, retains the owner
+message and returns to planning in the same transaction. This clears the old
+active synthesis, blocker and hold. The task leaves Done and its old result and
+acceptance are no longer current. Prior plans, results, acceptance and integration
+remain in history. The new plan goes through the normal work, independent review,
+runtime verification and owner acceptance rules; a direct answer cannot bypass
+planning. The next result after v<n> is v<n+1>; a first result is v1.
+
+For integrated work, rework starts from the current local head of the target
+branch, not the previous task branch. A worktree task gets a fresh owned
+worktree and branch; a project-folder task stays in place and requires that the
+target branch already be checked out. Workspace does not switch that checkout
+or remove its changes. The old integration is not undone: integrate the new
+result separately after review and verification.
 
 ## Recorded data and pending questions
 
@@ -1203,6 +1237,11 @@ A task that has never started offers **Edit task…** in its title bar and board
 
 **Close sprint…** is visible beside the sprint actions (in the sprint's actions menu when the title band is narrow) and asks for confirmation. It archives the sprint container and stops its automatic queue and planner. It does **not** cancel, accept, merge, close, archive or delete member tasks or discard files: unfinished tasks remain in the project outside active sprint grouping, and tasks already running continue. Individual task closure and unmerged-work/archive decisions keep their existing confirmations. The closed sprint disappears from active lists, sidebar, search and New task choices, and appears under **Archive → Closed sprints**, with its retained Summary. Closed sprint controls cannot restart its queue or accept new members. This is not permanent deletion or release qualification.
 
+A sprint cannot close while a task returned for rework is still open (`rework_pending`).
+Returning a member for rework pauses a completed queue, or a queue whose automatic slot refers to that member.
+If any direct or transitive dependent in the sprint already started, Workspace asks for confirmation
+when it has that warning. Rework does not stop, change or roll back those dependent tasks.
+
 **Delete sprint…** is a separate permanent action in the sprint menu, also available on a closed sprint. Its single confirmation names the task count and says running work will stop. The
 service pauses the queue, fences new starts and continuation controls, cancels each bound execution through the existing task-wide stop path, and waits a bounded time for confirmed
 runtime/process quiescence. It removes member tasks, their conversations/questions and the sprint from product lists; it never selects another sprint's tasks. A failed or unconfirmed stop
@@ -1245,19 +1284,27 @@ The Settings machine catalogue retains every connection-selectable route identit
 efforts for the chosen model. Unsupported or withdrawn routes are not silently
 replaced. A failed dispatch remains unknown and is not replayed automatically.
 
-A plain project folder opens and runs in place even when Git is not installed. Git-only actions such as initializing a repository still require Git. On start, a saved worktree choice becomes the project-folder checkout (internal kind `main`) because there is no repository from which to create a worktree; no repository is created implicitly. Tasks, results, review and acceptance do not depend on Git. Code can read/save project files, while Changes explains that a Git diff is unavailable. Accepted work reaches Ready to merge; the owner can close it as-is without Git, or explicitly initialize Git before using Git integration. Closing as-is a result that already reached Ready to merge through acceptance (manual or automatic) keeps it checked, and so does a result that an earlier build marked `automaticReady` (`notVerifiedByCortex` stays false); closing any other result as-is still records the lasting Not verified warning.
+A plain project folder opens and runs in place even when Git is not installed. Git-only actions such as initializing a repository still require Git. The **Separate worktree** choice is disabled with an explanation in a non-Git project. Start refuses a saved worktree choice without a Git repository (`worktree_git_required`) or committed HEAD (`worktree_head_unborn`). It neither initializes Git nor falls back to **Project folder**. Tasks, results, review and acceptance do not depend on Git. Code can read/save project files, while Changes explains that a Git diff is unavailable. Accepted work reaches Ready to merge; the owner can close it as-is without Git, or explicitly initialize Git before using Git integration. Closing as-is a result that already reached Ready to merge through acceptance (manual or automatic) keeps it checked, and so does a result that an earlier build marked `automaticReady` (`notVerifiedByCortex` stays false); closing any other result as-is still records the lasting Not verified warning.
 
-A separate worktree is prepared on explicit start under the machine's configured
-worktree root, grouped by repository identity. New task branches and directory names
-use `cw/<description-slug>-<12-character-suffix>` and the matching leaf name, not
-the task's transport identifier, based on the project's open HEAD. Existing saved
+### Separate worktrees
+
+**Start** creates the worktree under the machine's configured root, at
+`<root>/<repository-id>/<slug>-<12-character-suffix>`, with branch
+`cw/<slug>-<12-character-suffix>`. It starts from the project's committed HEAD,
+not its staged, unstaged or untracked files. Invalid roots and path or branch
+collisions refuse Start instead of using another folder. Existing saved
 branches and checkout paths remain unchanged, including legacy names and after a
 default-root change. The default root is
 `$XDG_DATA_HOME/cortex-workspace/worktrees`, or
 `~/.local/share/cortex-workspace/worktrees` when the service has no XDG data override. The dev service sets XDG data to `<channel-state>/data`, so its default is `<channel-state>/data/cortex-workspace/worktrees`. Overview reports the absolute default separately from the saved root; the real reset control and example use that value. Changing or resetting the root never moves existing worktrees. Settings reject roots inside Git checkouts or registered non-Git projects, and locations occupied by files or lacking write/search permission. A writable external folder such as `/mnt/Big_Storage/.cortex/worktrees` is allowed; the `.cortex` name alone does not make it a project store. A refused save retains the draft and a persistent readable reason beside Save. The actual linked checkout is the ACP session cwd and permanent runtime
 task workspace; it shares the main repository's **one store per channel**: `.cortex/cortex.sqlite3` for release/default ACP, `.cortex-dev/cortex.sqlite3` for Workspace Dev. Dev never opens the release store; see [channel ownership](backlog/CW-S12.md).
-Task Changes reads that task's baseline-to-current diff, including its untracked
-files, not another checkout's diff. Project-folder tasks share the owner's files;
+Native execution, review and verification use the bound checkout. Changes reads
+its baseline-to-current diff, including its untracked files; Code and task Git
+operations use its exact checkout ID. A missing or changed checkout leaves
+history and recovery available where recorded, not an editable view of main.
+The [worktree execution policy](security.md#separate-worktree-boundary) is stricter
+than project-folder execution. The owner terminal still opens in the registered
+project folder. Project-folder tasks share the owner's files;
 pre-existing uncommitted work therefore belongs to that visible checkout.
 
 Activation adds the exact Workspace helper paths to local Git excludes, without
@@ -1271,10 +1318,10 @@ Machine configuration is reread after activation and on machine-fact refreshes, 
 Git commit-message drafts update reactive checkout state synchronously, survive fact refreshes, and clear only after a successful matching commit. A newer draft entered while Commit is in
 flight is kept. Empty messages remain refused. Commit is local and requires no remote: an existing staged selection is kept, or, when the index is empty, the listed non-helper changes are
 staged and committed. Amend uses the same visible message and explicit confirmation. The Finish dialog's commit message (Commit to this branch and squash merge) and its pull request title
-and description use [English templates](#short-model-texts) filled with Git metadata, not model prose (`product.task` `draft_integration_text` with
-`method` `commit`, `squash` or `pr`, `targetBranch`, and for `commit` the pending `paths`). The machine reads changed paths and added and deleted line counts
-(for `commit` the pending paths against `HEAD`; otherwise against the merge base with the target). New files are listed by name only. Task descriptions,
-result summaries, commit prose and diff excerpts are not inputs. The dialog never replaces an owner edit. Nothing is committed, merged or pushed until
+and description use [short text drafts](#short-model-texts) (`product.task` `draft_integration_text` with `method` `commit`, `squash` or `pr`, `targetBranch`,
+and for `commit` the pending `paths`). Commit and squash send a bounded file list and text diff to the configured model (pending paths against `HEAD` for commit;
+the checkout against the target merge base for squash). Untracked files are listed by name only and private paths are omitted from the prompt. The PR title and its
+fallback description use local Git metadata. A matching confirmed Push summary supplies the PR description instead. The dialog never replaces an owner edit. Nothing is committed, merged or pushed until
 the owner confirms. Automatic close, branch updates, conflict completion and revert use fixed English messages. Owner-written messages are not translated. Revert requires an empty index before applying
 its inverse and making the English-message commit; a failure leaves Git’s visible pending work for manual recovery. Push accepts a configured remote name or the confirmed
 credential-redacted display URL and resolves it against current Git configuration before one non-forcing push. Unknown, stale or ambiguous URLs are refused; an unclear push result is never
@@ -1283,6 +1330,24 @@ action, instead of waiting; shorter Git actions are waited for. Pull refuses an 
 not the Push dialog's remote field. When a remote exists, Pull is disabled with a reason when no upstream exists or the last fetched state has no incoming commits; Fetch checks for newer
 remote state. Local-only repositories omit Fetch, Pull, Push, PR creation and push-status wording rather than showing dead network controls. Local commits, review, squash merge and confirmed
 closure still work.
+
+## Result links
+
+On the local desktop, a Markdown video or subtitle file link opens a path popup.
+Select **Open in default app** to hand the file to the operating system, or
+**Copy path** to open it yourself. Relative paths use the task's checkout, not
+the app's working directory. The opener does not load the file into Code or
+change the task's route. Missing files, refused targets and immediate opener
+failures are shown in the popup; the task stays usable. The operating system
+chooses the app, and a successful handoff does not confirm playback. A worktree
+under an external `.cortex/worktrees` folder is not refused just because of
+its name. Paths through `.git` or marked Cortex stores are refused, including
+aliases into them. Ordinary source references still open in Code when the
+file is in the checkout.
+
+HTTP(S) and mail links hand off to the system on activation without replacing
+the task window. Unsupported schemes such as `file:` and executable schemes
+remain text. See the [desktop trust boundary](security.md#local-slice-trust-boundary-built).
 
 ## Integration and conflicts
 
@@ -1314,16 +1379,19 @@ never certifies code for merging.
 Changed files, stale results, unavailable
 evidence and unsuccessful work verification refuse integration.
 
-The owner confirms squash merge into a local target branch. Dirty target
-checkouts are refused; nothing is auto-stashed or reset. A target that predates
-the task baseline is refused rather than silently including earlier branch work.
-Updating from a newer target invalidates acceptance and requires fresh checks and
-review before integration. Conflicts stay in the task checkout and do not modify
-the target. The target control explains why a branch predating the baseline is incompatible: squash would include earlier unrelated branch work. The UI can choose an entire displayed text-file version, stage it and
-finish the source merge, or send resolution guidance to the owning Cortex
-execution. Manual completion requests fresh checks. These are requests, not proof
-that a model resolved a conflict. Add/delete, symlink, binary and mode conflicts
-require manual Git/editor resolution rather than destructive text replacement. Oversized or non-text sides show bounded metadata and instructions to resolve contents/type/mode, stage with Git add or remove with Git rm, and finish. Finish checks the complete Git index, including paths omitted by the bounded display. The previous result identity/version is retained so it cannot certify the changed source.
+The owner confirms squash merge into a local target branch. Dirty target checkouts are refused; there is no automatic stash or discard of owner changes. The guarded [target-side squash rollback](#native-machine-boundary) is separate from resolving a source merge. A target predating the work’s baseline is refused rather than silently including earlier branch work. Bringing a newer target into the source branch invalidates the earlier acceptance. If that merge stops, the conflict stays in the source checkout; the target is not changed.
+
+1. Open the conflict in **Changes**. To resolve it yourself, choose and stage an available text version, or edit and stage the resolution with Git. Add/delete, symlink, binary, mode and oversized conflicts may require Git or an editor. Use **Finish merge** after staging; it checks the full index and remains available for a confirmed stopped merge even if no paths are displayed. **Abort merge** is available only when the service can confirm it is safe to abort the saved operation.
+2. To involve Cortex, choose **Hand to the app…** and confirm. Detection alone never dispatches Cortex. The service binds the handoff to the saved source and target commits and sends the coordinator a Git-index manifest: JSON-quoted paths as data, not instructions, with explicit completeness and truncation flags. The manifest contains no file contents. A recorded handoff does not prove delivery or progress. **Stop resolution** requests a stop. Once stop, refusal or failure is confirmed and Git still holds the saved stopped merge, manual Finish and Abort return. If the outcome is unclear, use **Inspect merge state**: it rechecks the saved state without sending another prompt or committing, and manual writes stay blocked while the outcome cannot be confirmed. On confirmed Cortex completion, the service can finish the exact saved merge when Git and the staged resolution validate it.
+3. Whether you or Cortex finish, review the diff and select **Request fresh checks**. Independent review and runtime verification are not requested automatically, even in an automatic sprint. The request is bound to the resolved revision; if it cannot be confirmed, inspect rather than sending it again. **Requested** is not evidence that checks started or passed. Earlier checks cannot certify the resolution. Current passing evidence is required before integration, which still requires separate owner confirmation.
+
+### Saved merges from an earlier version
+
+If the conflict card says **Saved merge from an earlier version**, Workspace cannot verify the original merge commits and does not offer its normal Finish, Abort, inspection or Cortex handoff controls. Finish or abort the merge in Git in the original checkout on the saved branch. Then choose **Clear saved merge…** and confirm **Clear saved merge record**. Workspace refuses to clear the record if the owning execution has not settled, the branch does not match, or a Git operation or unmerged index entries remain. Resolve the stated condition before retrying.
+
+Clearing changes only what Workspace has saved, not Git or the comparison base. It does not certify what happened in Git, restore earlier checks or request new ones. Obtain fresh review and verification for the current checkout before integration.
+
+### Pull requests
 
 PR creation uses the owner's installed `gh`, never copied credentials. Missing
 `gh` is stated on the control. The branch must already have an upstream and no
@@ -1332,8 +1400,14 @@ blind retries after an ambiguous remote response. Confirm the outcome in GitHub
 before another attempt. Real GitHub creation and paid-engine resolution are not
 qualified by the no-paid fixtures.
 
-Clean worktree removal uses Git without force and retains the branch. Dirty trees
-are never forcibly removed. After a confirmed squash, optional immediate cleanup removes only a clean, separate task worktree and retains its branch. Integration is recorded first; a failed cleanup is recorded as retained, not as a failed merge. Archive purge recognizes already removed worktrees. Removing a merged checkout can make its old verification evidence unavailable; the scheduler preserves Done and the recorded integration instead of reopening the task. Only explicit reopening changes that owner/integration state.
+Ordinary Close, Stop and Archive keep the folder. To close and request cleanup,
+use **Close and delete worktree folder** and confirm. In Finish, after a confirmed
+local squash, **Delete worktree folder** is on by default when eligible and disabled
+with a reason when unsafe. The merge is recorded before cleanup; if the folder
+cannot be safely removed, it is retained without undoing the merge. Archive purge
+includes the clean Cortex-created worktree, recognizes an already removed folder,
+and never removes the main project. All three cleanup paths verify ownership and
+cleanliness, use Git without force and keep the branch. Removing a merged checkout can make its old verification evidence unavailable; the scheduler preserves Done and the recorded integration instead of reopening the task. Only [Return for rework](#return-for-rework) clears the current closure and integration disposition. The previous integration stays in history.
 
 Acceptance binds the runtime-evidence event version, not the execution display version: late transcript/progress writes cannot stale an unchanged result. New runtime evidence and changed source still invalidate old decisions. The UI uses current service review actions and source-drift warnings rather than inferring availability from check counts. An unsuccessful or unconfirmed Accept keeps its reason and Refresh result action beside the result after the transient toast closes. A paused queue identifies the blocking task and its review reason; review it, then use Continue queue.
 
@@ -1377,7 +1451,12 @@ The deliverable is the sprint plan, submitted with the `sprint_plan_submit` tool
 whose schema states the item fields and limits. A plan may have any number of
 tasks. One call carries at most 50 tasks and 128 KiB of UTF-8 JSON, so a larger
 plan arrives in ordered parts; a first part starts a new plan and discards an
-unfinished earlier one. The runtime checks every part with the parts before it
+unfinished earlier one. The planning request tells the coordinator to submit a
+large plan as small ordered parts while it works (`final: false` on each
+intermediate part, `final: true` on the last), to keep each item compact without
+dropping scope, dependencies, owner decisions or acceptance criteria, and not to
+repeat the plan as prose. It points to the tool's advertised limits and states
+no numbers itself. The runtime checks every part with the parts before it
 and, at the final part, the whole assembled plan: unique keys, dependencies that
 name only keys of the whole plan, no cycles, non-empty descriptions and at most
 512 KiB of UTF-8 JSON for the whole plan. A refusal names the failing item
@@ -1419,7 +1498,23 @@ the saved conversation.
 
 A failure that cancels planning saves a reason, step, code and timestamp on
 the sprint, with the same reason in the conversation. An owner stop is not a
-failure. If Start is refused or its reply is lost, the service checks for a
+failure. When the planning task reached a terminal state, the service also
+classifies the outcome from recorded runtime evidence only and saves a `kind`:
+`owner_stopped` (the owner stopped or finished the task), `limit` (an evidenced
+plan-size refusal, `plan_part_too_large` or `plan_too_large`, or a recorded
+scheduler, progress or no-progress limit) or `unknown` (the cause was not
+recorded; the explanation says so and engine text is never guessed or shown).
+The explanation says what Retry will do. After a `limit` failure, **Retry
+planning** starts a new planning task whose request asks for small ordered parts
+from the first submission. If that smaller-parts replacement meets the same
+limit, the sprint records `recommendedAction: change_request`; Workspace then
+offers **Change request** instead of Retry, and a plain Retry is refused with
+`planning_change_request_required` until the owner replaces the description or
+sends an amendment. An `owner_stopped` or `unknown` failure keeps the plain
+Retry. The request, attachments, saved answers and conversation, and any
+previously approved proposal are kept. Parts the stopped task had submitted but
+not completed, and execution-only answers, are not carried into a replacement
+task: the replacement starts its plan from the saved request. If Start is refused or its reply is lost, the service checks for a
 committed execution. A confirmed never-started draft is unlinked in the same
 write as the failure and stays in task history; a committed execution keeps
 its link. If the check cannot be completed, the service does not assume it
@@ -1596,8 +1691,7 @@ Retracted worker checks (withdrawn probes or invocation errors) are rederived fr
 
 Sprint creation first checks that the chosen model exists in the current selectable catalogue. A missing/unavailable model refuses with a connect/select-model explanation, keeps the
 description in the form and creates no sprint or planning task. A preset name alone is not a connected model. Sprint creation offers the same **Where it works** choice as a single task:
-**Project folder** (the currently open local branch) or **Separate worktree**. The machine default fills the form until the owner chooses; unsupported worktrees and non-Git folders use
-Project folder with an explanation. Creation saves its chosen checkout kind, route and target before starting the planning task, which always studies the project folder. Planning and Summary
+**Project folder** (the currently open local branch) or **Separate worktree**. The machine default fills the form until the owner chooses; the separate-worktree option is disabled with an explanation without service support, in non-Git projects or in Automatic mode. Creation saves its chosen checkout kind, route and target before starting the planning task, which always studies the project folder. Planning and Summary
 show the saved checkout choice. Every task materialized from the plan inherits the sprint checkout kind, overriding per-item plan hints; worktree mode uses the existing per-task worktree
 preparation on explicit start, not one shared sprint checkout. Manual, Hybrid and Automatic starts use those same saved task options; an Automatic sprint starts only in the project folder
 (see [sprint run modes](#sprint-run-modes)). No checkout is created during planning, no existing checkout moves, and machine defaults are not rewritten. Older sprints without a saved choice
@@ -1610,7 +1704,7 @@ plain-text follow-ups as a safeguard against a shortened summary; oversized comb
 permission boundary. Create tasks materializes the plan as unstarted user tasks. Only Run sprint or an explicit task Start begins execution. The plan arrives only through the
 runtime-validated `sprint_plan_submit` tool, never parsed from prose. A refused plan names the failing task (1-based index and key) and rule, for example "task 4 (t4): description is empty";
 duplicate keys, unknown dependency keys and cycles are always errors. Planning failures add a service-owned readable explanation to the planning conversation; raw model output and engine
-errors are not displayed. The cancelled banner offers Resume planning and the conversation retains the failure note. A failed or interrupted planning task never produces a ready state with a
+errors are not displayed. The cancelled banner offers Resume planning and the conversation retains the failure note; a classified failure names the limit or says the cause is unknown, and after a repeated limit offers Change request instead of Retry (see [Sprint planning limits](#sprint-planning-limits)). A failed or interrupted planning task never produces a ready state with a
 null plan. Materialized tasks inherit its settings and target; changing a task target makes that target explicit. Sprint-target changes propagate to inherited task targets, not explicit
 overrides. Once tasks are materialized, change their routes individually rather than silently rewriting them.
 
@@ -1681,13 +1775,13 @@ Changing that identity closes the old report and discards its page cursor.
 
 ## Editing files
 
-Code edits the files of the project checkout or the task's worktree in
-CodeMirror 6, with tabs, a dirty marker, find and replace, undo per tab and
-syntax highlighting. Ctrl+S or Save writes through the machine service; Autosave
+Local desktop Code opens files in the selected checkout read-only. Its
+CodeMirror 6 editor supports tabs, dirty markers, find and replace, per-tab
+undo and syntax highlighting. Ctrl+S or Save writes through the machine service; Autosave
 in Settings, Appearance is off by default and saves about a second after typing.
 
 Every save names the revision the owner last read, which is the SHA-256 of the
-file's bytes. The helper compares it while holding the machine lock, writes a
+file's bytes. The service compares it in the lease-checked transaction, writes a
 temporary file beside the target, syncs it, compares once more and renames it
 over the target, keeping the file's mode. A save with an older revision writes
 nothing and returns the current one. Reaching the file walks its folders one at
@@ -1695,9 +1789,8 @@ a time without following any link, so a link anywhere on the path is refused,
 even one that stays inside the checkout. `.git`, `.cortex` and `.cortex-dev` are refused at any
 depth. Files over 512 KiB, binary files, text that is not UTF-8 and files that
 mix line endings open read-only with the reason; a file's own line endings are
-kept. A model writer that uses plain file writes can still land between that
-last comparison and the rename: the window is small and not closed, so the rule
-below is what protects the owner while a task runs.
+kept. An uncooperative writer can still change the file between the final
+comparison and replacement; the revision check is not a filesystem lock.
 
 The open file is compared with the disk every three seconds and when the window
 regains focus. A clean file follows the disk. A file with unsaved text shows the
@@ -1706,13 +1799,11 @@ and one undo brings the owner's text back; Keep mine saves it over exactly the
 version that was shown, so a further change is another conflict. If the file was
 deleted, Keep mine recreates it only while nothing else has.
 
-A save is refused while the runtime has not confirmed that the checkout is
-quiet. The helper reads the project store: a task bound to that checkout whose
-runtime state is not `COMPLETED`, `FAILED`, `CANCELLED` or `PAUSED` holds it, and
-an unreadable store counts as held. The file opens locked. Edit anyway lets the
-owner type, and that text waits in the app until Stop or the task's end, when
-Save writes it through the same revision check. Nothing here is a lease: the
-runtime is not told, so it does not hold writers back for the owner.
+Select **Edit** to obtain a file lease. **Ctrl+S**, **Save**, autosave and
+**Keep mine** all require that lease, as well as the current base revision.
+An unreadable store or unresolved writer binding does not establish that it
+is safe to edit. For renewal, expiry, scope and recovery messages, see
+[Code editing and write leases](ide-and-git.md#code-editing-and-write-leases).
 
 Unsaved text lives above every screen, so moving between tabs, projects and
 settings keeps it with its undo history. Closing a dirty tab asks first. Closing
@@ -1720,8 +1811,9 @@ the window by its button or through the window manager lists the unsaved files
 and offers Save all and close, Close without saving or Keep working. A reply that
 never comes leaves the tab at Save not confirmed: the disk is read once to see
 whether the bytes landed, nothing is resent on its own, and Save asks again.
-Unsaved text is held in memory, so a crash of the window loses it. Create,
-rename, Save as, Compare and language servers are not built.
+Unsaved text is held in memory, so a crash of the window loses it. To save a
+parked draft, return to the file and reacquire the lease with **Edit**. Create,
+rename, Save as and Compare are not built.
 
 ### The file tree
 
@@ -1800,12 +1892,18 @@ No storage migration or wire-version change is required.
 
 ## Short model texts
 
-Task titles can use a model (`crates/workspace-service/src/machine/short_text.rs`,
-route choice in `crates/workspace-service/src/native_routes/short_text.rs`).
-Git drafts share the poll mechanism but not the model route: they use fixed
-English templates. Commit, squash and PR drafts list changed paths and counts;
-Push drafts count outgoing commits from local refs. A matching, previously
-confirmed Push summary is reused as owner-confirmed text, not regenerated.
+Task titles and Commit, squash and Push drafts use one short text mechanism
+(`crates/workspace-service/src/machine/short_text.rs`; route choice in
+`crates/workspace-service/src/native_routes/short_text.rs`). Commit and squash
+return an English subject and detailed body from a file list and up to 12,000
+UTF-8 bytes of diff excerpts. Push uses subjects, bodies and aggregate diffstat
+from at most 20 outgoing commits, with up to 12,000 UTF-8 bytes of that context.
+Clipped excerpts are marked. Git inspection is local. Known private paths,
+binary content and recognizable credentials are omitted where applicable; the
+filter is not a guarantee against secrets in arbitrary source or commit prose.
+The selected provider receives the resulting excerpt. A matching, previously
+confirmed Push summary is reused as the editable PR description, not the title.
+Without a matching summary the PR draft uses a local Git metadata template.
 
 - Route: among the routes the owner allows for automatic choice (enabled, not
   denied, listed in `auto`, placed in a tier) on Claude or Codex native
@@ -1842,11 +1940,13 @@ confirmed Push summary is reused as owner-confirmed text, not regenerated.
 - Jobs: `generate_title`, `draft_integration_text`, `draft_checkout_commit` and
   `draft_push_summary` return `{"jobId"}`. `short_text_poll` takes the job ID and,
   for task-bound jobs only, the task ID. A finished job reports `source`
-  (`model` for titles, `template` for generated Git drafts, `fallback`, or `saved`
-  for a PR body from Push), `reason` and `route` (null for Git drafts). Git
-  routing and task-title routing are independent. Draft actions return immediately;
-  title persistence can take `machine.lock` in the background. Jobs live in
-    memory for ten minutes; after a restart a poll is refused as `unknown_job`.
+  (`model`, `fallback`, `template` for unmatched PR drafts, or `saved` for a
+  PR body from Push), `reason` and `route` (when a model route was selected).
+  Draft actions return without waiting for generation. An unavailable route,
+  unreadable input, timeout, refusal or unusable answer leaves editable text
+  and a reason; no alternate model is tried. Title persistence can take
+  `machine.lock` in the background. Jobs live in memory for ten minutes; after
+  a restart a poll is refused as `unknown_job` and no job is replayed.
 - Diagnostics: `short-text.log` in the service log folder records
   `short_text_selected`, `short_text_generated`, `short_text_fallback` and `short_text_saved_push` with
   purpose, engine, model, connection id, tier, plan reading, choice reason,
@@ -2005,10 +2105,12 @@ One rule (`resumeState` in `packages/workspace-ui/src/session-model.ts`, read fr
 | Interrupted turn or recovery hold waiting for the owner | Interrupted or Stopped, waits for you | Continue, or send a message |
 | Safe automatic recovery (worker lost, service restart) | Recovering automatically | None; the service continues from the recorded state and replays nothing |
 | Owned process exit or effect unconfirmed | Waiting for exit evidence, or for processes to stop | None; the reason is shown, and Resume and Continue stay off, also on a paused task |
-| Cancelled or failed run, closed task | The run is final and cannot be resumed | None; a new message may reopen eligible finished work with a fresh plan, otherwise Close task |
+| Cancelled or failed run that still needs closure | Run cancelled or Run failed | Close task; ordinary Request changes remains separate where available |
+| Eligible closed task | Closed | Return for rework, not Resume or Continue |
+| Archived task | Archived | Restore first; rework is unavailable while archived |
 | Unknown or offline | Unavailable until the task's state is confirmed | None |
 
-Stop keeps its behavior. Before the runtime exists (an engine launch still opening) there is nothing to pause, so Stop cancels the launch and the task is stopped. A paused task keeps its changes in the existing checkout: the service reports `taskWorktrees: false`, so tasks run in the project folder and no dedicated task worktree holds them. A restart of the service does not discard or replay them.
+Stop keeps its behavior. Before the runtime exists (an engine launch still opening) there is nothing to pause, so Stop cancels the launch and the task is stopped. A paused task keeps its changes in its existing checkout, including a dedicated worktree if one was selected. A restart of the service does not discard or replay them.
 
 Coverage, all no-paid: the `paused-checkpoint`, `hold` and `command-restart-lost` scenarios of `binary_journey` in `crates/workspace-service/tests/native_desktop.rs` start the compiled service with fake engines in a disposable Git project. The first pauses a task after worker progress, kills the service with SIGKILL, restarts the same binary and resumes with the current version: task, plan, node, report and attempt identities, history order and file contents are unchanged, the interrupted node gets a fresh attempt and the task completes without repeated side effects. `hold` continues without any owner click, and `command-restart-lost` keeps an unresolved command held and never relaunches it. `packages/workspace-ui/test/recovery-controls.test.tsx` covers each row of the table, including that terminal and unknown states offer neither Resume nor Continue. Rendered installed-desktop qualification of these controls was not run. A safe service-restart re-drive of a manual task cannot be told apart from other holds in the existing projection, so the UI does not label it separately.
 

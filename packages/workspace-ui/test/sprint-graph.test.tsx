@@ -106,6 +106,9 @@ describe("the plan's List and Graph views", () => {
     expect(JSON.parse(localStorage.getItem("cw.plan.view")!)).toBe("graph");
     expect(all(".gsv .n")).toHaveLength(15);
     expect($(".gsv")?.getAttribute("aria-label")).toBe("Dependency graph, 15 tasks");
+    expect($('.gv-bar button[aria-label="Zoom in"]')?.getAttribute("data-tooltip")).toBe("Zoom in · +");
+    expect(button("Fit")?.hasAttribute("data-tooltip")).toBe(false);
+    expect(all(".gsv .n").every(node => node.hasAttribute("data-tooltip"))).toBe(true);
     dispose?.(); document.body.innerHTML = "";
     await open(sprint(), [], "list");
     expect($(".sp-plan")?.dataset.view).toBe("graph");
@@ -173,17 +176,18 @@ describe("the plan's List and Graph views", () => {
 
   it("keeps stopped planning's reason and its Retry or Resume in a short Graph and in Full view", async () => {
     const lane = () => $(".l-lane")!;
-    for (const [failure, action] of [["The planning model stopped before it answered.", "Retry planning"], [undefined, "Resume planning"]] as const) {
+    const failed: Sprint["planningFailure"] = { text: "The planning model stopped before it answered.", step: "run", code: "planning_task_stopped", at: 100 };
+    for (const [failure, action] of [[failed, "Retry planning"], [undefined, "Resume planning"]] as const) {
       resize(1024, 640);
       const port = await open({ ...sprint({ planning: "cancelled" }), ...(failure ? { planningFailure: failure } : {}) });
       expect($(".sp-plan")?.dataset.view).toBe("graph");
-      expect(lane().textContent).toContain(failure ?? "Planning is cancelled. Your draft, answers and plan are kept.");
-      if (failure) expect(lane().querySelector('[role="alert"]')?.textContent).toContain(failure);
+      expect(lane().textContent).toContain(failure?.text ?? "You stopped planning. Your saved request, attachments and answers are kept, along with any previously approved proposal.");
+      if (failure) expect(lane().querySelector('[role="alert"]')?.textContent).toContain(failure.text);
       expect(button(action, lane())).toBeTruthy();
       button("Full view")!.click(); await settled();
       expect($(".sp-body")?.hasAttribute("data-full")).toBe(true);
       expect($(".sp-h")).toBeNull();
-      expect(lane().textContent).toContain(failure ?? "Planning is cancelled.");
+      expect(lane().textContent).toContain(failure?.text ?? "You stopped planning.");
       button(action, lane())!.click(); await settled();
       expect(port.commands.some(c => c.operation === "resume_planning")).toBe(true);
       dispose?.(); dispose = undefined; document.body.innerHTML = "";
