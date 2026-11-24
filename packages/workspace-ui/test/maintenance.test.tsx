@@ -90,11 +90,13 @@ it("native login opens a terminal, then rechecks independently without sending c
   expect(calls[1]).toEqual({op:"engine.connection",p:{action:"recheck",engine:"claude-agent-acp"}});
 });
 
-it("voice settings show only the shipped local Russian provider and real model state",async()=>{
-  mount(()=><VoiceSettings/>,async()=>({message:"Not downloaded or incomplete."}));
+it("voice settings without a local voice port explain the desktop package requirement",async()=>{
+  const calls: string[] = [];
+  mount(()=><VoiceSettings/>,async(op)=>{calls.push(op);return {};});
   await settle();
   expect(document.body.textContent).toContain("sherpa-onnx");
-  expect(document.body.textContent).toContain("Russian only");
-  expect(document.body.textContent).toContain("Not downloaded or incomplete");
-  expect(document.body.textContent).not.toContain("Not chosen");
+  expect(document.body.textContent).toContain("Local Russian and English dictation");
+  expect(document.body.textContent).toContain("need the complete local desktop package");
+  expect(document.querySelector('[aria-label="Dictation language"]')).toBeNull();
+  expect(calls).toEqual([]);
 });

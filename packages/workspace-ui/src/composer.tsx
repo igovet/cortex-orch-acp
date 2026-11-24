@@ -8,6 +8,7 @@ import { setDragPreview } from "./drag-preview";
 import { REQUESTING, RequestStatus } from "./request-feedback";
 import { createUnsent, onScreen, ScreenActive } from "./freshness";
 import { createLocalDictation } from "./voice";
+import { voiceLanguageName } from "./voice-client";
 import { I, MenuItem, Pop } from "./kit";
 import { Action, Whole } from "./layout";
 import { createSuggest, SUGGEST_HINT, SuggestList, type SlashCommand, type SuggestOptions } from "./suggest";
@@ -226,7 +227,7 @@ export function createDictation() {
   onCleanup(stop);
   return {
     on, seconds, fault, words, stop,
-    phase: () => "recording" as const, progress: () => 100,
+    phase: () => "recording" as const, progress: () => 100, language: () => undefined,
     pause: async () => { clearInterval(clock); clearInterval(speech); },
     finish: async () => { const text = spoken().slice(0, words()).join(" "); stop(); return text; },
     toggle() { if (on()) { clearInterval(clock); clearInterval(speech); } else this.start(); },
@@ -257,14 +258,18 @@ export function MicBar(props: { mic: Dictation; onInsert: (text: string) => void
     try { const text = await props.mic.finish(); if (text) use?.(text); }
     finally { setFinishing(false); }
   };
-  const status = () => ({ starting: ws.shell?.kind === "phone" ? "Starting…" : "Starting local dictation…", downloading: "Downloading Russian model: " + props.mic.progress() + "%", loading: "Loading local speech model…", recording: ws.shell?.kind === "phone" ? "Listening" : "Listening · Ctrl+D to stop", stopping: "Finishing transcription…", ready: "Ready to insert", error: "", cancelled: "" }[props.mic.phase()]);
+  const language = () => {
+    const bound = props.mic.language();
+    return bound ? voiceLanguageName(bound) : "";
+  };
+  const status = () => ({ starting: ws.shell?.kind === "phone" ? "Starting…" : "Starting local dictation…", downloading: "Downloading " + (language() || "speech") + " model: " + props.mic.progress() + "%", loading: "Loading local speech model…", recording: ws.shell?.kind === "phone" ? "Listening" : "Listening · Ctrl+D to stop", stopping: "Finishing transcription…", ready: "Ready to insert", error: "", cancelled: "" }[props.mic.phase()]);
   return <>
     <Show when={props.mic.on()}>
       <div class="micbar" role="group" aria-label={ws.t("voiceLabel")}>
         <I n="mic" s={14} class="st-bad" /><span class="mic-time">{time(props.mic.seconds())}</span>
         <span class="cap muted" role="status">{status()}</span>
         <span class="mic-text" aria-live="polite">{props.mic.text()}</span>
-        <span class="cap faint">{ws.voice ? ws.voice.badge ?? "On-device · Russian · not sent" : ws.t("voiceBadge")}</span>
+        <span class="cap faint">{ws.voice ? ws.voice.badge ?? ["On-device", language(), "not sent"].filter(Boolean).join(" · ") : ws.t("voiceBadge")}</span>
         <button class="btn btn-sm" onClick={() => props.mic.stop()}>Cancel</button>
         <button class="btn btn-line btn-sm" disabled={finishing() || !props.mic.text()} onClick={() => void finish(props.onInsert)}>Insert</button>
         <Show when={props.onInsertAndSend}><button class="btn btn-primary btn-sm" disabled={finishing() || !props.mic.text()} onClick={() => void finish(props.onInsertAndSend)}>Insert and send</button></Show>

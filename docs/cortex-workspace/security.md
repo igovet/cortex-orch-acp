@@ -20,18 +20,20 @@ Machine facts and owner actions run through the native machine host (`crates/wor
 
 ### Local dictation (built, local Linux)
 
-Only bundled main-window content may call voice.start/read/stop/cancel; the
-same-user socket and shared Rust parser enforce the closed identities and refuse
-audio, file paths, URLs, commands, environments and send flags. A random session
-identity binds reads and controls; recent start identities do not restart capture.
-There is one microphone lease, refreshed by reads and cancelled after ten seconds
-without a read. Stopping finalizes a preview and cannot send anything.
+Only bundled main-window content may call the native voice controls through the
+desktop bridge; they are not available over the remote tunnel or ACP. The same-user
+socket uses the shared Rust parser, accepting only RU/EN for language changes and
+refusing audio, file paths, URLs, commands, environments and send flags. A random
+session identity binds reads and controls. Capture and model-only downloads share
+one lease, refreshed by reads and cancelled after ten seconds without a read.
+Language changes are refused while the lease is active. Stopping finalizes a preview
+and cannot send anything.
 
 The service starts its fixed packaged worker with a cleared environment, retaining
 only HOME, LANG and the actual desktop XDG_RUNTIME_DIR for local audio access.
 It uses the bundled Node and fixed parec capture arguments. No project, engine,
 credential environment or webview-selected executable is passed. The helper
-downloads only the committed model URL, checks the exact size and SHA-256 before
+downloads only the selected model from its committed GitHub release URL, checks the exact size and SHA-256 before
 extracting named model members, verifies their hashes and caches them under the
 channel's private state directory. Audio stays in bounded process memory; transcript
 snapshots are local IPC only, never public journal/status logs. A recording stops

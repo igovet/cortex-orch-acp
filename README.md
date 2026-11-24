@@ -644,7 +644,8 @@ restart. The Board and List group it under **Closed, not verified**, separate fr
 See [recorded activity and routes](docs/cortex-workspace/local-task-execution.md#recorded-data-and-pending-questions).
 
 Workspace settings include release updates, native/API-key engine connections and
-local Russian voice-model status. In-app release updates require an Ed25519
+a Russian/English dictation switch with separate status for each on-device model.
+In-app release updates require an Ed25519
 signature over the archive checksum; Dev updates remain manual. Add project also offers Clone from GitHub or
 an absolute local bare Git repository path.
 See the [desktop control map and verification limits](docs/cortex-workspace/maintenance-and-controls.md).
@@ -735,9 +736,9 @@ Every Workspace form for a message or new work (task and sprint creation, conver
 clipboard images and picked files (eight files, 4 MiB combined), shown as removable chips with image thumbnails. Queue Edit
 restores both text and files. Each file is uploaded once, when it is attached, and kept as a private content-addressed file on the machine; messages, commands and reads carry a reference to it, and its bytes are read only when it is opened. Saved files can be opened from their task, sprint, message or answered question and saved through the system's save dialog; an answer's files are kept as long as a message's, until the task is deleted; local JSON frames are bounded to 8 MiB. See [attachments](docs/cortex-workspace/local-task-execution.md#attachments).
 
-Workspace supports on-device Russian dictation (Ctrl+D or microphone), with live
-preview, Cancel, Insert and an explicit Insert and send action. A verified model
-download runs once on first use; audio stays local. See [voice input](docs/cortex-workspace/local-task-execution.md#local-voice-input).
+Workspace supports on-device Russian and English dictation (Ctrl+D or microphone), with live
+preview, Cancel, Insert and an explicit Insert and send action. Choose RU or EN in
+Settings → Voice input; only the selected model downloads on first use, and audio stays local. See [voice input](docs/cortex-workspace/local-task-execution.md#local-voice-input).
 
 Workspace includes a local project terminal (Ctrl+J): your own shell, owned by the
 machine service, with retained output across window closure. It starts in the registered

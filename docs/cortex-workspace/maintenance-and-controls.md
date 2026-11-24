@@ -130,12 +130,14 @@ for Codex and Claude. OpenCode retains its separate explicit Enable flow.
 
 ## Voice and titles
 
-Settings → Voice input describes the shipped sherpa-onnx CPU recognizer,
-`small-zipformer-ru-2024-09-18`, Russian only, and the system default
-PulseAudio/PipeWire source. It checks the real local model-file hashes. Test
-microphone / retry model download uses the same local dictation worker as a
-composer: first use downloads about 105 MiB, verifies it, then records. Cancel
-discards the test transcript. No unsupported provider/language selectors remain.
+Settings → Voice input switches the shipped sherpa-onnx CPU recognizer between
+Russian (RU, the default) and English (EN). The machine saves the choice for
+the next recording. Each model displays its own missing, verified or failed
+integrity status. Download fetches and verifies only the selected model without
+opening the microphone (about 105 MiB for Russian or 107 MiB for English).
+Test microphone uses the system default PulseAudio/PipeWire source and the same
+worker as a composer, downloading the selected model first if needed. Cancel
+discards the test transcript. Audio never leaves the machine.
 
 Automatic naming is wired from `tasks.create` through the service's bounded
 TitleJobs pool to the configured real engine route. No engine, invalid output,

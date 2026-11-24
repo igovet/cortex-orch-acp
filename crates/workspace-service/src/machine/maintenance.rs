@@ -1264,20 +1264,6 @@ pub async fn action(state: &Path, p: &Value, projects: &Value) -> Result<Value> 
                 .map_err(|_| refuse("tool_path_unavailable", "The shell could not be read."))
         }
         "tool_path.set_extra" => settings::set_tool_path_extra(state, p, projects),
-        "voice.status" => {
-            let spec: Value =
-                serde_json::from_str(include_str!("../../../../packaging/voice/model.json"))
-                    .unwrap();
-            let base = state.join("voice").join(spec["name"].as_str().unwrap());
-            let ready = spec["files"]
-                .as_object()
-                .unwrap()
-                .iter()
-                .all(|(name, sha)| digest(&base.join(name)).ok().as_deref() == sha.as_str());
-            Ok(
-                json!({"phase":if ready {"ready"} else {"not_downloaded"},"message":if ready {"Verified local model ready."} else {"Not downloaded or incomplete. First use downloads and verifies the Russian model; retry is safe."}}),
-            )
-        }
         "update.status" => {
             let dev = workspace_protocol::channel::current().is_dev();
             Ok(

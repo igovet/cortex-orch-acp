@@ -1,6 +1,6 @@
 # CW-U11: Voice input for the task composer
 
-**Status:** Partly implemented: local dictation in the composer with a Russian-only on-device recognizer ([maintenance and controls](../maintenance-and-controls.md)); no provider choice; a real microphone is not verified · **Phase:** 3+ · **Size:** M
+**Status:** Partly implemented: local dictation in the composer with selectable Russian and English on-device models ([maintenance and controls](../maintenance-and-controls.md)); no provider choice; a real microphone is not verified · **Phase:** 3+ · **Size:** M
 
 ## Goal
 

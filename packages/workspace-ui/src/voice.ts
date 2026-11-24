@@ -1,21 +1,22 @@
 import { createSignal, onCleanup } from "solid-js";
-import { voiceReason, type VoicePage, type VoicePhase, type VoicePort } from "./voice-client";
+import { voiceReason, type VoiceLanguage, type VoicePage, type VoicePhase, type VoicePort } from "./voice-client";
 
 /** Only an explicit Insert action consumes a transcript. Stop/timeout never sends. */
 export function createLocalDictation(port: VoicePort) {
   const [on, setOn] = createSignal(false), [phase, setPhase] = createSignal<VoicePhase>("ready");
   const [text, setText] = createSignal(""), [seconds, setSeconds] = createSignal(0), [progress, setProgress] = createSignal(0);
   const [fault, setFault] = createSignal<string | null>(null);
+  const [language, setLanguage] = createSignal<VoiceLanguage>();
   let session: string | undefined, generation = 0, timer: ReturnType<typeof setTimeout> | undefined;
   const terminal = () => ["ready", "error", "cancelled"].includes(phase());
   const apply = (page: VoicePage) => {
-    setPhase(page.phase); setText(page.text); setSeconds(page.seconds); setProgress(page.progress);
-    if (page.phase === "error") { setFault(voiceReason(page.error)); setOn(false); }
+    setLanguage(page.language); setPhase(page.phase); setText(page.text); setSeconds(page.seconds); setProgress(page.progress);
+    if (page.phase === "error") { setFault(voiceReason(page.error, page.language)); setOn(false); }
   };
   const stop = () => {
     generation++; clearTimeout(timer); setOn(false); setText("");
     const id = session; session = undefined;
-    if (id) void port.cancel(id).catch(() => {}); // The service lease also closes a lost window.
+    if (id) return port.cancel(id).catch(() => {}); // The service lease also closes a lost window.
   };
   const fail = (error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
@@ -30,12 +31,12 @@ export function createLocalDictation(port: VoicePort) {
       if (!terminal()) timer = setTimeout(() => void poll(run), 250);
     } catch (error) { if (run === generation) fail(error); }
   };
-  const start = async () => {
+  const start = async (begin = port.start) => {
     stop();
     const run = generation;
-    setFault(null); setOn(true); setPhase("starting"); setSeconds(0); setProgress(0);
+    setFault(null); setOn(true); setPhase("starting"); setSeconds(0); setProgress(0); setLanguage(undefined);
     try {
-      const page = await port.start("voice-" + crypto.randomUUID());
+      const page = await begin("voice-" + crypto.randomUUID());
       if (run !== generation) { void port.cancel(page.sessionId).catch(() => {}); return; }
       session = page.sessionId; apply(page);
       if (!terminal()) timer = setTimeout(() => void poll(run), 250);
@@ -57,7 +58,7 @@ export function createLocalDictation(port: VoicePort) {
     const value = text(); stop(); return value;
   };
   onCleanup(stop);
-  return { on, phase, progress, seconds, fault, text, stop, finish, pause,
+  return { on, phase, progress, seconds, language, fault, text, stop, finish, pause,
     words: () => text().split(/\s+/).length, finished: text,
     clearFault: () => setFault(null), start,
     toggle: () => on() && !terminal() ? void pause() : void start() };

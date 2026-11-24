@@ -4,6 +4,8 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Added: Workspace desktop dictation supports English as well as Russian. Settings → Voice input saves the RU/EN choice for the next recording and shows each model's verification status. Models download separately on demand; audio stays on the machine and text is never sent automatically.
+
 - Changed: Coordinators are reminded to skip plan recaps and keep owner-facing replies, questions and results in the selected language even after English tool output.
 
 - Fixed: Automatic response language now uses the original request for final result and verification-disclosure labels. Runtime-authored ACP consent and question text and access explanations use the same effective language. Workspace interface labels and decision authority are unchanged.

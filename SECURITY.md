@@ -1525,8 +1525,10 @@ for remaining compatibility limits.
 
 Workspace local dictation uses a fixed packaged sherpa-onnx worker and default
 PulseAudio capture, with closed native/service controls and a short read lease.
-Audio is not uploaded or persisted; only explicitly inserted/sent text enters the
-ordinary prompt path. First-use model downloads have fixed size/content hashes;
+Audio is not uploaded or persisted. English recognition output is lowercased in the
+local worker; only explicitly sent text enters the ordinary prompt path.
+The native owner can select only RU or EN, and cannot change languages
+during an active session. Each on-demand model download has a pinned size and content hashes;
 no webview-supplied URL, path or executable is accepted. See [dictation authority](docs/cortex-workspace/security.md#local-dictation-built-local-linux).
 
 Workspace attachment input carries bytes, not arbitrary client filesystem paths, and

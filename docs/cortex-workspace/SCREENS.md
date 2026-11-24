@@ -359,7 +359,7 @@ Task composer (task discussion; the create-task form reuses the same controls fo
 - Access mode: Development, Guarded or Auto, each with its own description of what engine file tools ask before and what commands may do: in every mode a command can read anything the owner's account can read, outside the project included, without asking (in Guarded it cannot write there; a writing worker's commands in Development and Auto can). An unknown stored value is shown as Guarded, never as Auto.
 - Language: Auto, English or Russian. It applies to Cortex's own status, question and stop text, and the control says so.
 - Send mode: Steer or Queue, described under Task send modes below.
-- Voice input: a microphone control that places dictated text in the composer for review, described under Voice input below. Local Russian dictation is built in the Linux desktop slice; Paseo's composer dictation is its reference ([CW-R31](requirements.md), [CW-U11](backlog/CW-U11.md)). Dictated text is never sent automatically.
+- Voice input: a microphone control that places dictated text in the composer for review, described under Voice input below. Local Russian and English dictation is built in the Linux desktop slice; Paseo's composer dictation is its reference ([CW-R31](requirements.md), [CW-U11](backlog/CW-U11.md)). Dictated text is never sent automatically.
 
 Task header and inspector:
 
@@ -607,25 +607,26 @@ a refusal keeps your draft. An archived task has no rework action: restore it fi
 
 ## Voice input
 
-**Built local subset:** Ctrl+D or the mic toggles local Russian capture in task,
-worker, New task, planner and question-answer composers, and every other shared composer. A live, wrapping transcript preview
-appears inside the composer with loading/download progress. Stop retains the
-preview; Cancel discards it; Insert appends it to the editable draft. Insert and
-send is a separate button where that composer supports sending. The default
-PulseAudio source and sherpa-onnx small Russian model are used with no cloud
-provider or audio storage. New-task dictation never saves or starts a task.
-See [local voice behavior and limits](local-task-execution.md#local-voice-input). Recording on an installed desktop package has not been qualified; the source path is wired.
-The broader controls below (provider/language selection, level meter, insertion at
-cursor, push-to-talk and Esc/Enter bindings) remain planned, not built.
+**Built local subset:** Ctrl+D or the microphone starts and stops dictation in the
+shared composers. The recording bar shows its language, download/loading progress
+or elapsed time, and a live wrapping transcript. Stop leaves a preview. Cancel
+discards only the recording; Insert appends the text to the editable draft.
+Insert and send is a separate explicit button where the composer can send.
+New-task dictation never saves or starts a task.
 
-- The Voice control sits in the tools row of every message composer where dictation applies (see the [composer anatomy](DESIGN.md#unified-message-composer)): task, worker, sprint planning, Request changes, diff comments and New task description.
-- Start: a click toggles dictation. A press-and-hold push-to-talk mode is proposed, pending the owner's decision. Ctrl/Cmd+D toggles it in a focused composer, and it is not bound while the terminal has focus.
-- While recording, a recording bar replaces the composer toolbar at the same height. It shows a red indicator with elapsed time, a level meter (static under reduced motion), a language choice (Auto, Русский, English or an installed model), Cancel (Esc), Insert (Enter), and Insert and send (button only).
-- Live transcript: partial text appears in grey italics at the cursor in the draft. It becomes normal text on Insert. "Processing…" appears between stop and the final text.
-- Dictation never sends by itself. Insert and send uses the composer's current send mode.
-- Errors appear inline, and text input stays available: "Microphone access is blocked by the system." (with a link to system settings); "No microphone found."; "Dictation needs a speech model that is not downloaded." (with Download and Choose another); "Speech-to-text key is not set for this machine."; "This machine's voice service is offline."; "Microphone interrupted. Waiting to resume…"; "Transcription took too long." (with Retry and Discard).
-- Provider: a local model is the recommended default, and an OpenAI-compatible service is the alternative. The owner selects the provider in the machine's voice settings ([CW-U07](backlog/CW-U07.md), [CW-U15](backlog/CW-U15.md)). The default and the machine that transcribes a remote task are open decisions.
-- Privacy: audio is streamed only while recording and is not stored by default. A recording indicator is visible for as long as audio is captured. Dictation starts only from a user gesture.
+Settings → Voice input switches between Russian (RU, default) and English (EN).
+The choice is saved on the machine and applies to the next recording; it cannot
+change while recording or downloading. Each model shows its own verification
+status. Choose a missing model and use Download to fetch it without recording,
+or let the microphone download it on first use. A failed content check does not
+load the model. The default PulseAudio/PipeWire source and sherpa-onnx CPU
+recognizer are used without cloud processing or audio storage.
+
+Capture, download, integrity and session failures appear inline without disabling
+typing. The shortcut is not bound when the terminal has focus.
+Push-to-talk, a level meter, insertion at the cursor and Esc/Enter dictation
+bindings remain planned. Physical microphone capture has not been qualified.
+See [local voice behavior and limits](local-task-execution.md#local-voice-input).
 
 ## Tabs (desktop)
 

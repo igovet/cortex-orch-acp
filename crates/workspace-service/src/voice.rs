@@ -1,10 +1,14 @@
 //! One local microphone lease, independent of projects and model sessions.
-use crate::local::failure;
-use serde_json::{json, Value};
+use crate::{local::failure, machine::settings};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
-    io,
-    path::PathBuf,
+    fs::{self, OpenOptions},
+    io::{self, Read},
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
@@ -12,10 +16,10 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
-    sync::{mpsc, Mutex},
+    sync::{Mutex, mpsc},
     task::JoinHandle,
 };
-use workspace_protocol::voice::Request;
+use workspace_protocol::voice::{Language, Request};
 const LEASE: Duration = Duration::from_secs(10);
 struct Live {
     page: Value,
@@ -24,6 +28,7 @@ struct Live {
 struct Session {
     id: String,
     request: String,
+    download_only: bool,
     live: Arc<Mutex<Live>>,
     control: mpsc::Sender<&'static str>,
     task: JoinHandle<()>,
@@ -68,12 +73,112 @@ fn runtime(config: &crate::Config) -> io::Result<(PathBuf, PathBuf)> {
     }
     Err(failure("voice_unavailable"))
 }
+#[derive(Deserialize)]
+struct Model {
+    name: String,
+    bytes: u64,
+    files: std::collections::BTreeMap<String, String>,
+}
+
+fn catalogue() -> &'static std::collections::BTreeMap<String, Model> {
+    static MODELS: std::sync::OnceLock<std::collections::BTreeMap<String, Model>> =
+        std::sync::OnceLock::new();
+    MODELS.get_or_init(|| {
+        serde_json::from_str(include_str!("../../../packaging/voice/model.json"))
+            .expect("packaged voice catalogue")
+    })
+}
+
+fn model_directory(state: &Path, model: &Model) -> PathBuf {
+    state.join("voice").join(&model.name)
+}
+
+fn model_phase(state: &Path, model: &Model) -> &'static str {
+    let directory = model_directory(state, model);
+    match fs::symlink_metadata(&directory) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return "not_downloaded",
+        Ok(m) if m.is_dir() => {}
+        _ => return "integrity_failed",
+    }
+    if model.files.iter().all(|(name, sha)| {
+        let verified = || -> io::Result<bool> {
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(directory.join(name))?;
+            let meta = file.metadata()?;
+            if !meta.is_file() || meta.len() > model.bytes {
+                return Ok(false);
+            }
+            let mut hash = Sha256::new();
+            let size = io::copy(&mut file.take(meta.len() + 1), &mut hash)?;
+            Ok(size == meta.len() && format!("{:x}", hash.finalize()) == *sha)
+        };
+        verified().unwrap_or(false)
+    }) {
+        "ready"
+    } else {
+        "integrity_failed"
+    }
+}
+
+fn preference(state: &Path) -> PathBuf {
+    state.join("voice-settings.json")
+}
+
+fn language(state: &Path) -> io::Result<Language> {
+    let value = settings::read_json(&preference(state), json!(Language::default()))
+        .map_err(|_| failure("voice_settings_unavailable"))?;
+    serde_json::from_value(value).map_err(|_| failure("voice_settings_unavailable"))
+}
+
 impl Manager {
+    async fn busy(&self) -> bool {
+        match &self.session {
+            Some(s) => !terminal(&s.live.lock().await.page),
+            None => false,
+        }
+    }
+
+    async fn set_language(&self, state: &Path, language: Language) -> io::Result<Value> {
+        if self.busy().await {
+            return Err(failure("voice_busy"));
+        }
+        settings::write_json(&preference(state), &json!(language))
+            .map_err(|_| failure("voice_settings_unavailable"))?;
+        Ok(json!({"language":language}))
+    }
+
     pub async fn call(&mut self, config: &crate::Config, request: Request) -> io::Result<Value> {
-        if let Request::Start(p) = request {
+        match request {
+            Request::Settings => {
+                let state = config.state_dir.clone();
+                let language = language(&state)?;
+                let busy = self.busy().await;
+                let models = tokio::task::spawn_blocking(move || {
+                    Language::ALL.map(|lang| {
+                        let model = &catalogue()[lang.as_str()];
+                        json!({"language":lang,"name":model.name,"bytes":model.bytes,
+                            "phase":model_phase(&state, model)})
+                    })
+                })
+                .await
+                .map_err(|_| failure("voice_settings_unavailable"))?;
+                return Ok(json!({"language":language,"busy":busy,"models":models}));
+            }
+            Request::SetLanguage(p) => {
+                return self.set_language(&config.state_dir, p.language).await;
+            }
+            _ => {}
+        }
+        let download_only = matches!(request, Request::Download(_));
+        if let Request::Start(p) | Request::Download(p) = request {
             if let Some(s) = &self.session {
                 let mut live = s.live.lock().await;
                 if s.request == p.request_id {
+                    if s.download_only != download_only {
+                        return Err(failure("voice_request_expired"));
+                    }
                     live.read = Instant::now();
                     return Ok(live.page.clone());
                 }
@@ -85,11 +190,14 @@ impl Manager {
                 return Err(failure("voice_request_expired"));
             }
             self.stop().await;
+            let language = language(&config.state_dir)?;
             let (node, helper) = runtime(config)?;
             let mut command = Command::new(node);
             command
                 .arg(helper)
                 .arg(&config.state_dir)
+                .arg(language.as_str())
+                .arg(if download_only { "download" } else { "record" })
                 .current_dir("/")
                 .env_clear();
             // Keep the actual desktop audio session, not the dev channel's synthetic runtime directory.
@@ -123,7 +231,7 @@ impl Manager {
             let mut input = child.stdin.take().unwrap();
             let output = child.stdout.take().unwrap();
             let id = crate::identity()?;
-            let page = json!({"sessionId":id,"phase":"starting","progress":0,"text":"","seconds":0,"error":""});
+            let page = json!({"sessionId":id,"language":language,"phase":"starting","progress":0,"text":"","seconds":0,"error":""});
             let live = Arc::new(Mutex::new(Live {
                 page,
                 read: Instant::now(),
@@ -185,6 +293,7 @@ impl Manager {
             self.session = Some(Session {
                 id,
                 request: p.request_id,
+                download_only,
                 live,
                 control,
                 task,
@@ -292,11 +401,131 @@ mod tests {
         assert!(!assets.join("crates").exists());
         let other = root.join("unselected-channel/runtime");
         fs::create_dir_all(&other).unwrap();
-        assert!(crate::LaunchSpec::native(other)
-            .unwrap()
-            .bundled_engines()
-            .is_none());
+        assert!(
+            crate::LaunchSpec::native(other)
+                .unwrap()
+                .bundled_engines()
+                .is_none()
+        );
     }
+    #[tokio::test]
+    async fn settings_select_separate_models_and_bind_the_active_worker() {
+        use std::os::unix::fs::PermissionsExt;
+        use workspace_protocol::voice::{Language, parse};
+
+        let root =
+            std::env::temp_dir().join(format!("cw-test-voice-{}", crate::identity().unwrap()));
+        fs::create_dir(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let package = root.join(&workspace_protocol::channel::current().package);
+        let assets = package.join("runtime");
+        let node = package.join("engines/node/bin/node");
+        fs::create_dir_all(&assets).unwrap();
+        fs::create_dir_all(node.parent().unwrap()).unwrap();
+        fs::create_dir_all(package.join("voice")).unwrap();
+        fs::write(package.join("voice/voice.cjs"), b"fixture").unwrap();
+        // The disposable worker echoes argv, not audio, and waits for cancellation.
+        fs::write(
+            &node,
+            r#"#!/bin/sh
+printf '{"phase":"recording","progress":100,"text":"%s/%s","seconds":1,"error":""}\n' "$3" "$4"
+read -r ignored
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&node, fs::Permissions::from_mode(0o700)).unwrap();
+        let config = crate::Config {
+            runtime_dir: root.join("socket"),
+            state_dir: root.join("state"),
+            allowed_root: root.clone(),
+            launch: crate::LaunchSpec::native(assets).unwrap(),
+            request_timeout: Duration::from_secs(2),
+            shutdown_timeout: Duration::from_secs(1),
+            event_capacity: 16,
+        };
+        let request = |method, value| parse(method, value).unwrap();
+        let mut manager = Manager::default();
+        let initial = manager.call(&config, Request::Settings).await.unwrap();
+        assert_eq!(initial["language"], "ru");
+        assert!(!preference(&config.state_dir).exists());
+        assert_eq!(initial["models"][0]["phase"], "not_downloaded");
+        assert_eq!(initial["models"][1]["phase"], "not_downloaded");
+        let ru = model_directory(&config.state_dir, &catalogue()["ru"]);
+        let en = model_directory(&config.state_dir, &catalogue()["en"]);
+        assert_ne!(en, ru);
+        assert!(ru.ends_with("voice/sherpa-onnx-small-zipformer-ru-2024-09-18"));
+        fs::create_dir_all(en).unwrap();
+        let statuses = manager.call(&config, Request::Settings).await.unwrap();
+        assert_eq!(statuses["models"][0]["phase"], "not_downloaded");
+        assert_eq!(statuses["models"][1]["phase"], "integrity_failed");
+
+        manager
+            .set_language(&config.state_dir, Language::En)
+            .await
+            .unwrap();
+        let mut manager = Manager::default(); // simulate restart before recording
+        let active = manager
+            .call(
+                &config,
+                request("voice.start", json!({"requestId":"en-record"})),
+            )
+            .await
+            .unwrap();
+        let id = active["sessionId"].as_str().unwrap();
+        assert_eq!(active["language"], "en");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let page = manager
+                    .call(&config, request("voice.read", json!({"sessionId":id})))
+                    .await
+                    .unwrap();
+                if page["phase"] == "recording" {
+                    assert_eq!(page["text"], "en/record");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let error = manager
+            .set_language(&config.state_dir, Language::Ru)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "voice_busy");
+        let error = manager
+            .call(
+                &config,
+                request("voice.download", json!({"requestId":"other"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "voice_busy");
+        manager
+            .call(&config, request("voice.cancel", json!({"sessionId":id})))
+            .await
+            .unwrap();
+        manager
+            .set_language(&config.state_dir, Language::Ru)
+            .await
+            .unwrap();
+        let next = manager
+            .call(
+                &config,
+                request("voice.download", json!({"requestId":"ru-download"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next["language"], "ru");
+        manager.stop().await;
+    }
+
     #[test]
     fn bounds_updates() {
         assert!(valid_update(

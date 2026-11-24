@@ -5,18 +5,24 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { once } = require("node:events");
-const model = require("./model.json");
+const models = require("./model.json");
+const modelFor = language => {
+  if (!Object.hasOwn(models, language)) throw Error("voice_unavailable");
+  return models[language];
+};
 const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
-const verified = directory => Object.entries(model.files).every(([name, digest]) => {
+const verified = (directory, language) => Object.entries(modelFor(language).files).every(([name, digest]) => {
   try { const p = path.join(directory, name); return fs.lstatSync(p).isFile() && hash(fs.readFileSync(p)) === digest; }
   catch { return false; }
 });
 
-async function prepare(state, emit, signal) {
+async function prepare(state, language, emit, signal) {
+  const model = modelFor(language);
+  signal.throwIfAborted();
   const base = path.join(state, "voice");
   fs.mkdirSync(base, { recursive: true, mode: 0o700 });
   const directory = path.join(base, model.name);
-  if (verified(directory)) return directory;
+  if (verified(directory, language)) return directory;
   // A failed or cancelled attempt is never installed as a model.
   // A process-group cancellation can interrupt finally; remove only our stale staging directories on retry.
   for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
@@ -44,7 +50,8 @@ async function prepare(state, emit, signal) {
     fs.mkdirSync(unpacked, { mode: 0o700 });
     const tar = spawn("/usr/bin/tar", ["-xjf", archive, "--strip-components=1", "-C", unpacked,
       ...Object.keys(model.files).map(f => model.name + "/" + f)], { stdio: "ignore", signal });
-    if ((await once(tar, "exit"))[0] !== 0 || !verified(unpacked)) throw Error("model_integrity_failed");
+    if ((await once(tar, "exit"))[0] !== 0 || !verified(unpacked, language)) throw Error("model_integrity_failed");
+    signal.throwIfAborted();
     if (fs.existsSync(directory)) fs.rmSync(directory, { recursive: true });
     fs.renameSync(unpacked, directory);
     return directory;
@@ -53,25 +60,30 @@ async function prepare(state, emit, signal) {
     throw Error("model_download_failed");
   } finally { fs.rmSync(stage, { recursive: true, force: true }); }
 }
-function recognizer(directory) {
+function recognizer(directory, language) {
+  const files = modelFor(language).transducer ?? {
+    encoder: "encoder.int8.onnx", decoder: "decoder.onnx", joiner: "joiner.int8.onnx",
+  };
   const sherpa = require("sherpa-onnx-node");
   return new sherpa.OfflineRecognizer({
     featConfig: { sampleRate: 16000, featureDim: 80 },
     modelConfig: { transducer: {
-      encoder: path.join(directory, "encoder.int8.onnx"), decoder: path.join(directory, "decoder.onnx"),
-      joiner: path.join(directory, "joiner.int8.onnx") },
+      encoder: path.join(directory, files.encoder), decoder: path.join(directory, files.decoder),
+      joiner: path.join(directory, files.joiner) },
       tokens: path.join(directory, "tokens.txt"), numThreads: 2, provider: "cpu", debug: false },
     decodingMethod: "greedy_search",
   });
 }
-async function decode(recognizer, pcm) {
+async function decode(recognizer, pcm, language) {
   const samples = new Float32Array(pcm.length / 2);
   for (let i = 0; i < samples.length; i++) samples[i] = pcm.readInt16LE(i * 2) / 32768;
   const stream = recognizer.createStream();
   stream.acceptWaveform({ samples, sampleRate: 16000 });
-  return (await recognizer.decodeAsync(stream)).text.trim();
+  const text = (await recognizer.decodeAsync(stream)).text.trim();
+  // The pinned English model emits uppercase tokens. Keep Russian output unchanged.
+  return language === "en" ? text.toLowerCase() : text;
 }
-async function main(state) {
+async function main(state, language, mode) {
   let capture, ticker, cancelled = false, stopping = false, busy = false, text = "", fixed = "";
   let chunks = [], length = 0, seconds = 0, pending = Buffer.alloc(0), silence = 0;
   const abort = new AbortController();
@@ -84,16 +96,20 @@ async function main(state) {
   process.stdin.on("data", data => {
     commands += data;
     if (commands.length > 64 || commands.includes("cancel\n")) { cancel(); process.exit(0); }
-    if (commands.includes("stop\n")) { stopping = true; capture?.kill("SIGTERM"); }
+    if (commands.includes("stop\n")) {
+      stopping = true;
+      if (!capture) { cancel(); emit({ phase: "ready" }); process.exit(0); }
+      capture.kill("SIGTERM");
+    }
   });
   process.stdin.on("end", () => { cancel(); process.exit(0); });
   try {
     // Fail before downloading when no native capture executable is installed.
-    if (!fs.existsSync("/usr/bin/parec")) throw Error("capture_unavailable");
-    const directory = await prepare(state, emit, abort.signal);
-    if (cancelled || stopping) { emit({ phase: "ready" }); process.exit(0); }
+    if (mode !== "download" && !fs.existsSync("/usr/bin/parec")) throw Error("capture_unavailable");
+    const directory = await prepare(state, language, emit, abort.signal);
+    if (mode === "download" || cancelled || stopping) { emit({ phase: "ready" }); process.exit(0); }
     emit({ phase: "loading" });
-    const engine = recognizer(directory);
+    const engine = recognizer(directory, language);
     if (cancelled || stopping) { emit({ phase: "ready" }); process.exit(0); }
     capture = spawn("/usr/bin/parec", ["--raw", "--format=s16le", "--rate=16000", "--channels=1", "--latency-msec=100"],
       { stdio: ["ignore", "pipe", "ignore"] });
@@ -127,7 +143,7 @@ async function main(state) {
           const commit = stopping || length >= 20 * 32000 || silence >= .8;
           const audio = Buffer.concat(chunks, length);
           if (commit) { chunks = []; length = 0; silence = 0; }
-          const partial = audio.length ? await decode(engine, audio) : "";
+          const partial = audio.length ? await decode(engine, audio, language) : "";
           if (cancelled) return;
           text = [fixed, partial].filter(Boolean).join(" ");
           if (text.length > 16000) throw Error("transcript_limit");
@@ -145,5 +161,5 @@ async function main(state) {
     process.exitCode = 1; process.stdin.destroy();
   }
 }
-module.exports = { prepare, recognizer, decode, verified, model };
-if (require.main === module) main(process.argv[2]);
+module.exports = { prepare, recognizer, decode, verified };
+if (require.main === module) main(process.argv[2], process.argv[3], process.argv[4]);

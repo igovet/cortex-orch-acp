@@ -4,7 +4,7 @@
 use super::journey::*;
 use super::session::*;
 use crate::installed::util::*;
-use crate::json::{parse, Res, Value};
+use crate::json::{Res, Value, parse};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -489,7 +489,8 @@ impl J {
         let name = parse(&read_to_string(
             &self.st.checkout.join("packaging/voice/model.json"),
         )?)?
-        .get("name")
+        .get("ru")
+        .and_then(|model| model.get("name"))
         .and_then(Value::as_str)
         .ok_or("voice model name unreadable")?
         .to_string();
@@ -575,6 +576,79 @@ impl J {
             self.registration_inert(&project),
             "voice_must_not_start_engine_or_save_task",
         )?;
+        let en_model = self.st.artifacts.join("voice-model-en");
+        let en_fixture = self.st.artifacts.join("voice-fixture-en.wav");
+        if en_model.is_dir() && en_fixture.is_file() {
+            let name = parse(&read_to_string(
+                &self.st.checkout.join("packaging/voice/model.json"),
+            )?)?
+            .get("en")
+            .and_then(|model| model.get("name"))
+            .and_then(Value::as_str)
+            .ok_or("English voice model name unreadable")?
+            .to_owned();
+            run(
+                &[
+                    "cp",
+                    "-R",
+                    &en_model.to_string_lossy(),
+                    &state.join(name).to_string_lossy(),
+                ],
+                Duration::from_secs(120),
+            )?;
+            let selected = self.q("return JSON.stringify(await window.__TAURI_INTERNALS__.invoke('workspace_request',{operation:'voice.setLanguage',message:{language:'en'}}));")?;
+            require(
+                text(&selected, "language") == "en",
+                "voice_english_not_selected",
+            )?;
+            self.js(
+                "document.querySelector('[aria-label=\"Voice input\"]').click(); return 'yes';",
+            )?;
+            self.wait("voice_english_recording", 30, |j| {
+                Ok(j.voice_status()?.contains("Listening") &&
+                    j.js("return document.querySelector('.micbar')?.textContent.includes('On-device · English') ? 'yes' : '';")? == "yes")
+            })?;
+            let mut playback = Command::new("paplay");
+            playback.arg("--device=cw_voice").arg(en_fixture);
+            let mut player = spawn_quiet(&mut playback)?;
+            let played = player.wait().map(|s| s.success()).unwrap_or(false);
+            require(played, "voice_english_fixture_playback_failed")?;
+            self.wait("voice_live_english_text", 20, |j| {
+                Ok(j.voice_text()?.to_lowercase().contains("yellow lamps"))
+            })?;
+            self.press("Insert")?;
+            self.wait_js(
+                "voice_english_insert_closed",
+                15,
+                "return document.querySelector('.micbar') ? '' : 'yes';",
+            )?;
+            let text_after = self
+                .js("return document.querySelector('[aria-label=\"Describe the task\"]').value;")?;
+            require(
+                text_after.starts_with(&inserted)
+                    && text_after.to_lowercase().contains("yellow lamps")
+                    && self.registration_inert(&project),
+                "voice_english_insert_lost_draft_or_sent",
+            )?;
+            let restored = self.q("return JSON.stringify(await window.__TAURI_INTERNALS__.invoke('workspace_request',{operation:'voice.setLanguage',message:{language:'ru'}}));")?;
+            require(
+                text(&restored, "language") == "ru",
+                "voice_russian_not_restored",
+            )?;
+            self.step(
+                "native_english_voice_round_trip",
+                vec![
+                    ("transcription", s("real sherpa-onnx English fixture")),
+                    ("insert_preserves_draft", b(true)),
+                    ("engine_started", b(false)),
+                ],
+            );
+        } else {
+            self.not_applicable("native_english_voice_round_trip",
+                "English fixture playback needs voice-model-en/ and voice-fixture-en.wav in the artifact directory",
+                s(format!("model present: {}; fixture present: {}", en_model.is_dir(), en_fixture.is_file())));
+        }
+
         // Closed native controls exercise the same real socket manager, with no test-only product route.
         let bridge =
             self.q("return JSON.stringify({invoke:typeof window.__TAURI_INTERNALS__?.invoke});")?;

@@ -234,6 +234,7 @@ impl Bridge {
             if let Some(
                 code @ ("voice_busy"
                 | "voice_unavailable"
+                | "voice_settings_unavailable"
                 | "voice_session_unknown"
                 | "voice_request_expired"),
             ) = reply["error"]["message"].as_str()
@@ -384,7 +385,10 @@ impl Bridge {
             | "machine.call"
             | "directories.search"
             | "directories.cancel"
+            | "voice.settings"
+            | "voice.setLanguage"
             | "voice.start"
+            | "voice.download"
             | "voice.read"
             | "voice.stop"
             | "voice.cancel"
@@ -1219,6 +1223,48 @@ mod tests {
                 assert!(error.contains("Edit the task to work in the project folder"));
                 assert!(error.ends_with("Nothing was started."));
             }
+        }
+        serving.await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn voice_settings_error_is_preserved_only_for_a_matching_voice_reply() {
+        use serde_json::json;
+
+        let root = std::env::temp_dir().join(format!("cw-voice-error-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("service.sock");
+        let listener = bind_socket(&path);
+        let cases = [
+            ("voice.start", true, "voice_settings_unavailable"),
+            ("voice.settings", true, "voice_settings_unavailable"),
+            ("voice.settings", false, "service_request_failed"),
+            ("service.status", true, "service_request_failed"),
+        ];
+        let serving = tokio::spawn(async move {
+            for (method, matching, _) in cases {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = crate::frames::read_frame(&mut stream).await.unwrap();
+                assert_eq!(request["method"], method);
+                let id = if matching {
+                    request["id"].clone()
+                } else {
+                    json!(null)
+                };
+                crate::frames::write_frame(
+                    &mut stream,
+                    &json!({"jsonrpc":"2.0","id":id,
+                        "error":{"code":-32000,"message":"voice_settings_unavailable"}}),
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let bridge = bridge(path);
+        for (method, _, expected) in cases {
+            assert_eq!(bridge.rpc(method, json!({})).await.unwrap_err(), expected);
         }
         serving.await.unwrap();
         std::fs::remove_dir_all(root).unwrap();

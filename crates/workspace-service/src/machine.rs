@@ -43,7 +43,7 @@ mod project_registry;
 pub(crate) mod project_routing;
 mod project_skills;
 pub(crate) mod retention;
-mod settings;
+pub(crate) mod settings;
 pub mod settings_api;
 pub(crate) mod short_text;
 pub(crate) mod sprint_graph;

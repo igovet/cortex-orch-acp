@@ -3,7 +3,10 @@ use serde_json::json;
 #[test]
 fn voice_is_closed_and_local_window_only() {
     for (method, message) in [
+        ("voice.settings", json!({})),
+        ("voice.setLanguage", json!({"language":"en"})),
         ("voice.start", json!({"requestId":"r"})),
+        ("voice.download", json!({"requestId":"r"})),
         ("voice.read", json!({"sessionId":"s"})),
         ("voice.stop", json!({"sessionId":"s"})),
         ("voice.cancel", json!({"sessionId":"s"})),
@@ -23,6 +26,12 @@ fn voice_is_closed_and_local_window_only() {
             .is_err());
         }
     }
+    assert!(authorize(
+        "main",
+        "tauri://localhost/",
+        json!({"operation":"voice.setLanguage","message":{"language":"fr"}})
+    )
+    .is_err());
     assert!(authorize(
         "main",
         "tauri://localhost/",

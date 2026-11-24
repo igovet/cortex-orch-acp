@@ -2187,8 +2187,10 @@ events does not count as new live activity.
 
 ## Local voice input
 
-Ctrl+D or the microphone starts and stops on-device Russian dictation in a
-composer. Partial recognition appears live inside that composer; stopping leaves
+Ctrl+D or the microphone starts and stops on-device Russian or English dictation
+in a composer. Settings → Voice input saves the language for that machine and
+channel. Russian is the default; message language does not change recognition.
+The setting cannot change during recording or download and applies to the next recording. Partial recognition appears live inside that composer; stopping leaves
 a preview, never a message. Cancel discards only the recording. Insert appends the
 final transcript to the editable draft. Insert and send is a separate explicit
 action where that composer supports sending (including the answer inside a question card); new-task
@@ -2197,10 +2199,14 @@ dictation never creates or starts a task.
 The service captures the default desktop source through PulseAudio's parec
 (including PipeWire's PulseAudio compatibility server), not Web Speech or a cloud
 speech service. The package contains sherpa-onnx-node 2.0.1 and uses bundled Node.
-On first use it downloads the fixed small Russian Zipformer model (about 110 MB
-download, 27 MB installed) with visible progress and verifies the archive and model
-files against committed SHA-256 hashes. Subsequent sessions use the channel-private
-model cache without a download. No audio is uploaded or written to disk.
+The fixed small Zipformer models are separate: Russian (109,906,654 bytes, about
+105 MiB to download) and English (112,232,184 bytes, about 107 MiB). On first use
+only the selected model downloads, with visible progress. Settings shows both
+models' integrity status and can download the selected model without recording.
+The worker checks the archive and model files against committed SHA-256 hashes
+before installing the model in the channel-private cache. A failed or cancelled
+download is not installed; retry starts a new verified download. No audio is
+uploaded or written to disk.
 Only explicitly sent transcript text enters the ordinary Cortex prompt path.
 
 Recognition refreshes partial text using bounded overlapping offline inference;
@@ -2210,8 +2216,11 @@ Insert or Insert and send. The service allows one microphone lease at a time;
 a lost composer/window lease expires after ten seconds. Service stop cancels it.
 Missing capture tools, audio-server/microphone access, unavailable local runtime,
 failed download, failed integrity or a lost session are reported, not simulated.
-The default model is Russian-only; other speech languages and physical-device
-quality are not implied by fixture checks.
+There is no automatic language detection or mixed-language mode. Fixture checks
+do not establish physical-device recognition quality. The optional rendered
+English fixture uses `voice-model-en/` and `voice-fixture-en.wav` in the
+`check-rendered` artifact directory alongside the Russian artifacts. Obtain
+the English recording from `test_wavs/0.wav` in the pinned model archive.
 
 ## Explicit limits
 

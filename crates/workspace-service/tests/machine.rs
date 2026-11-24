@@ -222,8 +222,9 @@ async fn explicit_workflows_and_maintenance_reads_need_no_activation() {
         .unwrap()
         .contains("я".repeat(30000).as_str()));
     assert_eq!(
-        f.ok("maintenance", json!({"action":"voice.status"})).await["phase"],
-        "not_downloaded"
+        f.call("maintenance", json!({"action":"voice.status"}))
+            .await["code"],
+        "invalid_action"
     );
     assert_eq!(
         f.call("maintenance", json!({"action":"read","id":"../bad"}))

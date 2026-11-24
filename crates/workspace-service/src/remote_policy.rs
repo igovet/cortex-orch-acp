@@ -146,7 +146,7 @@ pub fn machine_operation_allowed(op: &str, params: &Value) -> bool {
         // privilege prompt on the machine's screen) and acknowledging an unconfirmed
         // install (the owner checks the package manager at the machine).
         "maintenance" => match action {
-            Some("voice.status" | "update.status" | "update.check" | "read" | "cancel") => true,
+            Some("update.status" | "update.check" | "read" | "cancel") => true,
             Some("start") => matches!(
                 params.get("kind").and_then(Value::as_str),
                 Some("clone" | "download")
@@ -200,7 +200,10 @@ mod tests {
             "terminal.write",
             "terminal.resize",
             "terminal.close",
+            "voice.settings",
+            "voice.setLanguage",
             "voice.start",
+            "voice.download",
             "voice.read",
             "voice.stop",
             "voice.cancel",

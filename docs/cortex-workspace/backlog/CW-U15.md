@@ -1,6 +1,6 @@
 # CW-U15: Machine dictation service
 
-**Status:** Partly implemented: a local on-device dictation worker (sherpa-onnx, Russian) with a streaming read protocol; no OpenAI-compatible provider is confirmed in code ([maintenance and controls](../maintenance-and-controls.md)) · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: an on-device sherpa-onnx worker with Russian and English models, a saved language setting, and polled partial transcripts; no cloud provider or model removal ([maintenance and controls](../maintenance-and-controls.md)) · **Phase:** 3+ · **Size:** L
 
 ## Goal
 
@@ -19,7 +19,7 @@ See [requirements](../requirements.md).
 
 - [CW-U11](CW-U11.md) (the composer control), [CW-U07](CW-U07.md) (per-machine settings), [CW-H05](CW-H05.md) (machine registry and connector) and [Security](../security.md) (credential and data-flow rules).
 - Observed in the installed Paseo 0.15.0 app (read-only inspection of its bundle, not a dependency): a host-side speech service with a local sherpa-onnx model catalogue (including GigaAM v3 for Russian and Parakeet v3 for mixed European languages), an OpenAI provider (whisper-1, gpt-4o-transcribe and gpt-4o-mini-transcribe) with an optional OpenAI-compatible base URL, and a stream of start, chunk, finish and cancel requests that returns ack, partial, final and error events. Errors carry a retryable flag, a reason code and the missing model identities. Model sizes and download times are not measured.
-- Open decisions: the default provider (the recommendation is local), and where a remote machine's task is transcribed (the recommendation is the local machine). Both must be decided before implementation.
+- Decision: the local desktop uses only on-device recognition, with separate Russian and English models. Where a remote machine's task is transcribed remains an open decision.
 
 ## Deliverables
 
@@ -49,13 +49,13 @@ Negative:
 ## Dependencies
 
 - [CW-U07](CW-U07.md), [CW-H05](CW-H05.md) and [CW-C01](CW-C01.md) (the versioned contract).
-- Gate records: CW-D05 (Gate D). Open decisions on the default provider and the transcription location must be recorded.
+- Gate records: CW-D05 (Gate D). Remote transcription location must be decided before adding remote dictation.
 
 ## Validation
 
 - Fake-stream tests: start, chunk, partial, final, error, cancel, and finalize timeout.
 - Key redaction test across responses, logs and diagnostics.
-- Local provider run on fixture audio: only after the default provider is decided; not run until then.
+- Local recognizer fixture audio: use the pinned model and fixture checks described in [local voice input](../local-task-execution.md#local-voice-input).
 - A network capture showing that the local provider sends no audio off the machine. Required by [CW-U11](CW-U11.md); not run until the provider is implemented.
 - The OpenAI-compatible provider is not called in any check here. A real call is paid and needs an owner request. Recorded as not run.
 

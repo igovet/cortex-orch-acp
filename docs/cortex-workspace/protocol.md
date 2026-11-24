@@ -291,7 +291,19 @@ authoritative task facts; the reply is not a new result. Do not send a follow-up
 ordinary prompt or a private `reopen` overlay action. See
 [rework eligibility and behavior](local-task-execution.md#return-for-rework).
 
-**Local dictation.** The owner-only native/socket surface additionally offers closed voice.start/read/stop/cancel controls, separate from the ACP/project wire schema. Start binds a request identity; further calls bind a random local session identity. Replies contain bounded phase, percentage, seconds, transcript and fixed error code, never audio. One read-refreshed capture lease is allowed; ten seconds without reads or service stop cancels it. Stop finalizes a preview, never a prompt. No path, URL, executable, environment or send parameter is accepted. See [voice input](local-task-execution.md#local-voice-input).
+**Local dictation.** The owner-only native/socket surface offers closed voice
+controls, separate from the ACP/project wire schema. `voice.settings` reads the
+machine's language, lease status and both pinned models' integrity status.
+`voice.setLanguage` accepts only `ru` or `en` and persists the selection for the
+current channel; an active lease refuses changes. `voice.start` and
+`voice.download` take a request identity and bind the current machine language
+to a recording or model-only download, respectively. `voice.read`, `voice.stop`
+and `voice.cancel` take that session's random identity. Session replies carry
+the bound language, phase, percentage, seconds, bounded transcript and fixed
+error code, never audio. One read-refreshed lease is allowed; ten seconds without
+reads or service stop cancels it. Stop finalizes a preview, never a prompt.
+No path, URL, executable, environment or send parameter is accepted.
+See [voice input](local-task-execution.md#local-voice-input).
 
 For native-owned executions, worker guidance/stops, host-verifier stops/reruns and next-use task settings use the same `executions.control` actions without Python mutation fallback. Guarded-only settings and exact stored check identities are described in [native task controls](local-task-execution.md#native-desktop-task-controls); these controls do not certify work or grant broader permissions.
 
