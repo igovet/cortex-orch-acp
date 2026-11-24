@@ -33,8 +33,13 @@ describe("interface rules", () => {
     expect(css).toMatch(/prefers-reduced-motion: reduce\)\s*\{\s*\.spin[^{]*\{[^}]*animation: ws-pulse/);
   });
 
-  it("has hints and labels in English only", () => {
-    expect(hits(/[\u0400-\u04ff]/)).toEqual([]);
+  it("keeps default hints and labels in English, with only the approved Russian overrides", () => {
+    const copyPath = join(SRC, "copy.ts");
+    const approved = new Set([
+      `${copyPath}: deleteWorktreeFolder: "Удалить worktree папку",`,
+      `${copyPath}: closeDeleteWorktreeFolder: "Закрыть и удалить worktree папку",`,
+    ]);
+    expect(hits(/[\u0400-\u04ff]/).filter(line => !approved.has(line))).toEqual([]);
     expect(JSON.stringify(HELP)).not.toMatch(/[\u0400-\u04ff]/);
   });
   it("does not name the program inside the program", () => {

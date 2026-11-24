@@ -1,6 +1,6 @@
 # CW-A03: Android result screens and file-edit WebView host
 
-**Status:** Not implemented; no Android client exists; mobile is deferred behind Gate M · **Phase:** 3+ · **Size:** L
+**Status:** Not implemented as a dedicated item: an Android app exists as the shared interface in the phone shell (see CW-A01), but this item's result screens and file-edit WebView host are not built or verified on a device; mobile is deferred behind Gate M · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Build the native React Native result screen (evidence, revision digest and an entry to the acceptance decision) and a native changed-files list with read-only hunks. Also build the file-edit screen, which hosts the CodeMirror 6 bundle from [CW-I05](CW-I05.md) inside react-native-webview. React Native owns navigation: the back gesture, the stack and the header.

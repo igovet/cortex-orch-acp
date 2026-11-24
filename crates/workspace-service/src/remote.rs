@@ -125,6 +125,7 @@ fn code(error: RemoteError) -> io::Error {
         RemoteError::InvalidConfig(_) => "invalid_remote_relay",
         RemoteError::Bind(_) => "remote_bind_failed",
         RemoteError::Io(_) | RemoteError::InsecureState(_) => "remote_state_unavailable",
+        RemoteError::CorruptState(_) => "remote_state_corrupt",
         RemoteError::UnknownMachine => "remote_operation_failed",
     })
 }
@@ -196,6 +197,9 @@ fn start_reason(error: &RemoteError) -> &'static str {
     match error {
         RemoteError::InsecureState(_) => {
             "Remote access could not start: its private state folder is not private to your account."
+        }
+        RemoteError::CorruptState(_) => {
+            "Remote access could not start: its saved state is damaged. It stays off until the file is fixed."
         }
         RemoteError::Io(_) => "Remote access could not start: its private state could not be read.",
         RemoteError::Bind(_) => "Remote access could not start: no network port could be opened.",

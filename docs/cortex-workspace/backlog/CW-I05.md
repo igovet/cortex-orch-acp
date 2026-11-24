@@ -1,6 +1,6 @@
 # CW-I05: Android small-file edit contract for the CodeMirror 6 WebView bridge
 
-**Status:** Not implemented; no Android client exists; mobile is deferred behind Gate M · **Phase:** 3+ · **Size:** L
+**Status:** Not implemented as a dedicated item: an Android app exists (see CW-A01), but the remote allowlist refuses file saves from a phone and no small-file edit bridge is built; mobile is deferred behind Gate M · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Define and implement the bridge contract between React Native and a WebView-hosted CodeMirror 6 bundle, for small files. The contract covers load, save with hash check, conflict result, undo and redo, and dirty state. The bundle and its configuration are built from the same source as the desktop editor in CW-I04a. The small-file size bound is proposed at 256 KiB and is confirmed by measurement.

@@ -30,6 +30,10 @@ fn refused(path: &Path, problem: &str) -> RemoteError {
     RemoteError::InsecureState(format!("{}: {problem}", path.display()))
 }
 
+fn corrupt(path: &Path, problem: &str) -> RemoteError {
+    RemoteError::CorruptState(format!("{}: {problem}", path.display()))
+}
+
 /// Ensures `dir` is a real directory owned by the effective user and not writable by
 /// others, creating it (mode 0700) when absent. A symlink, a foreign owner or an
 /// other-writable directory is refused. Group-writable is accepted because Android
@@ -118,7 +122,7 @@ pub fn load_or_create_key(path: &Path) -> Result<SecretKey, RemoteError> {
             let bytes: [u8; 32] = bytes
                 .as_slice()
                 .try_into()
-                .map_err(|_| refused(path, "identity key has the wrong length"))?;
+                .map_err(|_| corrupt(path, "identity key has the wrong length"))?;
             return Ok(SecretKey::from_bytes(&bytes));
         }
         let key = SecretKey::generate();
@@ -150,11 +154,11 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, RemoteEr
     let mut bytes = Vec::new();
     file.take(STATE_FILE_BYTES + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > STATE_FILE_BYTES {
-        return Err(refused(path, "state file is too large"));
+        return Err(corrupt(path, "state file is too large"));
     }
     serde_json::from_slice(&bytes)
         .map(Some)
-        .map_err(|_| refused(path, "state file is not valid"))
+        .map_err(|_| corrupt(path, "state file is not valid"))
 }
 
 fn temp_name(path: &Path) -> PathBuf {
@@ -182,18 +186,70 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), RemoteErro
         drop(open_private(path)?);
     }
     let temp = temp_name(path);
+    let mut renamed = false;
     let result = (|| -> io::Result<()> {
         let mut file = create_private(&temp)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
+        #[cfg(test)]
+        injected_write_error(path, WriteStep::Rename)?;
         fs::rename(&temp, path)?;
+        renamed = true;
         if let Some(parent) = path.parent() {
+            #[cfg(test)]
+            injected_write_error(path, WriteStep::DirectorySync)?;
             sync_dir(parent)?;
         }
         Ok(())
     })();
-    if result.is_err() {
+    if result.is_err() && !renamed {
         let _ = fs::remove_file(&temp);
     }
     result.map_err(Into::into)
+}
+
+/// Disarms a durable recovery record only after the protected registry is synced.
+/// Unlink is the commit point. If syncing the deletion fails, a power loss can
+/// bring the intent back and conservatively undo a grant, never authorize a
+/// grant that was returned as cancelled.
+pub fn finish_intent(path: &Path) -> Result<(), RemoteError> {
+    fs::remove_file(path)?;
+    if let Some(parent) = path.parent() {
+        let _ = sync_dir(parent);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteStep {
+    Rename,
+    DirectorySync,
+}
+
+#[cfg(test)]
+thread_local! {
+    static WRITE_FAILURE: std::cell::RefCell<Option<(PathBuf, WriteStep)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_write(path: &Path, step: WriteStep) {
+    WRITE_FAILURE.with_borrow_mut(|failure| {
+        assert!(failure.replace((path.to_owned(), step)).is_none());
+    });
+}
+
+#[cfg(test)]
+fn injected_write_error(path: &Path, step: WriteStep) -> io::Result<()> {
+    WRITE_FAILURE.with_borrow_mut(|failure| {
+        if failure
+            .as_ref()
+            .is_some_and(|(p, s)| p == path && *s == step)
+        {
+            failure.take();
+            return Err(io::Error::other("injected registry write failure"));
+        }
+        Ok(())
+    })
 }

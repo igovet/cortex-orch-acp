@@ -1,6 +1,6 @@
 # CW-N03: QR/link enrollment: desktop NodeId + relay URLs + one-use secret; phone dial + local desktop confirmation; replay/expiry rejection tests
 
-**Status:** Not implemented; there is no device enrollment · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented (no-paid tests only, not qualified): a single-use pairing link (QR or text, 5 minutes, constant-time secret check, five-attempt limit, consumed on use), a fingerprint on both screens and an explicit owner Allow before any device is stored. Not implemented: a requested scope or per-project grant in the confirmation (a paired phone has full remote authority within the allowlist), a measured physical-phone dial over LAN and a remote network ([security](../security.md#remote-access-built-not-qualified)) · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Let a phone enroll with a desktop by scanning a time-limited QR code or opening an equivalent link. The payload carries the desktop NodeId, relay URLs and a one-use secret. The desktop must confirm locally before any trust is added.

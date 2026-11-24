@@ -1,6 +1,6 @@
 # CW-N06: LAN fast path: desktop mDNS advertise + Android NsdManager discovery feeding direct-address dial, bypassing relay; same-Wi-Fi latency measurement
 
-**Status:** Not implemented; there is no remote transport · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented: the remote transport exists and dials the direct addresses in the pairing link, but there is no mDNS advertisement, no NsdManager discovery and no latency measurement · **Phase:** 3+ · **Size:** M
 
 ## Goal
 When the desktop and the phone share a network, dial the paired desktop NodeId directly using addresses from local discovery. This bypasses the relay without weakening authorization.

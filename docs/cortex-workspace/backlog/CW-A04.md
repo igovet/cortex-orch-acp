@@ -1,6 +1,6 @@
 # CW-A04: Android credential storage and measured background connection
 
-**Status:** Not implemented; no Android client exists; mobile is deferred behind Gate M · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented: an Android app exists (see CW-A01) and keeps its device key in a 0600 file in the app's private data with backup off, but there is no Android Keystore wrapping and no measured background connection; mobile is deferred behind Gate M · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Store the device enrollment credential in Android Keystore-backed storage through react-native-keychain. Make revocation from the desktop invalidate the stored credential on the next contact. Measure the operating-system limits on background connections on the owner's device and document the measured values. Do not promise keep-alive behaviour that has not been measured.

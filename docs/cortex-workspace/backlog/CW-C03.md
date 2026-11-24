@@ -1,6 +1,6 @@
 # CW-C03: Decision CAS/idempotency/revocation tests and handler
 
-**Status:** Partly implemented: decisions are answered by identified, idempotent requests, single or as a batch ([protocol](../protocol.md)); cross-device authorization and revocation do not exist because there is no remote transport · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: decisions are answered by identified, idempotent requests, single or as a batch ([protocol](../protocol.md)); a remote device is authorized by the paired-device registry and the remote allowlist, and revocation closes its connections, but a request already handed to the service has an unknown outcome after revoke; the explicit revoked error for pending decision submissions and the revoke-versus-decision race tests are not built · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

@@ -18,7 +18,7 @@
 //!
 //! # Protocols
 //!
-//! Two ALPNs are used:
+//! Three ALPNs are used:
 //!
 //! - [`PAIRING_ALPN`]: the device opens one bidirectional stream and sends one frame
 //!   `{"secret":"<base64url, 32 bytes>","name":"<device name>"}`. The host answers with
@@ -39,8 +39,12 @@
 //!   and not forwarded. A malformed or oversized frame resets the stream and drops the
 //!   local connection without forwarding anything of it. Service→client frames are
 //!   forwarded unchanged.
+//! - [`VERSION_ALPN`]: the peer sends byte `0x01` and finishes its send half on one
+//!   bidirectional stream. The host replies with one frame containing only `supported`
+//!   (the pair and RPC ALPNs) and `wire` (the service's major.minor wire version), then
+//!   ends the stream and closes the connection. No pairing or device data is returned.
 //!
-//! All frames are the service's own framing: a 4-byte big-endian length followed by
+//! JSON frames are the service's own framing: a 4-byte big-endian length followed by
 //! that many bytes of JSON ([`workspace_protocol::encode_frame`]).
 //!
 //! # Limits
@@ -89,6 +93,23 @@ pub use link::{fingerprint, LinkError, PairingLink};
 pub const PAIRING_ALPN: &[u8] = b"cortex-workspace/pair/1";
 /// ALPN of the RPC tunnel.
 pub const RPC_ALPN: &[u8] = b"cortex-workspace/rpc/1";
+/// ALPN of the unauthenticated, constants-only version probe.
+pub const VERSION_ALPN: &[u8] = b"cortex-workspace/version/1";
+/// Stable refusal code when the machine advertises a different transport version.
+pub const INCOMPATIBLE_VERSION_CODE: &str = "remote_incompatible_version";
+
+const VERSION_REQUEST: &[u8] = b"\x01";
+const VERSION_REPLY_BYTES: usize = 256;
+
+/// Constants reported by a machine that answered a transport version probe.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionInfo {
+    /// The machine's advertised pairing and RPC ALPNs.
+    pub supported: Vec<String>,
+    /// The machine's advertised major.minor JSON wire version.
+    pub wire: String,
+}
 
 /// Lifetime of a pairing secret, and the ceiling for the owner's decision on a pending
 /// request (five minutes). [`HostConfig::pairing_ttl`] overrides it (tests).
@@ -137,9 +158,11 @@ pub enum RemoteError {
     /// An I/O failure reading or writing private state.
     Io(std::io::Error),
     /// A state file or directory failed the private-file rules (symlink, foreign owner,
-    /// group/other permission bits, wrong size or content). The text names the path and
+    /// group/other permission bits or not a regular file). The text names the path and
     /// the problem; it never contains key material.
     InsecureState(String),
+    /// A private state file was present but its contents could not be read as the expected data.
+    CorruptState(String),
     /// A name or relay URL is out of bounds or malformed.
     InvalidConfig(&'static str),
     /// Remote access is off; there is no endpoint.
@@ -159,6 +182,7 @@ impl std::fmt::Display for RemoteError {
         match self {
             RemoteError::Io(e) => write!(f, "remote_state_io: {e}"),
             RemoteError::InsecureState(why) => write!(f, "remote_state_refused: {why}"),
+            RemoteError::CorruptState(why) => write!(f, "remote_state_corrupt: {why}"),
             RemoteError::InvalidConfig(why) => write!(f, "invalid_remote_config: {why}"),
             RemoteError::Disabled => f.write_str("remote_access_disabled"),
             RemoteError::UnknownRequest => f.write_str("unknown_pairing_request"),

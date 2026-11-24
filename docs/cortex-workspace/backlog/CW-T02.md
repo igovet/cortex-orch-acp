@@ -1,6 +1,6 @@
 # CW-T02: Android advanced terminal attachment
 
-**Status:** Not implemented; no Android client exists · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented: an Android app exists (see CW-A01), but the remote allowlist refuses every `terminal.*` method from a phone and no terminal attachment is built · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Provide an advanced Android screen that attaches to an existing service PTY to view output and send input, with keyboard and accessibility handling. As [screens](../SCREENS.md) specifies, the terminal is secondary: it is not on the Android home screen. Closing the view detaches and never stops the session.

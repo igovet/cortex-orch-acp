@@ -4,6 +4,8 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Fixed: Automatic response language now uses the original request for final result and verification-disclosure labels. Runtime-authored ACP consent and question text and access explanations use the same effective language. Workspace interface labels and decision authority are unchanged.
+
 - Changed: The bundled routing preset uses `sonnet` and its seven-day quota window, limits Haiku and Luna preferences to investigation, and includes Astra for deep work. The portable Opus coordinator stays at medium effort. Fresh installs and explicit routing/defaults resets use the new policy; existing settings and saved profiles are not automatically replaced.
 
 - Added: Workspace **Board**, just below Home, shows live task status across projects on the selected machine. Each card names its project and opens the task. Archived work remains in Archive.

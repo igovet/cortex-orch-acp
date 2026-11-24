@@ -3,6 +3,19 @@
 use crate::bridge::{BoxFuture, Connector, Stream};
 use workspace_remote::{ConnectError, ConnectionState, RemoteConnection};
 
+pub(crate) const UPDATE_NEEDED: &str =
+    "The computer and this app are different versions. Update the app or the computer so both match.";
+
+fn unavailable_reason(state: &ConnectionState) -> Option<&'static str> {
+    match state {
+        ConnectionState::Rejected => {
+            Some("This phone is no longer paired with this machine. Pair it again on the machine.")
+        }
+        ConnectionState::IncompatibleVersion => Some(UPDATE_NEEDED),
+        _ => None,
+    }
+}
+
 /// Reaches the machine service through a paired machine's remote connection.
 #[derive(Clone)]
 pub struct RemoteConnector {
@@ -35,12 +48,28 @@ impl Connector for RemoteConnector {
         })
     }
     fn unavailable(&self) -> Option<String> {
-        match *self.connection.state().borrow() {
-            ConnectionState::Rejected => Some(
-                "This phone is no longer paired with this machine. Pair it again on the machine."
-                    .into(),
-            ),
-            _ => None,
-        }
+        unavailable_reason(&self.connection.state().borrow()).map(str::to_owned)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incompatible_and_rejected_connections_have_distinct_recovery_guidance() {
+        assert_eq!(
+            unavailable_reason(&ConnectionState::IncompatibleVersion),
+            Some(UPDATE_NEEDED)
+        );
+        assert!(unavailable_reason(&ConnectionState::Rejected)
+            .unwrap()
+            .contains("Pair it again"));
+        assert_eq!(
+            unavailable_reason(&ConnectionState::Offline {
+                last_connected_ms: None,
+            }),
+            None
+        );
     }
 }

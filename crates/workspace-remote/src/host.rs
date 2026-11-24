@@ -2,23 +2,25 @@
 //!
 //! # State directory
 //!
-//! [`HostConfig::state_dir`] holds three private (0600) files:
+//! [`HostConfig::state_dir`] holds private (0600) files:
 //!
 //! - `remote-host.key`: the 32-byte iroh secret key (the machine's endpoint id),
 //! - `remote-devices.json`: the paired-device registry,
+//! - `remote-grant.json`: the recovery intent for a new grant, present until commit,
 //! - `remote-settings.json`: `enabled`, the relay override and the last bound port.
 //!
 //! Remote access is off until [`Host::set_enabled`]`(true)`; while off no endpoint is
 //! bound. The flag persists across restarts.
 
 use std::collections::{BTreeMap, HashMap};
-use std::future::Future;
+use std::future::{poll_fn, Future};
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::Duration;
 
 use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
@@ -38,11 +40,12 @@ use crate::{
     CLOSE_NOT_PAIRED, CLOSE_REPLACED, CLOSE_REVOKED, CONTROL_FRAME_BYTES, IO_TIMEOUT,
     MAX_CONNECTED_DEVICES, MAX_CONNECTIONS_PER_DEVICE, MAX_HANDSHAKES, MAX_PAIRING_CONNECTIONS,
     MAX_STREAMS_PER_DEVICE, PAIRING_ALPN, PAIRING_ATTEMPTS, PAIRING_TTL, RPC_ALPN, STREAM_BUSY,
-    STREAM_INVALID_FRAME, STREAM_LOCAL_FAILED,
+    STREAM_INVALID_FRAME, STREAM_LOCAL_FAILED, VERSION_ALPN, VERSION_REQUEST,
 };
 
 const KEY_FILE: &str = "remote-host.key";
 const REGISTRY_FILE: &str = "remote-devices.json";
+const GRANT_FILE: &str = "remote-grant.json";
 const SETTINGS_FILE: &str = "remote-settings.json";
 /// The JSON-RPC error message for a request the method policy refused.
 pub const REFUSED_MESSAGE: &str = "remote_operation_refused";
@@ -191,7 +194,7 @@ pub struct HostStatus {
     pub pairing: Option<PairingStatus>,
     /// Requests waiting for [`Host::decide`].
     pub pending: Vec<PendingRequest>,
-    /// Paired devices.
+    /// Paired devices and disconnected rows whose revocation still needs saving.
     pub devices: Vec<DeviceStatus>,
 }
 
@@ -217,6 +220,26 @@ struct Registry {
     devices: Vec<DeviceRecord>,
 }
 
+/// Until the intent is removed, the named identity must not be loaded as authorized.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantIntent {
+    device_id: String,
+}
+
+fn read_grant_intent(path: &Path) -> Result<Option<GrantIntent>, RemoteError> {
+    let intent: Option<GrantIntent> = files::read_json(path)?;
+    if intent
+        .as_ref()
+        .is_some_and(|grant| grant.device_id.parse::<EndpointId>().is_err())
+    {
+        return Err(RemoteError::CorruptState(
+            "invalid device identity in the grant recovery record".into(),
+        ));
+    }
+    Ok(intent)
+}
+
 struct ActivePairing {
     secret: [u8; 32],
     status: PairingStatus,
@@ -227,7 +250,8 @@ struct ActivePairing {
 
 struct PendingEntry {
     info: PendingRequest,
-    decide: Option<oneshot::Sender<bool>>,
+    deadline: Instant,
+    decide: oneshot::Sender<&'static str>,
 }
 
 struct LiveDevice {
@@ -243,6 +267,8 @@ struct Running {
 struct State {
     settings: Settings,
     devices: Vec<DeviceRecord>,
+    /// Rows retained for the owner to retry, never consulted for authorization.
+    pending_revocations: BTreeMap<String, DeviceRecord>,
     pairing: Option<ActivePairing>,
     pending: BTreeMap<String, PendingEntry>,
     live: HashMap<EndpointId, LiveDevice>,
@@ -259,6 +285,7 @@ struct Inner {
     key: SecretKey,
     id: EndpointId,
     registry_path: PathBuf,
+    grant_path: PathBuf,
     settings_path: PathBuf,
     state: Mutex<State>,
     /// Serializes enable/disable/relay changes.
@@ -290,11 +317,18 @@ impl Host {
             ),
         };
         files::ensure_private_dir(&config.state_dir)?;
-        let key = files::load_or_create_key(&config.state_dir.join(KEY_FILE))?;
         let settings_path = config.state_dir.join(SETTINGS_FILE);
         let registry_path = config.state_dir.join(REGISTRY_FILE);
+        let grant_path = config.state_dir.join(GRANT_FILE);
         let settings: Settings = files::read_json(&settings_path)?.unwrap_or_default();
-        let registry: Registry = files::read_json(&registry_path)?.unwrap_or_default();
+        let mut registry: Registry = files::read_json(&registry_path)?.unwrap_or_default();
+        if let Some(grant) = read_grant_intent(&grant_path)? {
+            registry.devices.retain(|d| d.device_id != grant.device_id);
+            // Do not bind if rollback fails. Leave the intent on disk for the next start.
+            files::write_json(&registry_path, &registry)?;
+            files::finish_intent(&grant_path)?;
+        }
+        let key = files::load_or_create_key(&config.state_dir.join(KEY_FILE))?;
         let enabled = settings.enabled;
         let inner = Arc::new(Inner {
             name,
@@ -306,10 +340,12 @@ impl Host {
             id: key.public(),
             key,
             registry_path,
+            grant_path,
             settings_path,
             state: Mutex::new(State {
                 settings,
                 devices: registry.devices,
+                pending_revocations: BTreeMap::new(),
                 pairing: None,
                 pending: BTreeMap::new(),
                 live: HashMap::new(),
@@ -452,27 +488,45 @@ impl Host {
     /// Records the owner's decision on a pending request. Only `allow == true` adds the
     /// device to the registry.
     pub fn decide(&self, request_id: &str, allow: bool) -> Result<(), RemoteError> {
-        let entry = self
-            .inner
-            .lock()
+        let inner = &self.inner;
+        let _order = inner.writes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = inner.lock();
+        let entry = state
             .pending
             .remove(request_id)
             .ok_or(RemoteError::UnknownRequest)?;
-        if let Some(decide) = entry.decide {
-            let _ = decide.send(allow);
-        }
-        self.inner.changed();
-        Ok(())
+        let result = if Instant::now() >= entry.deadline || entry.decide.is_closed() {
+            Err(RemoteError::UnknownRequest)
+        } else if allow {
+            inner.add_device(&mut state, &entry.info)
+        } else {
+            Ok(())
+        };
+        let outcome = match &result {
+            Ok(()) if allow => "allowed",
+            Ok(()) => "denied",
+            Err(RemoteError::UnknownRequest) => "expired",
+            Err(_) => "cancelled",
+        };
+        let _ = entry.decide.send(outcome);
+        drop(state);
+        inner.changed();
+        result
     }
 
-    /// Removes a paired device and immediately closes its connections.
+    /// Disconnects a paired device and saves its removal. On a write error, the
+    /// disconnected device remains visible to the owner and the same id can be retried.
     pub fn revoke(&self, device_id: &str) -> Result<(), RemoteError> {
         let inner = &self.inner;
+        let _order = inner.writes.lock().unwrap_or_else(|e| e.into_inner());
         {
             let mut state = inner.lock();
-            let before = state.devices.len();
-            state.devices.retain(|d| d.device_id != device_id);
-            if state.devices.len() == before {
+            if let Some(index) = state.devices.iter().position(|d| d.device_id == device_id) {
+                let record = state.devices.remove(index);
+                state
+                    .pending_revocations
+                    .insert(device_id.to_owned(), record);
+            } else if !state.pending_revocations.contains_key(device_id) {
                 return Err(RemoteError::UnknownDevice);
             }
             if let Ok(id) = device_id.parse::<EndpointId>() {
@@ -483,7 +537,11 @@ impl Host {
                 }
             }
         }
-        let result = inner.persist_registry();
+        let result = inner.write_registry();
+        if result.is_ok() {
+            // The snapshot excludes every pending removal, not just the requested id.
+            inner.lock().pending_revocations.clear();
+        }
         inner.changed();
         result
     }
@@ -510,6 +568,7 @@ impl Host {
             devices: state
                 .devices
                 .iter()
+                .chain(state.pending_revocations.values())
                 .map(|d| DeviceStatus {
                     device_id: d.device_id.clone(),
                     name: d.name.clone(),
@@ -603,6 +662,16 @@ impl Inner {
 
     fn persist_registry(&self) -> Result<(), RemoteError> {
         let _order = self.writes.lock().unwrap_or_else(|e| e.into_inner());
+        // Leave a failed removal explicitly retryable rather than relying on whichever
+        // phone happens to connect next to save it along with its last-seen timestamp.
+        if !self.lock().pending_revocations.is_empty() {
+            return Ok(());
+        }
+        self.write_registry()
+    }
+
+    /// Caller holds `writes`.
+    fn write_registry(&self) -> Result<(), RemoteError> {
         let registry = Registry {
             devices: self.lock().devices.clone(),
         };
@@ -612,7 +681,11 @@ impl Inner {
     /// Binds the endpoint and starts the accept loop. Caller holds `lifecycle`.
     async fn bind(self: &Arc<Self>) -> Result<(), RemoteError> {
         let relay = self.effective_relay().0;
-        let alpns = vec![PAIRING_ALPN.to_vec(), RPC_ALPN.to_vec()];
+        let alpns = vec![
+            PAIRING_ALPN.to_vec(),
+            RPC_ALPN.to_vec(),
+            VERSION_ALPN.to_vec(),
+        ];
         let endpoint = if self.bind_addrs.is_empty() {
             let port = self.lock().settings.port.unwrap_or(0);
             let binds = |port| {
@@ -708,6 +781,11 @@ async fn handle_incoming(
         .await
         .ok()?
         .ok()?;
+    if conn.alpn() == VERSION_ALPN {
+        // Count an entire probe against the handshake limit, not just its TLS step.
+        serve_version(conn).await;
+        return Some(());
+    }
     drop(permit);
     if conn.alpn() == PAIRING_ALPN {
         serve_pairing(inner, conn).await;
@@ -722,6 +800,30 @@ async fn handle_incoming(
 // ---------------------------------------------------------------------------------------
 // Pairing
 // ---------------------------------------------------------------------------------------
+
+async fn serve_version(conn: Connection) {
+    conn.set_max_concurrent_uni_streams(code(0));
+    conn.set_max_concurrent_bi_streams(code(1));
+    let _ = tokio::time::timeout(IO_TIMEOUT, async {
+        let (mut send, mut recv) = conn.accept_bi().await.ok()?;
+        if recv.read_to_end(VERSION_REQUEST.len()).await.ok()? != VERSION_REQUEST {
+            return None;
+        }
+        let supported = [PAIRING_ALPN, RPC_ALPN]
+            .map(|alpn| std::str::from_utf8(alpn).expect("ASCII ALPN"));
+        let reply = json!({
+            "supported": supported,
+            "wire": format!("{}.{}", workspace_protocol::WIRE_MAJOR, workspace_protocol::WIRE_MINOR),
+        });
+        frames::write_json(&mut send, &reply).await.ok()?;
+        send.finish().ok()?;
+        // Let the peer read the reply before a QUIC close can discard it.
+        let _ = conn.closed().await;
+        Some(())
+    })
+    .await;
+    conn.close(code(CLOSE_DONE), b"done");
+}
 
 async fn send_status(send: &mut SendStream, status: &str) -> io::Result<()> {
     tokio::time::timeout(
@@ -765,7 +867,7 @@ async fn serve_pairing(inner: Arc<Inner>, conn: Connection) {
         return;
     };
     let admitted = inner.admit(&secret, device, name);
-    let (info, deadline, decision) = match admitted {
+    let (info, deadline, mut decision) = match admitted {
         Ok(admitted) => admitted,
         Err(status) => {
             let _ = send_status(&mut send, status).await;
@@ -779,26 +881,21 @@ async fn serve_pairing(inner: Arc<Inner>, conn: Connection) {
         return;
     }
     let outcome = tokio::select! {
-        decided = tokio::time::timeout_at(deadline, decision) => match decided {
-            Ok(Ok(true)) => "allowed",
-            Ok(Ok(false)) => "denied",
-            Ok(Err(_)) => "cancelled",
-            Err(_) => "expired",
+        decided = &mut decision => decided.unwrap_or("cancelled"),
+        _ = tokio::time::sleep_until(deadline) => {
+            // If a decision acquired the state lock before expiry, use its result.
+            if inner.drop_pending(&request_id) {
+                "expired"
+            } else {
+                decision.await.unwrap_or("cancelled")
+            }
         },
         _ = conn.closed() => {
             inner.drop_pending(&request_id);
             return;
         }
     };
-    inner.lock().pending.remove(&request_id);
-    if outcome == "allowed" {
-        if inner.add_device(&info).is_err() {
-            let _ = send_status(&mut send, "cancelled").await;
-            finish_and_close(&conn, &mut send).await;
-            return;
-        }
-    }
-    inner.changed();
+    inner.drop_pending(&request_id);
     let _ = send_status(&mut send, outcome).await;
     finish_and_close(&conn, &mut send).await;
 }
@@ -817,7 +914,7 @@ fn parse_pairing_request(value: &Value) -> Option<([u8; 32], String)> {
     Some((secret, name))
 }
 
-type Admitted = (PendingRequest, Instant, oneshot::Receiver<bool>);
+type Admitted = (PendingRequest, Instant, oneshot::Receiver<&'static str>);
 
 impl Inner {
     /// Checks a presented secret in constant time. On success the secret is consumed and
@@ -859,46 +956,74 @@ impl Inner {
             requested_at_ms: now_ms(),
         };
         let (tx, rx) = oneshot::channel();
+        let deadline = Instant::now() + self.ttl;
         state.pending.insert(
             info.request_id.clone(),
             PendingEntry {
                 info: info.clone(),
-                decide: Some(tx),
+                deadline,
+                decide: tx,
             },
         );
         drop(state);
         self.changed();
-        Ok((info, Instant::now() + self.ttl, rx))
+        Ok((info, deadline, rx))
     }
 
-    fn drop_pending(&self, request_id: &str) {
-        if self.lock().pending.remove(request_id).is_some() {
+    fn drop_pending(&self, request_id: &str) -> bool {
+        let removed = self.lock().pending.remove(request_id).is_some();
+        if removed {
             self.changed();
         }
+        removed
     }
 
-    fn add_device(&self, info: &PendingRequest) -> Result<(), RemoteError> {
+    /// Caller holds both `writes` and `state`: never expose an uncommitted grant.
+    fn add_device(&self, state: &mut State, info: &PendingRequest) -> Result<(), RemoteError> {
+        let mut candidate = Registry {
+            devices: state.devices.clone(),
+        };
+        if read_grant_intent(&self.grant_path)?.is_some() {
+            // A previous failed grant may still be on disk. Flush current safe
+            // state before replacing its intent with another device's intent.
+            files::write_json(&self.registry_path, &candidate)?;
+            files::finish_intent(&self.grant_path)?;
+        }
+        let now = now_ms();
+        let new_device = match candidate
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == info.device_id)
         {
-            let mut state = self.lock();
-            let now = now_ms();
-            match state
-                .devices
-                .iter_mut()
-                .find(|d| d.device_id == info.device_id)
-            {
-                Some(existing) => {
-                    existing.name = info.device_name.clone();
-                    existing.paired_at_ms = now;
-                }
-                None => state.devices.push(DeviceRecord {
+            Some(existing) => {
+                existing.name = info.device_name.clone();
+                existing.paired_at_ms = now;
+                false
+            }
+            None => {
+                // This must be durable before the candidate can replace the registry.
+                files::write_json(
+                    &self.grant_path,
+                    &GrantIntent {
+                        device_id: info.device_id.clone(),
+                    },
+                )?;
+                candidate.devices.push(DeviceRecord {
                     device_id: info.device_id.clone(),
                     name: info.device_name.clone(),
                     paired_at_ms: now,
                     last_seen_ms: None,
-                }),
+                });
+                true
             }
+        };
+        files::write_json(&self.registry_path, &candidate)?;
+        if new_device {
+            files::finish_intent(&self.grant_path)?;
         }
-        self.persist_registry()
+        state.devices = candidate.devices;
+        state.pending_revocations.clear();
+        Ok(())
     }
 
     /// Registers an RPC connection of a paired device. `None` when it must be refused.
@@ -981,8 +1106,13 @@ async fn serve_rpc(inner: Arc<Inner>, endpoint: Endpoint, conn: Connection) {
                 match streams.clone().try_acquire_owned() {
                     Ok(permit) => {
                         let inner = inner.clone();
+                        let conn = conn.clone();
                         tokio::spawn(async move {
-                            tunnel(&inner, send, recv).await;
+                            tokio::select! {
+                                biased;
+                                _ = conn.closed() => (),
+                                _ = tunnel(&inner, (device, id), send, recv) => (),
+                            }
                             drop(permit);
                         });
                     }
@@ -999,7 +1129,12 @@ async fn serve_rpc(inner: Arc<Inner>, endpoint: Endpoint, conn: Connection) {
 }
 
 /// Bridges one device stream to one fresh local service connection.
-async fn tunnel(inner: &Inner, mut send: SendStream, mut recv: RecvStream) {
+async fn tunnel(
+    inner: &Inner,
+    connection: (EndpointId, u64),
+    mut send: SendStream,
+    mut recv: RecvStream,
+) {
     let local = match (inner.connector)().await {
         Ok(local) => local,
         Err(_) => {
@@ -1014,7 +1149,7 @@ async fn tunnel(inner: &Inner, mut send: SendStream, mut recv: RecvStream) {
     // decided first and acted on only after both futures (and the device receive
     // stream, which stops it) are dropped.
     let reset = {
-        let up = upstream(&inner.policy, recv, local_write, &send);
+        let up = upstream(inner, connection, recv, local_write, &send);
         let down = downstream(local_read, &send);
         tokio::pin!(up, down);
         let mut up_done = false;
@@ -1045,7 +1180,8 @@ async fn tunnel(inner: &Inner, mut send: SendStream, mut recv: RecvStream) {
 
 /// Device → service. `Err(code)` resets the stream.
 async fn upstream(
-    policy: &MethodPolicy,
+    inner: &Inner,
+    connection: (EndpointId, u64),
     mut recv: RecvStream,
     mut local: WriteHalf<LocalStream>,
     send: &tokio::sync::Mutex<SendStream>,
@@ -1072,11 +1208,30 @@ async fn upstream(
             return Err(STREAM_INVALID_FRAME);
         };
         let params = value.get("params").unwrap_or(&Value::Null);
-        if policy(method, params) {
-            local
-                .write_all(&frame)
-                .await
-                .map_err(|_| STREAM_LOCAL_FAILED)?;
+        if (inner.policy)(method, params) {
+            // Revoke and each actual write poll share the authorization lock. A
+            // frame buffered before revoke cannot start (or resume) writing after it.
+            let (device, id) = connection;
+            let mut remaining = frame.as_slice();
+            while !remaining.is_empty() {
+                let written =
+                    poll_fn(|cx| {
+                        let state = inner.lock();
+                        if !state.live.get(&device).is_some_and(|live| {
+                            live.conns.iter().any(|(current, _)| *current == id)
+                        }) {
+                            return Poll::Ready(Err(STREAM_LOCAL_FAILED));
+                        }
+                        Pin::new(&mut local)
+                            .poll_write(cx, remaining)
+                            .map(|result| result.map_err(|_| STREAM_LOCAL_FAILED))
+                    })
+                    .await?;
+                if written == 0 {
+                    return Err(STREAM_LOCAL_FAILED);
+                }
+                remaining = &remaining[written..];
+            }
         } else {
             let id = value.get("id").cloned().unwrap_or(Value::Null);
             let refusal =
@@ -1103,5 +1258,113 @@ async fn downstream(
             Ok(None) => return Ok(()),
             Err(_) => return Err(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_grant_never_loads_after_failed_sync_and_failed_rollback() {
+        let dir = tempfile_dir();
+        let registry_path = dir.0.join(REGISTRY_FILE);
+        let grant_path = dir.0.join(GRANT_FILE);
+        let mut config = HostConfig::new(
+            &dir.0,
+            "Test machine",
+            || async { Err(io::Error::other("unexpected tunnel")) },
+            |_, _| false,
+        );
+        config.bind_addrs = vec!["127.0.0.1:0".parse().unwrap()];
+        let host = Host::start(config.clone()).await.unwrap();
+        host.set_enabled(true).await.unwrap();
+
+        let pending = |request_id: &str| {
+            let (decide, outcome) = oneshot::channel();
+            let entry = PendingEntry {
+                info: PendingRequest {
+                    request_id: request_id.into(),
+                    device_name: "Test phone".into(),
+                    device_id: SecretKey::generate().public().to_string(),
+                    fingerprint: String::new(),
+                    requested_at_ms: now_ms(),
+                },
+                deadline: Instant::now() + Duration::from_secs(10),
+                decide,
+            };
+            let device_id = entry.info.device_id.clone();
+            host.inner.lock().pending.insert(request_id.into(), entry);
+            (device_id, outcome)
+        };
+
+        let (allowed_device, allowed) = pending("allowed");
+        host.decide("allowed", true).unwrap();
+        assert_eq!(allowed.await.unwrap(), "allowed");
+        assert!(!grant_path.exists());
+
+        let (failed_device, cancelled) = pending("cancelled");
+        files::fail_next_write(&registry_path, files::WriteStep::DirectorySync);
+        assert!(matches!(
+            host.decide("cancelled", true),
+            Err(RemoteError::Io(_))
+        ));
+        assert_eq!(cancelled.await.unwrap(), "cancelled");
+        assert_eq!(host.status().devices.len(), 1);
+        assert_eq!(host.status().devices[0].device_id, allowed_device);
+        let intent = read_grant_intent(&grant_path).unwrap().unwrap();
+        assert_eq!(intent.device_id, failed_device);
+        let candidate: Registry = files::read_json(&registry_path).unwrap().unwrap();
+        assert!(candidate
+            .devices
+            .iter()
+            .any(|d| d.device_id == failed_device));
+        host.shutdown().await;
+        drop(host);
+
+        files::fail_next_write(&registry_path, files::WriteStep::Rename);
+        assert!(matches!(
+            Host::start(config.clone()).await,
+            Err(RemoteError::Io(_))
+        ));
+        assert_eq!(
+            read_grant_intent(&grant_path).unwrap().unwrap().device_id,
+            failed_device
+        );
+        let still_unsafe: Registry = files::read_json(&registry_path).unwrap().unwrap();
+        assert!(still_unsafe
+            .devices
+            .iter()
+            .any(|d| d.device_id == failed_device));
+
+        let restarted = Host::start(config.clone()).await.unwrap();
+        assert!(restarted.status().enabled);
+        assert_eq!(restarted.status().devices.len(), 1);
+        assert_eq!(restarted.status().devices[0].device_id, allowed_device);
+        assert!(!grant_path.exists());
+        restarted.shutdown().await;
+        let restarted = Host::start(config).await.unwrap();
+        assert_eq!(restarted.status().devices.len(), 1);
+        assert_eq!(restarted.status().devices[0].device_id, allowed_device);
+        restarted.shutdown().await;
+    }
+
+    struct TestDir(PathBuf);
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tempfile_dir() -> TestDir {
+        let mut id = [0; 16];
+        random_bytes(&mut id);
+        let path = std::env::temp_dir().join(format!(
+            "workspace-remote-grant-{}",
+            data_encoding::HEXLOWER.encode(&id)
+        ));
+        files::ensure_private_dir(&path).unwrap();
+        TestDir(path)
     }
 }

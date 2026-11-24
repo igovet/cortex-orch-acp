@@ -15,7 +15,8 @@ use std::{
 use tokio::{sync::oneshot, task::JoinHandle};
 use workspace_client::{policy, Bridge, RemoteConnector};
 use workspace_remote::{
-    Client, ClientConfig, ConnectionState, PairError, PairingAttempt, PathKind, RemoteConnection,
+    link::LinkError, Client, ClientConfig, ConnectionState, PairError, PairingAttempt, PathKind,
+    RemoteConnection, INCOMPATIBLE_VERSION_CODE,
 };
 
 /// Receives the two event streams of the shell: `phone-state` and `workspace-transport`.
@@ -59,7 +60,11 @@ pub struct Phone {
 
 fn pair_code(error: &PairError, begin: bool) -> &'static str {
     match error {
+        PairError::InvalidLink(LinkError::UnsupportedVersion(_)) => {
+            "unsupported_pairing_link_version"
+        }
         PairError::InvalidLink(_) => "invalid_link",
+        PairError::IncompatibleVersion(_) => INCOMPATIBLE_VERSION_CODE,
         PairError::Expired => "expired",
         PairError::Denied => "denied",
         PairError::Cancelled => "cancelled",
@@ -67,6 +72,30 @@ fn pair_code(error: &PairError, begin: bool) -> &'static str {
         // A wrong or used secret, a refused name or a broken exchange: the computer did not take it.
         _ if begin => "refused",
         _ => "unreachable",
+    }
+}
+
+fn machine_connection(
+    seen: Option<ConnectionState>,
+    last: Option<u64>,
+) -> (&'static str, Option<&'static str>, Option<u64>) {
+    match seen {
+        Some(ConnectionState::Connecting) => ("connecting", None, last),
+        Some(ConnectionState::Connected { path }) => (
+            "connected",
+            Some(match path {
+                PathKind::Direct => "direct",
+                PathKind::Relay => "relay",
+                PathKind::Unknown => "unknown",
+            }),
+            last,
+        ),
+        Some(ConnectionState::Offline { last_connected_ms }) => {
+            ("offline", None, last_connected_ms.or(last))
+        }
+        Some(ConnectionState::Rejected) => ("rejected", None, last),
+        Some(ConnectionState::IncompatibleVersion) => ("update_needed", None, last),
+        None => ("offline", None, last),
     }
 }
 
@@ -219,23 +248,7 @@ impl Phone {
                     .links
                     .get(&machine.machine_id)
                     .map(|link| link.connection.state().borrow().clone());
-                let (state, path, last) = match seen {
-                    Some(ConnectionState::Connecting) => ("connecting", None, machine.last_connected_ms),
-                    Some(ConnectionState::Connected { path }) => (
-                        "connected",
-                        Some(match path {
-                            PathKind::Direct => "direct",
-                            PathKind::Relay => "relay",
-                            PathKind::Unknown => "unknown",
-                        }),
-                        machine.last_connected_ms,
-                    ),
-                    Some(ConnectionState::Offline { last_connected_ms }) => {
-                        ("offline", None, last_connected_ms.or(machine.last_connected_ms))
-                    }
-                    // A machine that revoked this phone, or one not asked yet, is not reachable.
-                    Some(ConnectionState::Rejected) | None => ("offline", None, machine.last_connected_ms),
-                };
+                let (state, path, last) = machine_connection(seen, machine.last_connected_ms);
                 json!({"id": machine.machine_id, "name": machine.name, "state": state, "path": path, "lastConnectedAt": last})
             })
             .collect();
@@ -389,6 +402,53 @@ impl Drop for Phone {
     fn drop(&mut self) {
         if let Some(subscription) = self.lock().subscription.take() {
             subscription.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use workspace_remote::VersionInfo;
+
+    #[test]
+    fn distinguishes_pairing_link_and_transport_versions_from_invalid_links() {
+        for begin in [true, false] {
+            assert_eq!(
+                pair_code(&PairError::InvalidLink(LinkError::Malformed("test")), begin),
+                "invalid_link"
+            );
+            assert_eq!(
+                pair_code(
+                    &PairError::InvalidLink(LinkError::UnsupportedVersion(42)),
+                    begin
+                ),
+                "unsupported_pairing_link_version"
+            );
+            assert_eq!(
+                pair_code(
+                    &PairError::IncompatibleVersion(VersionInfo {
+                        supported: vec![],
+                        wire: "2.0".into(),
+                    }),
+                    begin
+                ),
+                "remote_incompatible_version"
+            );
+        }
+    }
+
+    #[test]
+    fn reports_refused_machines_separately_from_offline() {
+        for (state, expected) in [
+            (Some(ConnectionState::Rejected), "rejected"),
+            (Some(ConnectionState::IncompatibleVersion), "update_needed"),
+            (None, "offline"),
+        ] {
+            assert_eq!(
+                machine_connection(state, Some(42)),
+                (expected, None, Some(42))
+            );
         }
     }
 }

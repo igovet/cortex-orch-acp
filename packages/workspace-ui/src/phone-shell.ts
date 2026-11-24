@@ -5,7 +5,7 @@ import type { VoicePort } from "./voice-client";
  * The contract between the shared interface and the Android app. The native side implements `PhoneShell` exactly; the
  * interface never reaches the network, the camera or the key store itself.
  */
-export type PhoneMachine = { id: string; name: string; state: "connecting" | "connected" | "offline";
+export type PhoneMachine = { id: string; name: string; state: "connecting" | "connected" | "offline" | "rejected" | "update_needed";
   path: "direct" | "relay" | "unknown" | null; lastConnectedAt: number | null };
 export type PhoneState = { active: string | null; machines: PhoneMachine[] };
 export interface PhoneShell {
@@ -13,7 +13,7 @@ export interface PhoneShell {
   subscribe(listener: (state: PhoneState) => void): () => void;
   /** Opens the camera scanner. Resolves the QR text, or null when the owner backs out. Rejects with Error("camera_denied") or Error("camera_unavailable"). */
   scan(): Promise<string | null>;
-  /** Starts pairing from a scanned or pasted link. Rejects with Error("invalid_link" | "unreachable" | "expired" | "refused"). */
+  /** Starts pairing from a scanned or pasted link. Rejects with Error("invalid_link" | "unsupported_pairing_link_version" | "remote_incompatible_version" | "unreachable" | "expired" | "refused"). */
   pairBegin(link: string): Promise<{ machineName: string; fingerprint: string }>;
   /** Resolves when the computer allows it. Rejects with Error("denied" | "expired" | "cancelled" | "unreachable"). */
   pairFinish(name: string): Promise<{ machineId: string }>;

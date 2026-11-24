@@ -2,7 +2,7 @@ import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount,
 import { render } from "solid-js/web";
 import type { PhoneFrame, PhoneWorkspace } from "./ctx";
 import { I } from "./kit";
-import { machineLine } from "./phone-words";
+import { machineLine, machineRefusal, UPDATE_NEEDED } from "./phone-words";
 import { PAIR_LINK_PREFIX, type PhoneMachine, type PhoneShell, type PhoneState } from "./phone-shell";
 import { createRealPort } from "./port/real";
 import { relayProblem } from "./remote-access";
@@ -14,6 +14,8 @@ import "./phone.css";
 /** Plain words for every way pairing can end without a machine. */
 export const PAIR_WORDS: Record<string, string> = {
   invalid_link: `This is not a pairing link. Copy the whole link from the computer; it starts with ${PAIR_LINK_PREFIX}`,
+  unsupported_pairing_link_version: "This pairing link was made by an incompatible version. Update the app or the computer so both match.",
+  remote_incompatible_version: UPDATE_NEEDED,
   unreachable: "The computer could not be reached. Check that it is on, that the desktop app is running, and that both are online.",
   expired: "This pairing link has expired. Make a new one on the computer, in Settings, Remote access.",
   refused: "The computer refused this pairing link. Make a new one on the computer and try again.",
@@ -245,7 +247,7 @@ function PastePage(props: { error?: string; onBack: () => void; onGo: (link: str
 
 function MachineList(props: { machines: PhoneMachine[]; active: string | null; onPick: (id: string) => void }) {
   return <div class="ph-group" role="list"><For each={props.machines}>{m => <button class="ph-row" role="listitem" aria-current={m.id === props.active ? "true" : undefined} onClick={() => props.onPick(m.id)}>
-    <I n="laptop" /><span class="ph-row-t"><span class="w500 trunc">{m.name}</span><span class={`cap trunc ${machineLine(m).tone}`}>{machineLine(m).text}</span></span>
+    <I n="laptop" /><span class="ph-row-t"><span class="w500 trunc">{m.name}</span><span class={`cap trunc ${machineLine(m).tone}`}>{machineLine(m).text}</span><Show when={machineRefusal(m.state)}>{why => <span class="cap muted">{why()}</span>}</Show></span>
     <Show when={m.id === props.active}><I n="check" /></Show>
   </button>}</For></div>;
 }
@@ -260,7 +262,7 @@ function PhoneSettings(props: { shell: PhoneShell; theme: Theme; machines: Phone
     <div class="ph-body">
       <div class="ph-h"><span>Machines</span><Show when={props.machines.length > 0}><span>{props.machines.length}</span></Show></div>
       <div class="ph-group"><For each={props.machines}>{m => <button class="ph-row" onClick={() => props.onOpen({ kind: "machine", id: m.id })}>
-        <I n="laptop" /><span class="ph-row-t"><span class="w500 trunc">{m.name}</span><span class={`cap trunc ${machineLine(m).tone}`}>{machineLine(m).text}</span></span><I n="chevron-right" s={14} class="faint" />
+        <I n="laptop" /><span class="ph-row-t"><span class="w500 trunc">{m.name}</span><span class={`cap trunc ${machineLine(m).tone}`}>{machineLine(m).text}</span><Show when={machineRefusal(m.state)}>{why => <span class="cap muted">{why()}</span>}</Show></span><I n="chevron-right" s={14} class="faint" />
       </button>}</For></div>
       <button class="btn btn-line ph-wide" onClick={() => props.onAdd()}><I n="plus" s={14} />Add machine</button>
       <div class="ph-h"><span>This phone</span></div>
@@ -296,7 +298,7 @@ function MachinePage(props: { shell: PhoneShell; machine: PhoneMachine; active: 
             <span class="ph-edit"><input class="inp" aria-label="Machine name" value={editing() ?? ""} onInput={e => setEditing(e.currentTarget.value)} onKeyDown={e => { if (e.key === "Enter") save(); if (e.key === "Escape") setEditing(null); }} />
               <button class="btn btn-primary" aria-disabled={saving() ? "true" : undefined} data-why={saving() ? "Saving" : undefined} onClick={save}>Save</button><button class="btn" onClick={() => setEditing(null)}>Cancel</button></span>
           </Show></span></div>
-        <div class="ph-row"><span class="ph-row-t"><span class="cap muted">Connection</span><span class={line().tone}>{line().text}</span></span></div>
+        <div class="ph-row"><span class="ph-row-t"><span class="cap muted">Connection</span><span class={line().tone}>{line().text}</span><Show when={machineRefusal(props.machine.state)}>{why => <span class="muted">{why()}</span>}</Show></span></div>
       </div>
       <Show when={issue()}>{why => <p class="ph-err" role="alert">{why()}</p>}</Show>
       <Show when={props.active} fallback={<button class="btn btn-primary ph-wide" onClick={() => props.onSwitch()}>Switch to this machine</button>}>

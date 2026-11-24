@@ -46,11 +46,21 @@ pub enum LinkError {
     UnsupportedVersion(u8),
 }
 
+impl LinkError {
+    /// Stable refusal code, without diagnostic detail.
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Malformed(_) => "invalid_pairing_link",
+            Self::UnsupportedVersion(_) => "unsupported_pairing_link_version",
+        }
+    }
+}
+
 impl std::fmt::Display for LinkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LinkError::Malformed(why) => write!(f, "invalid_pairing_link: {why}"),
-            LinkError::UnsupportedVersion(v) => write!(f, "unsupported_pairing_link_version: {v}"),
+            LinkError::Malformed(why) => write!(f, "{}: {why}", self.code()),
+            LinkError::UnsupportedVersion(v) => write!(f, "{}: {v}", self.code()),
         }
     }
 }

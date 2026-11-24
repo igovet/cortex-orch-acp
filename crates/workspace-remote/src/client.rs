@@ -26,8 +26,9 @@ use tokio::sync::watch;
 
 use crate::link::{self, LinkError, PairingLink};
 use crate::{
-    code, files, frames, now_ms, RemoteError, CLOSE_DONE, CLOSE_NOT_PAIRED, CLOSE_REVOKED,
-    CONTROL_FRAME_BYTES, PAIRING_ALPN, RPC_ALPN,
+    code, files, frames, now_ms, RemoteError, VersionInfo, CLOSE_DONE, CLOSE_NOT_PAIRED,
+    CLOSE_REVOKED, CONTROL_FRAME_BYTES, INCOMPATIBLE_VERSION_CODE, PAIRING_ALPN, RPC_ALPN,
+    VERSION_ALPN, VERSION_REPLY_BYTES, VERSION_REQUEST,
 };
 
 const KEY_FILE: &str = "remote-device.key";
@@ -90,13 +91,15 @@ pub enum PairError {
     InvalidDeviceName,
     /// The host could not be reached, or the connection was lost before an answer.
     Unreachable,
+    /// The machine answered the probe but does not advertise this client's pairing ALPN.
+    IncompatibleVersion(VersionInfo),
     /// The host refused the secret (wrong, already used, or no pairing offer active).
     SecretRejected,
     /// The secret or the wait for the owner's decision expired.
     Expired,
     /// The owner denied the request.
     Denied,
-    /// The host withdrew the request (remote access turned off or relay changed).
+    /// The host withdrew the request or could not save the owner's approval.
     Cancelled,
     /// The host answered something this build does not understand.
     Protocol,
@@ -110,6 +113,7 @@ impl std::fmt::Display for PairError {
             PairError::InvalidLink(e) => e.fmt(f),
             PairError::InvalidDeviceName => f.write_str("invalid_device_name"),
             PairError::Unreachable => f.write_str("machine_unreachable"),
+            PairError::IncompatibleVersion(_) => f.write_str(INCOMPATIBLE_VERSION_CODE),
             PairError::SecretRejected => f.write_str("pairing_secret_rejected"),
             PairError::Expired => f.write_str("pairing_expired"),
             PairError::Denied => f.write_str("pairing_denied"),
@@ -129,6 +133,8 @@ pub enum ConnectError {
     UnknownMachine,
     /// The machine could not be reached.
     Unreachable,
+    /// The machine answered the probe but does not advertise this client's RPC ALPN.
+    IncompatibleVersion(VersionInfo),
     /// The machine refused this device: it is not paired there (revoked), or the
     /// connection was revoked.
     Rejected,
@@ -147,6 +153,7 @@ impl std::fmt::Display for ConnectError {
         match self {
             ConnectError::UnknownMachine => f.write_str("unknown_machine"),
             ConnectError::Unreachable => f.write_str("machine_unreachable"),
+            ConnectError::IncompatibleVersion(_) => f.write_str(INCOMPATIBLE_VERSION_CODE),
             ConnectError::Rejected => f.write_str("device_rejected"),
             ConnectError::Busy => f.write_str("machine_busy"),
             ConnectError::Closed => f.write_str("connection_closed"),
@@ -188,6 +195,8 @@ pub enum ConnectionState {
     },
     /// The machine refused this device (not paired or revoked).
     Rejected,
+    /// The machine answered the version probe but does not support this client's RPC ALPN.
+    IncompatibleVersion,
 }
 
 struct ClientInner {
@@ -336,12 +345,22 @@ impl Client {
             .await
             .map_err(PairError::State)?;
         let timeout = self.inner.config.connect_timeout;
-        let begun = tokio::time::timeout(timeout, async {
-            let addr = host_addr(link.host_id, link.relay.as_ref(), &link.addrs);
-            let conn = endpoint
-                .connect(addr, PAIRING_ALPN)
+        let addr = host_addr(link.host_id, link.relay.as_ref(), &link.addrs);
+        let deadline = tokio::time::Instant::now() + timeout;
+        let conn =
+            match tokio::time::timeout_at(deadline, endpoint.connect(addr.clone(), PAIRING_ALPN))
                 .await
-                .map_err(|_| PairError::Unreachable)?;
+            {
+                Ok(Ok(conn)) => conn,
+                _ => {
+                    let error = probe_version(&endpoint, addr, PAIRING_ALPN, timeout)
+                        .await
+                        .map_or(PairError::Unreachable, PairError::IncompatibleVersion);
+                    endpoint.close().await;
+                    return Err(error);
+                }
+            };
+        let begun = tokio::time::timeout_at(deadline, async {
             let (mut send, mut recv) = conn.open_bi().await.map_err(|_| PairError::Unreachable)?;
             let request = json!({
                 "secret": data_encoding::BASE64URL_NOPAD.encode(&link.secret),
@@ -559,6 +578,48 @@ fn path_kind(paths: &iroh::endpoint::PathList<'_>) -> PathKind {
     }
 }
 
+/// Only a valid answer from the same endpoint that omits the requested ALPN
+/// proves a transport mismatch. A failed/invalid probe leaves the original error.
+async fn probe_version(
+    endpoint: &Endpoint,
+    addr: EndpointAddr,
+    wanted: &[u8],
+    timeout: Duration,
+) -> Option<VersionInfo> {
+    let reply = tokio::time::timeout(timeout, async {
+        let conn = endpoint.connect(addr, VERSION_ALPN).await.ok()?;
+        let reply = async {
+            let (mut send, mut recv) = conn.open_bi().await.ok()?;
+            tokio::io::AsyncWriteExt::write_all(&mut send, VERSION_REQUEST)
+                .await
+                .ok()?;
+            send.finish().ok()?;
+            frames::read_json(&mut recv, VERSION_REPLY_BYTES)
+                .await
+                .ok()?
+        }
+        .await;
+        conn.close(code(CLOSE_DONE), b"done");
+        reply
+    })
+    .await
+    .ok()??;
+    let info: VersionInfo = serde_json::from_value(reply).ok()?;
+    let (major, minor) = info.wire.split_once('.')?;
+    major.parse::<u32>().ok()?;
+    minor.parse::<u32>().ok()?;
+    if info.supported.is_empty()
+        || info.supported.iter().any(|alpn| {
+            alpn.is_empty()
+                || !alpn.bytes().all(|c| c.is_ascii_graphic())
+                || alpn.as_bytes() == wanted
+        })
+    {
+        return None;
+    }
+    Some(info)
+}
+
 fn refusal(error: &ConnectionError) -> Option<ConnectError> {
     match error {
         ConnectionError::ApplicationClosed(close) => {
@@ -646,10 +707,10 @@ impl Shared {
                 Ok(conn)
             }
             Err(e) => {
-                let state = if matches!(e, ConnectError::Rejected) {
-                    ConnectionState::Rejected
-                } else {
-                    self.offline()
+                let state = match e {
+                    ConnectError::Rejected => ConnectionState::Rejected,
+                    ConnectError::IncompatibleVersion(_) => ConnectionState::IncompatibleVersion,
+                    _ => self.offline(),
                 };
                 self.state.send_replace(state);
                 Err(e)
@@ -665,10 +726,15 @@ impl Shared {
     ) -> Result<Connection, ConnectError> {
         let timeout = self.client.config.connect_timeout;
         let addr = host_addr(self.machine, relay, &machine.addrs);
-        let conn = tokio::time::timeout(timeout, endpoint.connect(addr, RPC_ALPN))
-            .await
-            .map_err(|_| ConnectError::Unreachable)?
-            .map_err(|_| ConnectError::Unreachable)?;
+        let conn =
+            match tokio::time::timeout(timeout, endpoint.connect(addr.clone(), RPC_ALPN)).await {
+                Ok(Ok(conn)) => conn,
+                _ => {
+                    return Err(probe_version(endpoint, addr, RPC_ALPN, timeout)
+                        .await
+                        .map_or(ConnectError::Unreachable, ConnectError::IncompatibleVersion));
+                }
+            };
         // The hello doubles as the host's authorization: an unpaired device is closed
         // with CLOSE_NOT_PAIRED instead.
         let hello = tokio::time::timeout(timeout, async {

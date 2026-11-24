@@ -1,8 +1,9 @@
 //! In-process tests with two real iroh endpoints on loopback, no relay and no network.
 
 use std::future::Future;
+use std::io::Write as _;
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,7 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use workspace_remote::link::{qr_rows, PairingLink};
 use workspace_remote::{
     Client, ClientConfig, ConnectError, ConnectionState, Host, HostConfig, LocalStream, PairError,
-    RemoteError,
+    RemoteError, INCOMPATIBLE_VERSION_CODE, PAIRING_ALPN, RPC_ALPN, VERSION_ALPN,
 };
 
 const LOOPBACK: &str = "127.0.0.1:0";
@@ -678,13 +679,14 @@ async fn state_files_are_private_and_symlinks_or_loose_modes_are_refused() {
             Client::new(ClientConfig::new(&phone_dir)),
             Err(RemoteError::InsecureState(_))
         ));
-        // A wrong-length key is refused rather than replaced.
+        // A wrong-length key is diagnosed as damaged rather than replaced.
         std::fs::set_permissions(&device_key, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::write(&device_key, b"short").unwrap();
         assert!(matches!(
             Client::new(ClientConfig::new(&phone_dir)),
-            Err(RemoteError::InsecureState(_))
+            Err(RemoteError::CorruptState(_))
         ));
+        assert_eq!(std::fs::read(device_key).unwrap(), b"short");
     })
     .await;
 }
@@ -741,6 +743,10 @@ fn link_round_trip_rejections_fingerprint_and_qr() {
         PairingLink::decode(&unknown),
         Err(LinkError::UnsupportedVersion(2))
     );
+    assert_eq!(
+        PairingLink::decode(&unknown).unwrap_err().code(),
+        "unsupported_pairing_link_version"
+    );
     let long_name = PairingLink {
         machine_name: "x".repeat(65),
         ..link.clone()
@@ -764,6 +770,317 @@ fn link_round_trip_rejections_fingerprint_and_qr() {
         .iter()
         .all(|row| row.len() == qr.len() && row.bytes().all(|b| b == b'0' || b == b'1')));
     assert!(qr.iter().any(|row| row.contains('1')));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoke_ends_an_in_flight_reply_and_prevents_later_frames() {
+    bounded(async {
+        let dirs = TempDir::new("revoke-in-flight");
+        let received = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (finished, mut observed) = tokio::sync::mpsc::channel(1);
+        let mut config = HostConfig::new(
+            dirs.sub("host"),
+            "Test machine",
+            {
+                let received = received.clone();
+                let release = release.clone();
+                move || {
+                    let received = received.clone();
+                    let release = release.clone();
+                    let finished = finished.clone();
+                    async move {
+                        let (tunnel, mut local) = tokio::io::duplex(65536);
+                        tokio::spawn(async move {
+                            let first = read_frame(&mut local).await.unwrap().unwrap();
+                            assert_eq!(first["method"], "in.flight");
+                            received.notify_one();
+                            release.notified().await;
+                            let write = write_frame(&mut local, &json!({"id":1,"result":"processed"})).await;
+                            let next = read_frame(&mut local).await;
+                            finished.send((write.is_ok(), next)).await.unwrap();
+                        });
+                        Ok(Box::new(tunnel) as LocalStream)
+                    }
+                }
+            },
+            |_, _| true,
+        );
+        config.bind_addrs = vec![LOOPBACK.parse().unwrap()];
+        let host = Host::start(config).await.unwrap();
+        host.set_enabled(true).await.unwrap();
+        let phone = client(&dirs.sub("phone"));
+        let id = pair(&host, &phone).await;
+        let conn = phone.connect(&id).await.unwrap();
+        let mut stream = conn.open().await.unwrap();
+        write_frame(&mut stream, &json!({"jsonrpc":"2.0","id":1,"method":"in.flight"})).await.unwrap();
+        received.notified().await;
+
+        let started = std::time::Instant::now();
+        host.revoke(&phone.device_id()).unwrap();
+        let returned_after = started.elapsed();
+        let stale_write = write_frame(&mut stream, &json!({"jsonrpc":"2.0","id":2,"method":"after.revoke"})).await;
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream)).await.unwrap();
+        wait_state(&conn, |s| *s == ConnectionState::Rejected).await;
+        let rejected_after = started.elapsed();
+        let (service_wrote, next) = observed.recv().await.unwrap();
+        eprintln!(
+            "revoke returned in {returned_after:?}, client observed rejection in {rejected_after:?}; \
+             stale write accepted locally={}, service reply write={}, client reply={result:?}",
+            stale_write.is_ok(), service_wrote,
+        );
+        assert!(!matches!(result, Ok(Some(_))), "the already-started request has no reply");
+        assert!(next.unwrap().is_none(), "no subsequent frame may reach the service");
+        assert!(matches!(conn.open().await, Err(ConnectError::Rejected)));
+        conn.close().await;
+        host.shutdown().await;
+    }).await;
+}
+
+fn write_private(path: &Path, bytes: &[u8]) {
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap();
+    file.write_all(bytes).unwrap();
+}
+
+/// Give a test client a route without using the pairing flow or changing its identity.
+fn routed_client(dir: &Path, host_id: iroh::EndpointId, addrs: &[SocketAddr]) -> Client {
+    drop(client(dir));
+    let record = json!({"machines":[{
+        "machineId": host_id.to_string(), "name": "Stored machine", "relayUrl": null,
+        "addrs": addrs, "pairedAtMs": 0, "lastConnectedMs": null,
+    }]});
+    write_private(
+        &dir.join("remote-machines.json"),
+        &serde_json::to_vec(&record).unwrap(),
+    );
+    client(dir)
+}
+
+async fn test_endpoint(alpns: &[&[u8]]) -> iroh::Endpoint {
+    iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(iroh::RelayMode::Disabled)
+        .clear_address_lookup()
+        .clear_ip_transports()
+        .bind_addr_with_opts(LOOPBACK.parse::<SocketAddr>().unwrap(), Default::default())
+        .unwrap()
+        .alpns(alpns.iter().map(|alpn| alpn.to_vec()).collect())
+        .bind()
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_that_was_never_paired_is_rejected() {
+    bounded(async {
+        let dirs = TempDir::new("never-paired");
+        let service = Service::default();
+        let host = Host::start(host_config(
+            &dirs.sub("host"),
+            &service,
+            Duration::from_secs(60),
+        ))
+        .await
+        .unwrap();
+        host.set_enabled(true).await.unwrap();
+        let id = host.endpoint_id();
+        let outsider = routed_client(
+            &dirs.sub("outsider"),
+            id.parse().unwrap(),
+            &host.direct_addrs().await,
+        );
+        let connection = outsider.connection(&id).unwrap();
+        assert!(matches!(
+            connection.open().await,
+            Err(ConnectError::Rejected)
+        ));
+        assert_eq!(*connection.state().borrow(), ConnectionState::Rejected);
+        connection.close().await;
+        assert!(host.status().devices.is_empty());
+        assert!(service.methods().is_empty());
+        host.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_approval_does_not_grant_access_and_failed_revoke_does_not_restore_it() {
+    bounded(async {
+        let dirs = TempDir::new("failed-registry-write");
+        let dir = dirs.sub("host");
+        let service = Service::default();
+        let host = Host::start(host_config(&dir, &service, Duration::from_secs(60)))
+            .await
+            .unwrap();
+        host.set_enabled(true).await.unwrap();
+        let phone_dir = dirs.sub("phone");
+        let phone = client(&phone_dir);
+        let id = host.endpoint_id();
+        let offer = host.pairing_start().await.unwrap();
+        let attempt = phone.pair_begin(&offer.link, "Phone").await.unwrap();
+        let pending = wait_pending(&host).await;
+        let registry = dir.join("remote-devices.json");
+        std::fs::create_dir(&registry).unwrap();
+        assert!(matches!(
+            host.decide(&pending.request_id, true),
+            Err(RemoteError::InsecureState(_))
+        ));
+        assert!(matches!(attempt.finish().await, Err(PairError::Cancelled)));
+        assert!(host.status().devices.is_empty());
+        assert!(host.status().pending.is_empty());
+        assert!(phone.machines().is_empty());
+        drop(phone);
+
+        // Same device key and route; even an attempted RPC without local pairing is rejected.
+        let phone = routed_client(&phone_dir, id.parse().unwrap(), &host.direct_addrs().await);
+        assert!(matches!(
+            phone.connect(&id).await,
+            Err(ConnectError::Rejected)
+        ));
+
+        std::fs::remove_dir(&registry).unwrap();
+        assert_eq!(pair(&host, &phone).await, id);
+        let conn = phone.connect(&id).await.unwrap();
+        let mut stream = conn.open().await.unwrap();
+        assert_eq!(call(&mut stream, 1, "echo", json!(1)).await["result"], 1);
+        std::fs::rename(&registry, dir.join("previous-registry.json")).unwrap();
+        std::fs::create_dir(&registry).unwrap();
+        assert!(matches!(
+            host.revoke(&phone.device_id()),
+            Err(RemoteError::InsecureState(_))
+        ));
+        let retry_rows = host.status().devices;
+        assert_eq!(retry_rows.len(), 1);
+        assert_eq!(retry_rows[0].device_id, phone.device_id());
+        assert!(!retry_rows[0].connected);
+        let result = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream))
+            .await
+            .unwrap();
+        assert!(!matches!(result, Ok(Some(_))));
+        assert!(matches!(conn.open().await, Err(ConnectError::Rejected)));
+        conn.close().await;
+        host.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn version_probe_is_constants_only_even_with_pairing_and_devices() {
+    bounded(async {
+        let dirs = TempDir::new("probe-privacy");
+        let service = Service::default();
+        let host = Host::start(host_config(&dirs.sub("host"), &service, Duration::from_secs(60)))
+            .await.unwrap();
+        host.set_enabled(true).await.unwrap();
+        let phone = client(&dirs.sub("phone"));
+        pair(&host, &phone).await;
+        let offer = host.pairing_start().await.unwrap();
+        let link = PairingLink::decode(&offer.link).unwrap();
+        let addr = iroh::EndpointAddr::from_parts(
+            link.host_id,
+            link.addrs.into_iter().map(iroh::TransportAddr::Ip),
+        );
+        let probe = test_endpoint(&[]).await;
+        let conn = probe.connect(addr.clone(), VERSION_ALPN).await.unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        AsyncWriteExt::write_all(&mut send, b"\x01").await.unwrap();
+        send.finish().unwrap();
+        let frame = recv.read_to_end(260).await.unwrap();
+        assert_eq!(
+            workspace_protocol::decode_frame(&frame).unwrap(),
+            json!({
+                "supported": [
+                    std::str::from_utf8(PAIRING_ALPN).unwrap(),
+                    std::str::from_utf8(RPC_ALPN).unwrap()
+                ],
+                "wire": format!("{}.{}", workspace_protocol::WIRE_MAJOR, workspace_protocol::WIRE_MINOR),
+            })
+        );
+        conn.close(0u32.into(), b"done");
+
+        let conn = probe.connect(addr, VERSION_ALPN).await.unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        AsyncWriteExt::write_all(&mut send, b"\x01\x01").await.unwrap();
+        send.finish().unwrap();
+        assert!(!matches!(recv.read_to_end(260).await, Ok(reply) if !reply.is_empty()));
+        assert!(host.status().pairing.is_some());
+        assert_eq!(host.status().devices.len(), 1);
+        assert_eq!(*service.connections.lock().unwrap(), 0);
+        probe.close().await;
+        host.shutdown().await;
+    }).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_pair_and_rpc_dials_distinguish_mismatch_from_no_probe() {
+    bounded(async {
+        let dirs = TempDir::new("probe-mismatch");
+        for (case, alpns, advertised, incompatible) in [
+            ("different", vec![VERSION_ALPN], vec!["cortex-workspace/pair/2", "cortex-workspace/rpc/2"], true),
+            ("old", vec![b"cortex-workspace/rpc/0".as_slice()], vec![], false),
+            ("same", vec![VERSION_ALPN], vec![
+                std::str::from_utf8(PAIRING_ALPN).unwrap(),
+                std::str::from_utf8(RPC_ALPN).unwrap(),
+            ], false),
+        ] {
+            let machine = test_endpoint(&alpns).await;
+            let link = PairingLink {
+                host_id: machine.id(),
+                relay: None,
+                addrs: machine.bound_sockets(),
+                secret: [1; 32],
+                machine_name: "Fixture".into(),
+            };
+            let reply = json!({"supported": advertised, "wire": "2.0"});
+            let responder = alpns.contains(&VERSION_ALPN).then(|| {
+                let machine = machine.clone();
+                tokio::spawn(async move {
+                    let mut answered = 0;
+                    while answered < 2 {
+                        let incoming = machine.accept().await.unwrap();
+                        let Ok(conn) = incoming.await else {
+                            // The original unsupported dial reaches this endpoint too.
+                            continue;
+                        };
+                        answered += 1;
+                        assert_eq!(conn.alpn(), VERSION_ALPN);
+                        let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+                        assert_eq!(recv.read_to_end(1).await.unwrap(), b"\x01");
+                        write_frame(&mut send, &reply).await.unwrap();
+                        send.finish().unwrap();
+                        conn.closed().await;
+                    }
+                })
+            });
+            let phone = routed_client(&dirs.sub(case), link.host_id, &link.addrs);
+            let pair_error = phone.pair_begin(&link.encode().unwrap(), "Phone").await.unwrap_err();
+            let conn = phone.connection(&link.host_id.to_string()).unwrap();
+            let Err(connect_error) = conn.open().await else {
+                panic!("RPC should not have connected: {case}");
+            };
+            if incompatible {
+                assert_eq!(pair_error.to_string(), INCOMPATIBLE_VERSION_CODE);
+                assert_eq!(connect_error.to_string(), INCOMPATIBLE_VERSION_CODE);
+                assert!(matches!(pair_error, PairError::IncompatibleVersion(info)
+                    if info.wire == "2.0" && info.supported == ["cortex-workspace/pair/2", "cortex-workspace/rpc/2"]));
+                assert!(matches!(connect_error, ConnectError::IncompatibleVersion(info) if info.wire == "2.0"));
+                assert_eq!(*conn.state().borrow(), ConnectionState::IncompatibleVersion);
+            } else {
+                assert!(matches!(pair_error, PairError::Unreachable), "{case}: {pair_error}");
+                assert!(matches!(connect_error, ConnectError::Unreachable), "{case}: {connect_error}");
+            }
+            if let Some(responder) = responder {
+                responder.await.unwrap();
+            }
+            conn.close().await;
+            machine.close().await;
+        }
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
