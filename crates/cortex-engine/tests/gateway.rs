@@ -141,6 +141,74 @@ async fn channel_restriction_filters_discovery_and_calls() {
     assert_eq!(c.calls.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]
+async fn result_submit_rejects_extra_fields_without_echoing_values() {
+    let c = core();
+    let g = Gateway::new(c.clone(), credentials());
+    let valid = json!({"report":"# Report","summary":"Summary","checks":[],"request_key":"r"});
+    let value = "unexpected-value-not-for-diagnostics";
+    let mut top = valid.clone();
+    top["artifacts"] = json!(value);
+    let mut nested = valid.clone();
+    nested["checks"] = json!([{"name":"check","outcome":"passed","closed_by":value}]);
+    let mut ambiguous = valid.clone();
+    ambiguous["checks[0].closed_by"] = json!(value);
+    let mut oversized = valid;
+    oversized["é".repeat(129)] = json!(value);
+    let shortened = format!(r#"arguments["{}"...]"#, "é".repeat(128));
+    for (args, field) in [
+        (top, "arguments.artifacts"),
+        (nested, "arguments.checks[0].closed_by"),
+        (ambiguous, r#"arguments["checks[0].closed_by"]"#),
+        (oversized, shortened.as_str()),
+    ] {
+        let reply = g
+            .handle(json!({
+                "jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"result_submit","arguments":args}
+            }))
+            .await
+            .unwrap();
+        assert_eq!(reply["error"]["code"], -32602);
+        assert_eq!(reply["error"]["data"]["code"], "invalid_arguments");
+        assert_eq!(reply["error"]["data"]["reason"], "unexpected_property");
+        assert_eq!(reply["error"]["data"]["field"], field);
+        assert!(!reply.to_string().contains(value));
+    }
+    assert_eq!(c.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn result_submit_advertises_rejection_and_verbatim_receipts_for_each_variant() {
+    for (profile, stage, has_receipts) in [
+        ("worker-backend-dev", "execution", true),
+        ("worker-code-reviewer", "review", true),
+        ("worker-senior-consultant", "execution", false),
+    ] {
+        let tool = schema::catalogue("worker", Some(profile), Some(stage))
+            .unwrap()
+            .into_iter()
+            .find(|tool| tool["name"] == "result_submit")
+            .unwrap();
+        assert!(tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown fields such as artifacts (which belongs to write_report) are rejected."));
+        let input = &tool["inputSchema"];
+        assert_eq!(input["additionalProperties"], false);
+        assert!(input["properties"].get("artifacts").is_none());
+        let checks = &input["properties"]["checks"]["items"]["properties"];
+        if has_receipts {
+            let description = checks["tool_call_ref"]["description"].as_str().unwrap();
+            assert!(description.contains("copy the exact tool_call_ref field"));
+            assert!(description.contains("do not add, replace or guess a prefix"));
+            assert!(!description.contains("gateway:"));
+        } else {
+            assert!(checks.get("tool_call_ref").is_none());
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_named_core_refusal_keeps_authority_and_its_code() {
     struct Refusing;
     impl GatewayCore for Refusing {

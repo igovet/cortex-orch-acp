@@ -2,7 +2,7 @@
 //! Sources: src/cortex_runtime/channeled_tools.py:25-27,
 //! delegation/mcp_tools.py:755-797 and tool_read_api.py:66-96.
 use crate::{Error, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::OnceLock;
 fn snapshot() -> &'static Value {
     static DATA: OnceLock<Value> = OnceLock::new();
@@ -35,9 +35,41 @@ pub fn catalogue(role: &str, profile: Option<&str>, stage: Option<&str>) -> Resu
         .iter()
         .map(|id| snapshot()["tools"][id.as_str().unwrap()].clone())
         .collect::<Vec<_>>();
+    if role == "coordinator" && stage == Some("active_steering") {
+        let plan = tools.iter().find(|t| t["name"] == "plan_submit")
+            .and_then(|t| t["inputSchema"]["properties"].get("plan"))
+            .cloned().ok_or(Error::Forbidden)?;
+        tools.retain(|t| active_steering_read(t["name"].as_str().unwrap_or_default()));
+        let source = json!({"type":"string","minLength":1,"maxLength":128,
+            "description":"Exact owner message request shown in this steering prompt."});
+        let key = json!({"type":"string","minLength":1,"maxLength":128,
+            "description":"Stable action key; reuse only for an exact retry of this owner message's action."});
+        tools.push(json!({"name":"steer_plan",
+            "description":"Propose a replacement of unclaimed work in the executing plan. Every already claimed or completed node and the verification commands must remain identical. The runtime validates the graph and owner limits; it never restarts a worker for this operation.",
+            "inputSchema":{"type":"object","additionalProperties":false,
+                "required":["source_request","request_key","expected_plan","plan"],
+                "properties":{"source_request":source,"request_key":key,
+                    "expected_plan":{"type":"string","minLength":64,"maxLength":64,
+                        "description":"Current plan digest from the steering snapshot or the last amendment receipt."},
+                    "plan":plan}}}));
+        tools.push(json!({"name":"steer_worker",
+            "description":"Queue instructions on the exact live execution attempt, without granting scope or changing its assignment. The receipt confirms admission, not delivery; a completed attempt is refused and a later attempt never inherits the instruction.",
+            "inputSchema":{"type":"object","additionalProperties":false,
+                "required":["source_request","request_key","attempt","text"],
+                "properties":{"source_request":source,"request_key":key,
+                    "attempt":{"type":"string","minLength":1,"maxLength":128,
+                        "description":"Exact live attempt from the steering snapshot."},
+                    "text":{"type":"string","minLength":1,"maxLength":4000,
+                        "description":"English instruction within the current assignment's authority."}}}}));
+    }
     tools.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Ok(tools)
 }
+pub fn active_steering_read(name: &str) -> bool {
+    matches!(name, "tools_discover" | "read_batch" | "read_capsule" | "read_report"
+        | "list_reports" | "read_skill" | "list_sources" | "read_source" | "project_read")
+}
+
 pub fn validate(schema: &Value, v: &Value) -> Result<()> {
     fn valid(
         s: &Value,
@@ -130,6 +162,23 @@ pub fn validate(schema: &Value, v: &Value) -> Result<()> {
                     valid(prop, v, depth + 1, path)?;
                     path.truncate(end);
                 } else if s["additionalProperties"] == false {
+                    // Bound caller-controlled names and quote ambiguous path segments.
+                    let mut chars = k.chars();
+                    let name: String = chars.by_ref().take(128).collect();
+                    let truncated = chars.next().is_some();
+                    if !truncated
+                        && !name.is_empty()
+                        && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                    {
+                        path.push('.');
+                        path.push_str(&name);
+                    } else {
+                        path.push_str(&format!("[{}", json!(name)));
+                        if truncated {
+                            path.push_str("...");
+                        }
+                        path.push(']');
+                    }
                     return Err("unexpected_property");
                 }
             }
@@ -185,6 +234,46 @@ mod tests {
         assert!(
             matches!(validate(&schema,&args),Err(Error::InvalidField{field,reason:"missing_required_field"}) if field=="arguments.edits[1].new_string")
         );
+    }
+    #[test]
+    fn question_option_details_accept_legacy_and_detailed_choices() {
+        for (role, profile, name) in [
+            ("coordinator", None, "user_question_request"),
+            ("worker", Some("worker-backend-dev"), "ask_question"),
+        ] {
+            let tool = catalogue(role, profile, Some("execution"))
+                .unwrap()
+                .into_iter()
+                .find(|t| t["name"] == name)
+                .unwrap();
+            for batch in [false, true] {
+                let args = |option: Value| {
+                    let q = json!({"question":"Use this route?", "options":[option, "No"]});
+                    if batch {
+                        json!({"request_key":"q", "questions":[q, {"question":"Continue?", "options":["Yes","No"]}]})
+                    } else {
+                        let mut q = q;
+                        q["request_key"] = json!("q");
+                        q
+                    }
+                };
+                let schema = &tool["inputSchema"];
+                assert!(validate(schema, &args(json!("Yes"))).is_ok());
+                assert!(validate(schema, &args(json!({"label":"Yes"}))).is_ok());
+                assert!(validate(schema, &args(json!({"label":"Yes", "detail":"я".repeat(1000)}))).is_ok());
+                for invalid in [
+                    json!("A".repeat(1001)),
+                    json!({"label":"A".repeat(1001)}),
+                    json!({"label":"Yes","detail":"я".repeat(1001)}),
+                    json!({"label":"Yes","detail":""}),
+                    json!({"label":"Yes","detail":null}),
+                    json!({"detail":"Missing label"}),
+                    json!({"label":"Yes","extra":"no"}),
+                ] {
+                    assert!(validate(schema, &args(invalid.clone())).is_err(), "{name}: {invalid}");
+                }
+            }
+        }
     }
     #[test]
     fn nullable_output_types_still_check_their_other_constraints() {

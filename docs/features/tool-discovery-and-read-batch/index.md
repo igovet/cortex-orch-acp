@@ -16,6 +16,12 @@ project-read fallback, not a guessed alias.
 Existing individual tools, all 23 profiles and ordinary engine loading remain.
 This is not a Cortex-owned Code Mode sandbox or a two-tool replacement for MCP.
 
+A direct gateway call with an unexpected property in a closed argument object
+returns `-32602` (`invalid_arguments`), with reason `unexpected_property`
+and the offending path in `error.data.field`, for example `arguments.artifacts`
+or `arguments.checks[0].closed_by`. The unknown key segment is bounded and
+quoted when needed; its value is not echoed.
+
 `read_batch` is offered to every role whose catalogue lists it (every
 coordinator, worker and consultant catalogue), and discovery entries mark the
 batchable reads with `read_batch_supported: true`.

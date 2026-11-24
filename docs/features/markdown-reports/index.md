@@ -52,9 +52,9 @@ it and whether it is required. An inline report is published under that template
 | review (every review assignment; general template) | Verdict; Findings; Coverage (optional: Verification; Risks and remaining work) |
 
 The other headings of each template are listed in the skeleton as optional.
-`result_submit` checks only that each required heading is present: a level-two
+For report structure, `result_submit` looks for each required heading: a level-two
 heading with the exact English text, letter case and spacing free, outside fenced
-code. Content is never judged. A missing section is a correctable tool error
+code. It does not judge the content. A missing section is a correctable tool error
 (`report_sections_missing`, `field` `report`, `missing` naming each heading);
 nothing is recorded, and a corrected resubmission, with the same request key or a
 new one, is a new payload. After two such refusals in one attempt the report is
@@ -71,6 +71,15 @@ publication and bounded report/draft reads through authenticated MCP channels.
 Worker results can reference their own published report, not another principal's
 report. Discovery and remaining limits are described in
 [native incoming ACP](../../project/native-incoming-acp.md).
+
+## Result submission arguments
+
+`result_submit` rejects unknown fields such as `artifacts`, which belongs to
+`write_report`. The gateway identifies the offending field path without echoing
+its value. Where checks support command evidence, copy `tool_call_ref` verbatim
+from the completed command response; do not add or replace a prefix.
+
+## Report reads
 
 Report reads use bounded cursors and exact report identities. Workers receive
 selected predecessor reports through context packets; they do not inspect
