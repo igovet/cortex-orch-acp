@@ -2,7 +2,6 @@ import { capabilityOf, FEATURES, taskEditable, type WorkspaceCommand } from "@co
 import { createMemo, createSignal, createUniqueId, For, mapArray, Show } from "solid-js";
 import { CodeView } from "./code";
 import { useWs } from "./ctx";
-import { setDragPreview } from "./drag-preview";
 import { REQUESTING, RequestStatus } from "./request-feedback";
 import { onScreen } from "./freshness";
 import { CheckoutButton, GitView } from "./git";
@@ -12,9 +11,10 @@ import { defaultCheckout, repoOf, taskCheckout, unavailableCheckout } from "./re
 import type { ProjectView, Route, Scope } from "./router";
 import { age, automaticAcceptanceHold, awaitsOwner, bySprint, cardFact, clock, columnsOf, COLUMNS, decisionRoute, inScope, nothingToCommit, planningNeedsOwner, projectsOn, rowIcon, sameBranch, sprintRoute, sprintTitle, sprintView, type ColumnId, type GroupedRow, type ProjectSummary, type TaskView } from "./selectors";
 import { archiveBlocked } from "./git-actions-model";
-import { closeBlocked, REWORK_LABEL, resumeState, reworkBinding, sessionModel } from "./session-model";
+import { closeBlocked, EXTERNAL_DONE_LABEL, externalDoneBlocked, offersExternalDone, REWORK_LABEL, resumeState, reworkBinding, sessionModel } from "./session-model";
 import { KnowledgePage, ProjectSettingsPage } from "./project-pages";
 import { createQueueStrip, QueueButton, QueueHelp, RunMode, SprintTarget, TargetChoices } from "./sprint";
+import { EmptyUntilRead, projectsPending } from "./skeleton";
 
 const CARD_GAP = 8;
 const SECONDARY: { id: ProjectView; label: string }[] = [
@@ -46,7 +46,6 @@ function primaryAction(v: TaskView, startable: boolean): { label: string; kind: 
     default: return null;
   }
 }
-const manuallyMovable = (v: TaskView) => !v.unknown && v.task.status !== "done" && v.column !== "closed_unverified";
 const startable = (v: TaskView) => v.task.status === "draft" && !v.unknown && v.fact.icon !== "hourglass";
 
 function Card(props: { view: TaskView; named: boolean; showProject?: boolean }) {
@@ -65,14 +64,8 @@ function Card(props: { view: TaskView; named: boolean; showProject?: boolean }) 
     else if (a.kind === "resume") ws.run({ type: "continue_task", taskId: task, now: ws.store.clock() });
     else if (a.kind === "retry") ws.run({ type: "retry_task", taskId: task, now: ws.store.clock() });
   };
-  return <article class={cls()} draggable={!props.showProject && manuallyMovable(v()) && ws.can(capabilityOf("close_task"))}
-    onDragStart={e => {
-      if (props.showProject || !manuallyMovable(v()) || (e.target as Element).closest("button")) { e.preventDefault(); return; }
-      e.dataTransfer?.setData("application/x-workspace-task", v().id);
-      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
-      setDragPreview(e);
-    }} aria-current={ws.selected() === v().id ? "true" : undefined} data-task={v().id}>
-    <A class="card-link" to={taskRoute(v())} onKeyDown={e => { if (e.key === " ") { e.preventDefault(); ws.select(v().id); } }}>
+  return <article class={cls()} aria-current={ws.selected() === v().id ? "true" : undefined} data-task={v().id}>
+    <A draggable={false} class="card-link" to={taskRoute(v())} onKeyDown={e => { if (e.key === " ") { e.preventDefault(); ws.select(v().id); } }}>
       <div class="card-m">
         <div class="card-t"><span data-tooltip-cut="">{v().task.title}</span></div>
         <Show when={props.showProject}><div class="card-project">{v().project.name}</div></Show>
@@ -84,7 +77,7 @@ function Card(props: { view: TaskView; named: boolean; showProject?: boolean }) 
       <span class="age ws-card-age"><Show when={props.named && v().sprint}>{s => <><I n="layers" s={12} /><span data-tooltip-cut="" class="trunc">{sprintTitle(s())}</span></>}</Show><span class="ws-none">{age(v().at, ws.store.clock())}</span></span>
       <span class="card-a">
         <Show when={action()}>{a => a().kind === "go"
-          ? <A class={`btn ${a().line ? "btn-line" : "btn-primary"} btn-sm`} to={goTo()}>{a().label}</A>
+          ? <A draggable={false} class={`btn ${a().line ? "btn-line" : "btn-primary"} btn-sm`} to={goTo()}>{a().label}</A>
           : <button class={`btn ${a().line ? "btn-line" : "btn-primary"} btn-sm`} {...(needed() ? ws.needs(needed()!) : {})} onClick={act}>{a().label}</button>}</Show>
         <button data-tooltip="Actions for this task" class="ib" aria-label={`Actions for ${v().task.title}`} onClick={e => ws.openTaskMenu(v().id, e.currentTarget)}><I n="more" s={14} /></button>
       </span>
@@ -119,23 +112,14 @@ const SprintHead = (props: { row: Extract<GroupedRow, { kind: "sprint" }>; machi
 
 function Board(props: { summary?: ProjectSummary; views: TaskView[]; onQuick?: () => void; machine: string; grouped?: boolean }) {
   const ws = useWs();
-  const [dropHint, setDropHint] = createSignal("");
   const columns = createMemo(() => columnsOf(props.views));
   const columnLabel = (id: ColumnId, label: string) => id === "merge" && columns().merge.some(v => sameBranch(v.task, v.target)) ? "Ready to finish" : label;
   const quick = () => props.summary && !props.summary.offline && props.onQuick;
   const rows = (id: ColumnId): GroupedRow[] => props.grouped ? bySprint(columns()[id]) : columns()[id].map(view => ({ kind: "task", view }));
-  return <><Show when={dropHint()}><div class="strip info" role="status">{dropHint()}</div></Show><div class="board-wrap" classList={{ "machine-board": !props.summary }} onKeyDown={moveOnBoard}>
+  return <div class="board-wrap" classList={{ "machine-board": !props.summary }} onKeyDown={moveOnBoard}>
     <For each={COLUMNS.filter(col => col.id !== "closed_unverified" || columns()[col.id].length > 0)}>{col => {
       const open = () => columns()[col.id].length > 0 || (col.id === "todo" && !!quick());
-      return <section class={`col${open() ? "" : " strip"}`} data-col={col.id}
-        onDragOver={e => { if (props.summary && e.dataTransfer?.types.includes("application/x-workspace-task")) { e.preventDefault(); e.dataTransfer.dropEffect = col.id === "done" ? "move" : "none"; } }}
-        onDrop={e => {
-          const id = e.dataTransfer?.getData("application/x-workspace-task");
-          if (!props.summary || !id || !props.views.some(v => v.id === id && manuallyMovable(v))) return;
-          e.preventDefault();
-          if (col.id !== "done") { setDropHint("Only Done accepts manual moves. Other columns follow the task's actual progress."); return; }
-          setDropHint(""); ws.closeTask(id, "external");
-        }} aria-label={columnLabel(col.id, col.label)}>
+      return <section class={`col${open() ? "" : " strip"}`} data-col={col.id} aria-label={columnLabel(col.id, col.label)}>
         <Show when={open()} fallback={<><I n={col.icon} s={14} class="faint" /><span class="v">{columnLabel(col.id, col.label)}</span></>}>
           <div class={`col-h ${col.tone}`}><I n={col.icon} s={14} class={col.tone ? undefined : "faint"} />{columnLabel(col.id, col.label)}<Count n={columns()[col.id].length} /></div>
           <RowList class="col-b" label={columnLabel(col.id, col.label)} items={rows(col.id)} keyOf={rowKey} gap={CARD_GAP}
@@ -145,7 +129,7 @@ function Board(props: { summary?: ProjectSummary; views: TaskView[]; onQuick?: (
       </section>;
     }}</For>
     <Show when={props.summary && (ws.store.mode === "demo" || props.summary.archived > 0) && props.summary}>{summary => <A class="col archive" to={{ name: "archive", machine: props.machine }}><I n="archive" s={14} /><span class="v">Archive{summary().archived ? ` ${summary().archived}` : ""}</span></A>}</Show>
-  </div></>;
+  </div>;
 }
 
 export function MachineBoard() {
@@ -155,8 +139,9 @@ export function MachineBoard() {
   return <Page class="l-work" scroll="none" status={<Show when={ws.shell.kind !== "phone" && ws.machine().connection !== "connected"}>
     <Strip tone="info">Last known state. {ws.machine().name} is offline, last confirmed {clock(ws.machine().lastConfirmedAt)}.</Strip>
   </Show>}>
-    <Show when={views().length > 0} fallback={<div class="note-panel"><span class="w500">{projects().length ? "No tasks to show on this machine" : "No projects on this machine yet"}</span>
-      <A class="lnk" to={{ name: "home", machine: ws.machine().id }}>Back to Home</A></div>}>
+    <Show when={views().length > 0} fallback={<EmptyUntilRead name={`board|${ws.machine().id}`} pending={() => projectsPending(ws, p => p.machineId === ws.machine().id)} label="Loading the board…">
+      <div class="note-panel"><span class="w500">{projects().length ? "No tasks to show on this machine" : "No projects on this machine yet"}</span>
+      <A class="lnk" to={{ name: "home", machine: ws.machine().id }}>Back to Home</A></div></EmptyUntilRead>}>
       <Board views={views()} machine={ws.machine().id} />
     </Show>
   </Page>;
@@ -187,7 +172,7 @@ function List(props: { views: TaskView[]; grouped: boolean; machine: string }) {
         <span class="cap faint trunc">{v().sprint ? sprintTitle(v().sprint!) : "Standalone"}</span>
         <span class="mono trunc faint">{!v().task.checkout.branch ? "" : v().task.checkout.kind === "worktree" ? v().task.checkout.branch : `${v().task.checkout.branch} (project folder)`}</span>
         <span class={`st trunc ${cardFact(v()).tone}`}><span class="trunc" data-tooltip-cut="">{cardFact(v()).text}</span></span><span class="cap faint">{age(v().at, ws.store.clock())}</span>
-      </A><Show when={reworkBinding(v())}><button data-tooltip="Actions for this task" type="button" class="ib" aria-label={`Actions for ${v().task.title}`} onClick={e => ws.openTaskMenu(v().id, e.currentTarget)}><I n="more" s={14} /></button></Show></div>;
+      </A><Show when={offersExternalDone(v()) || reworkBinding(v())}><button data-tooltip="Actions for this task" type="button" class="ib" aria-label={`Actions for ${v().task.title}`} onClick={e => ws.openTaskMenu(v().id, e.currentTarget)}><I n="more" s={14} /></button></Show></div>;
     }} />;
 }
 
@@ -353,8 +338,9 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
     </Show>}>
       <Show when={knownSprint()} fallback={<div class="note-panel"><span class="w500">Sprint not found</span><A class="lnk" to={{ ...props.route, scope: { kind: "all" } }}>Show all work</A></div>}>
         <Show when={missing() > 0 && !!props.summary.project.issue}><div class="note-panel" role="status"><span class="w500">Task details unavailable</span><span>{missing()} sprint task{missing() === 1 ? "" : "s"} could not be loaded. The sprint membership is retained.</span><button class="btn btn-line btn-sm" onClick={() => ws.store.reload()}>Retry</button></div></Show>
-        <Show when={scoped().length > 0} fallback={<div class="note-panel"><span class="w500">{sprintId() ? missing() ? "" : "No active tasks in this sprint" : props.route.scope.kind === "standalone" ? "No standalone tasks" : "No tasks in this project yet"}</span>
-          <Show when={!props.summary.offline && (!sprintId() || (addSprint() && !missing()))}><button class="btn btn-line btn-sm" onClick={onQuick}><I n="plus" s={14} />New task</button></Show></div>}>
+        <Show when={scoped().length > 0} fallback={<EmptyUntilRead name={`project|${props.summary.project.id}`} pending={() => projectsPending(ws, p => p.id === props.summary.project.id)} label="Loading the board…">
+          <div class="note-panel"><span class="w500">{sprintId() ? missing() ? "" : "No active tasks in this sprint" : props.route.scope.kind === "standalone" ? "No standalone tasks" : "No tasks in this project yet"}</span>
+          <Show when={!props.summary.offline && (!sprintId() || (addSprint() && !missing()))}><button class="btn btn-line btn-sm" onClick={onQuick}><I n="plus" s={14} />New task</button></Show></div></EmptyUntilRead>}>
           <Show when={views().length > 0} fallback={<div class="note-panel"><span class="w500">No tasks match this filter</span><button class="btn btn-sm" onClick={() => setFilter("")}>Clear filter</button></div>}>
             <div class="main-body">
               <Show when={view() === "board"} fallback={<List views={views()} grouped={grouped()} machine={props.summary.machine.id} />}><Board summary={props.summary} views={views()} onQuick={onQuick} machine={props.summary.machine.id} grouped={grouped()} /></Show>
@@ -372,7 +358,9 @@ export function TaskMenu(props: { taskId: string | null; ref: (el: HTMLDivElemen
   const view = () => props.taskId ? ws.store.index().byId.get(props.taskId) ?? null : null;
   const blocked = () => view()?.unknown ? "Unavailable until this task's state is confirmed" : undefined;
   const onOwnPage = () => { const r = ws.router.route(); return r.name === "task" && r.task === props.taskId; };
-  const closeReason = () => { const m = props.taskId ? sessionModel(ws.store.index(), props.taskId) : null; return m ? closeBlocked(m) ?? undefined : undefined; };
+  const model = createMemo(() => props.taskId ? sessionModel(ws.store.index(), props.taskId) : null);
+  const closeReason = () => { const m = model(); return m ? closeBlocked(m) ?? undefined : undefined; };
+  const externalDoneReason = () => { const m = model(); return m ? externalDoneBlocked(m) ?? undefined : undefined; };
   const hasBoundWorktree = (task: TaskView["task"]) => task.checkout.kind === "worktree" && !!task.checkout.id;
   const closeWorktree = (taskId: string) => ws.open({ kind: "confirm",
     title: ws.t("closeDeleteWorktreeFolder"), action: ws.t("closeDeleteWorktreeFolder"), danger: true,
@@ -398,6 +386,7 @@ export function TaskMenu(props: { taskId: string | null; ref: (el: HTMLDivElemen
       <Show when={v().task.status === "stopping" && v().machine.connection === "connected"}><MenuItem icon="check" label={ws.t("confirmStop")} needs="confirm_stop" onSelect={() => ws.run({ type: "confirm_stop", taskId: v().id, now: ws.store.clock() })} /></Show>
       <Show when={reworkBinding(v())}><MenuItem icon="message" label={REWORK_LABEL} needs="rework_task" onSelect={() => ws.returnForRework(v().id)} /></Show>
       <MenuItem icon="x" label="Close task…" disabled={closeReason()} needs="close_task" onSelect={() => ws.closeTask(v().id)} />
+      <Show when={offersExternalDone(v())}><MenuItem icon="check" label={EXTERNAL_DONE_LABEL} disabled={externalDoneReason()} needs="close_task" onSelect={() => ws.closeTask(v().id, "external")} /></Show>
       <Show when={hasBoundWorktree(v().task) && !v().task.archive}><MenuItem icon="trash" label={ws.t("closeDeleteWorktreeFolder")} needs="close_task"
         disabled={blocked() ?? (!ws.can("workspace.task_worktrees") ? ws.t("noTaskWorktrees") : v().task.process !== "stopped" ? "Stop the task and wait for its workers first."
           : v().task.merge && !v().task.merge!.finished ? "Finish or abort the merge first." : !taskCheckout(ws.store.state(), v().task) ? ws.t("worktreeUnavailable") : taskCheckout(ws.store.state(), v().task)!.files.length ? "Commit or remove uncommitted files first." : undefined)}

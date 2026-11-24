@@ -2,17 +2,18 @@ import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Mat
 import { automaticQueueOf, dependencyProblem, queueDrivenMode, runBlocker, sprintCloseBlockers, SPRINT_RUN_MODES, type PlanItem, type Sprint, type TaskSettings, type WorkspaceState } from "@cortex/workspace-domain";
 import { AttachChips, createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
 import { useWs } from "./ctx";
+import { autoGrow } from "./autogrow";
 import { REQUESTING, RequestLabel } from "./request-feedback";
 import { FieldEdit } from "./field-edit";
 import { createFollow } from "./follow";
 import { Pill } from "./worker";
 import { createBodyMark, createUnsent, ScreenActive } from "./freshness";
-import { A, I, Keyed, MenuItem, placeFocus, Pop } from "./kit";
+import { A, I, Keyed, MenuItem, Modal, placeFocus, Pop } from "./kit";
 import { ActionBar, Page, revealCutIn, revealWhenCut, SectionHead, StatusLane, Toolbar, type StripItem, type StripTone } from "./layout";
 import { Hint } from "./settings-kit";
 import { Answered, QuestionForm, type AskAnswer } from "./questions";
 import type { Route } from "./router";
-import { activePlanningWarning, clock, decisionRoute, humanStatus, classifiedPlanningFailure, planningChangeRequired, planningFailureDetails, savedPlanningText, stoppedPlanningComposerText, stoppedPlanningText, planningTaskOf, sprintModeDescription, sprintModeLabel, sprintTitle, sprintView, stopReason, type ProjectSummary } from "./selectors";
+import { activePlanningWarning, clock, decisionRoute, humanStatus, classifiedPlanningFailure, planningChangeRequired, planningFailureDetails, planningRequestInvalid, savedPlanningText, stoppedPlanningComposerText, stoppedPlanningText, planningTaskOf, sprintModeDescription, sprintModeLabel, sprintTitle, sprintView, stopReason, type ProjectSummary } from "./selectors";
 import { Conversation as TaskConversation, firstWorker, TaskWorkers, useSessionClock } from "./session";
 import { sessionModel, type SessionModel } from "./session-model";
 import { PlanningPlace } from "./task-place";
@@ -585,8 +586,26 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
     action: <button class="btn btn-sm" {...ws.needs("resume_planning")} onClick={retry}>Resume planning</button> };
   const ownerStopped = () => failure()?.kind === "owner_stopped";
   const changeRequired = () => planningChangeRequired(s());
+  const replaceRequest = () => planningRequestInvalid(s());
+  const changeCommand = () => replaceRequest() ? "replace_planning_request" : "plan_message";
+  const [requestEdit, setRequestEdit] = createSignal<{ original: string; diagnostic: string } | null>(null);
+  const [description, setDescription] = createSignal("");
+  const [savingRequest, setSavingRequest] = createSignal(false);
+  const requestWhy = () => ws.gate("replace_planning_request")
+    ?? (!replaceRequest() || !cancelled() ? "The sprint is no longer waiting for a shorter request."
+      : !description().trim() ? "Write a request first."
+      : description().trim() === requestEdit()?.original.trim() ? "Shorten the original request first." : undefined);
+  const closeRequest = () => { if (!savingRequest()) setRequestEdit(null); };
+  const saveRequest = async () => {
+    if (savingRequest() || requestWhy()) return;
+    setSavingRequest(true);
+    try {
+      const receipt = await ws.run({ type: "replace_planning_request", sprintId: s().id, description: description().trim() });
+      if (receipt.ok) setRequestEdit(null);
+    } finally { setSavingRequest(false); }
+  };
   const failed: StripItem = { id: "planning-failure", domId: why,
-    get readable() { return !!failure()?.kind; },
+    get readable() { return replaceRequest() || !!failure()?.kind; },
     get tone() { return ownerStopped() ? "info" : "fail"; },
     get role() { return ownerStopped() ? "status" : "alert"; },
     get icon() { return ownerStopped() ? <I n="x" s={14} class="faint" /> : <I n="alert" s={14} />; },
@@ -595,14 +614,20 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
       if (!f) return;
       const reason = f.kind ? f.text : f.step ? `${f.step}: ${f.text}` : f.text;
       const retryEffect = ownerStopped() ? " Retry starts a new planning task." : "";
-      const changeEffect = !f.kind ? "" : changeRequired() ? " Send an amendment to start planning again."
+      const changeEffect = replaceRequest() || !f.kind ? "" : changeRequired() ? " Send an amendment to start planning again."
         : " Change request lets you send an amendment before starting again.";
       return `${reason}${retryEffect}${changeEffect} ${savedPlanningText}`;
     },
     action: <>
       <Show when={!changeRequired()}><button class="btn btn-sm" {...ws.needs("resume_planning")} onClick={retry}>Retry planning</button></Show>
-      <button class={changeRequired() ? "btn btn-primary btn-sm" : "btn btn-sm"} {...ws.needs("plan_message")} onClick={() => {
-        if (ws.gate("plan_message")) return;
+      <button class={changeRequired() ? "btn btn-primary btn-sm" : "btn btn-sm"} {...ws.needs(changeCommand())} onClick={() => {
+        if (ws.gate(changeCommand())) return;
+        if (replaceRequest()) {
+          const original = s().description;
+          setDescription(original);
+          setRequestEdit({ original, diagnostic: failure()!.text });
+          return;
+        }
         setEditingRequest(true);
         requestChanges();
       }}>Change request</button>
@@ -707,6 +732,21 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
       <Tabs route={props.route} sprint={s()} />
     </Show>}
     status={<StatusLane items={lane()} />}>
+    <Modal open={!!requestEdit()} onClose={closeRequest} label="Edit original request">
+      <div class="dlg-h"><h2>Edit original request</h2></div>
+      <div class="dlg-b">
+        <p class="cap muted">{requestEdit()?.diagnostic}</p>
+        <label class="fld"><span class="lab">Original request</span>
+          <textarea class="inp" rows="8" data-autofocus value={description()} readOnly={savingRequest()}
+            ref={el => { autoGrow(el, description); queueMicrotask(() => { el.setSelectionRange(0, 0); el.scrollTop = 0; }); }}
+            onInput={e => setDescription(e.currentTarget.value)} />
+        </label>
+      </div>
+      <ActionBar place="dialog" hint={savingRequest() ? "Saving the request…" : requestWhy()}>
+        <button class="btn btn-line" disabled={savingRequest()} onClick={closeRequest}>Cancel</button>
+        <button class="btn btn-primary" disabled={savingRequest() || !!requestWhy()} onClick={() => void saveRequest()}>Save and retry</button>
+      </ActionBar>
+    </Modal>
     <div ref={body} class="sp-body" data-reading={details() ? "true" : undefined} data-full={fullOn() ? "" : undefined} style={{ "grid-template-columns": columns() }}>
       <Show when={planningTask()} keyed fallback={<Conversation sprint={s()} hidden={!chatTab()} changingRequest={changingRequest} onUnsent={setUnsent} onOpenPlan={() => ws.go(at("plan"))} />}>{task =>
         <PlanningTaskConversation sprint={s()} taskId={task} hidden={!chatTab() || workersTab()} changingRequest={changingRequest} onOpenPlan={() => ws.go(at("plan"))} />}</Show>

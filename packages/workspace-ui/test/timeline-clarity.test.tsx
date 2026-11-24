@@ -5,6 +5,7 @@ import { emptyWorkspace, emptySession, LOCAL_MACHINE_ID, type Worker } from "@co
 import { Workspace } from "../src";
 import { ResultText, resultPreview } from "../src/result-text";
 import { WorkingIndicator } from "../src/worker";
+import { firstWindowEntries } from "../src/first-view";
 import { flush, projection, scriptedPort, withTask } from "./support";
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ""; localStorage.clear(); });
@@ -87,16 +88,24 @@ it("keeps a calm live indicator mounted across factual activity updates",()=>{
   setActivity([]);
   expect(indicator?.textContent).toBe("Working…");
 });
-it("uses an explicit drag image with the card's dimensions",async()=>{
+it("uses an explicit drag image with the dragged tab's dimensions; board cards are not draggable",async()=>{
   await mount();
-  const card=document.querySelector<HTMLElement>(".card")!;
+  expect(document.querySelector(".card")).not.toBeNull();
+  for (const c of document.querySelectorAll<HTMLElement>(".card")) expect(c.getAttribute("draggable")).not.toBe("true");
+  const tab=document.querySelector<HTMLElement>(".ws-tab[draggable='true']")!;
+  expect(tab).toBeTruthy();
+  expect(tab.getAttribute("draggable")).toBe("true");
+  // jsdom has no layout; a real draggable tab has a non-empty box.
+  tab.getBoundingClientRect = () => DOMRect.fromRect({ x: 20, y: 30, width: 240, height: 90 });
   let ghost:HTMLElement|undefined;
-  const event=new Event("dragstart",{bubbles:true});
+  const event=new MouseEvent("dragstart",{bubbles:true,clientX:40,clientY:50});
   Object.defineProperty(event,"dataTransfer",{value:{setData(){},setDragImage(el:HTMLElement){ghost=el;}}});
-  card.dispatchEvent(event);
-  expect(ghost?.style.width).toBe(`${card.getBoundingClientRect().width}px`);
-  expect(ghost?.style.height).toBe(`${card.getBoundingClientRect().height}px`);
-  expect(ghost?.getAttribute("aria-hidden")).toBe("true");
+  tab.dispatchEvent(event);
+  expect(ghost?.style.width).toBe("240px");
+  expect(ghost?.style.height).toBe("90px");
+  const layer = ghost?.closest<HTMLElement>(".ws-drag-layer");
+  expect(layer?.getAttribute("aria-hidden")).toBe("true");
+  expect(layer?.inert).toBe(true);
 });
 it("always uses normal conversation detail, with no verbosity selector",async()=>{
   localStorage.setItem("cw.ws.conversationDetail",JSON.stringify("detailed"));
@@ -124,6 +133,10 @@ it("keeps history rows and the reader's position through a live tail update", as
     activity:Array.from({length:220},(_,i)=>({sequence:i+1,kind:"note" as const,text:"Observation "+i,at:null}))} satisfies Worker];
   const port=await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/w`,structuredClone(state));
   const rows=[...document.querySelectorAll(".ev-note")];
+  // About one screen of the newest rows is drawn first; the 200 before them are held, not drawn.
+  expect(rows).toHaveLength(firstWindowEntries());
+  expect(rows[0].textContent).toBe(`Observation ${220 - rows.length}`);
+  expect(document.querySelector(".stream .ws-earlier")?.textContent).toContain("Earlier activity is not shown.");
   const scroller=document.querySelector<HTMLElement>(".stream")!;
   // jsdom has no layout: the feed is 400 px high over 4000 px of rows, and the reader scrolls up into it.
   Object.defineProperties(scroller,{clientHeight:{get:()=>400},scrollHeight:{get:()=>4000}});
@@ -132,12 +145,17 @@ it("keeps history rows and the reader's position through a live tail update", as
   scroller.dispatchEvent(new Event("scroll"));
   state.workers[0].activity.at(-1)!.text="Live tail changed";
   port.emit(projection("2",structuredClone(state))); await settle();
-  expect(document.querySelectorAll(".ev-note")).toHaveLength(220);
+  expect(document.querySelectorAll(".ev-note")).toHaveLength(rows.length);
   expect(document.querySelectorAll(".ev-note")[0]).toBe(rows[0]);
-  expect(document.querySelectorAll(".ev-note")[219]).toBe(rows[219]);
-  expect(rows[0].textContent).toBe("Observation 0");
-  expect(rows[219].textContent).toBe("Live tail changed");
+  expect(document.querySelectorAll(".ev-note")[rows.length - 1]).toBe(rows.at(-1));
+  expect(rows.at(-1)!.textContent).toBe("Live tail changed");
   expect(scroller.scrollTop).toBe(1000);
+  // Show earlier draws the next screen of held rows above, the drawn ones keep their nodes, and nothing is read again.
+  document.querySelector<HTMLButtonElement>(".stream .ws-earlier button")!.click(); await settle();
+  const more=[...document.querySelectorAll(".ev-note")];
+  expect(more).toHaveLength(2 * rows.length);
+  expect(more[rows.length]).toBe(rows[0]);
+  expect(more[0].textContent).toBe(`Observation ${220 - 2 * rows.length}`);
 });
 
 const feedWorker = (patch: Partial<Worker> = {}): Worker => ({id:"w",taskId:"t",executionId:"e",role:"frontend-dev",status:"completed",lane:"execution",goal:"Build the page",now:null,waitsFor:null,scope:[],route:{model:"opus-5.5",effort:"high"},attempt:null,elapsedMs:null,runningSince:null,context:null,usage:null,
@@ -171,7 +189,7 @@ it("reads a worker's feed like Conversation: messages, a collapsed block, then t
   expect(row("Shell").querySelector(".i-terminal")).not.toBeNull();
   expect(row("Edit").querySelector(".i-pencil")).not.toBeNull();
   row("Shell").click(); await settle();
-  expect(stream.querySelector(".ws-step-detail .args")?.textContent).toBe("ok");
+  expect(stream.querySelector('[role=region][aria-label="Command output"]')?.textContent).toBe("ok");
 });
 
 it("retains an older page when the same worker refreshes while it is loading",async()=>{
@@ -182,8 +200,11 @@ it("retains an older page when the same worker refreshes while it is loading",as
   const port=await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/w`,structuredClone(state),p=>{
     p.port.readWorkerActivity=()=>new Promise(r=>{resolve=r;});
   });
-  const olderButton=()=>[...document.querySelectorAll<HTMLButtonElement>(".stream button")].find(b=>b.textContent==="Load older activity");
-  expect(olderButton()).toBeUndefined(); await settle();
+  const olderButton=()=>[...document.querySelectorAll<HTMLButtonElement>(".stream button")].find(b=>b.textContent==="Show earlier");
+  // Older activity is read only when the reader comes to it: here, by asking.
+  expect(resolve).toBeUndefined();
+  olderButton()!.click(); await settle();
+  expect(document.querySelector(".stream")?.textContent).toContain("Loading recorded activity…");
   state.workers[0].now="A refreshed fact";
   port.emit(projection("2",structuredClone(state))); await settle();
   resolve({activity:[older],activityCursor:null}); await settle();
@@ -192,7 +213,7 @@ it("retains an older page when the same worker refreshes while it is loading",as
   expect(olderButton()).toBeUndefined();
 });
 
-it("automatically reads every history page and retains live arrivals",async()=>{
+it("reads earlier history pages only as the reader asks for them, and retains live arrivals",async()=>{
   const state=withTask(emptyWorkspace(),"Whole history");
   state.workers=[feedWorker({status:"working",result:null,activityCursor:"page2",activity:[{sequence:3,kind:"note",text:"Latest page",at:null}]})];
   const cursors:(string|undefined)[]=[];
@@ -205,9 +226,17 @@ it("automatically reads every history page and retains live arrivals",async()=>{
     };
   });
   await settle();
+  // Opening reads nothing older: the newest rows the worker's facts carried are the first screen.
+  expect(cursors).toEqual([]);
+  const earlier=()=>document.querySelector<HTMLButtonElement>(".stream .ws-earlier button");
+  earlier()!.click(); await settle();
+  expect(cursors).toEqual(["page2"]);
+  expect(document.querySelector(".stream")?.textContent).toMatch(/Middle page.*Latest page/);
+  earlier()!.click(); await settle();
   expect(cursors).toEqual(["page2","page1"]);
   expect(document.querySelector(".stream")?.textContent).toMatch(/First page.*Middle page.*Latest page/);
-  expect(document.querySelector(".stream")?.textContent).not.toContain("Load older");
+  // The beginning is reached: no earlier line is left.
+  expect(earlier()).toBeNull();
   // Following: Latest does not stand in the dock, and there is no other follow control.
   expect(document.querySelector(".dock-w .new-pill")).toBeNull();
   expect(document.querySelector('[aria-label="Follow new activity"]')).toBeNull();
@@ -216,7 +245,7 @@ it("automatically reads every history page and retains live arrivals",async()=>{
   expect(document.querySelector(".stream")?.textContent).toMatch(/First page.*Middle page.*Latest page.*Live arrival/);
 });
 
-it("restores the saved worker scroll offset after a failed history read is retried", async () => {
+it("retries a failed earlier read, and coming back to the worker keeps its rows and offset without reading them again", async () => {
   const state = withTask(emptyWorkspace(), "Paged worker");
   const note = (sequence: number, text: string) => ({ sequence, kind: "note" as const, text, at: null });
   const fullPage = { activity: [note(1, "Earlier observation")], activityCursor: null, messages: [] };
@@ -229,7 +258,7 @@ it("restores the saved worker scroll offset after a failed history read is retri
   await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/w`, state, p => {
     p.port.readWorkerActivity = async (_task, _worker, cursor) => {
       cursors.push(cursor);
-      if (cursors.length === 2) return new Promise((_resolve, reject) => { failHistory = reject; });
+      if (cursors.length === 1) return new Promise((_resolve, reject) => { failHistory = reject; });
       return fullPage;
     };
   });
@@ -241,6 +270,16 @@ it("restores the saved worker scroll offset after a failed history read is retri
     await settle();
   };
   const original = stream();
+  original.querySelector<HTMLButtonElement>(".ws-earlier button")!.click(); await settle();
+  failHistory(new Error("Activity read interrupted"));
+  await settle();
+  const alert = original.querySelector('[role="alert"]')!;
+  expect(alert.textContent).toContain("Activity read interrupted");
+  alert.querySelector<HTMLButtonElement>("button")!.click();
+  await settle();
+  expect(cursors).toEqual(["older", "older"]);
+  expect(original.querySelector('[role="alert"]')).toBeNull();
+  expect(original.textContent).toContain("Earlier observation");
   // jsdom has no layout: the feed is 400 px high over 1400 px of rows, and the reader scrolls up into it.
   Object.defineProperties(original, { clientHeight: { get: () => 400 }, scrollHeight: { get: () => 1400 } });
   original.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
@@ -250,26 +289,49 @@ it("restores the saved worker scroll offset after a failed history read is retri
   await pick("w");
   const returned = stream();
   expect(returned).not.toBe(original);
+  // The rows already read are back at once, at the reader's offset, with nothing read again.
   expect(cursors).toEqual(["older", "older"]);
-
-  // jsdom has no layout. Model WebKit clamping the offset until the earlier rows are back.
-  let top = 0;
-  Object.defineProperties(returned, {
-    clientHeight: { get: () => 400 },
-    scrollHeight: { get: () => returned.textContent?.includes("Earlier observation") ? 1400 : 500 },
-    scrollTop: { get: () => top, set: (value: number) => { top = Math.min(value, returned.scrollHeight - returned.clientHeight); } },
-  });
-  failHistory(new Error("Activity read interrupted"));
-  await settle();
-  const alert = returned.querySelector('[role="alert"]')!;
-  expect(alert.textContent).toContain("Activity read interrupted");
-  alert.querySelector<HTMLButtonElement>("button")!.click();
-  await settle();
-  expect(cursors).toEqual(["older", "older", "older"]);
-  expect(returned.querySelector('[role="alert"]')).toBeNull();
   expect(returned.textContent).toContain("Earlier observation");
+  expect(returned.querySelector(".ws-earlier")).toBeNull();
   expect(returned.scrollTop).toBe(700);
   expect(document.querySelector(".dock-w .new-pill")).not.toBeNull();
+});
+
+it("drops an earlier read still under way when the reader leaves the worker, and reads it again on request", async () => {
+  const state = withTask(emptyWorkspace(), "Paged worker");
+  const note = (sequence: number, text: string) => ({ sequence, kind: "note" as const, text, at: null });
+  const fullPage = { activity: [note(1, "Earlier observation")], activityCursor: null, messages: [] };
+  state.workers = [
+    feedWorker({ status: "working", result: null, activityCursor: "older", activity: [note(2, "Latest observation")] }),
+    feedWorker({ id: "other", role: "reviewer", status: "working", result: null }),
+  ];
+  const cursors: (string | undefined)[] = [];
+  let late!: (page: typeof fullPage) => void;
+  await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/w`, state, p => {
+    p.port.readWorkerActivity = async (_task, _worker, cursor) => {
+      cursors.push(cursor);
+      if (cursors.length === 1) return new Promise(resolve => { late = resolve; });
+      return fullPage;
+    };
+  });
+  const stream = () => document.querySelector<HTMLElement>(".livepane .stream")!;
+  const pick = async (id: string) => {
+    const select = document.querySelector<HTMLSelectElement>(".ws-worker-picker select")!;
+    select.value = id;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+  };
+  stream().querySelector<HTMLButtonElement>(".ws-earlier button")!.click(); await settle();
+  expect(cursors).toEqual(["older"]);
+  await pick("other");
+  await pick("w");
+  // The reply to the screen that was left arrives late and changes nothing here.
+  late(fullPage); await settle();
+  const returned = stream();
+  expect(returned.textContent).not.toContain("Earlier observation");
+  returned.querySelector<HTMLButtonElement>(".ws-earlier button")!.click(); await settle();
+  expect(cursors).toEqual(["older", "older"]);
+  expect(returned.textContent).toMatch(/Earlier observation.*Latest observation/);
 });
 
 it("opens the worker result on a card with its report, without a disclosure triangle",async()=>{

@@ -54,8 +54,31 @@ A created sprint has **New task** and **Close sprint…** in its title band; a n
   whose model and effort are already set. The general composer folds to "Send a separate message"; when it
   is expanded it is labelled "To Coordinator — not an answer to the question". Both drafts are preserved.
 - Batch questions: questions asked together are one form. Every question is on view under "Question N of M" with its own options and answer box, and one Send answers button sends every answer at once as the one answer of their batch; it stays unavailable, with "Answer every question first: N of M answered", until each question has an answer. Once the service records the answers the form reads as answered and never offers the same questions again; a refused send keeps every chosen and typed answer and shows the reason, so the owner can send again. The answers read as given from the press, with "Sending the answers…", while their fields stay behind them; a refusal brings the fields back as they were, with the reason and Retry.
-- Long conversations open on their latest part. The Conversation opens at its end with the newest rows,
-  read in at most four requests however long the task ran, and new rows keep arriving below as before.
+- A conversation opens whole or not at all. Opened for the first time in a window (after a restart, on the
+  desktop and on the phone alike), it shows a skeleton: one line "Loading the conversation…" over quiet
+  shapes of messages, with the region marked busy, never a made-up row or count. The skeleton stays until
+  its latest messages, the questions of its run and its workers and result are all in; then the whole
+  conversation appears at once, at its end, following. Answered questions never show first on their own.
+  If that takes more than 5 seconds, or the machine is offline, the skeleton stops: what has arrived shows,
+  with one notice naming what has not ("Couldn’t finish loading the conversation.", or questions, or
+  workers and results) and **Retry**; it never reads as ready, and the notice goes once the rest arrives.
+  Left and opened again before then, it shows no skeleton but keeps that notice and **Retry** until the
+  missing parts arrive.
+  A conversation already shown in the window (a parked tab, a reconnect, a refresh, a task just started
+  from its page) keeps what it shows, its draft, focus and scroll, with no skeleton. **Answer** or **See
+  what is needed** pressed while the conversation is still loading brings the card into view once the
+  conversation shows it. Work details shows the
+  same skeleton for its worker list and a picked worker until the task's first facts read is in, so a worker
+  never reads as "not part of the task" while it is still on its way. A task's workers stay shown while
+  another task of the same project is open; a new run of the task waits for its own workers. The
+  coordinator's activity has the same skeleton, 5-second limit, offline notice and **Retry**; a reply
+  for an earlier run of the task never shows in it. Board, Inbox, Home and Archive show a
+  list skeleton instead of "nothing here" while a project's tasks are still being read, and panels that wait
+  for the machine's details show a panel skeleton.
+- Long conversations open on their latest part. The Conversation opens at its end with about one screen of
+  its newest rows (as many as fill the window: the first request asks for only that many rows, later
+  ones for more when steps fold together, in at most four requests however long the task ran), and new
+  rows keep arriving below as before.
   If the boundary below the task description is on screen or within one screen above it, earlier
   content loads automatically, even while following. This repeats as needed on opening, resizing or
   scrolling up. **Show earlier** remains a fallback. "Loading earlier…" stays until there is more
@@ -66,6 +89,13 @@ A created sprint has **New task** and **Close sprint…** in its title band; a n
   may have begun before the rows read is not shown. A settled question from before them is not shown at
   their top, and the follow pill does not count rows read above as new. A short conversation reads in one
   request and looks exactly as before.
+- A worker's or the coordinator's activity opens the same way, on about one screen of its newest rows.
+  Earlier rows are drawn when the reader scrolls up to within half a screen of the top, or while the feed
+  does not fill its box yet; only once every held row is drawn is the next older page read from the
+  machine. "Earlier activity is not shown." with **Show earlier** stands at the top while more exists,
+  "Loading recorded activity…" while a page is read, and a failed page says why with **Retry**. Rows drawn
+  above keep the row being read where it is. Picking another worker in Work details and coming back shows
+  the rows already read at the same place, without reading them again.
 - Sent messages read at once. A message, a steer, a request for changes, a message to the planner and a direct message to a worker leave the composer and read in their place the moment they are sent, marked "Sending…", then "Sent"; a queued message stands at the end of the queue as "Queuing…". The service's own record takes its place without a second copy or a move: a saved, queued or worker message by the request id it was saved under, a history line by its text among the lines that arrived after the send, each record answering one send in order. A send that did not arrive stays on its line, text and files, with "Not sent:" and the reason, Retry (in the same place) and Edit (back into the composer). A confirmed message whose record does not arrive within a minute stops being shown on its own.
 - Suggestions while writing. The task's message field reads "Message the agent, tag @files, or use
   /commands and /skills". Typing `@` (at the start or after a space) opens a list of the project's files
@@ -137,8 +167,15 @@ questions make the sprint read Needs you, and any address of it opens its sprint
 without such a task keeps the four tabs and its planning chat.
 
 If planning fails, the strip above the conversation names the step and what went wrong. **Retry planning**
-asks planning to resume without a new message. **Change request** opens the existing composer and
-focuses its draft; sending the changes asks the planner to continue with them. The draft, previous answers and proposed plan stay in place.
+asks the service to retry without a new message. If the planner never started, the service starts a
+fresh planning task. **Change request** normally focuses the existing composer. If there is no live
+execution, sending the amendment saves it and requests a fresh planner in one operation. An unconfirmed
+send stays available through the conversation's failed-send controls.
+
+If the combined planning request is too long, **Change request** instead opens the original text for
+editing and shows the measured length and limit from the failure. **Save and retry** replaces only
+the original text and requests a fresh planner. An unconfirmed save leaves the edited text in the
+editor. The message draft, attachments, previous answers and proposed plan are not cleared.
 An owner stop instead shows the neutral cancellation message and **Resume planning**.
 Repeated service problems show a non-blocking warning while planning continues. Inbox links to the
 sprint with **Planning failed** or **Planning problem** on connected machines. An open planning question
@@ -297,7 +334,7 @@ The local desktop slice connects these conversation controls to the real service
 - All work names sprints on the board and the list: each column and status group shows standalone tasks, then each sprint under its name, and a card repeats the sprint's name in its footer. The heading leads to that sprint.
 - A task waiting for the owner, in Needs you or Review, is tinted on the board and the list and marked in the sidebar. Same-branch and non-Git results use Finish in the sidebar; the inspector describes committing or closing, not merging. Review the diff opens the result-bound Accept control before the separate commit or merge confirmation.
 - Status and reason text is plain language everywhere (sidebar, board, task header, queue strip, notifications, check rows): a recorded reason code reads as a sentence, a code the app does not recognise reads as a generic sentence, and no internal code or underscore is ever shown. A sidebar row always keeps the task title and shows its short status in a separate word beside it; the longer reason is read in the task itself. Ready to merge is a group heading; its rows still read Finish or Merge. The current sprint is highlighted in both places it appears, instead of its project. The project is highlighted in All work and Standalone scopes. On a task page, the visible links for that task are highlighted instead of the sprint. One table (`packages/workspace-ui/src/status-text.ts`) holds the wording. A code with a machine detail (`coordinator_prompt_failed:RuntimeError`, compared without regard to case) reads as its code's sentence and never shows the detail. Inside the task, the generic sentence never adds "Open the task for details".
-- A card that changes status crosses to its new column instead of vanishing, and a folded column opens around it. Reduced motion moves it at once. A manual drag keeps the card, queued message or workspace tab at its on-screen size. In the Linux desktop app the preview follows the pointer inside the window; elsewhere supported browsers use native drag feedback. Start stays on the pressed card through background reads and shows a refusal there, with a retry path; sprint queue mode does not silently disable an otherwise startable draft.
+- Board cards are not draggable. They move to another column only when confirmed task state changes. To record work finished elsewhere, choose **Done outside the app…** from the Board or List task menu, the task page menu, or the task's command palette, then confirm. Dragging a queued message or workspace tab keeps it at its on-screen size. In the Linux desktop app the preview follows the pointer inside the window; elsewhere supported browsers use native drag feedback. Start stays on the pressed card through background reads and shows a refusal there, with a retry path; sprint queue mode does not silently disable an otherwise startable draft.
 - Every action shows its loader on the control that was pressed, after a short delay so a quick action shows nothing, and that control takes no second press until the action ends. Enter in a composer counts as pressing its send button, and an action from a menu shows on the control that opened the menu.
 - A machine-persisted queue, sent by the service at the coordinator's next step. Edit removes an unsent item and restores the composer; Send now captures steering even during a running turn. Captured text is not replayed automatically after a lost response. Each queued row is one line: its text shortens and opens whole on a press or Enter, and Edit, Send now and remove keep their own box. The row shows no attachment chips; the message keeps its files, which show again in Edit and open from the conversation once sent.
 - Live and finished workers from retained runtime rows, including prose retained at tool boundaries, result summaries, the whole public report when it is opened (retrieved in bounded pages, never shown in part) and all available combined task/command/guidance history automatically loaded by attempt using byte-bounded continuation pages, including older guidance attachments and delivery status. There is no Load older control; a failed read retains history and offers Retry. Following and the reader's scroll anchor stay unchanged while pages arrive. Checkout locations say Project folder or Worktree separately from the branch; the project title chip shows the current open branch, not the Git default.
@@ -465,8 +502,11 @@ Live worker view:
   still respond. It lies out of the dock's flow and changes neither the dock's nor the feed's size, so it
   coming or going never moves the end. The folded "Send a separate message" row under an open question
   keeps its opaque band of the timeline's surface inside the dock.
-- Opening a block or step in any feed stops following, so the end no longer pulls the opened row away,
-  and scrolls the opened content into view only as far as the row's heading stays visible. Answer, See
+- Opening a block or step in a following feed keeps following when the whole opened block is visible with
+  the end pinned (a short feed, or a block that fits above the end): nothing moves, and the end stays
+  pinned as the feed grows. When reading it needs leaving the end, opening stops following, so the end no
+  longer pulls the opened row away, and scrolls the opened content into view only as far as the row's
+  heading stays visible. Answer, See
   what is needed and a notification bring their card into view the same way: following stops first, so
   the end never takes the feed back from the card.
 - The owner's own message or answer sent from a feed's screen (the composer, Request changes, an answer to
@@ -542,7 +582,7 @@ A composer at the bottom of a running worker's view reads "Message <role>…". I
 ### Return for rework
 
 For eligible closed tasks, including Done and **Closed, not verified**, choose **Return for rework**
-from the title band, task menu, or Board or List card menu. Dragging a card out of Done does not reopen it.
+from the title band, task menu, or Board or List card menu.
 The action opens the shared message composer in Chat and focuses the message box. Its effect line
 reads “Sending reopens this task for rework”. Enter a message (attachments are optional), then choose
 **Send and reopen**. This is not ordinary **Request changes** or a late chat message.
@@ -696,7 +736,7 @@ Several cards stack, oldest first. They are read every 5 seconds while the machi
 - Counts: nothing to count shows nothing, never "All 0". What differs from a profile is listed in words, for example "Claude: 4 sessions at most, was 2".
 - Titles and names are edited by clicking them. There is no separate Rename or Edit control. A click opens the name as a field with Save and Cancel beside it; an unchanged name also closes when focus leaves it. A task's title stays editable after Start, review, finishing and closing, because it is presentation, not lifecycle; only a cleared task's title is read-only. Edit task… (the saved request and its settings) remains for a never-started task only.
 - Text is saved only by Save, or Enter in a one-line field; Cancel or Escape puts the saved text back. Nothing saves on leaving a field or after a pause in typing, and a read of the machine never replaces text still being edited. This holds for the project name in project settings, the machine name, task and sprint titles, connection and profile names, and the new task's title. A refused save keeps the typed text with its reason below the field. The rules are in [editing text](DESIGN.md#editing-text).
-- Selection: text can be selected and copied everywhere, with Ctrl+C. Buttons, links, the title band, the sidebar and draggable cards are excluded.
+- Selection: text can be selected and copied everywhere, with Ctrl+C. Buttons, links, the title band, the sidebar and draggable controls such as queue rows and workspace tabs are excluded.
 - One piece of text, such as a path, is cut with an ellipsis and never broken across lines. Text with a full-text box still opens it on press, Enter or Space. On desktop, marked text that is actually cut also has a delayed hover and keyboard-focus tooltip. Text that fits has none.
 - Absent values: a value Cortex does not have is not rendered. No dash (—) or placeholder glyph stands in for it, and an unknown value is never shown as zero or as success. When a whole panel has no data, the panel carries one state line with its reason, not a placeholder in each field.
 - Diff colours are always paired with `+` and `−` text. Every icon has a text label.

@@ -941,6 +941,25 @@ html[data-hidden] *, html[data-hidden] *::after { animation-play-state: paused !
 }
 /* Words for something still on its way, with the loader beside them. */
 .ws-loading { display: flex; align-items: center; gap: 6px; }
+/* A view's first read (skeleton.tsx): one status line, then quiet shapes of what is coming. Percent widths only, so a phone's
+   single pane never scrolls sideways; the shapes breathe as one layer through the shared `shimmer` loader, which pauses when
+   nobody sees it, and hold still under reduced motion. */
+.ws-skel { display: flex; flex-direction: column; gap: 12px; width: 100%; min-width: 0; padding: 4px 0; }
+.ws-skel-status { color: var(--fg-3); font-size: var(--t-cap); line-height: 16px; }
+.ws-skel-rows { display: flex; flex-direction: column; gap: 12px; }
+.ws-skel-row { width: 100%; height: 14px; border-radius: 4px; background: var(--bg-hover); }
+.ws-skel-mine { align-self: flex-end; width: 46%; height: 34px; border-radius: var(--r-card); }
+.ws-skel-ai { width: 92%; height: 44px; }
+.ws-skel-ai-short, .ws-skel-note-short, .ws-skel-line-short { width: 58%; }
+.ws-skel-fold { width: 38%; height: 18px; }
+.ws-skel-note { width: 86%; height: 30px; }
+.ws-skel-step { width: 52%; height: 16px; }
+.ws-skel-head { width: 34%; height: 18px; }
+.ws-skel-list .ws-skel-row { height: 40px; border-radius: var(--r-card); }
+.ws-skel-activity, .ws-skel-panel, .ws-skel-pane { padding: 12px; }
+@media (prefers-reduced-motion: reduce) { .ws-skel-rows.shimmer { will-change: auto; animation: none !important; } }
+.ws-first-notice { margin: 0 0 6px; }
+.ws-first-notice .lnk { flex: none; }
 
 /* A frameless window takes the outer 5px of each edge for resizing, ahead of the page. Scrollers at the window's right and
    bottom edge stop short of it, so a scrollbar is always grabbed and an edge always resizes. The desktop bridge widens the
