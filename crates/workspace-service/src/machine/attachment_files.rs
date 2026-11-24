@@ -8,7 +8,7 @@ use base64::Engine as _;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::unix::fs::OpenOptionsExt,
@@ -19,8 +19,6 @@ use std::{
 /// Most bytes one attachment set (and so one body) may hold.
 pub const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_FILES: usize = 8;
-/// An uploaded body no saved record references yet (a draft not sent) is kept this long.
-pub const UNSENT_GRACE: Duration = Duration::from_secs(24 * 3600);
 static LAST_SWEEP: AtomicU64 = AtomicU64::new(0);
 
 pub fn directory(state: &Path) -> PathBuf {
@@ -159,6 +157,7 @@ pub fn read(state: &Path, sha: &str) -> Result<Vec<u8>> {
 /// and answers their references.
 pub fn upload(state: &Path, files: &Value) -> Result<Value> {
     super::product::attachments(files)?;
+    let lock = settings::Lock::new(state, "machine.lock")?;
     let mut out = Vec::new();
     for item in files.as_array().into_iter().flatten() {
         let bytes = base64::engine::general_purpose::STANDARD
@@ -172,6 +171,7 @@ pub fn upload(state: &Path, files: &Value) -> Result<Value> {
             &sha,
         ));
     }
+    drop(lock);
     maybe_sweep(state);
     Ok(json!(out))
 }
@@ -237,24 +237,43 @@ pub fn resolve(state: &Path, items: &Value) -> Result<Value> {
 }
 /// Every `attachments` list in a command resolved to inline bodies for Core.
 pub fn resolve_all(state: &Path, value: &mut Value) -> Result<()> {
-    match value {
-        Value::Object(map) => {
-            for (key, v) in map.iter_mut() {
-                if key == "attachments" && v.is_array() {
-                    *v = resolve(state, v)?;
-                } else {
-                    resolve_all(state, v)?;
+    fn resolve_tree(state: &Path, value: &mut Value, lock: &mut Option<settings::Lock>) -> Result<()> {
+        match value {
+            Value::Object(map) => {
+                for (key, v) in map.iter_mut() {
+                    if key == "attachments" && v.is_array() {
+                        if v.as_array().is_some_and(|items| !items.is_empty()) && lock.is_none() {
+                            *lock = Some(settings::Lock::new(state, "machine.lock")?);
+                        }
+                        let resolved = resolve(state, v)?;
+                        // Admission to Core can finish before the product receipt is
+                        // written. Renew a body read for that in-flight input.
+                        for item in v.as_array().into_iter().flatten() {
+                            let path = body_path(state, item["sha256"].as_str().ok_or_else(invalid)?)?;
+                            let file = OpenOptions::new().write(true)
+                                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                                .open(path)?;
+                            if !file.metadata()?.is_file() {
+                                return Err(unavailable());
+                            }
+                            file.set_modified(SystemTime::now())?;
+                        }
+                        *v = resolved;
+                    } else {
+                        resolve_tree(state, v, lock)?;
+                    }
                 }
             }
-        }
-        Value::Array(items) => {
-            for v in items {
-                resolve_all(state, v)?;
+            Value::Array(items) => {
+                for v in items {
+                    resolve_tree(state, v, lock)?;
+                }
             }
+            _ => {}
         }
-        _ => {}
+        Ok(())
     }
-    Ok(())
+    resolve_tree(state, value, &mut None)
 }
 /// For one engine prompt built from saved records (sprint planning): every reference
 /// whose body is still here is read now and inlined in this in-memory copy; one that
@@ -499,29 +518,107 @@ pub fn forget_answers(product: &mut Value, task: &str) {
         map.remove(task);
     }
 }
-/// Delete every body no saved product file references, except one renewed within
-/// `grace` (an upload not sent yet). The caller holds `machine.lock`. Any unreadable
-/// product file stops the sweep before anything is deleted.
-pub fn sweep_locked(state: &Path, grace: Duration) -> Result<usize> {
-    let folder = directory(state);
-    let Ok(entries) = fs::read_dir(&folder) else {
-        return Ok(0);
+/// A successful producer can commit the answer to Core before it can save the
+/// product cache. Read authoritative evidence for all retained project locators.
+fn keep_answer_digests(state: &Path, kept: &mut HashSet<String>) -> Result<()> {
+    let mut retained = BTreeMap::new();
+    // Read the visible registry first: Remove writes the detached locator before
+    // dropping the visible entry. Re-add can leave the locator in both.
+    for registry in ["projects.json", "removed-projects.json"] {
+        for project in crate::local::read_registry(&state.join(registry))? {
+            *retained
+                .entry((project.canonical_root, project.project_id))
+                .or_insert(false) |= project.activation.is_some();
+        }
+    }
+    for ((root, project), activated) in retained {
+        crate::project_guard::check(&root)?;
+        let key = super::context::key(&root)?;
+        let store = match cortex_core::Store::read_for_workspace_retention(key.clone()) {
+            Ok(store) => store,
+            // Activation can be absent on re-add or stale in the detached
+            // registry. It never exempts an existing store from the scan.
+            Err(error) if !activated && crate::local::store_missing(&key, &error) => continue,
+            Err(error) => return Err(super::context::core(error)),
+        };
+        store.read(|db| {
+            let mut query = db.prepare(
+                "SELECT e.payload_json FROM workspace_tasks t
+                 JOIN workspace_executions x ON x.task_id=t.task_id
+                 JOIN runtime_events e ON e.task_id=x.runtime_task_id
+                 WHERE t.project_id=? AND e.type='USER_ANSWER_ATTACHMENTS' LIMIT 10001",
+            )?;
+            let mut rows = query.query([&project])?;
+            let mut count = 0;
+            while let Some(row) = rows.next()? {
+                count += 1;
+                if count > 10000 {
+                    return Err(cortex_core::CoreError::Refused("attachment_references_too_large"));
+                }
+                let payload: Value = serde_json::from_str(&row.get::<_, String>(0)?)?;
+                let attachments = payload["attachments"].as_array()
+                    .ok_or(cortex_core::CoreError::Refused("attachment_references_unreadable"))?;
+                for item in attachments {
+                    if item["availability"] == "stored" {
+                        let sha = item["sha256"].as_str().filter(|sha| digest_ok(sha))
+                            .ok_or(cortex_core::CoreError::Refused("attachment_references_unreadable"))?;
+                        kept.insert(sha.to_owned());
+                    }
+                }
+            }
+            Ok(())
+        }).map_err(super::context::core)?;
+    }
+    Ok(())
+}
+
+/// Sweep recognized, old files under `machine.lock`. Complete reference
+/// enumeration before removing any bytes.
+pub fn sweep_locked(state: &Path, now: SystemTime) -> Result<usize> {
+    let days = settings::machine(state)?["unreferencedAttachmentRetentionDays"]
+        .as_u64().filter(|n| (1..=3650).contains(n))
+        .ok_or_else(unavailable)?;
+    let grace = Duration::from_secs(days * 86_400);
+    let safe_dir = |path: &Path| -> Result<bool> {
+        match fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_dir() => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Ok(_) => Err(unavailable()),
+            Err(e) => Err(e.into()),
+        }
     };
+    let folder = directory(state);
+    if !safe_dir(&folder)? {
+        return Ok(0);
+    }
     let mut kept = HashSet::new();
-    if let Ok(products) = fs::read_dir(state.join("product")) {
-        for entry in products.flatten() {
-            let path = entry.path();
+    let products = state.join("product");
+    if safe_dir(&products)? {
+        // Finish the entire reference scan before unlinking anything. A listed
+        // file that disappears or is malformed is not an empty product.
+        for entry in fs::read_dir(products)? {
+            let path = entry?.path();
             if path.extension().is_some_and(|e| e == "json") {
-                references(&settings::read_json(&path, json!({}))?, &mut kept);
+                let document = settings::read_json(&path, Value::Null)?;
+                if !document.is_object() {
+                    return Err(unavailable());
+                }
+                references(&document, &mut kept);
             }
         }
     }
-    let now = SystemTime::now();
+    keep_answer_digests(state, &mut kept)?;
+    let entries = fs::read_dir(folder)?;
     let mut removed = 0;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let stored = digest_ok(&name);
-        if (stored && kept.contains(&name)) || !(stored || name.starts_with(".tmp-")) {
+        let staged = name.strip_prefix(".tmp-").is_some_and(|parts| {
+            let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+            let mut parts = parts.split('-');
+            (0..3).all(|_| parts.next().is_some_and(digits)) && parts.next().is_none()
+        });
+        if (stored && kept.contains(&name)) || !(stored || staged) {
             continue;
         }
         let Ok(meta) = fs::symlink_metadata(entry.path()) else {
@@ -534,6 +631,9 @@ pub fn sweep_locked(state: &Path, grace: Duration) -> Result<usize> {
             .is_none_or(|age| age < grace);
         if meta.is_file() && !recent && fs::remove_file(entry.path()).is_ok() {
             removed += 1;
+            if removed == 256 {
+                break;
+            }
         }
     }
     Ok(removed)
@@ -542,7 +642,7 @@ pub fn sweep_locked(state: &Path, grace: Duration) -> Result<usize> {
 pub fn release(state: &Path, before: &HashSet<String>, after: &Value) {
     let now = held(after);
     if before.iter().any(|sha| !now.contains(sha)) {
-        let _ = sweep_locked(state, UNSENT_GRACE);
+        let _ = sweep_locked(state, SystemTime::now());
     }
 }
 /// At most once an hour per process, unsent uploads past their grace are removed.
@@ -557,7 +657,7 @@ pub fn maybe_sweep(state: &Path) {
         return;
     }
     if let Ok(Some(_lock)) = settings::Lock::try_new(state, "machine.lock") {
-        let _ = sweep_locked(state, UNSENT_GRACE);
+        let _ = sweep_locked(state, SystemTime::now());
     }
 }
 #[cfg(test)]

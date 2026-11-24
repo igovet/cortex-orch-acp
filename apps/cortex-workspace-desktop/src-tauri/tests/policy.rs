@@ -142,10 +142,9 @@ fn the_window_reports_focus_and_kinds_and_takes_a_click_target_in_exact_shapes()
     }
 }
 
-/// A notification's click opens a place the window named itself; the window grant stays the same
-/// three commands, and the click is not a bridge request at all.
+/// Notification clicks name a closed destination; they are not bridge requests.
 #[test]
-fn a_notification_carries_only_a_closed_target_and_adds_no_window_command() {
+fn a_notification_carries_only_a_closed_target() {
     use cortex_workspace_desktop::policy::notification_target;
     let question = json!({"kind":"question","project":"p","task":"t","decision":"d"});
     assert!(notification_target("Fix the race", question.clone()).is_ok());
@@ -172,6 +171,11 @@ fn a_notification_carries_only_a_closed_target_and_adds_no_window_command() {
         json!({"operation":"native.navigate","message":{"kind":"question"}})
     )
     .is_err());
+}
+
+#[test]
+fn the_main_window_has_only_the_declared_workspace_commands() {
+    // Result links use a separate native command, not the notification or request bridge.
     let capability: Value =
         serde_json::from_str(include_str!("../capabilities/main.json")).unwrap();
     let commands: Vec<&str> = capability["permissions"]
@@ -186,7 +190,8 @@ fn a_notification_carries_only_a_closed_target_and_adds_no_window_command() {
         [
             "allow-workspace-request",
             "allow-workspace-notify",
-            "allow-workspace-close"
+            "allow-workspace-open-result-target",
+            "allow-workspace-close",
         ]
     );
 }
@@ -575,6 +580,39 @@ fn every_machine_operation_the_real_port_names_is_allowed() {
 }
 
 #[test]
+fn desktop_merge_controls_only_accept_bound_owner_input() {
+    let call = |message| {
+        authorize(
+            "main",
+            "tauri://localhost/",
+            json!({
+                "operation":"executions.control","message":message
+            }),
+        )
+    };
+    let input = json!({"projectId":"p","executionId":"e","requestId":"r","action":"handoff_merge",
+        "conflictId":"mc_1","text":"Keep both","attachments":[{"name":"hint.txt",
+        "mimeType":"text/plain","size":1,"sha256":"a".repeat(64)}]});
+    assert!(call(input.clone()).is_ok());
+    for (key, value) in [
+        ("conflictId", Value::Null),
+        ("manifest", json!({"paths":["a.txt"]})),
+        ("text", json!("x".repeat(12_001))),
+        ("action", json!("inspect_merge")),
+        ("action", json!("request_merge_checks")),
+    ] {
+        let mut bad = input.clone();
+        bad[key] = value;
+        assert!(call(bad).is_err(), "{key}");
+    }
+    assert!(call(
+        json!({"projectId":"p","executionId":"e","requestId":"r","action":"inspect_merge",
+        "conflictId":null})
+    )
+    .is_ok());
+}
+
+#[test]
 fn owner_check_reruns_name_only_retained_result_evidence() {
     let body = json!({"operation":"executions.control","message":{
         "projectId":"p","executionId":"e","requestId":"r","action":"rerun_check",
@@ -703,6 +741,8 @@ fn every_request_the_real_port_sends_is_allowed() {
         let extra = match action {
             "pause" | "resume" => json!({"expectedVersion":"3"}),
             "retry" => json!({}),
+            "handoff_merge" => json!({"conflictId":"mc_1","text":"Keep both changes"}),
+            "inspect_merge" | "request_merge_checks" => json!({"conflictId":"mc_1"}),
             "worker_message" => json!({"workerId":"w1","text":"Keep the old message"}),
             "worker_stop" => json!({"workerId":"w1","reason":"Not needed"}),
             "allow_write" => json!({"path":"test/run.js"}),
@@ -742,6 +782,9 @@ fn every_request_the_real_port_sends_is_allowed() {
             }
             "native.open_editor" => {
                 json!({"projectId":"wp_1","checkoutId":"wp_1:main","file":"src/a.ts","line":3})
+            }
+            "native.reveal_file" => {
+                json!({"projectId":"wp_1","checkoutId":"wp_1:main","file":"src/a.ts"})
             }
             "native.save_attachment" => json!({"name":"shot.png","data":"eA=="}),
             "native.engine_login" => json!({"engine":"claude-agent-acp"}),

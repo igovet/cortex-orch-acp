@@ -6,7 +6,11 @@ import { capture, emptyWorkspace, LOCAL_MACHINE_ID, routeIdOf, type EngineConnec
 import { Workspace } from "../src";
 import { createRealPort } from "../src/port/real";
 import { SIDEBAR_DEFAULT, SIDEBAR_MIN } from "../src/prefs";
+import { WsContext, type Ws } from "../src/ctx";
+import { buildIndex } from "../src/selectors";
+import { BranchChip } from "../src/task-chrome";
 import { capabilitiesWire, flush, refOf, scriptedTransport, snapshot, stoppedMerge, wireDecision, wireTask } from "./support";
+import { reviewWorld } from "./layout-fit-review";
 
 /** The screens on the real port, with a machine that answers as the helper does, so what they show is what real data gives. */
 const OFFERED = ["capabilities.get", "project.snapshot", "tasks.create", "tasks.start", "decisions.list", "decisions.answer", "results.get", "executions.get", "history.page"];
@@ -802,6 +806,21 @@ describe("task session on real data", () => {
     // Stop is the composer's action button while the field is empty, and nowhere in the title band.
     expect(all(".tb-actions button").some(b => /Stop|Resume|Start/.test(b.textContent ?? ""))).toBe(false);
     expect(all('[aria-label="Task composer"] button').at(-1)?.getAttribute("aria-label")).toBe("Stop");
+  });
+
+  it("explains why the worktree terminal is disabled before pressing it", () => {
+    const state = reviewWorld(), index = buildIndex(state, 0), toggleTerminal = vi.fn();
+    const ws = { store: { state: () => state, index: () => index }, terminalAvailable: () => true, toggleTerminal, panels: { terminalOpen: () => false } } as unknown as Ws;
+    const root = document.body.appendChild(document.createElement("div"));
+    dispose = render(() => <WsContext.Provider value={ws}><BranchChip view={index.byId.get("rg")!} /></WsContext.Provider>, root);
+
+    const action = button("Open worktree terminal", "#m-wt")!;
+    expect(action.getAttribute("aria-disabled")).toBe("true");
+    const reason = document.getElementById(action.getAttribute("aria-describedby")!);
+    expect(reason?.textContent).toBe("The terminal opens in the project folder only. Open it from the project board.");
+    expect(reason?.closest("[hidden]")).toBeNull();
+    action.click();
+    expect(toggleTerminal).not.toHaveBeenCalled();
   });
 
   it("offers no terminal it does not have", async () => {

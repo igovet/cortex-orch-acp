@@ -375,7 +375,7 @@ The paid probes (`probe-codex`, `probe-claude`) stay entirely separate: they ref
 The packaged Workspace service also runs automatic retention without any command: on project activation and then hourly it archives old Done tasks and, unless `automaticArchivePurge` is switched off in Storage, deletes expired closed archives. It touches no active or unclosed task, dirty or unmerged worktree, migration backup or qualification evidence. Settings and defaults: [configuration](../configuration.md#workspace-storage-retention); rules: [storage](storage.md#automatic-workspace-retention). The `/cortex-clear` text below is the separate ACP chat route.
 
 Use `/cortex-clear` in an idle ACP session to preview old task deletion from
-this project. The native host does not yet delete: a confirmed `/cortex-clear` that would delete something refuses and writes nothing (see [known limits](native-incoming-acp.md#known-limits)); the confirmed-deletion behavior below is the contract carried from the former implementation. It is advertised in the ACP command picker and handled by the
+this project. The explicit command in the native host does not yet delete (the Workspace background retention is separate, see [automatic Workspace retention](storage.md#automatic-workspace-retention)): a confirmed `/cortex-clear` that would delete something refuses and writes nothing (see [known limits](native-incoming-acp.md#known-limits)); the confirmed-deletion behavior below is the contract carried from the former implementation. It is advertised in the ACP command picker and handled by the
 runtime without a coordinator turn or engine/model call; `/clear` is not an
 alias because hosts reserve it.
 

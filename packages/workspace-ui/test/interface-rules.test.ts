@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { HELP } from "../src/orch-help";
+import { workspaceCopy } from "../src/copy";
 
 /** The rules a source file can answer on its own. What needs layout is in sweep.measure.mjs. */
 const files = (dir: string): string[] => readdirSync(dir).flatMap(name => { const path = join(dir, name); return statSync(path).isDirectory() ? files(path) : /\.tsx?$/.test(name) ? [path] : []; });
@@ -36,11 +37,14 @@ describe("interface rules", () => {
   it("keeps default hints and labels in English, with only the approved Russian overrides", () => {
     const copyPath = join(SRC, "copy.ts");
     const approved = new Set([
+      `${copyPath}: questionRecommended: "Рекомендуется",`,
       `${copyPath}: deleteWorktreeFolder: "Удалить worktree папку",`,
       `${copyPath}: closeDeleteWorktreeFolder: "Закрыть и удалить worktree папку",`,
     ]);
     expect(hits(/[\u0400-\u04ff]/).filter(line => !approved.has(line))).toEqual([]);
     expect(JSON.stringify(HELP)).not.toMatch(/[\u0400-\u04ff]/);
+    expect(workspaceCopy("questionRecommended", "en-US")).toBe("Recommended");
+    expect(workspaceCopy("questionRecommended", "ru-RU")).toBe("Рекомендуется");
   });
   it("does not name the program inside the program", () => {
     expect(hits(/\bCortex\b/)).toEqual([]);

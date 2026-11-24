@@ -849,6 +849,9 @@ unchanged. Requested via a delivered user steer.
 - Retention: ship a user-run maintenance CLI, `python3 src/cortex_clear.py
   --project-root <path> --days N [--keep-thread <id>]`; the coordinator only
   explains it. Codex-era `CODEX_*` env protection is removed. Approved by the user.
+  Superseded: the product has no Python and no such CLI. Retention is now the
+  explicit `/cortex-clear` command plus an hourly automatic Workspace pass; see
+  [automatic Workspace retention](storage.md#automatic-workspace-retention).
 - `docs/project/verification.md` is produced by a knowledge-harvest
   refresh rather than hand-written, per the user.
 - Worker routing: a route-caused failure (quota/rate limit, model

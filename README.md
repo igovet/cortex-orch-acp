@@ -39,6 +39,8 @@ In Workspace, you can add a comment to a route choice without changing the selec
 
 Choose English, Russian, or Automatic for coordinator responses. Internal work stays in English; the coordinator is guided to keep replies, questions and final results in your language even when tool output is English.
 
+Coordinator and worker questions mark one suggested answer without selecting it for you. Workspace shows “Recommended” (or “Рекомендуется” in a Russian UI); you can still choose another option or write your own answer for normal questions. See [questions and answers](docs/features/steering-and-questions/index.md).
+
 Workspace result checks list recorded skips with their reasons, including checks that required authorization and did not run.
 
 For MCP result submissions, unknown fields such as `artifacts` are rejected with the offending field path. Copy `tool_call_ref` exactly from the completed command response. See [Markdown reports](docs/features/markdown-reports/index.md#result-submission-arguments).
@@ -389,6 +391,10 @@ Missing, untrusted, ambiguous or unsupported routes fail visibly without a Pytho
 mutation fallback. A built-binary socket test covers native create/start through
 completion with PATH fake engines and private HOME/XDG state; it does not qualify
 real engine accounts or a released application. In Workspace, choose **Separate worktree** to start from committed HEAD in a dedicated checkout. Execution, review, verification, Changes, Code and Git use that checkout; the terminal still opens in the registered project folder. Without Git the choice is disabled. If a saved worktree task cannot start because Git or a first commit is missing, the service explains how to proceed instead of falling back to the project folder. See [separate worktrees](docs/cortex-workspace/local-task-execution.md#separate-worktrees). Owner attachments (new task, follow-up and Request-changes messages, and question answers) are retained as private source bodies and delivered to the engine; the native service advertises `attachments: true` in its capabilities, and worker guidance carries no files.
+
+The Workspace reasoning-effort picker offers only concrete levels for the
+selected model. With no choice, it uses the effort in Settings or Medium,
+whichever is applicable, adjusted to the closest level the model supports.
 
 The runtime normally continues work on its own. Work failures use a strategy
 ladder (repair, escalated routes, the senior consultant, another role and

@@ -193,7 +193,18 @@ function Worktrees() {
 function Storage() {
   const ws = useWs();
   const m = () => ws.machine(), off = useReadOnly();
-  const d = useDraft<{ retention: number; auto: number }>({ key: () => `${m().id}:storage`, saved: () => ({ retention: m().retentionDays, auto: m().autoArchiveDays }), name: () => "Storage and archive", where: () => m().name, commit: v => ws.run({ type: "save_storage", machineId: m().id, retentionDays: v.retention, autoArchiveDays: v.auto }) });
+  const d = useDraft({
+    key: () => `${m().id}:storage`,
+    saved: () => ({
+      retentionDays: m().retentionDays,
+      autoArchiveDays: m().autoArchiveDays,
+      automaticArchivePurge: m().automaticArchivePurge ?? true,
+      unreferencedAttachmentRetentionDays: m().unreferencedAttachmentRetentionDays ?? 1,
+    }),
+    name: () => "Storage and archive",
+    where: () => m().name,
+    commit: v => ws.run({ type: "save_storage", machineId: m().id, ...v }),
+  });
   const total = () => m().storage.reduce((sum, s) => sum + s.mb, 0);
   const last = () => m().cleanup;
   useWantOverview();
@@ -201,11 +212,15 @@ function Storage() {
   return <Page title="Storage and archive" lead="How long this machine keeps finished work, and what it uses." bar={<SaveBar d={d} />}>
     <SetH title="Archive rules" />
     <div class="surface"><OverviewShown>
-      <Srow t="Auto archive" d="Tasks move from Done to Archive after this many days. Archiving never asks and never deletes work."><Stepper label="Auto archive" value={d.value().auto} suffix="days" min={1} max={90} disabled={off()} onChange={auto => d.set({ ...d.value(), auto })} /></Srow>
-      <Srow t="Retention" d="Archived tasks are cleaned up after this many days. 30 by default, set per machine."><Stepper label="Retention" value={d.value().retention} suffix="days" min={1} max={365} disabled={off()} onChange={retention => d.set({ ...d.value(), retention })} /></Srow>
+      <Srow t="Auto archive" d="Tasks move from Done to Archive after this many days. Archiving never asks and never deletes work."><Stepper label="Auto archive" value={d.value().autoArchiveDays} suffix="days" min={1} max={3650} disabled={off()} onChange={autoArchiveDays => d.set({ ...d.value(), autoArchiveDays })} /></Srow>
+      <Srow t="Retention" d="How long eligible finished tasks stay in Archive before cleanup can delete them, counted from archive time. A Done task archived by closing its sprint counts from its completion time plus the auto-archive days."><Stepper label="Retention" value={d.value().retentionDays} suffix="days" min={1} max={3650} disabled={off()} onChange={retentionDays => d.set({ ...d.value(), retentionDays })} /></Srow>
+      <Srow t="Delete expired archives automatically" d="On by default. Only closed tasks with confirmed, settled execution qualify. You can still run cleanup manually.">
+        <Sw label="Delete expired archives automatically" checked={d.value().automaticArchivePurge} disabled={off()} onChange={automaticArchivePurge => d.set({ ...d.value(), automaticArchivePurge })} />
+      </Srow>
+      <Srow t="Unreferenced attachments" d="Keep uploaded attachments that nothing saved refers to for at least this many days."><Stepper label="Unreferenced attachments" value={d.value().unreferencedAttachmentRetentionDays} suffix={d.value().unreferencedAttachmentRetentionDays === 1 ? "day" : "days"} min={1} max={3650} disabled={off()} onChange={unreferencedAttachmentRetentionDays => d.set({ ...d.value(), unreferencedAttachmentRetentionDays })} /></Srow>
       <Srow t="Space reclamation failures" d="Deleted records whose SQLite space could not be reclaimed. Deletion is not rolled back; close readers before maintenance."><span class={m().reclamationFailures ? "st st-warn" : "cap muted"}>{m().reclamationFailures ?? 0} records</span></Srow>
       </OverviewShown>
-      <Srow t="Last cleanup" d={wait() ?? (last() ? `${clock(last()!.at)}: removed ${last()!.removed} task${last()!.removed === 1 ? "" : "s"}, ${last()!.skipped} skipped and waiting for you. ${last()!.reclamationFailed ?? 0} records failed space reclamation.${last()!.freedMb ? ` ${sizeText(last()!.freedMb)} freed.` : ""}` : "No cleanup has run on this machine yet.")}>
+      <Srow t="Last manual cleanup" d={wait() ?? (last() ? `${clock(last()!.at)}: removed ${last()!.removed} task${last()!.removed === 1 ? "" : "s"}, ${last()!.skipped} skipped and waiting for you. ${last()!.reclamationFailed ?? 0} records failed space reclamation.${last()!.freedMb ? ` ${sizeText(last()!.freedMb)} freed.` : ""}` : "No cleanup has run manually on this machine yet.")}>
         <button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("run_cleanup")} onClick={() => { if (!off()) ws.run({ type: "run_cleanup", machineId: m().id, now: ws.store.clock() }); }}>Run cleanup now</button>
       </Srow>
     </div>

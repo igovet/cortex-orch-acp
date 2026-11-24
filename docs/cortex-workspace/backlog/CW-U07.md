@@ -116,7 +116,7 @@ Profiles, presets and retention:
 - [ ] Never captured (project settings, MCP `command`, `args`, `env`, credentials): Profiles, note.
 - [ ] Default preset apply (absent files only) and reset (replaces routing and defaults, keeps private backups, needs a literal confirmation): Defaults > Default preset.
 - [ ] Model-policy migration (preview, then apply with explicit consent): Files and sources.
-- [ ] Storage cleanup (0 to 36500 days; explicit owner action only; no automatic configuration key): Storage page. Archive retention per machine is Workspace-owned and belongs to [CW-C10](CW-C10.md).
+- [ ] Storage cleanup (0 to 36500 days; explicit owner action; automatic archive and purge are separate Workspace settings `autoArchiveDays`, `retentionDays` and `automaticArchivePurge`, see [Workspace storage retention](../../configuration.md#workspace-storage-retention)): Storage page. Archive retention per machine is Workspace-owned and belongs to [CW-C10](CW-C10.md).
 - [ ] Help language (English, Russian, both; default both): App > Appearance; a client setting, not a configuration key. The settings help is English only today, and the choice is open (SCREENS, orchestration open point 1).
 
 Sources and overview:

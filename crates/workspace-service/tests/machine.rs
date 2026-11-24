@@ -1106,6 +1106,37 @@ async fn code_lease_gates_save_and_heartbeat_without_persisting_the_token() {
     f.stop().await;
 }
 
+#[tokio::test]
+async fn code_edit_installs_an_absent_lease_group_but_refuses_partial_storage() {
+    let f = Fixture::plain().await;
+    f.write("a.txt", b"original");
+    let store = f.store();
+    store.write(|db| {
+        db.execute_batch("DROP TABLE code_writer_reservations")?;
+        Ok(())
+    }).unwrap();
+    let refused = f.call("repo.file.lease.acquire", json!({"file":"a.txt"})).await;
+    assert_eq!(refused["code"], "partial_storage_schema", "{refused}");
+
+    // Model an older format-12 store without any of the additive lease tables.
+    store.write(|db| {
+        db.execute_batch("DROP TABLE code_owner_file_leases; DROP TABLE code_editor_epoch")?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(
+        f.ok("repo.file.lease.status", json!({"file":"a.txt"})).await["status"],
+        "available"
+    );
+    let token = f.lease("a.txt").await;
+    assert!(token.is_string());
+    let released = f
+        .ok("repo.file.lease.release", json!({"file":"a.txt","leaseToken":token}))
+        .await;
+    assert_eq!(released["released"], true);
+    drop(store);
+    f.stop().await;
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_save_does_not_block_unrelated_start() {

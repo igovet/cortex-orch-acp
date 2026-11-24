@@ -952,6 +952,49 @@ describe("real port", () => {
       expect(asked.some(c => c.op === "product.sprint" && c.params?.action === "patch")).toBe(false);
     });
 
+    it("reads a sprint's live graph and sends each owner edit once, with a lost or unconfirmed answer left unknown", async () => {
+      const sprint = {id:"sp",projectId:"p",planning:"created",conversation:[],plan:{version:1,items:[]},materializedVersion:1,taskIds:["task-1"],queueState:"idle",pauseReason:null,runMode:"hybrid",description:"d"};
+      const {s,p,ready} = helper({sprints:[sprint]});
+      await ready();
+      const rev = "a".repeat(64);
+      const graph = {contractVersion:1,sprintId:"sp",graphRevision:rev,complete:true,priority:["task-1"],
+        members:[{taskId:"task-1",readStatus:"confirmed",dependencies:[],editable:true,canBePredecessor:true,approvedPlanKey:"k1"}],
+        order:{mode:"hybrid",queueState:"idle",working:[],notStarted:[{taskId:"task-1",rank:1,reason:null,next:false,conditional:false}]}};
+      const original = s.answers["machine.call"]!, sent: unknown[] = [];
+      let reply: () => unknown = () => ({ok:true,result:graph});
+      s.answers["machine.call"] = message => {
+        const call = message as {op:string;params?:{action?:string}};
+        if (call.op !== "product.sprint" || !["live_graph","set_dependency","move_priority"].includes(call.params?.action ?? "")) return original(message);
+        sent.push(message);
+        return reply();
+      };
+      expect(await p.sprintGraph!.read("sp")).toEqual({kind:"graph",graph});
+      expect(sent.at(-1)).toEqual({op:"product.sprint",projectId:"p",params:{action:"live_graph",sprintId:"sp"}});
+      // Another contract version, or an older service that does not know the action, leaves the sprint read-only.
+      reply = () => ({ok:true,result:{...graph,contractVersion:2}});
+      expect(await p.sprintGraph!.read("sp")).toEqual({kind:"unsupported"});
+      reply = () => ({ok:false,code:"unsupported_action",message:"This action is not available."});
+      expect(await p.sprintGraph!.read("sp")).toEqual({kind:"unsupported"});
+      reply = () => ({ok:false,code:"sprint_graph_too_large",message:"The sprint is too large to read."});
+      expect(await p.sprintGraph!.read("sp")).toEqual({kind:"refused",code:"sprint_graph_too_large",message:"The sprint is too large to read."});
+      expect(await p.sprintGraph!.read("elsewhere")).toMatchObject({kind:"refused",code:"unknown_sprint"});
+      const edit = {action:"set_dependency",sprintId:"sp",dependentTaskId:"task-1",predecessorTaskId:"task-2",present:true,expectedGraphRevision:rev} as const;
+      reply = () => ({ok:true,result:{changed:true}});
+      expect(await p.sprintGraph!.edit(edit)).toEqual({outcome:"changed"});
+      expect(sent.at(-1)).toEqual({op:"product.sprint",projectId:"p",params:edit});
+      reply = () => ({ok:true,result:{changed:false}});
+      expect(await p.sprintGraph!.edit(edit)).toEqual({outcome:"unchanged"});
+      reply = () => ({ok:false,code:"stale_graph_revision",message:"The sprint changed."});
+      expect(await p.sprintGraph!.edit(edit)).toEqual({outcome:"refused",code:"stale_graph_revision",message:"The sprint changed."});
+      reply = () => ({ok:false,code:"graph_save_unconfirmed",message:"The save could not be confirmed."});
+      expect(await p.sprintGraph!.edit(edit)).toEqual({outcome:"unknown",message:"The save could not be confirmed."});
+      const before = sent.length;
+      reply = () => { throw new Error("socket closed"); };
+      expect(await p.sprintGraph!.edit({action:"move_priority",sprintId:"sp",taskId:"task-1",direction:"up",expectedGraphRevision:rev})).toEqual({outcome:"unknown"});
+      expect(sent.length).toBe(before + 1);
+      await expect(p.sprintGraph!.read("sp")).rejects.toThrow("socket closed");
+    });
+
     it.each([undefined, "old-draft"])("recovers a failed Start with no execution (link: %s)", async planningTaskId => {
       const failure = {code:"planning_start_refused",text:"Start was refused.",step:"start",at:1};
       const sprint = {id:"sp",projectId:"p",planningTaskId,planning:"cancelled",conversation:[],planningFailure:failure};

@@ -664,7 +664,7 @@ The Workspace machine settings (Storage screen, machine overview and update) car
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `autoArchiveDays` | `7` | A Done task is archived automatically this many days after its saved Done time. No question is asked and the work is kept. |
-| `retentionDays` | `30` | An archived task becomes eligible for deletion this many days after its saved **Archive** time (not its Done time). |
+| `retentionDays` | `30` | An archived task becomes eligible for deletion this many days after its saved **Archive** time (not its Done time). The exception is a Done task newly archived by closing its sprint: its clock starts at its completion time plus `autoArchiveDays`, so it can be deleted on the next pass after closure when that moment is already past. An unknown completion time permits no age-based deletion. See [closing sprints](cortex-workspace/local-task-execution.md#editing-saved-tasks-and-closing-sprints). |
 | `automaticArchivePurge` | `true` | Whether the background pass deletes eligible archives. Archiving is always automatic; only background deletion follows this switch. |
 | `unreferencedAttachmentRetentionDays` | `1` | An attachment file that no saved task or committed answer references is removed this many days after its last write or renewal. |
 
@@ -874,7 +874,9 @@ role profile, so omission or a route change cannot widen task grants.
 Before a task starts, echoing the already selected exact model/provider is
 idempotent: absent native parameters are not a request to clear them. It keeps
 the saved portable coordinator and configured effort/mode unchanged. An actual
-route change still resets dependent parameters; an explicit effort selection
+route change resets other dependent parameters but keeps the configured effort
+when the new model offers it. Otherwise, the closest offered level is used
+(starting from Medium if no effort was configured). An explicit effort selection
 still changes that field. No ACP reset signal or catalog-order inference is
 introduced. Configuration states and engine confirmation references, not just UI values, are the evidence (the former bound inspector was removed; see [removed readers](features/observability/index.md#removed-python-era-readers)).
 

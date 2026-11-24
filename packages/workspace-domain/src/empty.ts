@@ -24,7 +24,7 @@ export function emptyConfig(): MachineConfig {
 }
 export function emptyMachine(input: Pick<Machine, "id" | "name" | "kind" | "connection">): Machine {
   return {
-    lastConfirmedAt: null, retentionDays: 30, autoArchiveDays: 7, worktreeRoot: "", version: null, latencyMs: null, historyGap: false, diskMb: null,
+    lastConfirmedAt: null, retentionDays: 30, autoArchiveDays: 7, automaticArchivePurge: true, unreferencedAttachmentRetentionDays: 1, worktreeRoot: "", version: null, latencyMs: null, historyGap: false, diskMb: null,
     remoteAccess: { allowed: false, devices: [] }, cleanup: null, diagnostics: null, storage: [], connections: [], config: emptyConfig(), ...input,
   };
 }

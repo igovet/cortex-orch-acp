@@ -26,7 +26,7 @@ fn inline(name: &str, bytes: &[u8]) -> Value {
     json!({"name":name,"mimeType":"image/png","data":b64(bytes)})
 }
 fn age(state: &Path, digest: &str) {
-    let old = SystemTime::now() - UNSENT_GRACE - Duration::from_secs(60);
+    let old = SystemTime::now() - Duration::from_secs(86_400 + 60);
     File::options()
         .write(true)
         .open(directory(state).join(digest))
@@ -183,6 +183,7 @@ fn saves_take_references_only_and_replies_carry_no_bytes() {
         &state,
         "p",
         &json!({"action":"create","description":"d","attachments":refs}),
+        None,
     )
     .unwrap();
     assert!(sprint["sprintId"].is_string());
@@ -191,6 +192,7 @@ fn saves_take_references_only_and_replies_carry_no_bytes() {
         "p",
         &json!({"action":"note","sprintId":sprint["sprintId"],"text":"n",
         "attachments":[inline("s.png",&bytes)]}),
+        None,
     )
     .unwrap_err();
     assert_eq!(refused.code, "inline_attachment_refused");
@@ -295,7 +297,7 @@ fn removing_the_last_reference_deletes_the_body_and_keeps_every_other() {
     assert!(exists(&fresh), "an unsent upload is kept within its grace");
     age(&state, &sha(&fresh));
     let _lock = settings::Lock::new(&state, "machine.lock").unwrap();
-    assert_eq!(sweep_locked(&state, UNSENT_GRACE).unwrap(), 1);
+    assert_eq!(sweep_locked(&state, SystemTime::now()).unwrap(), 1);
     assert!(!exists(&fresh) && exists(&shared));
 }
 
@@ -315,7 +317,7 @@ fn an_answer_file_lives_as_long_as_its_task_record() {
     {
         let _lock = settings::Lock::new(&state, "machine.lock").unwrap();
         // Referenced (an archived task keeps its answers): kept; nothing references the stray.
-        assert_eq!(sweep_locked(&state, UNSENT_GRACE).unwrap(), 1);
+        assert_eq!(sweep_locked(&state, SystemTime::now()).unwrap(), 1);
     }
     assert!(exists(&answered) && !exists(&stray));
     assert_eq!(read(&state, &sha(&answered)).unwrap(), answered);
@@ -324,8 +326,167 @@ fn an_answer_file_lives_as_long_as_its_task_record() {
     assert_eq!(product["answerFiles"], json!({}));
     settings::write_json(&product_path(&state, "p").unwrap(), &product).unwrap();
     let _lock = settings::Lock::new(&state, "machine.lock").unwrap();
-    assert_eq!(sweep_locked(&state, UNSENT_GRACE).unwrap(), 1);
+    assert_eq!(sweep_locked(&state, SystemTime::now()).unwrap(), 1);
     assert!(!exists(&answered));
+}
+
+#[test]
+fn attachment_sweep_respects_configured_age_and_fails_closed_on_directory_errors() {
+    let state = temp("scheduled-sweep");
+    let sha = put(&state, b"stray").unwrap();
+    age(&state, &sha);
+    let target = directory(&state).join(&sha);
+    let symlink = directory(&state).join("a".repeat(64));
+    std::os::unix::fs::symlink(&target, &symlink).unwrap();
+    let lock = settings::Lock::new(&state, "machine.lock").unwrap();
+    settings::write_json(&state.join("machine.json"), &json!({"unreferencedAttachmentRetentionDays":2})).unwrap();
+    let now = SystemTime::now();
+    assert_eq!(sweep_locked(&state, now).unwrap(), 0);
+    let product = state.join("product");
+    std::fs::write(&product, b"not a directory").unwrap();
+    let later = now + Duration::from_secs(86_400);
+    assert!(sweep_locked(&state, later).is_err());
+    assert!(target.is_file());
+    std::fs::remove_file(&product).unwrap();
+    assert_eq!(sweep_locked(&state, later).unwrap(), 1);
+    assert!(!target.exists());
+    assert!(symlink.symlink_metadata().unwrap().file_type().is_symlink());
+    drop(lock);
+}
+
+fn answer_sweep_store(state: &Path) -> (crate::Project, cortex_core::Store, String) {
+    let root = state.join("project");
+    fs::create_dir(&root).unwrap();
+    crate::project_guard::reserve(&root).unwrap();
+    let key = crate::native_runtime::key(&root).unwrap();
+    let store = cortex_core::Store::open(key, cortex_core::OpenMode::Initialize).unwrap();
+    let answer = put(state, b"still retained").unwrap();
+    age(state, &answer);
+    store.write(|db| {
+        db.execute("INSERT INTO workspace_projects VALUES ('p',?,'owner','now',1)", [root.to_str()])?;
+        db.execute("INSERT INTO workspace_tasks(task_id,project_id,description,execution_id,created_at) VALUES ('task','p','Fixture','execution','now')", [])?;
+        db.execute("INSERT INTO workspace_executions VALUES ('execution','task','runtime','session',1,1,'now')", [])?;
+        db.execute("INSERT INTO tasks VALUES ('runtime',?,'now')", [root.to_str()])?;
+        db.execute("INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES ('runtime','WAITING_USER','Fixture','now','now')", [])?;
+        db.execute(
+            "INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES ('runtime','USER_ANSWER_ATTACHMENTS','owner',?,'now')",
+            [json!({"attachments":[{"sha256":answer,"availability":"stored"}]}).to_string()],
+        )?;
+        Ok(())
+    }).unwrap();
+    let project = crate::Project {
+        project_id: "p".into(),
+        display_name: "Fixture".into(),
+        canonical_root: root,
+        activation: Some(crate::Activation {
+            actor_id: "owner".into(),
+            recorded_at: 0,
+        }),
+    };
+    assert!(!state.join("product").exists(), "the answer exists only in Core");
+    (project, store, answer)
+}
+
+#[test]
+fn attachment_sweep_keeps_a_committed_answer_before_the_product_cache_is_saved() {
+    let state = temp("answer-references");
+    let (project, store, answer) = answer_sweep_store(&state);
+    crate::local::save_registry(&state.join("projects.json"), &[project]).unwrap();
+    let orphan = put(&state, b"unreferenced").unwrap();
+    age(&state, &orphan);
+    let _lock = settings::Lock::new(&state, "machine.lock").unwrap();
+    let access = cortex_core::store::locks::AccessLock::acquire(
+        &store.key().directory().join(".access.lock"), false, true, Duration::ZERO,
+    ).unwrap();
+    assert!(sweep_locked(&state, SystemTime::now()).is_err());
+    assert!(directory(&state).join(&orphan).exists());
+    drop(access);
+    assert_eq!(sweep_locked(&state, SystemTime::now()).unwrap(), 1);
+    assert!(directory(&state).join(&answer).is_file());
+    assert!(!directory(&state).join(&orphan).exists());
+}
+
+#[test]
+fn attachment_sweep_keeps_core_only_answers_after_remove_and_readd() {
+    let state = temp("detached-answer-references");
+    let (mut project, _store, answer) = answer_sweep_store(&state);
+    // Remove keeps the first detached locator, so its activation may be stale.
+    // A re-added project also has no activation until it is started again.
+    project.activation = None;
+    crate::local::save_registry(
+        &state.join("removed-projects.json"),
+        std::slice::from_ref(&project),
+    )
+    .unwrap();
+    for readded in [false, true] {
+        if readded {
+            crate::local::save_registry(
+                &state.join("projects.json"),
+                std::slice::from_ref(&project),
+            )
+            .unwrap();
+        }
+        let orphan = put(&state, b"unreferenced").unwrap();
+        age(&state, &orphan);
+        let _lock = settings::Lock::new(&state, "machine.lock").unwrap();
+        assert_eq!(sweep_locked(&state, SystemTime::now()).unwrap(), 1);
+        assert!(directory(&state).join(&answer).is_file());
+        assert!(!directory(&state).join(&orphan).exists());
+    }
+}
+
+#[test]
+fn attachment_sweep_stops_when_a_detached_store_is_unreadable() {
+    let state = temp("unreadable-detached-store");
+    let (project, store, answer) = answer_sweep_store(&state);
+    crate::local::save_registry(&state.join("removed-projects.json"), &[project]).unwrap();
+    let orphan = put(&state, b"unreferenced").unwrap();
+    age(&state, &orphan);
+    let _lock = settings::Lock::new(&state, "machine.lock").unwrap();
+    let access = cortex_core::store::locks::AccessLock::acquire(
+        &store.key().directory().join(".access.lock"),
+        false,
+        true,
+        Duration::ZERO,
+    )
+    .unwrap();
+    assert!(sweep_locked(&state, SystemTime::now()).is_err());
+    assert!(directory(&state).join(&answer).is_file());
+    assert!(directory(&state).join(&orphan).is_file());
+
+    drop(access);
+    store
+        .write(|db| {
+            db.pragma_update(None, "user_version", 99)?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        sweep_locked(&state, SystemTime::now()).unwrap_err().code,
+        "unsupported_storage"
+    );
+    assert!(directory(&state).join(&answer).is_file());
+    assert!(directory(&state).join(&orphan).is_file());
+}
+
+#[test]
+fn attachment_sweep_allows_a_never_activated_project_with_no_store() {
+    let state = temp("new-project-without-store");
+    let root = state.join("project");
+    fs::create_dir(&root).unwrap();
+    crate::project_guard::reserve(&root).unwrap();
+    let project = crate::Project {
+        project_id: "p".into(),
+        display_name: "Fixture".into(),
+        canonical_root: root,
+        activation: None,
+    };
+    crate::local::save_registry(&state.join("projects.json"), &[project]).unwrap();
+    let orphan = put(&state, b"unreferenced").unwrap();
+    age(&state, &orphan);
+    let _lock = settings::Lock::new(&state, "machine.lock").unwrap();
+    assert_eq!(sweep_locked(&state, SystemTime::now()).unwrap(), 1);
+    assert!(!directory(&state).join(&orphan).exists());
 }
 
 #[test]
@@ -335,7 +496,7 @@ fn an_unreadable_product_file_stops_the_sweep() {
     age(&state, &digest);
     fs::create_dir_all(state.join("product")).unwrap();
     fs::write(state.join("product").join("p.json"), b"{not json").unwrap();
-    assert!(sweep_locked(&state, UNSENT_GRACE).is_err());
+    assert!(sweep_locked(&state, SystemTime::now()).is_err());
     assert!(directory(&state).join(digest).exists());
 }
 

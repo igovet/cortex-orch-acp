@@ -63,7 +63,7 @@ fn setup() -> (Project, cortex_core::Store, Value) {
     )
 }
 #[test]
-fn skill_proposal_header_uses_effective_language_without_changing_options() {
+fn skill_proposal_header_uses_effective_language_without_changing_option_labels() {
     for (language, action_label, question, options) in [
         ("en", "create", "Create?", ["Create the skill", "Not now"]),
         ("ru", "создание", "Создать?", ["Создать навык", "Не сейчас"]),
@@ -72,7 +72,7 @@ fn skill_proposal_header_uses_effective_language_without_changing_options() {
         args["question"] = json!(question);
         args["options"] = json!(options);
         let evidence_id = args["skill_proposal"]["evidence"][0]["report_id"].as_str().unwrap();
-        let (text, labels) = s.write(|db| {
+        let (text, stored_options) = s.write(|db| {
             cortex_core::lifecycle::event_tx(
                 db, "t", "NATIVE_TASK_SETTINGS", json!({"settings":{"language":language}}),
             )?;
@@ -86,7 +86,10 @@ fn skill_proposal_header_uses_effective_language_without_changing_options() {
         assert!(text.starts_with(&format!("case-skill ({action_label})\n")));
         assert!(text.contains(&format!("- {evidence_id} Case: one")));
         assert!(text.ends_with(question));
-        assert_eq!(serde_json::from_str::<Value>(&labels).unwrap(), json!(options));
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored_options).unwrap(),
+            json!([{"label":options[0],"recommended":true}, options[1]])
+        );
     }
 }
 #[test]
@@ -103,8 +106,8 @@ fn skill_proposals_still_require_an_exact_plain_string_pair() {
 fn coordinator_batch_waits_for_every_answer() {
     let (p, s, _) = setup();
     let a = json!({"request_key":"batch","questions":[
-        {"question":"Output?","options":["Long","Short"],"topic":"Output"},
-        {"question":"Language?","options":["English","Russian"],"topic":"Language"}]});
+        {"question":"Output?","options":["Long","Short"],"recommended":2,"topic":"Output"},
+        {"question":"Language?","options":["English","Russian"],"recommended":1,"topic":"Language"}]});
     let q = s
         .write(|db| skills::request(db, &p.0, "t", "c", "batch", &a))
         .unwrap();

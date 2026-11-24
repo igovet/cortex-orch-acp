@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSyn
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { DatabaseSync } from "node:sqlite";
+import { createRequire } from "node:module";
 import { NativeService } from "./native-machine";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
@@ -74,6 +74,8 @@ it("renders pending, uncaptured and empty command output from the native service
   await m.service.call("projects.activate", { projectId: m.id });
   await expect.poll(async () => (await m.service.call("projects.status", { projectId: m.id }) as { ready: boolean }).ready).toBe(true);
   const at = "2026-11-24T01:00:00Z";
+  // Load SQLite in Node, not through Vite’s jsdom module transform.
+  const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
   // Seed only synthetic engine records in the disposable Dev project. No engine is started.
   const db = new DatabaseSync(resolve(m.repo, ".cortex-dev/cortex.sqlite3"));
   try {

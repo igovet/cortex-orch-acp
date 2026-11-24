@@ -1,11 +1,6 @@
 use cortex_workspace_desktop::{client::Bridge, policy::authorize};
 use serde_json::{json, Value};
-use std::{
-    os::unix::fs::{MetadataExt, PermissionsExt},
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc, time::Duration};
 use workspace_service::{native_runtime::UnqualifiedRoutes, Config, LaunchSpec, Service};
 
 /// The native host is the only execution host.
@@ -194,6 +189,14 @@ async fn framed_bridge_detach_does_not_stop_service_or_runtime() {
         .unwrap();
     assert_eq!(status["ready"], true);
     assert_eq!(status["executionHost"], "rust");
+    let created = bridge.request(call("tasks.create",json!({
+        "protocol":{"major":workspace_protocol::WIRE_MAJOR,"minor":workspace_protocol::WIRE_MINOR},"requestId":"write-once","projectId":id,"target":id,
+        "operation":"tasks.create","expectedVersion":"0","ownerEpoch":null,"actorId":"untrusted",
+        "payload":{"description":"one"}
+    }))).await.unwrap();
+    assert_eq!(created["outcome"], "recorded");
+    // Activation owns initialization. Inspect the live store without competing
+    // for its initialization lock while the activation maintenance passes run.
     let root = f.0.join("project");
     let channel = if workspace_protocol::channel::current().is_dev() {
         cortex_core::StoreChannel::Dev
@@ -202,28 +205,9 @@ async fn framed_bridge_detach_does_not_stop_service_or_runtime() {
     };
     let store = cortex_core::Store::open(
         cortex_core::ProjectKey::new(&root, channel).unwrap(),
-        cortex_core::OpenMode::Initialize,
+        cortex_core::OpenMode::LiveReadOnly,
     )
     .unwrap();
-    store
-        .write(|db| {
-            db.execute(
-                "INSERT OR IGNORE INTO workspace_projects VALUES (?, ?, ?, 'now',1)",
-                (
-                    &id,
-                    root.to_str().unwrap(),
-                    format!("uid:{}", root.metadata().unwrap().uid()),
-                ),
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    let created = bridge.request(call("tasks.create",json!({
-        "protocol":{"major":workspace_protocol::WIRE_MAJOR,"minor":workspace_protocol::WIRE_MINOR},"requestId":"write-once","projectId":id,"target":id,
-        "operation":"tasks.create","expectedVersion":"0","ownerEpoch":null,"actorId":"untrusted",
-        "payload":{"description":"one"}
-    }))).await.unwrap();
-    assert_eq!(created["outcome"], "recorded");
     store
         .read(|db| {
             assert_eq!(
@@ -406,6 +390,20 @@ async fn native_editor_uses_only_the_registered_root_with_fake_code() {
         .await
         .unwrap_err();
     assert_eq!(escaped, "refused:That path is not inside this checkout.");
+    // Refused targets must never reach either native file-manager mechanism.
+    for (file, reason) in [
+        ("../outside", "That path is not inside this checkout."),
+        ("missing.txt", "This file is not in the checkout."),
+    ] {
+        let error = bridge
+            .request(call(
+                "native.reveal_file",
+                json!({"projectId":project["projectId"],"checkoutId":checkout,"file":file}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error, format!("refused:{reason}"));
+    }
     service.stop().await.unwrap();
     serving.await.unwrap().unwrap();
 }
@@ -465,13 +463,31 @@ async fn an_owner_save_goes_through_the_native_machine_bound_to_its_revision_and
     assert_eq!(read["ok"], true);
     let revision = read["result"]["revision"].as_str().unwrap().to_owned();
     assert_eq!(read["result"]["text"], "one\n");
-    let saved = bridge
+    let unleased = bridge
         .request(machine(
             "repo.file.save",
             json!({"file":"a.txt","text":"owner\n","revision":revision}),
         ))
         .await
         .unwrap();
+    assert_eq!(unleased["ok"], false);
+    assert_eq!(unleased["code"], "edit_lease_lost");
+    assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"one\n");
+
+    let lease = bridge
+        .request(machine("repo.file.lease.acquire", json!({"file":"a.txt"})))
+        .await
+        .unwrap();
+    assert_eq!(lease["ok"], true, "acquire refused: {}", lease["code"]);
+    let token = lease["result"]["leaseToken"].as_str().unwrap();
+    let saved = bridge
+        .request(machine(
+            "repo.file.save",
+            json!({"file":"a.txt","text":"owner\n","revision":revision,"leaseToken":token}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(saved["ok"], true, "save refused: {}", saved["code"]);
     assert_eq!(saved["result"]["outcome"], "saved");
     assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"owner\n");
 
@@ -480,7 +496,7 @@ async fn an_owner_save_goes_through_the_native_machine_bound_to_its_revision_and
     let conflict = bridge
         .request(machine(
             "repo.file.save",
-            json!({"file":"a.txt","text":"late\n","revision":saved["result"]["revision"]}),
+            json!({"file":"a.txt","text":"late\n","revision":saved["result"]["revision"],"leaseToken":token}),
         ))
         .await
         .unwrap();
@@ -502,19 +518,39 @@ async fn an_owner_save_goes_through_the_native_machine_bound_to_its_revision_and
         (escape["ok"].clone(), escape["code"].clone()),
         (json!(false), json!("invalid_path"))
     );
-    std::os::unix::fs::symlink(&outside, root.join("through")).unwrap();
+    // A lease on a safe path must not authorize a later symlink substitution.
+    let through = root.join("through");
+    std::fs::create_dir(&through).unwrap();
+    std::fs::write(through.join("secret"), "local").unwrap();
+    let file = "through/secret";
+    let read = bridge
+        .request(machine("repo.file", json!({"file":file})))
+        .await
+        .unwrap();
+    let revision = read["result"]["revision"].as_str().unwrap();
+    let lease = bridge
+        .request(machine("repo.file.lease.acquire", json!({"file":file})))
+        .await
+        .unwrap();
+    assert_eq!(lease["ok"], true, "acquire refused: {}", lease["code"]);
+    let token = lease["result"]["leaseToken"].as_str().unwrap();
+
+    std::fs::rename(&through, root.join("original")).unwrap();
+    std::os::unix::fs::symlink(&outside, &through).unwrap();
     let linked = bridge
         .request(machine(
             "repo.file.save",
-            json!({"file":"through/secret","text":"x","revision":null}),
+            json!({"file":file,"text":"x","revision":revision,"leaseToken":token}),
         ))
         .await
         .unwrap();
-    assert_eq!(
-        (linked["ok"].clone(), linked["code"].clone()),
-        (json!(false), json!("symlink_refused"))
-    );
+    assert_eq!(linked["ok"], false);
+    assert_eq!(linked["code"], "unsafe_edit_path");
     assert_eq!(std::fs::read(outside.join("secret")).unwrap(), b"secret");
+    assert_eq!(
+        std::fs::read(root.join("original/secret")).unwrap(),
+        b"local"
+    );
     service.stop().await.unwrap();
     serving.await.unwrap().unwrap();
 }
