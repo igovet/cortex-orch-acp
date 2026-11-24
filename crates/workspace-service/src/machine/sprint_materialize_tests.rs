@@ -337,3 +337,180 @@ async fn the_product_sprint_materialize_action_is_this_one_operation() {
     );
     assert_eq!(env.saved()["sprints"][0]["planning"], "created");
 }
+
+fn live(env: &Env, request: Value) -> Result<Value> {
+    super::super::sprint_live::owner_action(&env.root, &env.state, "p", &request)
+}
+
+fn graph(env: &Env) -> Value {
+    live(env, json!({"action":"live_graph","sprintId":"sp"})).unwrap()
+}
+
+fn edge(env: &Env, revision: &Value, task: &str, dep: &str, present: bool) -> Result<Value> {
+    live(env, json!({"action":"set_dependency","sprintId":"sp","expectedGraphRevision":revision,
+        "dependentTaskId":task,"predecessorTaskId":dep,"present":present}))
+}
+
+#[tokio::test]
+async fn sprint_live_graph_keeps_the_approved_plan_when_ten_later_drafts_are_linked() {
+    let env = env("live-later", 2);
+    let initial = env.run(1).unwrap()["taskIds"].clone();
+    let approved = env.saved()["sprints"][0].clone();
+    let store = Store::open(context::key(&env.root).unwrap(), OpenMode::RuntimeValidate).unwrap();
+    let config = crate::Config {
+        runtime_dir: env.base.join("runtime"), state_dir: env.state.clone(),
+        allowed_root: env.base.clone(), launch: crate::LaunchSpec::bare(),
+        request_timeout: std::time::Duration::from_secs(5),
+        shutdown_timeout: std::time::Duration::from_millis(100), event_capacity: 4,
+    };
+    let mut git = super::super::git::Git::for_service(&config);
+    let mut added = Vec::new();
+    for i in 0..10 {
+        let request = json!({"protocol":{"major":1,"minor":8},"requestId":format!("later-{i}"),
+            "projectId":"p","actorId":crate::actor(),"operation":"tasks.create","target":"p",
+            "expectedVersion":"0","ownerEpoch":null,"payload":{"description":"Later draft","checkout":{"kind":"worktree"}}});
+        let draft = core_workspace::create_draft(&store, "p", &crate::actor(), &request).unwrap().receipt;
+        let id = draft["target"].as_str().unwrap().to_owned();
+        super::super::task_actions::run(&env.root, "p", &env.state, &json!({"action":"sprint",
+            "sprintId":"sp","taskId":id,"dependencies":[]}), &mut git).await.unwrap();
+        added.push(id);
+    }
+    let first = graph(&env);
+    assert_eq!(first["members"].as_array().unwrap().len(), 12);
+    assert_eq!(first["members"][0]["taskId"], initial[0]);
+    assert_eq!(first["members"][0]["approvedPlanKey"], "t1");
+    assert_eq!(first["members"][11]["taskId"], added[9]);
+    assert!(first["members"][11]["approvedPlanKey"].is_null());
+    assert_eq!(first["members"][11]["dependencies"], json!([]));
+    assert_eq!(first["priority"][11], added[9]);
+
+    let rev = &first["graphRevision"];
+    assert_eq!(edge(&env, rev, &added[0], initial[1].as_str().unwrap(), true).unwrap()["changed"], true);
+    assert_eq!(edge(&env, rev, &added[1], &added[0], true).unwrap_err().code, "stale_graph_revision");
+    let second = graph(&env);
+    assert_eq!(edge(&env, &second["graphRevision"], &added[1], &added[0], true).unwrap()["changed"], true);
+    let third = graph(&env);
+    let rev = &third["graphRevision"];
+    let bytes = env.bytes();
+    assert_eq!(edge(&env, rev, &added[1], &added[0], true).unwrap()["changed"], false);
+    assert_eq!(edge(&env, rev, &added[0], &added[1], true).unwrap_err().code, "dependency_cycle");
+    assert_eq!(edge(&env, rev, &added[0], &added[0], true).unwrap_err().code, "dependency_self");
+    assert_eq!(edge(&env, rev, &added[0], "absent", true).unwrap_err().code, "dependency_missing");
+    assert_eq!(env.bytes(), bytes, "no-op and refusals do not rewrite the product");
+    assert_eq!(third["members"][2]["dependencies"], json!([initial[1]]));
+    assert_eq!(third["members"][3]["dependencies"], json!([added[0]]));
+    let saved = env.saved();
+    for key in ["plan", "history", "materializedVersion"] {
+        assert_eq!(saved["sprints"][0][key], approved[key]);
+    }
+    assert_eq!(env.drafts().len(), 12);
+}
+
+#[test]
+fn sprint_live_graph_reports_missing_and_accepts_only_confirmed_predecessors() {
+    let env = env("live-refusals", 3);
+    let ids: Vec<String> = serde_json::from_value(env.run(1).unwrap()["taskIds"].clone()).unwrap();
+    let mut saved = env.saved();
+    let path = product_path(&env.state, "p").unwrap();
+    saved["tasks"]["foreign"] = json!({"sprintId":"another"});
+    saved["tasks"][&ids[0]]["closedAs"] = json!("cancel");
+    saved["tasks"][&ids[0]]["status"] = json!("done");
+    settings::write_json(&path, &saved).unwrap();
+    let view = graph(&env);
+    let rev = &view["graphRevision"];
+    assert_eq!(edge(&env, rev, &ids[2], "foreign", true).unwrap_err().code, "dependency_cross_sprint");
+    assert_eq!(edge(&env, rev, &ids[2], &ids[0], true).unwrap_err().code, "predecessor_unavailable");
+    // A legacy duplicate stays readable; removing that link removes every copy.
+    saved["tasks"][&ids[1]]["dependencies"] = json!([ids[0], ids[0]]);
+    settings::write_json(&path, &saved).unwrap();
+    let view = graph(&env);
+    assert_eq!(view["members"][1]["dependencies"], json!([ids[0], ids[0]]));
+    assert_eq!(edge(&env, &view["graphRevision"], &ids[2], &ids[1], false).unwrap_err().code, "dependency_duplicate");
+    assert_eq!(edge(&env, &view["graphRevision"], &ids[1], &ids[0], false).unwrap()["changed"], true);
+    let mut saved = env.saved();
+    saved["tasks"][&ids[0]]["closedAs"] = json!("as_is");
+    saved["tasks"][&ids[0]]["archive"] = json!({"previousStatus":"done"});
+    settings::write_json(&path, &saved).unwrap();
+    let view = graph(&env);
+    assert_eq!(view["members"][0]["canBePredecessor"], true);
+    assert_eq!(edge(&env, &view["graphRevision"], &ids[2], &ids[0], true).unwrap()["changed"], true);
+
+    let mut saved = env.saved();
+    saved["sprints"][0]["taskIds"].as_array_mut().unwrap().push(json!("missing"));
+    settings::write_json(&path, &saved).unwrap();
+    let view = graph(&env);
+    assert_eq!(view["complete"], false);
+    assert_eq!(view["members"][3]["readStatus"], "missing");
+    assert!(view["members"][3]["dependencies"].is_null());
+    assert_eq!(view["members"][2]["editable"], false);
+    // Even a valid revision cannot edit an archived sprint.
+    saved["sprints"][0]["archivedAt"] = json!(1);
+    settings::write_json(&path, &saved).unwrap();
+    assert_eq!(edge(&env, &graph(&env)["graphRevision"], &ids[2], &ids[1], false).unwrap_err().code, "sprint_read_only");
+}
+
+#[test]
+fn sprint_live_order_uses_the_claim_sequence_and_labels_unknown_start_order() {
+    let env = env("live-claim-order", 4);
+    let mut saved = env.saved();
+    saved["sprints"][0]["checkout"]["kind"] = json!("main");
+    saved["sprints"][0]["runMode"] = json!("manual");
+    let path = product_path(&env.state, "p").unwrap();
+    settings::write_json(&path, &saved).unwrap();
+    let ids: Vec<String> = serde_json::from_value(env.run(1).unwrap()["taskIds"].clone()).unwrap();
+    let store = Store::open(context::key(&env.root).unwrap(), OpenMode::RuntimeValidate).unwrap();
+    let mut runtimes = Vec::new();
+    for i in [2, 1, 0] {
+        let request = json!({"protocol":{"major":1,"minor":8},"operation":"tasks.start",
+            "requestId":format!("manual-{i}"),"projectId":"p","actorId":crate::actor(),
+            "target":ids[i],"expectedVersion":"1","ownerEpoch":null,"payload":{}});
+        let result = core_workspace::start_native_input_with_policy(&store, "p", &crate::actor(), &request,
+            None, None, None).unwrap();
+        assert_eq!(result["fresh"], true);
+        runtimes.push(result["task"].as_str().unwrap().to_owned());
+    }
+    store.write(|db| {
+        // Model an older execution without retained native claim-order evidence.
+        db.execute("DELETE FROM runtime_events WHERE task_id=? AND type='NATIVE_START_ADMITTED'", [&runtimes[0]])?;
+        Ok(())
+    }).unwrap();
+    let view = graph(&env);
+    let working = view["order"]["working"].as_array().unwrap();
+    assert_eq!(working.iter().map(|w| w["taskId"].as_str().unwrap()).collect::<Vec<_>>(),
+        vec![ids[1].as_str(), ids[0].as_str(), ids[2].as_str()]);
+    assert!(working[0]["startOrder"].as_str().unwrap().parse::<i64>().unwrap()
+        < working[1]["startOrder"].as_str().unwrap().parse::<i64>().unwrap());
+    assert!(working[2]["startOrder"].is_null());
+    assert!(view["order"]["notStarted"].as_array().unwrap().iter().all(|r| r["next"] == false));
+
+    let mut saved = env.saved();
+    saved["sprints"][0]["runMode"] = json!("hybrid");
+    saved["sprints"][0]["queueState"] = json!("paused");
+    saved["sprints"][0]["pauseReason"] = json!("Paused by you");
+    settings::write_json(&path, &saved).unwrap();
+    let paused = graph(&env);
+    assert_eq!(paused["order"]["notStarted"][0]["reason"], "queue_paused");
+    assert!(paused["order"]["notStarted"][0]["rank"].is_null());
+    assert_eq!(edge(&env, &paused["graphRevision"], &ids[3], &ids[2], false).unwrap()["changed"], true);
+    let after = graph(&env);
+    assert_eq!(after["order"]["queueState"], "paused");
+    assert_eq!(after["order"]["notStarted"][0]["next"], false);
+}
+
+#[test]
+fn sprint_live_graph_failed_atomic_save_leaves_the_previous_graph() {
+    let env = env("live-write-limit", 2);
+    let ids: Vec<String> = serde_json::from_value(env.run(1).unwrap()["taskIds"].clone()).unwrap();
+    let mut saved = env.saved();
+    saved["tasks"][&ids[1]]["dependencies"] = json!([]);
+    saved["fixturePadding"] = json!("");
+    let allowance = FRAME_BUDGET - serde_json::to_vec(&saved).unwrap().len();
+    saved["fixturePadding"] = json!("x".repeat(allowance));
+    let path = product_path(&env.state, "p").unwrap();
+    settings::write_json(&path, &saved).unwrap();
+    let view = graph(&env);
+    let before = env.bytes();
+    assert_eq!(edge(&env, &view["graphRevision"], &ids[1], &ids[0], true).unwrap_err().code, "graph_save_unconfirmed");
+    assert_eq!(env.bytes(), before);
+    assert_eq!(graph(&env), view);
+}

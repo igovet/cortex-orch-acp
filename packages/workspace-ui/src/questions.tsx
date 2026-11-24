@@ -1,11 +1,12 @@
-import { createSignal, onCleanup, Show, untrack, useContext, type Accessor, type JSX } from "solid-js";
+import { createSignal, createUniqueId, onCleanup, Show, untrack, useContext, type Accessor, type JSX } from "solid-js";
 import type { AttachmentInput, CommandReceipt, WorkspaceCommand } from "@cortex/workspace-domain";
 import { AttachChips, createAttachments, createDictation, MessageComposer } from "./composer";
+import { workspaceCopy } from "./copy";
 import { useWs } from "./ctx";
 import { createUnsent, ScreenActive } from "./freshness";
 import { I, Keyed } from "./kit";
 import { Action } from "./layout";
-import { ResultText } from "./result-text";
+import { createInlineResultText, InlineResultText, ResultText } from "./result-text";
 import { clock } from "./selectors";
 
 /** `optionsOnly`: its options act by themselves (the runtime's stop question, a skill proposal), so an option takes no added words. */
@@ -49,7 +50,7 @@ function Question(props: Shared & { ask: Accessor<Ask>; n: number; of: number; h
   onCleanup(() => props.register(id, null));
   // A question with options always keeps its answer line, so choosing one fills the line instead of adding it and the page
   // does not move under the pointer.
-  const answerLine = () => option() ? <>Answer: <strong>{option()!.label}</strong></> : ask().options.length ? <>Answer: <span class="faint">not chosen yet</span></> : undefined;
+  const answerLine = () => option() ? <>Answer: <span class="w500"><InlineResultText text={option()!.label} /></span></> : ask().options.length ? <>Answer: <span class="faint">not chosen yet</span></> : undefined;
   const many = () => props.of > 1;
   // Built once for this question: a refreshed record of it must not rebuild the note's links and lose their focus. The note
   // reads the question's current facts by its id.
@@ -64,8 +65,28 @@ function Question(props: Shared & { ask: Accessor<Ask>; n: number; of: number; h
     {note}
     {/* Answers that say what they do (the runtime's stop question) are full-width rows, the label over its consequence. */}
     <div class={ask().options.some(o => o.sub || o.recommended) ? "dc-opts dc-opts-rows" : "dc-opts"} role="radiogroup" aria-label={many() ? `Answers to question ${props.n}` : "Answers"}>
-      <Keyed each={ask().options} by={keyOf}>{(o, i) => <button type="button" class="opt" role="radio" aria-checked={chosen() === keyOf(o()) ? "true" : "false"} aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs(props.needs)}
-        onClick={() => { if (!off() && !ws.gate(props.needs)) choose(chosen() === keyOf(o()) ? null : keyOf(o())); }}><span class="n">{i() + 1}</span><span class="t">{o().label}<Show when={o().recommended}> <span class="cap st-ok ws-dc-rec">Recommended</span></Show></span><Show when={o().sub}><span class="sub">{o().sub}</span></Show></button>}</Keyed>
+      <Keyed each={ask().options} by={keyOf}>{(o, i) => {
+        const id = createUniqueId();
+        const checked = () => chosen() === keyOf(o());
+        const label = createInlineResultText(() => o().label);
+        const detail = createInlineResultText(() => o().sub ?? "");
+        const select = () => { if (!off() && !ws.gate(props.needs)) choose(checked() ? null : keyOf(o())); };
+        const contents = () => <>
+          <span class="n" aria-hidden="true">{i() + 1}</span>
+          <span class="t" id={id + "-label"}>{label().nodes}<Show when={o().recommended}> <span class="cap st-ok ws-dc-rec">{workspaceCopy("questionRecommended")}</span></Show></span>
+          <Show when={o().sub}><span class="sub" id={id + "-detail"}>{detail().nodes}</span></Show>
+        </>;
+        // Only options with links need separate hit targets. The link is never a descendant of the radio.
+        return <Show when={label().hasLinks || detail().hasLinks} fallback={
+          <button type="button" class="opt" role="radio" aria-checked={checked()} aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs(props.needs)} onClick={select}>{contents()}</button>
+        }>
+          <label class="opt ws-ask-option" classList={{ "ws-ask-selected": checked(), "ws-ask-disabled": !!off() }} for={id}>
+            <button type="button" class="ws-ask-radio" id={id} role="radio" aria-labelledby={id + "-label"} aria-describedby={o().sub ? id + "-detail" : undefined}
+              aria-checked={checked()} aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs(props.needs)} onClick={select} />
+            {contents()}
+          </label>
+        </Show>;
+      }}</Keyed>
     </div>
     {/* The answer box writes the answer only: the task's model and effort were chosen for its session and an answer cannot change them. */}
     <MessageComposer class="dc-answer" label={many() ? `Your answer to question ${props.n}` : "Your answer"} placeholder={option() && !ask().optionsOnly ? (props.projectId ? "Add to your answer, tag @files…" : "Add to your answer…") : ask().options.length ? (props.projectId ? "Or write your own answer, tag @files…" : "Or write your own answer…") : props.projectId ? "Write your answer, tag @files…" : "Write your answer…"} text={text()} onText={write} files={files} mic={mic}

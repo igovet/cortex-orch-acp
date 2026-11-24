@@ -290,6 +290,14 @@ before it starts:
 The check never refreshed quota or connection data, never granted consent and never
 wrote. Availability, quota and a task's ceiling are checked again at dispatch.
 
+### Coordinator effort defaults
+
+The coordinator effort picker never offers an engine-default sentinel. Without
+an explicit choice, the coordinator uses the effort from machine Settings or
+Medium, narrowed to the closest level the selected model reports. Models with
+no concrete effort selector receive no effort parameter. This does not change
+automatic worker routing or explicit worker-effort policy.
+
 ### Explicit effort preservation
 
 A covered exact-model request can also select an exact effort in that **same

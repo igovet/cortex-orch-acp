@@ -26,7 +26,7 @@ function archiveDue(state: WorkspaceState, now: number, machineId?: string) {
   for (const task of state.tasks) {
     const machine = machineFor(state, task);
     if (inMachine(state, task, machineId) && !task.archive && task.status === "done" && task.doneAt !== null && now >= task.doneAt + machine.autoArchiveDays * DAY &&
-      (task.archiveAskAfter === null || now >= task.archiveAskAfter) && machine.connection === "connected" && task.process === "stopped") {
+      (task.archiveAskAfter == null || now >= task.archiveAskAfter) && machine.connection === "connected" && task.process === "stopped") {
       requestArchive(state, task, now);
       if (task.archiveQuestion) asked++;
     }

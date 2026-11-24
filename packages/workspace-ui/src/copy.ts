@@ -43,6 +43,7 @@ export const COPY = {
   noCodeWithoutGit: "The Code view reads files through Git. This project has no repository yet; you can create one in the Git tab.",
   changesWithoutGit: "Changes were applied in the project folder. This project has no Git repository, so there is no diff to show here.",
   confirmStop: "Confirm stop",
+  questionRecommended: "Recommended",
   attachTitle: "Attach files",
   noAttachments: "Attachments are not available yet",
   voiceLabel: "Voice input",
@@ -110,6 +111,7 @@ export type CopyKey = keyof typeof COPY;
 // The Workspace copy catalogue is English by default. Keep locale overrides here,
 // using the client locale (not the language sent to an engine).
 const RU: Partial<Record<CopyKey, string>> = {
+  questionRecommended: "Рекомендуется",
   deleteWorktreeFolder: "Удалить worktree папку",
   closeDeleteWorktreeFolder: "Закрыть и удалить worktree папку",
 };

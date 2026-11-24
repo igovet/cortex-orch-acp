@@ -45,6 +45,62 @@ fn bounded_executor_owns_project_reuses_connections_and_queries_committed_wal() 
     }
     drop(executor);
 }
+#[tokio::test]
+async fn full_writer_admission_timeout_never_runs_the_unaccepted_job() {
+    use std::time::{Duration, Instant};
+
+    let p = Project::new();
+    let executor = StoreExecutor::open(p.key()).unwrap();
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let blocker = executor
+        .publication(move |_| {
+            entered.send(()).unwrap();
+            gate.recv_timeout(Duration::from_secs(6)).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    observed.await.unwrap();
+    let queued: Vec<_> = (0..128)
+        .map(|_| executor.publication(|_| Ok(())).unwrap())
+        .collect();
+
+    let started = Instant::now();
+    let ticket = executor.submitted();
+    let result = tokio::time::timeout(
+        Duration::from_secs(4),
+        executor.publication_wait(|store| {
+            store.write(|db| {
+                db.execute("CREATE TABLE unexpected_admission (value TEXT)", [])?;
+                Ok(())
+            })
+        }),
+    )
+    .await
+    .expect("admission must be bounded");
+    assert_eq!(result.unwrap_err().code(), "busy");
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    assert_eq!(executor.submitted(), ticket, "refusals are not enqueued");
+
+    release.send(()).unwrap();
+    blocker.await.unwrap().unwrap();
+    for done in queued {
+        done.await.unwrap().unwrap();
+    }
+    assert!(!executor
+        .publication_wait(|store| {
+            store.read(|db| {
+                Ok(db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='unexpected_admission')",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )?)
+            })
+        })
+        .await
+        .unwrap());
+}
+
 /// Deferred display writes: never reported, committed before any ordinary job
 /// submitted after them, each in its own savepoint (a failing one is rolled back
 /// alone), and on shutdown.

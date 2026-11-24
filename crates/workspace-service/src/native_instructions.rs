@@ -235,6 +235,8 @@ mod tests {
             .unwrap();
         let tool = tools.iter().find(|t| t["name"] == "ask_question").unwrap();
         let signature = signature(&tool["inputSchema"]);
+        assert!(signature.contains("recommended?=integer 1..8"));
+        assert!(signature.contains("recommended=integer 1..8"));
         assert_eq!(
             signature
                 .matches("[string | {detail?=string 1..1000, label=string 1..1000}]")

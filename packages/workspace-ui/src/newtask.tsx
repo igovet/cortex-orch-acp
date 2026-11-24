@@ -1,7 +1,8 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
-import { capabilityOf, effectiveCeiling, FEATURES, machineDefaults, routingFor, type CommandReceipt, type SprintRunMode, type TaskSettings } from "@cortex/workspace-domain";
+import { capabilityOf, effectiveCeiling, FEATURES, machineDefaults, machineEffort, resolveEffort, routingFor, type CommandReceipt, type SprintRunMode, type TaskSettings } from "@cortex/workspace-domain";
 import { createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
 import { useWs } from "./ctx";
+import { createRequestFeedback, RequestStatus } from "./request-feedback";
 import { FieldEdit } from "./field-edit";
 import { createUnsent } from "./freshness";
 import { Tile } from "./frame";
@@ -24,6 +25,7 @@ type TitleState = "empty" | "naming" | "named" | "failed";
 /** New task or sprint. The description is the only required field; Cortex writes the title, and the owner can always rename it. */
 export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   const ws = useWs();
+  const request = createRequestFeedback();
   const [text, setText] = createSignal("");
   const [tried, setTried] = createSignal(false);
   const [saving, setSaving] = createSignal(false);
@@ -34,8 +36,9 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   const chooseCheckout = (value: "worktree" | "main") => { checkoutPicked = true; setCheckout(value); };
   // A folder without Git has no branches: the task works in the folder itself, and nothing offers a branch choice.
   const noGit = () => summary()?.project.hasGit === false;
-  const separate = () => ws.can(FEATURES.taskWorktrees) && !noGit();
-  const noWorktree = () => noGit() ? "A worktree needs Git. This folder has no Git repository, so work stays in the project folder." : ws.t("noTaskWorktrees");
+  const noWorktree = () => noGit() ? ws.t("worktreeNeedsGit") : !ws.can(FEATURES.taskWorktrees) ? ws.t("noTaskWorktrees")
+    : (kind() === "sprint" ? runMode() : pickedSprint()?.runMode) === "automatic" ? ws.t("worktreeNeedsManualOrHybrid") : undefined;
+  const separate = () => !noWorktree();
   const checkout = () => pickedSprint()?.checkout?.kind ?? (separate() ? chosen() : "main");
   const [runMode, setRunMode] = createSignal<SprintRunMode>("manual");
   const [chosenRoute, setSettings] = createSignal<TaskSettings>(defaults.settings);
@@ -62,11 +65,11 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
       // Keep an explicit choice only while the selected project still offers it.
       const preferred = routePicked ? current : values;
       const model = models.find(m => m.id === preferred.model) ?? models[0];
-      const keepEffort = model !== undefined && model.id === preferred.model && (!model.efforts || model.efforts.includes(preferred.effort));
-      return { ...preferred, model: model?.id ?? "", effort: keepEffort ? preferred.effort : model?.efforts?.[0] ?? "" };
+      return { ...preferred, model: model?.id ?? "", effort: resolveEffort(routePicked ? preferred.effort : "", machineEffort(ws.machine()), model?.efforts) };
     });
   });
-  const blocked = () => !summary() ? "Add a project to this machine first" : summary()!.offline ? `${summary()!.machine.name} is offline` : null;
+  const blocked = () => !summary() ? "Add a project to this machine first" : summary()!.offline ? `${summary()!.machine.name} is offline`
+    : pickedSprint()?.checkout?.kind === "worktree" ? noWorktree() ?? null : null;
   const empty = () => !text().trim();
   const draftTitle = () => ws.demo?.title.draft(text()) ?? "";
   const title = () => renamed() ?? draftTitle();
@@ -109,13 +112,13 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
     setSaving(true);
     try {
     if (kind() === "sprint") {
-      const receipt = await ws.run({ type: "create_sprint", projectId: s.project.id, description: text(), attachments: files.files(), runMode: runMode(), checkout: { kind: checkout() }, settings: settings(), targetBranch: target() });
+      const receipt = await request.run({ type: "create_sprint", projectId: s.project.id, description: text(), attachments: files.files(), runMode: runMode(), checkout: { kind: checkout() }, settings: settings(), targetBranch: target() });
       if (!receipt.ok || !receipt.entityId) return;
       // Route and target are recorded before the planning start.
       ws.go({ name: "sprint", machine: s.machine.id, project: s.project.id, sprint: receipt.entityId, tab: "planning" });
       return;
     }
-    const receipt = await ws.run({
+    const receipt = await request.run({
       type: "create_task", projectId: s.project.id, description: text(), attachments:files.files(), settings: settings(), sprintId: pickedSprint()?.id,
       checkout: checkout() === "main" ? { kind: "main" } : { kind: "worktree", branch: branch(), path: `worktrees/${slug(title())}-${ws.unique()}` },
     });
@@ -129,7 +132,7 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
     if (renamed() !== null) { if (ws.can(capabilityOf("rename_task"))) void ws.run({ type: "rename_task", taskId, title: renamed()! }); }
     else if (ws.can(capabilityOf("generate_title"))) void ws.run({ type: "generate_title", taskId, fail: titleState() === "failed" });
     if (start) {
-      const started = await ws.run({ type: "start_task", taskId, now: ws.store.clock() });
+      const started = await request.run({ type: "start_task", taskId, now: ws.store.clock() });
       if (started.ok) { ws.go({ name: "task", machine: s.machine.id, task: taskId }); return; }
     }
     ws.go({ name: "project", machine: s.machine.id, project: s.project.id, view: "board", scope: { kind: "all" } });
@@ -197,6 +200,7 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
       text={text()} onText={write} files={files} mic={mic} autofocus sendKey="mod-enter" attachOff={saving() ? "Saving…" : undefined}
       route={<RouteBar id="new" options={options()} disabled={ws.can(FEATURES.taskRoute) ? undefined : ws.t("machineRoute")} settings={settings()} onChange={patch => { routePicked = true; setSettings({ ...settings(), ...patch }); }} />}
       send={kind() === "sprint" ? { label: "Start planning", needs: "create_sprint", go: () => submit(false, plane()) } : { label: "Save draft", needs: "create_task", go: () => submit(false, plane()) }} /></div>
+    <RequestStatus text={request.text()} />
     <div class="ws-slot"><Show when={tried() && (empty() || blocked())}><div class="err">{blocked() ?? "Describe what needs doing."}</div></Show></div>
 
     <Show when={kind() === "task"} fallback={<div style={{ display: "grid", gap: "14px" }}>
@@ -221,7 +225,7 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
           <Show when={titleState() === "named"}><dd><FieldEdit label="Task title" value={title()} save={saveTitle} closed={{ class: "tt ws-edit", text: saved => saved }} /></dd></Show>
           <Show when={titleState() === "failed"}><dd><FieldEdit label="Task title" value={draftTitle()} save={saveTitle} closed={{ class: "tt muted ws-edit", text: saved => saved }} /></dd><dd class="row"><span class="cap st-warn">Title not generated</span><button class="btn btn-sm" onClick={generate}>Retry</button></dd></Show>
         </dl></Show>
-        <Show when={!pickedSprint()?.checkout} fallback={<div class="cap muted">Checkout follows this sprint: {checkout() === "worktree" ? "Separate worktree per task" : "Project folder"}.</div>}><Checkout /></Show>
+        <Show when={!pickedSprint()?.checkout} fallback={<div class="cap muted">Checkout follows this sprint: {checkout() === "worktree" ? "Separate worktree per task" : "Project folder"}.<Show when={checkout() === "worktree" && noWorktree()}> {noWorktree()}</Show></div>}><Checkout /></Show>
         <Target hint={`Git default branch. The task stops at ${step()} for your confirmation.`} />
       </div>
     </Show>

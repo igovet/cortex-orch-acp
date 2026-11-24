@@ -358,6 +358,142 @@ fn worktree_draft_is_refused_with_its_own_reason_before_any_effect() {
     }
     assert_eq!(count(&s, "workspace_outbox"), outbox);
 }
+fn git(root: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["-c", "core.hooksPath=/dev/null", "-c", "user.name=Test",
+               "-c", "user.email=test@example.invalid", "-C"])
+        .arg(root)
+        .args(args)
+        .output().unwrap();
+    assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap().trim().into()
+}
+
+fn worktree_draft(s: &Store) -> String {
+    let mut c = command();
+    c["payload"]["description"] = json!("Worktree // run");
+    c["payload"]["checkout"] = json!({"kind":"worktree"});
+    create_draft(s, "p", "owner", &c).unwrap().receipt["target"].as_str().unwrap().into()
+}
+
+#[test]
+fn worktree_start_materializes_only_committed_head_and_replays_exactly() {
+    use cortex_core::workspace::{start_native_worktree, worktrees::resolve};
+    use std::fs;
+    let (p, s) = setup();
+    let machine = Project::new();
+    git(&p.0, &["init"]);
+    fs::write(p.0.join("file"), "committed").unwrap();
+    fs::write(p.0.join(".gitattributes"), "file filter=external\n").unwrap();
+    git(&p.0, &["add", "file", ".gitattributes"]);
+    git(&p.0, &["commit", "-m", "base"]);
+    let base = git(&p.0, &["rev-parse", "HEAD"]);
+    fs::write(p.0.join("file"), "staged").unwrap();
+    git(&p.0, &["add", "file"]);
+    fs::write(p.0.join("file"), "unstaged").unwrap();
+    fs::write(p.0.join("untracked"), "local only").unwrap();
+
+    // A required and broken smudge demonstrates that checkout doesn't run filters.
+    git(&p.0, &["config", "filter.external.smudge", "false"]);
+    git(&p.0, &["config", "filter.external.required", "true"]);
+    let draft = worktree_draft(&s);
+    let cmd = start_command(&draft, "worktree");
+    let first = start_native_worktree(&s, "p", "owner", &cmd, &machine.0).unwrap();
+    let task = first["task"].as_str().unwrap();
+    let owner = cortex_core::ownership::OwnerEpoch {
+        owner: "owner".into(),
+        epoch: first["owner"]["epoch"].as_i64().unwrap(),
+    };
+    let checkout = resolve(&s, task, &owner).unwrap();
+    let w = checkout.worktree.as_ref().unwrap();
+    assert_eq!(checkout.logical.root(), p.0);
+    assert!(w.path.starts_with(&machine.0));
+    assert!(w.branch.starts_with("cw/worktree-run-"));
+    assert_eq!(w.branch.rsplit('-').next().unwrap().len(), 12);
+    assert_eq!(w.base_sha, base);
+    assert_eq!(fs::read_to_string(w.path.join("file")).unwrap(), "committed");
+    assert!(!w.path.join("untracked").exists());
+    assert_eq!(fs::read_to_string(p.0.join("file")).unwrap(), "unstaged");
+    assert_eq!(git(&p.0, &["show", ":file"]), "staged");
+    let outbox = count(&s, "workspace_outbox");
+    let replay = start_native_worktree(&s, "p", "owner", &cmd, &p.0).unwrap();
+    assert_eq!(replay["fresh"], false);
+    assert_eq!(first["receipt"], replay["receipt"]);
+    assert_eq!(count(&s, "workspace_outbox"), outbox);
+    assert_eq!(count(&s, "task_workspaces"), 1);
+    let mut changed = cmd;
+    changed["expectedVersion"] = json!("2");
+    assert_eq!(start_native_worktree(&s, "p", "owner", &changed, &machine.0)
+        .unwrap_err().code(), "payload_conflict");
+    assert_eq!(resolve(&s, task, &cortex_core::ownership::OwnerEpoch {
+        owner: "owner".into(), epoch: owner.epoch + 1
+    }).unwrap_err().code(), "stale_owner");
+    git(&w.path, &["update-ref", "--no-deref", "HEAD", &base]);
+    assert_eq!(resolve(&s, task, &owner).unwrap_err().code(), "worktree_unavailable");
+}
+
+#[test]
+fn worktree_start_refuses_no_git_unborn_and_existing_path_without_main_fallback() {
+    use cortex_core::workspace::start_native_worktree;
+    use std::fs;
+    let (p, s) = setup();
+    let machine = Project::new();
+    let draft = worktree_draft(&s);
+    let start = |request: &str| start_native_worktree(&s, "p", "owner",
+        &start_command(&draft, request), &machine.0);
+    assert_eq!(start("not-git").unwrap_err().code(), "worktree_git_required");
+    git(&p.0, &["init"]);
+    assert_eq!(start("unborn").unwrap_err().code(), "worktree_head_unborn");
+    git(&p.0, &["commit", "--allow-empty", "-m", "base"]);
+    assert_eq!(start("not-git").unwrap_err().code(), "worktree_git_required");
+
+    use sha2::{Digest, Sha256};
+    let hex = |v: &[u8]| format!("{:x}", Sha256::digest(v));
+    let repo = hex(p.0.join(".git").as_os_str().as_encoded_bytes());
+    let suffix = hex(draft.as_bytes());
+    let collision = machine.0.join(&repo[..16]).join(format!("worktree-run-{}", &suffix[..12]));
+    fs::create_dir_all(&collision).unwrap();
+    fs::write(collision.join("keep"), "untouched").unwrap();
+    assert_eq!(start("collision").unwrap_err().code(), "worktree_collision");
+    assert_eq!(fs::read_to_string(collision.join("keep")).unwrap(), "untouched");
+    assert_eq!(count(&s, "runtime_tasks"), 0);
+    assert_eq!(count(&s, "task_workspaces"), 0);
+}
+
+#[test]
+fn a_witnessed_worktree_survives_failed_admission_and_retries_without_new_git_effects() {
+    use cortex_core::workspace::start_native_worktree;
+    let (p, s) = setup();
+    let machine = Project::new();
+    git(&p.0, &["init"]);
+    git(&p.0, &["commit", "--allow-empty", "-m", "base"]);
+    let draft = worktree_draft(&s);
+    let cmd = start_command(&draft, "one-start");
+    s.write(|db| {
+        db.execute_batch("CREATE TRIGGER fixture_fail_admit BEFORE INSERT ON workspace_executions
+            BEGIN SELECT RAISE(ABORT, 'fixture injection'); END;")?;
+        Ok(())
+    }).unwrap();
+    assert!(start_native_worktree(&s, "p", "owner", &cmd, &machine.0).is_err());
+    assert_eq!(count(&s, "runtime_tasks"), 0);
+    assert_eq!(count(&s, "task_workspaces"), 0);
+    let witness = git(&p.0, &["worktree", "list", "--porcelain"]);
+    assert_eq!(witness.lines().filter(|l| l.starts_with("worktree ")).count(), 2);
+    assert_eq!(start_native_worktree(&s, "p", "owner", &start_command(&draft, "second-start"), &machine.0)
+        .unwrap_err().code(), "worktree_uncertain");
+    s.write(|db| {
+        db.execute_batch("DROP TRIGGER fixture_fail_admit;")?;
+        Ok(())
+    }).unwrap();
+    let result = start_native_worktree(&s, "p", "owner", &cmd, &p.0).unwrap();
+    assert_eq!(result["fresh"], true);
+    assert_eq!(git(&p.0, &["worktree", "list", "--porcelain"]), witness);
+    assert_eq!(count(&s, "runtime_tasks"), 1);
+    assert_eq!(count(&s, "task_workspaces"), 1);
+}
+
 /// Live N3: Request changes on a finished native task failed with
 /// `task_not_resumable`. As in Python `policy.apply_steering`, an owner message
 /// reopens a COMPLETED/FAILED task for a fresh plan; cancelled or owner-closed
@@ -471,6 +607,125 @@ fn owner_message_reopens_a_finished_task_but_not_a_cancelled_or_closed_one() {
     })
     .unwrap();
 }
+#[test]
+fn explicit_owner_rework_is_versioned_and_keeps_the_closed_history() {
+    use cortex_core::workspace::{control, start_native};
+    let (p, s) = setup();
+    for (index, state) in ["COMPLETED", "CANCELLED", "FAILED"].into_iter().enumerate() {
+        let mut create = command();
+        create["requestId"] = json!(format!("rework-draft-{index}"));
+        let draft = create_draft(&s, "p", "owner", &create).unwrap().receipt["target"]
+            .as_str().unwrap().to_owned();
+        let start = start_native(&s, "p", "owner",
+            &start_command(&draft, &format!("rework-start-{index}"))).unwrap();
+        let task = start["task"].as_str().unwrap();
+        let execution = start["receipt"]["target"].as_str().unwrap();
+        s.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state=?,revision=4,synthesis='Earlier result',
+                blocker=? WHERE task_id=?", (state, if state == "COMPLETED" {None} else {Some("earlier blocker")},task))?;
+            if state == "CANCELLED" {
+                db.execute("INSERT INTO task_stopped VALUES (?,?)", (task, "now"))?;
+            }
+            cortex_core::lifecycle::event_tx(db, task, "OWNER_TASK_RESOLVED",
+                json!({"certified": state == "COMPLETED"}))?;
+            Ok(())
+        }).unwrap();
+        let b = s.read(|db| control::binding(db, p.0.to_str().unwrap(), "p", "owner", execution)).unwrap();
+        let request = json!({"action":"rework","projectId":"p","taskId":draft,"executionId":execution,
+            "requestId":"rework","text":"Please make a fresh plan.","expectedVersion":b.version.to_string(),
+            "ownerEpoch":b.owner.epoch.to_string()});
+        let run = |request: &Value, archived| control::rework(&s, "p", "owner", request, None,
+            control::ReworkDisposition {
+                archived, closed: false, integrated: false, target: None,
+                history: json!({"acceptance":{"version":"previous"}}), worktree_root: &p.0,
+            });
+        let late = json!({"action":"prompt","executionId":execution,"requestId":"late","text":"Ordinary message"});
+        assert_eq!(control::admit(&s, "p", "owner", &late).err().unwrap().code(), "task_not_resumable");
+        assert_eq!(run(&request, true).unwrap_err().code(), "task_archived");
+        let mut stale = request.clone();
+        stale["expectedVersion"] = json!("0");
+        assert_eq!(run(&stale, false).unwrap_err().code(), "stale_version");
+        stale = request.clone();
+        stale["ownerEpoch"] = json!("0");
+        assert_eq!(run(&stale, false).unwrap_err().code(), "stale_epoch");
+        let mut empty = request.clone();
+        empty["text"] = json!("  ");
+        assert_eq!(run(&empty, false).unwrap_err().code(), "invalid_message");
+        let result = run(&request, false).unwrap();
+        assert_eq!(result["state"], "PLANNING");
+        assert_eq!(run(&request, false).unwrap(), result);
+        assert_eq!(run(&empty, false).unwrap_err().code(), "payload_conflict");
+        s.read(|db| {
+            let (state_now, revision, synthesis, blocker): (String, i64, Option<String>,Option<String>) =
+                db.query_row("SELECT state,revision,synthesis,blocker FROM runtime_tasks WHERE task_id=?",
+                    [task], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+            assert_eq!((state_now.as_str(), revision, synthesis, blocker), ("PLANNING",4,None,None));
+            let raw: String = db.query_row("SELECT payload_json FROM runtime_events
+                WHERE task_id=? AND type='TASK_REOPENED'",[task],|r|r.get(0))?;
+            let event: Value = serde_json::from_str(&raw)?;
+            assert_eq!(event["previous"], state);
+            assert_eq!(event["origin"], "owner_rework");
+            assert_eq!(event["closed"]["acceptance"]["version"], "previous");
+            assert_eq!(event["closed"]["synthesis"], "Earlier result");
+            assert!(!cortex_core::lifecycle::reconciliation::direct_answer_allowed(db, task)?);
+            let count = |kind: &str| db.query_row("SELECT count(*) FROM runtime_events WHERE task_id=? AND type=?",
+                (task,kind),|r|r.get::<_,i64>(0));
+            assert_eq!(count("OWNER_TASK_RESOLVED")?,1);
+            assert_eq!(count("TASK_REOPENED")?,1);
+            assert_eq!(count("USER_STEERING")?,1);
+            assert!(!control::owner_resolution_current(db, task)?);
+            let saved: String = db.query_row("SELECT text FROM host_transcript WHERE session_id=? AND kind='user_message'
+                ORDER BY seq DESC LIMIT 1",[&b.session],|r|r.get(0))?;
+            assert_eq!(saved, request["text"]);
+            Ok(())
+        }).unwrap();
+    }
+}
+
+#[test]
+fn unconfirmed_close_does_not_authorize_rework_until_the_exact_execution_is_reconciled() {
+    use cortex_core::workspace::{control, start_native};
+    let (p, s) = setup();
+    let draft = create_draft(&s, "p", "owner", &command()).unwrap().receipt["target"]
+        .as_str().unwrap().to_owned();
+    let start = start_native(&s, "p", "owner", &start_command(&draft, "start")).unwrap();
+    let task = start["task"].as_str().unwrap();
+    let execution = start["receipt"]["target"].as_str().unwrap();
+    s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='COMPLETED' WHERE task_id=?", [task])?;
+        db.execute("UPDATE workspace_starts SET state='unknown' WHERE execution_id=?", [execution])?;
+        Ok(())
+    }).unwrap();
+    let root = p.0.to_str().unwrap();
+    let project = || s.read(|db| cortex_core::projections::task_records(db, "p", root, &draft))
+        .unwrap().unwrap();
+    control::close_unconfirmed(&s, "p", "owner", &draft, execution, project().version).unwrap();
+    let mut request = json!({"action":"rework","projectId":"p","taskId":draft,"executionId":execution,
+        "requestId":"repair","text":"Please do this again.","expectedVersion":project().version,
+        "ownerEpoch":start["owner"]["epoch"].as_i64().unwrap().to_string()});
+    let run = |request: &Value| control::rework(&s, "p", "owner", request, None,
+        control::ReworkDisposition {
+            archived: false, closed: false, integrated: false, target: None,
+            history: json!({}), worktree_root: &p.0,
+        });
+    assert_eq!(run(&request).unwrap_err().code(), "native_execution_binding_invalid");
+    s.write(|db| {
+        db.execute("UPDATE workspace_starts SET state='claimed' WHERE execution_id=?", [execution])?;
+        Ok(())
+    }).unwrap();
+    assert!(project().warnings.iter().any(|w| w == "owner_closed_unconfirmed"));
+    request["expectedVersion"] = json!(project().version);
+    assert_eq!(run(&request).unwrap()["state"], "PLANNING");
+    assert_eq!(project().phase, "planning");
+    assert!(!project().warnings.iter().any(|w| w == "owner_closed_unconfirmed"));
+    s.read(|db| {
+        let history: i64 = db.query_row("SELECT count(*) FROM workspace_requests WHERE operation='tasks.close_unconfirmed'",
+            [], |r| r.get(0))?;
+        assert_eq!(history, 1);
+        Ok(())
+    }).unwrap();
+}
+
 /// Live N2: owner steering and Request changes text must read back as user
 /// turns of the task conversation, in order, through the desktop history page.
 #[test]

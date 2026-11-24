@@ -75,7 +75,11 @@ describe("workspace store", () => {
     await flush();
     const first = store.dispatch({ type: "start_task", taskId: "t", now: 1 }), repeat = store.dispatch({ type: "start_task", taskId: "t", now: 2 });
     expect(s.commands).toHaveLength(1);
+    const start = { type: "start_task", taskId: "t" } as const;
+    expect(store.pendingRequest(start)).toBe(true);
+    expect(store.pendingTask("start_task", "other")).toBe(false);
     s.receipt(); await flush(); await flush();
+    expect(store.pendingRequest(start)).toBe(false);
     expect((await first).ok).toBe(true);
     expect(await repeat).toEqual(await first);
     void store.dispatch({ type: "start_task", taskId: "t", now: 3 });

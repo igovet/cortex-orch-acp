@@ -1,0 +1,17 @@
+{
+  "format": 1,
+  "active": null,
+  "applied": null,
+  "profiles": {
+    "historical-v1": {
+      "description": "Historical Python format 1",
+      "rules": {
+        "deny": [
+          "fixture-disabled-model"
+        ]
+      },
+      "created_at": "2026-11-24T09:55:47.654152+00:00",
+      "updated_at": "2026-11-24T09:55:47.654152+00:00"
+    }
+  }
+}

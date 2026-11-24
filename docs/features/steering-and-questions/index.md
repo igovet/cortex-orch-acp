@@ -19,6 +19,17 @@ receipt, pending question, resume phase and `WAITING_USER` transition before
 contacting the ACP client. Supported clients receive the existing elicitation
 form; other clients receive the question and options as ordinary chat text.
 A declined, cancelled or timed-out elicitation leaves the question open.
+For a normal coordinator or worker question, the asker supplies one recommended
+option by its 1-based position, independently for each member of a batch.
+Cortex refuses a missing or out-of-list recommendation before opening the
+question. Workspace marks it beside the label; Paseo shows the mark as the
+option description. Neither client preselects it. Labels, answer identities
+and custom answers stay unchanged, and older questions without recommendation
+metadata still display. Exact skill proposals keep their approval/decline
+pair and recommend approval unless explicitly marked otherwise; runtime stop
+questions retain the runtime's own recommendation. No recommendation counts
+as an answer.
+
 Only an answer recorded against that exact question resumes the requesting
 phase. A completed worker-local question (or complete batch) also restores the
 three-replan budget with a durable `WORKER_USER_ANSWER_RECEIVED` marker in the
@@ -81,6 +92,8 @@ runtime validates action-matched approval and decline labels before persistence,
 shows its own evidence list, and derives an approve, decline or unclear decision
 from the exact answer. Persisted unsafe labels fail closed after restart; see
 [project skill management](../skill-management/index.md#proposed-skills-from-repeated-work).
+
+Ordinary single and batch questions (coordinator and worker) take each option as a plain string label or as an object `{label, detail}`. The optional `detail` is a short explanation (1–1000 characters, like the label); unknown object fields are refused. Plain-string options stay accepted. Workspace shows the detail under the option; selecting the option returns only its label, so answer matching, routing and replay are unchanged. Skill-proposal approve/decline pairs require plain strings, and runtime stop questions keep their own options. Question text should write file paths in backticks so Workspace can make them clickable. A worker's `ask_question` is one short question line: the details, evidence and consequences go once into the worker's message before the call. This is prompt guidance, not runtime enforcement of Markdown or of one line.
 
 The question contract is role-neutral: structured questions emitted from coordinator, worker, and runtime fallback paths use the same provider handling. The runtime request carries the question text and any answer options; a supported client can render them as a structured form. Paseo uses its installed `QuestionFormCard` with choice labels and an "Other..." field. Related questions can be carried in one batch and displayed in one **paginated** form; the user navigates among members and must answer every member before one all-member submission. This does not mean every field is simultaneously visible. Tabs use the supplied short topic (or bounded question-text fallback), never raw ids. Duplicate headers gain ` 2`, ` 3`, etc., within 24 characters. The provider uses that same unique header list to map Paseo's header-keyed submission back to exact question identities; complete legacy id-keyed maps remain accepted, but mixed key spaces are rejected.
 

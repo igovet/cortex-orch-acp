@@ -1,6 +1,6 @@
 # CW-G07: Owner-confirmed merge and PR
 
-**Status:** Implemented: Ready to merge with owner-confirmed local squash merge or pull request creation, and a conflict display with manual resolution ([local task execution](../local-task-execution.md)); handing a conflict to Cortex is not confirmed in code; no-paid checks only · **Phase:** 3+ · **Size:** L
+**Status:** Implemented in desktop and service source: owner-confirmed squash or PR, explicit Cortex handoff for a stopped source merge, recovery and fresh-check request ([Integration and conflicts](../local-task-execution.md#integration-and-conflicts)); no paid or installed-desktop qualification for handoff · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Owner-confirmed merge and PR.
@@ -12,17 +12,17 @@ CW-R20, CW-R25, CW-R35; see [requirements](../requirements.md).
 [Domain model](../domain-model.md), [testing and acceptance](../testing-and-acceptance.md), [desktop rework](../design/desktop-rework-proposal.ru.md) and dependencies below. Owner decisions supersede conflicting historical proposal text.
 
 ## Deliverables
-Implement test-first Ready to merge, target selection and confirmed local squash or PR workflow. Conflict handoff: "Let Cortex resolve" sends a conflict to the task; its result returns as a normal diff through Ready to merge for owner review, and "Abort merge" is always available. Split before implementation if effort exceeds L.
+Ready to merge, target selection and confirmed local squash or PR workflow. **Hand to the app…** sends the saved conflict to Cortex only on owner confirmation. Finish requires fresh checks; inspect unconfirmed outcomes before attempting manual changes.
 
 ## Acceptance
-- Positive: Default target is the Git default branch, overridable for task or sprint; owner confirms either action. A conflict handed to Cortex returns as a normal diff in Ready to merge, awaiting owner confirmation.
+- Positive: Default target is the Git default branch, overridable for the work or sprint; the owner confirms final integration. A confirmed stop or failure returns a still-stopped saved merge to the owner. After manual or Cortex Finish, review the normal diff and request fresh independent review and runtime verification before integration.
 - Negative: Automatic mode never merges or creates a PR without confirmation; conflicts remain unresolved until the owner hands them to Cortex or resolves them. A Cortex resolution is never merged or pushed without owner confirmation, and no automatic stash or reset runs.
 
 ## Dependencies
 CW-G06, CW-C07, CW-G03.
 
 ## Validation
-Write positive and negative domain or contract tests first where applicable; run focused tests and record command, environment, outcome and unrun cases. Conflict handoff tests use a real Git repository in a temporary directory: the conflicted state is kept, handoff performs no merge, and abort restores the pre-merge state without stash or reset.
+Use no-paid fixtures with a real Git repository to exercise the bound handoff and path manifest, confirmed stop, unknown inspection without replay, exact Finish and Abort, and fresh-check gating. Keep final target integration and target-side squash rollback separate.
 
 ## Documentation impact
 Update the relevant planned contracts and [roadmap](../roadmap.md) as behavior and qualification change; do not describe plans as shipped.

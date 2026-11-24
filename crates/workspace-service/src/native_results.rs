@@ -74,6 +74,18 @@ fn validate_result_with(
         .as_array()
         .ok_or(CoreError::Refused("invalid_native_result"))?;
     let mut runs = store.read(|db| worker_checks::load_runs(db, &i.task, &c.channel_id))?;
+    let logical = store.key().root();
+    if store.read(|db| Ok(crate::native_project::task_root(db, &i.task)? != logical))? {
+        let checkout = crate::native_project::checkout_binding(store, i)?
+            .ok_or(CoreError::Refused("worktree_binding_invalid"))?;
+        runs.retain(|run| {
+            run.receipt.get("checkout") == Some(&checkout)
+                && run.receipt["cwd"].as_str().map(std::path::Path::new).is_some_and(|cwd| {
+                    checkout["root"].as_str().is_some_and(|root| cwd.starts_with(root))
+                        && !cwd.components().any(|part| part == std::path::Component::ParentDir)
+                })
+        });
+    }
     let relevant = worker_checks::relevant_references(submitted, &runs);
     for run in &mut runs {
         if !run.receipt["tool_call_ref"]
@@ -121,7 +133,8 @@ fn validate_result_with(
                 assignment,
                 reference,
                 &mut digests,
-            )?;
+            )?.filter(|binding| binding.get("checkout") == run.receipt.get("checkout")
+                && (binding.get("checkout").is_none() || binding["cwd"] == run.receipt["cwd"]));
         }
     }
     // Retain only this attempt's observed failures/pending receipts, including
@@ -1323,6 +1336,7 @@ const FAILED_CHECK_CODES: [&str; 5] = [
 ];
 fn copy_evidence(e: &EvidenceSnapshot) -> EvidenceSnapshot {
     EvidenceSnapshot {
+        checkout_evidence: e.checkout_evidence.clone(),
         project_digest: e.project_digest.clone(),
         ignored_digest: e.ignored_digest.clone(),
         head: e.head.clone(),
@@ -1649,12 +1663,15 @@ fn submit_once(
         .ok_or(CoreError::Refused("worker_required"))?;
     // A review verdict is compared with what its review binds: the current bytes
     // of the task's own files (`native_change_set`), or the whole checkout.
-    if i.stage.as_deref() == Some("review") {
-        let root = store.key().root().to_path_buf();
+    let review_root = if i.stage.as_deref() == Some("review") {
+        let binding = crate::native_project::checkout_binding(store, &i)?;
+        let root = binding.as_ref().and_then(|b| b["root"].as_str())
+            .map(std::path::PathBuf::from).unwrap_or_else(|| store.key().root().to_path_buf());
         store.read(|db| {
             crate::native_change_set::bind_task_files_tx(db, &root, &i.task, &mut evidence)
         })?;
-    }
+        Some(root)
+    } else { None };
     let key = text(args, "request_key")?;
     let intent_actor = format!("native-publication:{}", credential.channel_id);
     // Conflict-check the complete payload before any file effect. This committed
@@ -1667,7 +1684,9 @@ fn submit_once(
         }
         let refusal =
             lifecycle::review::preflight_result_tx(db, &i.task, assignment, key, &evidence)?;
-        refresh_rebound_review_packet_tx(db, store.key().root(), &i.task, assignment)?;
+        if let Some(root) = &review_root {
+            refresh_rebound_review_packet_tx(db, root, &i.task, assignment)?;
+        }
         Ok(refusal)
     })? {
         // The re-binding is committed; the worker gets a structured, correctable error

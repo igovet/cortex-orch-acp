@@ -10,6 +10,12 @@ const raw = { __cortex_question: true, batchId: "qb_test", questionId: "pq_first
 assert.throws(() => parseQuestionBatch({ ...raw, questionId: "pq_second" }));
 assert.throws(() => parseQuestionBatch({ ...raw, questions: [raw.questions[0], raw.questions[0]] }));
 assert.throws(() => parseQuestionBatch({ ...raw, questions: [raw.questions[0], { ...raw.questions[1], options: ["Light", " light "] }] }));
+const recommended = parseQuestionBatch({ ...raw, questions: [
+  { ...raw.questions[0], recommended: 2 }, { ...raw.questions[1], recommended: 1 },
+] });
+assert.deepEqual(batchForm(recommended).questions.map(q => q.options.map(o => o.description)),
+  [[undefined, "Recommended"], ["Recommended", undefined]]);
+assert.throws(() => parseQuestionBatch({ ...raw, questions: [{ ...raw.questions[0], recommended: 3 }, raw.questions[1]] }));
 assert.throws(() => batchAnswers(raw, { "Which layout": "Compact", foreign: "Dark" }));
 // An optional per-question topic becomes the batch UI's tab label verbatim;
 // a missing one falls back to the question's own bounded, punctuation-

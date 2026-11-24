@@ -137,7 +137,7 @@ impl Fixture {
                 json!({"op":op,"projectId":project,"params":params}),
             )
             .await;
-        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["ok"], true, "{op}: {reply}");
         reply["result"].clone()
     }
     async fn register(&self, name: &str) -> String {
@@ -445,6 +445,62 @@ impl Fixture {
         }
         panic!("conversation did not end within 50 pages");
     }
+}
+
+/// Acquiring the first edit lease in a current store must coexist with live reads.
+#[tokio::test]
+async fn native_edit_lease_acquires_while_store_is_being_read() {
+    let mut f = Fixture::new();
+    let channel = if workspace_protocol::channel::current().is_dev() {
+        cortex_core::StoreChannel::Dev
+    } else {
+        cortex_core::StoreChannel::Release
+    };
+    let key = cortex_core::ProjectKey::new(&f.root.join("projects/one"), channel).unwrap();
+    f.start().await;
+    let id = f.ready_project().await;
+    let created = f.rpc("workspace", json!({
+        "protocol":{"major":1,"minor":8},"projectId":id,"actorId":"forged",
+        "requestId":"edit-while-reading","operation":"tasks.create","target":id,
+        "expectedVersion":"0","ownerEpoch":null,
+        "payload":{"description":"Draft before first edit","checkout":{"kind":"main"}}
+    })).await;
+    assert!(created["target"].is_string(), "{created}");
+    let (reading, ready) = tokio::sync::oneshot::channel();
+    let (release, finished) = tokio::sync::oneshot::channel::<()>();
+    let reader = tokio::task::spawn_blocking(move || {
+        let store = cortex_core::Store::open(key, cortex_core::OpenMode::LiveReadOnly)?;
+        store.read(|db| {
+            let before: i64 =
+                db.query_row("SELECT count(*) FROM code_owner_file_leases", [], |r| r.get(0))?;
+            assert_eq!(before, 0);
+            reading.send(()).unwrap();
+            // Also unblocks when the test panics and drops the sender.
+            let _ = finished.blocking_recv();
+            let after: i64 =
+                db.query_row("SELECT count(*) FROM code_owner_file_leases", [], |r| r.get(0))?;
+            assert_eq!(after, 0, "the live read keeps its original snapshot");
+            Ok(())
+        })
+    });
+    tokio::time::timeout(Duration::from_secs(5), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    let lease = f
+        .machine("repo.file.lease.acquire", Some(&id), json!({"file":"readme.txt"}))
+        .await;
+    release.send(()).unwrap();
+    reader.await.unwrap().unwrap();
+    let released = f
+        .machine(
+            "repo.file.lease.release",
+            Some(&id),
+            json!({"file":"readme.txt","leaseToken":lease["leaseToken"]}),
+        )
+        .await;
+    assert_eq!(released["released"], true);
+    f.stop().await;
 }
 
 /// A run that was working when its service stopped keeps its whole retained conversation readable

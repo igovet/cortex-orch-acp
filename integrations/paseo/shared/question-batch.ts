@@ -2,7 +2,8 @@
 export type QuestionBatch = {
   batchId: string;
   questionId: string;
-  questions: Array<{ questionId: string; question: string; options: string[]; topic?: string }>;
+  language?: "ru";
+  questions: Array<{ questionId: string; question: string; options: string[]; topic?: string; recommended?: number }>;
 };
 /** A short tab label when the runtime sent none (an older batch, or a model
  * that omitted the optional field): the question's own first meaningful
@@ -37,13 +38,27 @@ export function parseQuestionBatch(input: Record<string, unknown>): QuestionBatc
     ids.add(member.questionId);
     return {
       questionId: member.questionId, question: member.question, options: [...member.options] as string[],
+      ...recommendation(member.recommended, member.options.length),
       ...(typeof member.topic === "string" && member.topic.trim() ? { topic: member.topic.trim() } : {}),
     };
   });
   if (members[0].questionId !== questionId) throw new Error("Invalid Cortex question batch anchor");
-  return { batchId, questionId, questions: members };
+  return { batchId, questionId, questions: members, ...(input.language === "ru" ? { language: "ru" as const } : {}) };
 }
-export function batchForm(batch: Pick<QuestionBatch, "questions">) {
+
+export function recommendation(value: unknown, count: number): { recommended?: number } {
+  if (value === undefined) return {};
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > count) {
+    throw new Error("Invalid Cortex question recommendation");
+  }
+  return { recommended: value };
+}
+
+export function questionOption(label: string, index: number, recommended?: number, language?: unknown) {
+  return { label, ...(index + 1 === recommended ? { description: language === "ru" ? "Рекомендуется" : "Recommended" } : {}) };
+}
+
+export function batchForm(batch: Pick<QuestionBatch, "questions" | "language">) {
   const headers = new Set<string>();
   return { questions: batch.questions.map((member) => {
     const topic = member.topic || fallbackTopic(member.question) || "Question";
@@ -55,7 +70,7 @@ export function batchForm(batch: Pick<QuestionBatch, "questions">) {
     headers.add(header);
     return {
       question: member.question, header,
-      options: member.options.map((label) => ({ label })), multiSelect: false, allowOther: true,
+      options: member.options.map((label, index) => questionOption(label, index, member.recommended, batch.language)), multiSelect: false, allowOther: true,
     };
   }) };
 }

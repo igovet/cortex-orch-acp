@@ -117,10 +117,12 @@ const PROGRAM_MISSING: &str = "The check program is unavailable in its execution
 
 /// Availability only, through the same probe that plan and verification
 /// admission use. Never runs the check and never counts as test evidence.
-pub(super) async fn preflight(root: std::path::PathBuf, args: &Value) -> CoreResult<Value> {
+pub(super) async fn preflight(
+    root: std::path::PathBuf, logical: Option<std::path::PathBuf>, args: &Value,
+) -> CoreResult<Value> {
     let argv = args["argv"].clone();
     let (available, reason, message) =
-        match crate::native_effects::verification_preflight(root, &json!([argv])).await {
+        match crate::native_effects::checkout_preflight(root, logical, &json!([argv])).await {
             Ok(()) => (true, Value::Null, "Check program available; the check has not run."),
             Err(CoreError::Refused("verification_executable_unavailable")) => {
                 (false, json!("program_missing"), PROGRAM_MISSING)

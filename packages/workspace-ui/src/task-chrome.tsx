@@ -40,6 +40,7 @@ export function BranchChip(props: { view: TaskView }) {
   const m = useModel(() => props.view.id);
   const t = () => props.view.task;
   const worktree = () => t().checkout.kind === "worktree";
+  const terminalReason = () => worktree() ? "The terminal opens in the project folder only. Open it from the project board." : undefined;
   const uncommitted = () => taskCheckout(ws.store.state(), t())?.files.length ?? m()?.session.changes?.files;
   return <>
     <button class="chip branch-chip" popovertarget="m-wt" aria-label={`${worktree() ? "Worktree" : "Project folder"}${t().checkout.branch ? ` ${t().checkout.branch}` : ""}`}><I n="branch" s={12} /><span class="w-wide">{worktree() ? "Worktree" : "Project folder"}</span><Show when={t().checkout.branch}><span data-tooltip-cut="" class="mono trunc" style={{ "max-width": "170px" }}>{t().checkout.branch}</span></Show></button>
@@ -51,7 +52,16 @@ export function BranchChip(props: { view: TaskView }) {
         <Show when={props.view.target}><dt>{sameBranch(t(), props.view.target) ? "Target branch" : "Merge into"}</dt><dd class="mono">{props.view.target}</dd></Show>
         <Show when={uncommitted() !== undefined}><dt>Uncommitted</dt><dd>{uncommitted() ? `${uncommitted()} files` : "None"}</dd></Show>
       </dl>
-      <Show when={ws.terminalAvailable()}><div class="row" style={{ "margin-top": "10px" }}><button class="btn btn-line btn-sm" aria-disabled={worktree() ? "true" : undefined} data-why={worktree() ? "This service offers project shells only. Open the project terminal from its board." : undefined} onClick={e => { if (worktree()) return; (e.currentTarget.closest("[popover]") as HTMLElement).hidePopover?.(); if (!ws.panels.terminalOpen()) ws.toggleTerminal(); }}>{worktree() ? "Open worktree terminal" : "Open terminal here"}</button></div></Show>
+      <Show when={ws.terminalAvailable()}>
+        <div class="row" style={{ "margin-top": "10px" }}>
+          <button class="btn btn-line btn-sm" aria-disabled={worktree() ? "true" : undefined} aria-describedby={worktree() ? "worktree-terminal-reason" : undefined} data-why={terminalReason()} onClick={e => {
+            if (worktree()) return;
+            (e.currentTarget.closest("[popover]") as HTMLElement).hidePopover?.();
+            if (!ws.panels.terminalOpen()) ws.toggleTerminal();
+          }}>{worktree() ? "Open worktree terminal" : "Open terminal here"}</button>
+        </div>
+        <Show when={terminalReason()}>{reason => <p id="worktree-terminal-reason" class="cap muted">{reason()}</p>}</Show>
+      </Show>
     </Pop>
   </>;
 }

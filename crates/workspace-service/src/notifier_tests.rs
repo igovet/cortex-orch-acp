@@ -54,7 +54,7 @@ fn each_owner_moment_maps_to_its_kind_and_target() {
         ),
         ("stop".to_owned(), vec![question("wd_2", true)]),
     ]);
-    let found = items("p", &tasks, &product, &decisions);
+    let found = items("p", &tasks, &product, &decisions, &[]);
     let by = |id: &str| found.iter().find(|i| i.place.id == id).cloned();
     let q = by("q").unwrap();
     assert_eq!(
@@ -111,7 +111,7 @@ fn a_sprint_planning_task_notifies_only_as_its_sprint() {
         {"id":"s1","title":"Sprint","planning":"planning","planningTaskId":"plan","queueState":"idle"},
         {"id":"s2","title":"Approved","planning":"created","planningTaskId":"done-plan","queueState":"idle"}]});
     let decisions = HashMap::from([("plan".into(), vec![question("ask", false)])]);
-    let found = items("p", &tasks, &product, &decisions);
+    let found = items("p", &tasks, &product, &decisions, &[]);
     assert_eq!(
         found.len(),
         1,
@@ -147,7 +147,7 @@ fn automatic_sprint_notifies_only_actual_owner_moments() {
         ("stopped".into(), vec![question("stop", true)]),
         ("question".into(), vec![question("work", false)]),
     ]);
-    let found = items("p", &tasks, &product, &decisions);
+    let found = items("p", &tasks, &product, &decisions, &[]);
     assert_eq!(found.len(), 4);
     for id in ["cap", "deps"] {
         assert!(found
@@ -414,8 +414,16 @@ fn only_project_changes_wake_the_notifier() {
 #[test]
 #[ignore = "needs dbus-daemon; starts a private bus in a temporary directory"]
 fn the_service_raises_and_receives_the_click_on_a_private_bus() {
-    let dir = std::env::temp_dir().join(format!("cw-notify-bus-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    use std::os::unix::fs::DirBuilderExt;
+
+    // The runner's TMPDIR can already exceed the Unix socket pathname limit.
+    // Use a short, exclusively created directory accessible only to this user.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = PathBuf::from(format!("/tmp/cw-notify-bus-{}-{nonce}", std::process::id()));
+    std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
     let socket = dir.join("bus");
     let config = dir.join("bus.conf");
     std::fs::write(&config, format!("<busconfig><type>session</type><listen>unix:path={}</listen><auth>EXTERNAL</auth>\
@@ -604,7 +612,7 @@ fn hybrid_sprint_notifies_only_owner_holds_and_never_the_owners_own_pause() {
                 "reason":"The last run of this task ended as failed.","needsOwner":true,"nextActor":"owner"}},
         {"id":"automatic-mine","runMode":"automatic","taskIds":[],"queueState":"paused","pauseReason":"Paused by you"}
     ]});
-    let found = items("p", &[], &product, &HashMap::new());
+    let found = items("p", &[], &product, &HashMap::new(), &[]);
     let paused: Vec<&str> = found
         .iter()
         .filter(|item| item.kind == Kind::Paused)

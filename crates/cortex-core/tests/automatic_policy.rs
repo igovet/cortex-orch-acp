@@ -437,7 +437,7 @@ fn a_real_work_question_is_kept_and_replans_change_approach_without_a_limit() {
     let (p, s, task, _) = start(true);
     s.write(|db| {
         let question = json!({"question":"Which input format should be supported?",
-            "options":["JSON","YAML"]});
+            "recommended":1,"options":["JSON","YAML"]});
         lifecycle::skill_proposals::request(db, &p.0, &task, "coordinator", "work", &question)?;
         assert_eq!(
             domain::stop_tx(db, &task, "coordinator_no_progress_limit")?,

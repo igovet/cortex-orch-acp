@@ -1,5 +1,5 @@
 import { createMemo, createSignal, For, onMount, Show } from "solid-js";
-import { ACCESS_MODES, CONNECTION_ENGINE, configIssues, coordinatorEfforts, coordinatorResolution, denyTokens, effortLabel, engineLabel, ENGINE_KEYS, LANGUAGES, modelLabel, routeIdOf, type CommandReceipt, type EngineKey } from "@cortex/workspace-domain";
+import { ACCESS_MODES, CONNECTION_ENGINE, configIssues, coordinatorEfforts, coordinatorResolution, denyTokens, effortLabel, engineLabel, ENGINE_KEYS, LANGUAGES, modelLabel, resolveEffort, routeIdOf, type CommandReceipt, type EngineKey } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { A, I } from "./kit";
 import { HELP } from "./orch-help";
@@ -46,7 +46,12 @@ export function Defaults(props: { focus?: "ceiling" }) {
   const models = createMemo(() => ENGINE_KEYS.flatMap(e => c().surfaces.routing.engines[e].enabled.filter(id => available(e, id)).map(id => ({ id: `${e}|${id}`, label: modelLabel(c().catalogue, e, id), sub: engineLabel(e) }))));
   const coord = () => v().coordinator;
   const efforts = () => coord() ? coordinatorEfforts(c().catalogue, coord()!.engine, coord()!.model) : { levels: [], observed: true };
-  const pick = (value: string) => { const [engine, model] = value.split("|") as [EngineKey, string]; const levels = coordinatorEfforts(c().catalogue, engine, model).levels, was = coord()?.effort ?? "medium"; set({ coordinator: { engine, model, effort: levels.includes(was) ? was : levels[0], parameters: coord()?.parameters ?? {} } }); };
+  const pick = (value: string) => {
+    const [engine, model] = value.split("|") as [EngineKey, string];
+    const levels = coordinatorEfforts(c().catalogue, engine, model).levels;
+    const { thought_level, ...parameters } = coord()?.parameters ?? {};
+    set({ coordinator: { engine, model, effort: resolveEffort(coord()?.effort, thought_level, levels), parameters } });
+  };
   const bound = createMemo(() => coordinatorResolution({ ...m(), config: { ...c(), surfaces: { ...c().surfaces, user_defaults: v() } } }));
   const routes = createMemo(() => ENGINE_KEYS.flatMap(e => c().catalogue[e].models.filter(x => available(e, x.id)).map(x => ({ id: x.routeId ?? routeIdOf(e, x.id), label: x.label, sub: engineLabel(e), engine: e, model: x.id }))));
   const first = () => { const e = coord()?.engine ?? "claude-agent-acp", id = coord()?.model ?? c().surfaces.routing.engines[e].enabled[0]; return { routeId: routes().find(r => r.engine === e && r.model === id)?.id ?? routeIdOf(e, id), connectionId: m().connections.find(x => CONNECTION_ENGINE[x.engine] === e)?.detail.connectionId ?? "", model: id, parameters: {} }; };
@@ -84,7 +89,7 @@ export function Defaults(props: { focus?: "ceiling" }) {
       <SetH title={<span id="set-coord-h">Coordinator</span>}><Hint text={HELP.coordinator} label="coordinator" /></SetH>
       <div class="surface">
         <Srow t="Model" d="The agent you talk to. Enabled, available models, grouped by engine." r="A strong general model; it plans and checks the work."><Pick id="m-def-model" label="Main model" width="240px" value={coord() ? `${coord()!.engine}|${coord()!.model}` : ""} empty="Choose a model" options={models()} disabled={off()} onPick={pick} /></Srow>
-        <Show when={coord()}><Srow t="Effort" d={efforts().observed ? "The levels this model reports." : FALLBACK_EFFORTS}><Seg label="Effort" value={coord()!.effort} disabled={off()} options={efforts().levels.map(e => ({ id: e, label: effortLabel(e) }))} onChange={effort => set({ coordinator: { ...coord()!, effort } })} /></Srow></Show>
+        <Show when={coord()}><Srow t="Effort" d={efforts().observed ? "The levels this model reports." : FALLBACK_EFFORTS}><Seg label="Effort" value={resolveEffort(coord()!.effort, coord()!.parameters.thought_level, efforts().levels)} disabled={off()} options={efforts().levels.map(e => ({ id: e, label: effortLabel(e) }))} onChange={effort => set({ coordinator: { ...coord()!, effort } })} /></Srow></Show>
         <Srow t="Status" d="What this resolves to now."><Show when={bound().ok} fallback={<><span class="st st-bad"><I n="x-circle" s={12} />{(bound() as { text: string }).text}</span><A class="lnk" to={orchTo(m().id, "models")}>Fix in Models</A></>}><span class="st st-ok"><I n="check-circle" s={12} />Bound to {(bound() as { route: string }).route}</span></Show></Srow>
       </div>
       <Show when={coord()}><Adv id="coordinator" label="More coordinator parameters" force={Object.keys(coord()?.parameters ?? {}).length > 0}>

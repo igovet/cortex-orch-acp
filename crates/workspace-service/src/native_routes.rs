@@ -42,6 +42,11 @@ fn digest(bytes: &[u8]) -> String {
 pub(crate) fn is_alias_model(id: &str) -> bool {
     id.eq_ignore_ascii_case("default")
 }
+pub(crate) fn is_concrete_effort(id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty() && !id.eq_ignore_ascii_case("default") && !id.eq_ignore_ascii_case("engine_default")
+}
+
 /// Python `portable.identity.route_fingerprint` over a stored catalog route.
 /// Pairs are sorted, never deduplicated: claude-agent-acp advertises several
 /// `model_config` on/off selects, so a real Claude route repeats those pairs.
@@ -609,11 +614,23 @@ impl RouteResolver {
         parameters: Value,
         basis: &'static str,
     ) -> CoreResult<SelectedRoute> {
-        let parameters: BTreeMap<String, String> = serde_json::from_value(parameters)
+        let mut parameters: BTreeMap<String, String> = serde_json::from_value(parameters)
             .map_err(|_| CoreError::Refused("unsupported_dependent_setting"))?;
         let pairs: Vec<(String, String)> =
             serde_json::from_value(c.entry["route"]["supported_parameters"].clone())
                 .map_err(|_| CoreError::Refused("invalid_catalog_snapshot"))?;
+        if matches!(basis, "owner_default" | "owner_task")
+            && !parameters
+                .get("thought_level")
+                .is_some_and(|v| is_concrete_effort(v))
+        {
+            parameters.remove("thought_level");
+            if let Some(effort) =
+                presentation::nearest_effort(&presentation::efforts(c), self.settings_effort())
+            {
+                parameters.insert("thought_level".into(), effort.into());
+            }
+        }
         if parameters
             .iter()
             .any(|(k, v)| !pairs.contains(&(k.clone(), v.clone())))
@@ -627,6 +644,13 @@ impl RouteResolver {
             decision: json!({}),
             environment: self.environment.clone(),
         })
+    }
+    fn settings_effort(&self) -> Option<&str> {
+        let d = &self.defaults["defaults"];
+        d.get("parameters")
+            .or_else(|| d["coordinator"].get("parameters"))
+            .and_then(|p| p["thought_level"].as_str())
+            .filter(|v| is_concrete_effort(v))
     }
     /// Portable or saved exact coordinator defaults. Providers restrict workers,
     /// not a manually configured coordinator. Ambiguity never picks the first.
@@ -661,10 +685,9 @@ impl RouteResolver {
         self.selected(matches[0], parameters, "owner_default")
     }
     /// An explicit per-task coordinator choice stays inside existing owner eligibility.
-    /// Like Python's model/provider selection, a genuine route change starts
-    /// from empty dependent parameters: the default route's values (effort)
-    /// belong to that route and are never validated against another one. Only
-    /// the same route (an echo of the current model) keeps them.
+    /// A genuine route change drops route-specific parameters. An omitted
+    /// effort inherits the Settings preference, narrowed to the new route's
+    /// advertised levels; only the same route keeps its other parameters.
     /// An exact route id (a provider/cross-account choice) binds across
     /// connections and does not need a resolvable default; a bare model name
     /// stays on the default's connection, else it must name one route.
@@ -698,7 +721,7 @@ impl RouteResolver {
             Ok(base) if matches[0].route_id() == base.route_id() => base.parameters.clone(),
             _ => BTreeMap::new(),
         };
-        if let Some(effort) = settings["effort"].as_str().filter(|s| !s.is_empty()) {
+        if let Some(effort) = settings["effort"].as_str().filter(|s| is_concrete_effort(s)) {
             parameters.insert("thought_level".into(), effort.into());
         }
         self.selected(matches[0], serde_json::to_value(parameters)?, "owner_task")
@@ -725,7 +748,7 @@ impl RouteResolver {
         }
         let mut parameters: BTreeMap<String, String> =
             serde_json::from_value(pin["parameters"].clone()).unwrap_or_default();
-        if let Some(effort) = effort {
+        if let Some(effort) = effort.filter(|v| is_concrete_effort(v)) {
             parameters.insert("thought_level".into(), effort.into());
         }
         self.selected(matches[0], serde_json::to_value(parameters)?, "owner_task")
@@ -1016,7 +1039,8 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
         let selected = resolver.task_coordinator(settings)?;
         let parameters = if matches!(option, "model" | "provider") {
             // A host echo of the saved route is not a change (Python keeps the
-            // configured values); a real model change resets parameters. Like
+            // configured values); a real model change keeps only the resolved
+            // effort, not the previous model's other dependent parameters. Like
             // Python `_default_selection_from_user_defaults`, only a saved
             // `route_id` or a portable coordinator counts as a saved route.
             let d = &resolver.defaults["defaults"];
@@ -1037,7 +1061,9 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
             {
                 return Ok(true);
             }
-            BTreeMap::new()
+            selected.parameters.get("thought_level").map_or_else(BTreeMap::new, |effort| {
+                BTreeMap::from([("thought_level".to_owned(), effort.clone())])
+            })
         } else {
             selected.parameters.clone()
         };

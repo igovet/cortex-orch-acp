@@ -248,9 +248,9 @@ mod tests {
                 .unwrap();
             for batch in [false, true] {
                 let args = |option: Value| {
-                    let q = json!({"question":"Use this route?", "options":[option, "No"]});
+                    let q = json!({"question":"Use this route?", "options":[option, "No"], "recommended":2});
                     if batch {
-                        json!({"request_key":"q", "questions":[q, {"question":"Continue?", "options":["Yes","No"]}]})
+                        json!({"request_key":"q", "questions":[q, {"question":"Continue?", "options":["Yes","No"], "recommended":1}]})
                     } else {
                         let mut q = q;
                         q["request_key"] = json!("q");
@@ -259,6 +259,16 @@ mod tests {
                 };
                 let schema = &tool["inputSchema"];
                 assert!(validate(schema, &args(json!("Yes"))).is_ok());
+                let mut question = args(json!("Yes"));
+                let member = if batch { &mut question["questions"][0] } else { &mut question };
+                member.as_object_mut().unwrap().remove("recommended");
+                assert!(validate(schema, &question).is_err());
+                for invalid in [json!(0), json!(9), json!("1"), json!([1, 2])] {
+                    let mut question = args(json!("Yes"));
+                    let member = if batch { &mut question["questions"][0] } else { &mut question };
+                    member["recommended"] = invalid;
+                    assert!(validate(schema, &question).is_err());
+                }
                 assert!(validate(schema, &args(json!({"label":"Yes"}))).is_ok());
                 assert!(validate(schema, &args(json!({"label":"Yes", "detail":"я".repeat(1000)}))).is_ok());
                 for invalid in [

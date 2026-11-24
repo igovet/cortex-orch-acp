@@ -78,8 +78,8 @@ function load(marker: string, standIns: StandIn[]) {
   return exports;
 }
 const helper = load("e.parseQuestionFormQuestions=function", []);
-const batch = parseQuestionBatch({ batchId: "qb_test", questionId: "pq_a", questions: [
-  { questionId: "pq_a", question: "Layout?", topic: "Interface", options: ["Compact", "Spacious"] },
+const batch = parseQuestionBatch({ batchId: "qb_test", questionId: "pq_a", language: "ru", questions: [
+  { questionId: "pq_a", question: "Layout?", topic: "Interface", options: ["Compact", "Spacious"], recommended: 1 },
   { questionId: "pq_b", question: "Theme?", topic: "Interface", options: ["Light", "Dark"] },
 ] });
 const input = batchForm(batch);
@@ -148,12 +148,24 @@ let tree = nodes(render());
 assert.equal(questionText(tree), "Layout?");
 assert.ok(tree.some((node) => node.props.accessibilityRole === "radiogroup" && node.props.accessibilityLabel === "Layout?"));
 assert.deepEqual(tree.filter((node) => node.props.option).map((node) => node.props.option.label), ["Compact", "Spacious"]);
+assert.deepEqual(tree.filter((node) => node.props.option).map((node) => node.props.option.description), ["Рекомендуется", undefined]);
 assert.ok(tree.some((node) => node.props.onChange && node.props.accessibilityLabel === "Layout?"));
 assert.equal(tree.find((node) => node.props.testID === "question-form-primary-action").props.disabled, true);
 assert.ok(tree.some((node) => node.props.questions?.length === 2)); // one paginated form, not two cards
-// Select first answer; the real component advances to the second question.
-tree.find((node) => node.props.option).props.onToggle(0, 0, false);
+const optionNodes = tree.filter((node) => node.props.option);
+assert.deepEqual(optionNodes.map(node => nodes(node.type(node.props))
+  .filter(child => child.props.testID === "question-form-option-description")
+  .flatMap(child => nodes(child.props.children).map(text => text.props.text))), [["Рекомендуется"], []]);
+// Select the first answer, then advance through the installed card. Some
+// versions advance on selection; the current card has an explicit Next action.
+optionNodes[0].props.onToggle(0, 0, false);
 tree = nodes(render());
+if (questionText(tree) === "Layout?") {
+  const next = tree.find((node) => node.props.testID === "question-form-primary-action");
+  assert.equal(next.props.disabled, false);
+  next.props.onPress();
+  tree = nodes(render());
+}
 assert.equal(questionText(tree), "Theme?");
 assert.equal(tree.find((node) => node.props.testID === "question-form-primary-action").props.disabled, true);
 tree.find((node) => node.props.onChange && node.props.accessibilityLabel === "Theme?").props.onChange(1, "Custom theme");

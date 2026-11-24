@@ -1,5 +1,5 @@
-import { automaticQueueOf, boardPhase, dependencyReady, descriptionLabel, isOpen, plainModel, targetBranch } from "@cortex/workspace-domain";
-import type { Decision as TaskDecision, Check, CheckOutcome, EngineWeeklyUsage, HoldActor, Machine, OwnerHoldAction, Project, PlanningFailure, Sprint, SprintRunMode, Task, TaskStatus, Worker, WorkspaceState } from "@cortex/workspace-domain";
+import { automaticQueueOf, boardPhase, dependencyReady, descriptionLabel, isOpen, orderReasonText, plainModel, targetBranch } from "@cortex/workspace-domain";
+import type { Decision as TaskDecision, Check, CheckOutcome, EngineWeeklyUsage, HoldActor, Machine, OwnerHoldAction, Project, PlanningFailure, Sprint, SprintOrder, SprintOrderPending, SprintRunMode, Task, TaskStatus, Worker, WorkspaceState } from "@cortex/workspace-domain";
 import type { Scope } from "./router";
 import { share } from "./stable";
 import { plainPhase, plainReason, plainStop } from "./status-text";
@@ -227,6 +227,15 @@ export type ProjectSummary = {
 export type WorkspaceIndex = {
   now: number; state: WorkspaceState; views: TaskView[]; planning: TaskView[]; byId: Map<string, TaskView>;
   summaries: Map<string, ProjectSummary>; archive: TaskView[];
+  /** The service's execution order of each sprint whose live graph is current and matches the sprint's run mode. */
+  orders?: ReadonlyMap<string, SprintOrder>;
+};
+const NO_ORDERS: ReadonlyMap<string, SprintOrder> = new Map();
+const ordinal = (n: number) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? "th" : (["th", "st", "nd", "rd"][n % 10] ?? "th")}`;
+/** A sprint's order, only while it still describes this sprint: an order read under another run mode or queue state is stale. */
+export const orderOf = (index: Pick<WorkspaceIndex, "orders">, sprint: Sprint | null | undefined): SprintOrder | null => {
+  const order = sprint ? index.orders?.get(sprint.id) : undefined;
+  return order && sprint && order.mode === sprint.runMode && order.queueState === sprint.queueState ? order : null;
 };
 
 /**
@@ -324,7 +333,7 @@ function automaticStatusFact(task: Task, sprint: Sprint | null): Fact | undefine
   }
 }
 
-function statusFact(task: Task, filesWait: TaskView["filesWait"], ctx: { target: string; running: number; title: (id: string) => string; sprint: Sprint | null; ready: (id: string) => boolean; next: boolean }): Fact {
+function statusFact(task: Task, filesWait: TaskView["filesWait"], ctx: { target: string; running: number; title: (id: string) => string; sprint: Sprint | null; ready: (id: string) => boolean; next: boolean; pending?: SprintOrderPending | null }): Fact {
   if (task.status === "closed_unverified") return { text: "Closed by you · Not verified", tone: "st-idle", icon: "alert" };
   const handoff = task.merge?.handoff?.state;
   if (task.conflict !== "none" && (task.merge?.gitState === "unknown" || handoff === "unknown" || handoff === "dispatch_unknown"))
@@ -348,6 +357,11 @@ function statusFact(task: Task, filesWait: TaskView["filesWait"], ctx: { target:
     case "draft": {
       const waiting = task.dependencies.find(id => !ctx.ready(id));
       if (waiting) return { text: `Waits for ${ctx.title(waiting)}`, tone: "st-idle", icon: "hourglass" };
+      // With the service's order, its words: Next only for its current candidate, a place for a ranked task, a reason otherwise.
+      const p = ctx.pending;
+      if (ctx.sprint && p) return { text: p.next ? `Next in ${sprintTitle(ctx.sprint)}`
+        : p.rank !== null ? `${ctx.sprint.runMode === "manual" ? "Suggested" : "Queued"} ${ordinal(p.rank)} in ${sprintTitle(ctx.sprint)}`
+        : `${orderReasonText(p.reason) ?? "Not in the order"} · ${sprintTitle(ctx.sprint)}`, tone: "st-idle", icon: "layers" };
       if (ctx.sprint) return { text: `${ctx.next ? "Next" : "Queued"} in ${sprintTitle(ctx.sprint)}`, tone: "st-idle", icon: "layers" };
       return { text: "Draft, ready to start", tone: "st-idle" };
     }
@@ -397,7 +411,7 @@ export function deletionState(index: WorkspaceIndex, sprint: Sprint) {
     : `Deleting, ${left.length} tasks left, waiting for them to stop`;
 }
 
-export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
+export function buildIndex(state: WorkspaceState, now: number, orders: ReadonlyMap<string, SprintOrder> = NO_ORDERS): WorkspaceIndex {
   const projects = new Map(state.projects.map(p => [p.id, p]));
   const machines = new Map(state.machines.map(m => [m.id, m]));
   const sprints = new Map(state.sprints.filter(onView).map(s => [s.id, s]));
@@ -411,7 +425,15 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
   const title = (id: string) => tasks.get(id)?.title ?? "another task";
   // A sprint comes from the project's plan and its tasks from the project's runtime, so a sprint can name tasks that are
   // not loaded yet (the runtime is starting, stopped or refused). The index is read by every screen: it must not throw.
+  // With the service's order a sprint has a Next only when that order names one; without it, the first ready draft.
+  const pendingOf = new Map<string, SprintOrderPending>();
   const nextInSprint = new Set(state.sprints.filter(s => !s.archivedAt).flatMap(s => {
+    const order = orderOf({ orders }, s);
+    if (order) {
+      for (const p of order.notStarted) pendingOf.set(p.taskId, p);
+      const next = order.notStarted.find(p => p.next);
+      return next ? [next.taskId] : [];
+    }
     const next = s.taskIds.map(id => tasks.get(id)).find(t => t?.status === "draft" && t.dependencies.every(id => ready(id, s.runMode)));
     return next ? [next.id] : [];
   }));
@@ -453,7 +475,7 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
       : STATUS_COLUMN[phase === "unknown" ? task.status : phase];
     const fact: Fact = !unknown ? ownerDecision ? { text: ownerDecision.text, tone: "st-warn", icon: ownerDecision.kind === "permission" ? "shield" : "question" }
       : ownerIntegration ? { text: humanStatus(ownerIntegration.reason), tone: "st-warn", icon: "merge" }
-      : automaticFact ?? statusFact(task, filesWait, { target, running, title, sprint, ready: id => ready(id, sprint?.runMode), next: nextInSprint.has(task.id) })
+      : automaticFact ?? statusFact(task, filesWait, { target, running, title, sprint, ready: id => ready(id, sprint?.runMode), next: nextInSprint.has(task.id), pending: sprint ? pendingOf.get(task.id) ?? null : null })
       : machine.connection !== "connected" ? { text: `Last known: ${STATUS_WORD[task.status]}`, tone: "st-idle", icon: "help" }
       : task.status === "stopping" ? { text: "Stop not confirmed", tone: "st-warn", icon: "hourglass" }
       : replanStopping(task) ? { text: replanStopping(task)!.replace(/\..*$/, ""), tone: "st-warn", icon: "hourglass" }
@@ -482,7 +504,7 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
       sprints: state.sprints.filter(s => onView(s) && s.projectId === project.id), at, signal,
     }];
   }));
-  return { now, state, views: listed, planning, byId: new Map(views.map(v => [v.id, v])), summaries, archive: listed.filter(v => v.column === "archive") };
+  return { now, state, views: listed, planning, byId: new Map(views.map(v => [v.id, v])), summaries, archive: listed.filter(v => v.column === "archive"), orders };
 }
 
 /**
@@ -625,10 +647,35 @@ export function inboxItems(index: WorkspaceIndex): Decision[] {
 
 export const inScope = (summary: ProjectSummary, scope: Scope) =>
   summary.views.filter(v => scope.kind === "all" || (scope.kind === "standalone" ? !v.sprint : v.sprint?.id === scope.id));
-export function columnsOf(views: TaskView[]) {
+/**
+ * Each column, and with `index` each sprint's own tasks in it in execution order: Working in confirmed start order, Not
+ * started by the service's rank, the unranked after them. A sprint's tasks keep the places they held among other work, so
+ * standalone tasks and other sprints never move, and a sprint with no current order keeps the order it arrived in.
+ */
+export function columnsOf(views: TaskView[], index?: Pick<WorkspaceIndex, "orders">) {
   const out = Object.fromEntries(COLUMNS.map(c => [c.id, [] as TaskView[]])) as Record<ColumnId, TaskView[]>;
   for (const view of views) if (view.column !== "archive") out[view.column].push(view);
+  if (index?.orders?.size) for (const id of Object.keys(out) as ColumnId[]) out[id] = inExecutionOrder(out[id], index);
   return out;
+}
+/** `views` with each sprint's members sorted among the places they hold (see `columnsOf`). Ties keep their order. */
+export function inExecutionOrder(views: TaskView[], index: Pick<WorkspaceIndex, "orders">): TaskView[] {
+  const groups = new Map<string, { at: number[]; rank: Map<string, number> }>();
+  views.forEach((v, i) => {
+    const order = orderOf(index, v.sprint);
+    if (!order || !v.sprint) return;
+    let g = groups.get(v.sprint.id);
+    if (!g) groups.set(v.sprint.id, g = { at: [], rank: new Map([...order.working.map(w => w.taskId), ...order.notStarted.map(p => p.taskId)].map((id, n) => [id, n])) });
+    g.at.push(i);
+  });
+  if (!groups.size) return views;
+  const out = [...views];
+  for (const g of groups.values()) {
+    const members = g.at.map(i => views[i]), rank = (v: TaskView) => g.rank.get(v.id) ?? Infinity;
+    const sorted = members.map((v, n) => ({ v, n })).sort((a, b) => rank(a.v) - rank(b.v) || a.n - b.n).map(x => x.v);
+    g.at.forEach((i, n) => { out[i] = sorted[n]; });
+  }
+  return out.every((v, i) => v === views[i]) ? views : out;
 }
 
 export type GroupedRow = { kind: "task"; view: TaskView } | { kind: "sprint"; sprint: Sprint; count: number; column?: ColumnId };
@@ -649,9 +696,14 @@ export function sprintView(index: WorkspaceIndex, sprint: Sprint) {
   const started = views.length - drafts.length;
   const planning = { planning: "Planning, no tasks yet", question: "Planning, question open", ready: "Plan ready", cancelled: "Planning cancelled", created: "" }[sprint.planning];
   const queue = { idle: "queue idle", running: "queue running", paused: "queue paused", complete: "queue complete" }[sprint.queueState];
+  // The service's order says what runs now (first in start order) and what is next; Manual has no Next, only a suggestion.
+  const order = orderOf(index, sprint), byId = (id: string) => views.find(v => v.id === id);
+  const now = order ? order.working.map(w => byId(w.taskId)).find(v => v?.task.status === "working") ?? null : views.find(v => v.task.status === "working") ?? null;
+  const next = order ? byId(order.notStarted.find(p => p.next)?.taskId ?? "") ?? null : drafts.find(ready) ?? null;
+  const suggested = order ? sprint.runMode === "manual" ? byId(order.notStarted.find(p => p.rank !== null)?.taskId ?? "") ?? null : null : next;
   return {
     sprint, title: sprintTitle(sprint), views, started, missing: sprint.taskIds.length - views.length, usable: sprint.planning === "created",
-    now: views.find(v => v.task.status === "working") ?? null, next: drafts.find(ready) ?? null, blocked: drafts.filter(v => !ready(v)).length,
+    now, next, suggested, ordered: !!order, blocked: drafts.filter(v => !ready(v)).length,
     state: sprint.deletion ? deletionState(index, sprint) : planning || `${sprintModeLabel[sprint.runMode]}, ${queue}, ${started} of ${sprint.taskIds.length} started${views.length < sprint.taskIds.length && index.state.projects.find(p => p.id === sprint.projectId)?.issue ? ", task details unavailable" : ""}`,
   };
 }

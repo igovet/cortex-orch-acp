@@ -28,7 +28,7 @@ mod coordinator_card_tests {
                     "t",
                     "c",
                     "ask",
-                    &json!({"question":"Continue?","options":["Yes","No"]}),
+                    &json!({"recommended":2,"question":"Continue?","options":["Yes","No"]}),
                 )?;
                 let mut b = Binding {
                     task: "t".into(),
@@ -81,8 +81,8 @@ mod coordinator_card_tests {
             lifecycle::skill_proposals::request(
                 db, &root, "t", "c", "ask",
                 &json!({"questions":[
-                    {"question":"Keep it?", "options":[{"label":"Yes","detail":"Keeps `src/a.rs:42`"}, "No"]},
-                    {"question":"Try again?", "options":["Retry", "Stop"]},
+                    {"recommended":1,"question":"Keep it?", "options":[{"label":"Yes","detail":"Keeps `src/a.rs:42`"}, "No"]},
+                    {"recommended":2,"question":"Try again?", "options":["Retry", "Stop"]},
                 ]}),
             )
         }).unwrap();
@@ -100,6 +100,10 @@ mod coordinator_card_tests {
             let option = workspace_protocol::DecisionOption::try_from(cards[0]["options"][0].clone())
                 .expect("ordinary detail must survive the existing Workspace wire decoder");
             assert_eq!(option.as_value()["detail"], "Keeps `src/a.rs:42`");
+            assert_eq!(option.as_value()["recommended"], true);
+            assert!(cards[0]["options"][1].get("recommended").is_none());
+            assert!(cards[1]["options"][0].get("recommended").is_none());
+            assert_eq!(cards[1]["options"][1]["recommended"], true);
             assert!(cards[0]["options"][1].get("detail").is_none());
             assert_eq!(cards[1]["options"][0]["label"], "Retry");
             assert!(cards[1]["options"][0].get("detail").is_none());
@@ -149,7 +153,7 @@ mod coordinator_card_tests {
                         &format!("ask-{answer}"),
                         // A distinct question per answer: a repeat of an answered one is
                         // refused (`question_already_answered`).
-                        &json!({"question":format!("Stop the {which} daemon first or keep it?"),"options":["Stop","Keep"]}),
+                        &json!({"question":format!("Stop the {which} daemon first or keep it?"),"recommended":2,"options":["Stop","Keep"]}),
                     )?;
                     assert!(waits::answer_tx(db, "t", q["question_id"].as_str().unwrap(), answer, "text", None)?);
                     assert_ne!(domain::task_tx(db, "t")?.0, TaskState::Cancelled, "{answer} cancelled the task");
@@ -392,7 +396,7 @@ mod coordinator_card_tests {
                 let reference = |name: &str| json!([{"name":name,"mimeType":"image/png","size":3,"sha256":sha}]);
                 let ask = |key: &str| -> CoreResult<String> {
                     Ok(lifecycle::skill_proposals::request(db, &root, "t", "c", key,
-                        &json!({"question":key,"options":["Yes","No"]}))?["question_id"].as_str().unwrap().to_owned())
+                        &json!({"recommended":2,"question":key,"options":["Yes","No"]}))?["question_id"].as_str().unwrap().to_owned())
                 };
                 // Named: the file belongs to the question its answer named.
                 let named = ask("named")?;
@@ -1270,6 +1274,9 @@ fn decisions_tx(db: &Transaction<'_>, b: &Binding) -> CoreResult<Vec<Value>> {
             let mut wire = json!({"optionId":format!("wo_{}", &crate::digest(format!("{id}:{i}:{label}").as_bytes())[..40]),"label":label});
             if let Some(detail) = option["detail"].as_str() {
                 wire["detail"] = json!(detail);
+            }
+            if option["recommended"] == true {
+                wire["recommended"] = json!(true);
             }
             Ok(wire)
         }).collect::<CoreResult<Vec<_>>>()?;

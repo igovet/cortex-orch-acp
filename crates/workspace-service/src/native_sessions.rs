@@ -3592,14 +3592,15 @@ impl CorePolicy {
                                     .collect::<Vec<_>>();
                                 let forms = forms
                                     .into_iter()
-                                    .map(|f| waits::QuestionForm {
+                                    .map(|f| Ok(waits::QuestionForm {
                                         question: f["question"].as_str().unwrap().into(),
-                                        options: f["options"]
-                                            .as_array()
-                                            .unwrap()
-                                            .clone(),
-                                    })
-                                    .collect::<Vec<_>>();
+                                        options: waits::recommended_options(
+                                            f["options"].as_array().unwrap().clone(),
+                                            &f["recommended"],
+                                            false,
+                                        )?,
+                                    }))
+                                    .collect::<Result<Vec<_>, CoreError>>()?;
                                 waits::request_tx_bound_topics(db, &i.task, &c.channel_id, key, &forms, &topics)
                             }
                             "verification_submit" if i.role=="coordinator" => lifecycle::reconciliation::submit_verification_tx(db,&i.task,&c.channel_id,key,&arguments),

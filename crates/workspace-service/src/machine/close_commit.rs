@@ -52,6 +52,22 @@ fn recorded_paths(root: &Path, project: &str, task: &str) -> Vec<String> {
         .collect()
 }
 
+fn same_close(original: &Value, current: &Value) -> bool {
+    current["status"] == "done" && current["closedAs"] == "as_is"
+        && ["doneAt", "reworkEvent"].iter().all(|key| original[key] == current[key])
+}
+
+#[cfg(test)]
+#[test]
+fn an_old_close_cannot_commit_after_owner_rework() {
+    let closed = json!({"status":"done","closedAs":"as_is","doneAt":1});
+    let reopened = json!({"reworkEvent":"5"});
+    let next_close = json!({"status":"done","closedAs":"as_is","doneAt":1,"reworkEvent":"5"});
+    assert!(same_close(&closed, &closed));
+    assert!(!same_close(&closed, &reopened));
+    assert!(!same_close(&closed, &next_close));
+}
+
 /// Reports the commit outcome for an eligible Automatic close. An ineligible close
 /// has no commit outcome; a commit error never fails the already recorded close.
 pub(super) async fn commit(
@@ -121,6 +137,15 @@ async fn run(
         "integration_in_progress",
         REPO_BUSY,
     )?;
+    // Rework may have won the repository lock while this close examined
+    // its files. A pre-rework close can never commit in the new working cycle.
+    let mut current = super::native::product(state, project)?;
+    if let Some(store) = context::open(root, OpenMode::LiveReadOnly)? {
+        super::task_rework::project(&store, project, &mut current, false)?;
+    }
+    if !same_close(record, &current["tasks"][task]) {
+        return skipped("task_close_changed");
+    }
     let literal: Vec<String> = paths.iter().map(|p| format!(":(literal){p}")).collect();
     let mut status = vec!["status", "--porcelain", "-z", "--"];
     status.extend(literal.iter().map(String::as_str));

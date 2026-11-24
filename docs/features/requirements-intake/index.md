@@ -54,7 +54,7 @@ been checked.
   question tool is not used.
 - Options are meaningful, distinct and grounded in the project. Tradeoffs are explained,
   custom free text is preserved, and no invented requirement is offered as a default.
-- The question text and options use the runtime-selected user question language.
+- The question text and options use the runtime-selected user question language. A file path in a question is written in backticks. An option may be a plain label or a label with a short `detail` that Workspace shows under it; the answer is still the label.
 - Bounds: normally one round, at most two rounds, and at most five material questions per
   round (fewer if the live schema requires it). The coordinator ends its turn right after
   asking.

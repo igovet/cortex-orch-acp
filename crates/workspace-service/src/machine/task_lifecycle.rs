@@ -226,14 +226,19 @@ pub async fn apply(
                         .read(|db| settled(db, root, project, task))
                         .map_err(settle_error)?;
                 }
-                if choice == "already_in_target"
-                    && task_facts_git::read(root, record, task, git).await?["alreadyInTarget"]
-                        != true
-                {
-                    return Err(refuse(
-                        "containment_changed",
-                        "The target changed. Refresh before closing; nothing was merged.",
-                    ));
+                if choice == "already_in_target" {
+                    let facts = task_facts_git::read_for_finish(root, record, task, git).await?;
+                    let Some(target) = facts["targetBranch"]
+                        .as_str()
+                        .filter(|target| !target.is_empty() && facts["alreadyInTarget"] == true)
+                    else {
+                        return Err(refuse(
+                            "containment_changed",
+                            "The target changed. Refresh before closing; nothing was merged.",
+                        ));
+                    };
+                    // Containment records where to restart, not whether the result was accepted.
+                    record["alreadyInTargetBranch"] = json!(target);
                 }
                 for (k, v) in [
                     ("notVerifiedByCortex", json!(true)),

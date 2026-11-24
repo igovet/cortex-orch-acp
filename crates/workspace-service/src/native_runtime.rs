@@ -4267,6 +4267,18 @@ impl Service {
 mod pump_tests {
     use super::*;
     use std::time::Duration;
+
+    async fn poll_pending(mut wait: std::pin::Pin<&mut impl std::future::Future>) {
+        std::future::poll_fn(|cx| {
+            assert!(
+                wait.as_mut().poll(cx).is_pending(),
+                "the held step did not wait"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+
     // A turn whose state read fails still signals the batch (siblings must not keep running).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_failed_state_read_after_a_turn_still_signals_the_batch() {
@@ -4369,7 +4381,7 @@ mod pump_tests {
     // A ready step whose file another unfinished task's worker holds waits for it (one
     // recorded wait), instead of stopping the task as `native_continuation_unavailable`;
     // it claims again once the holder's task is cancelled.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn a_step_held_by_another_tasks_writer_waits_until_the_holding_ends() {
         let root = std::env::temp_dir().join(format!("held-{}", crate::identity().unwrap()));
         std::fs::create_dir(&root).unwrap();
@@ -4396,19 +4408,18 @@ mod pump_tests {
             Ok(waiting)
         }).unwrap().await.unwrap().unwrap();
         let (_cancel, cancelled) = watch::channel(false);
-        let r = runtime.clone();
-        let wait = tokio::spawn(async move {
-            r.wait_for_write_holding("waiting", &owners, &cancelled)
-                .await
-        });
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        assert!(!wait.is_finished(), "the held step did not wait");
+        let mut wait = Box::pin(runtime.wait_for_write_holding("waiting", &owners, &cancelled));
+        poll_pending(wait.as_mut()).await;
         let count = |runtime: Arc<Runtime>| async move {
             runtime.host.executor.read(|db| Ok(db.query_row(
                 "SELECT count(*)||':'||coalesce(max(json_extract(payload_json,'$.holder_task')),'') FROM runtime_events WHERE type='NATIVE_WRITE_CONFLICT_WAITING' AND task_id='waiting'",
                 [], |r| r.get::<_, String>(0))?)).unwrap().await.unwrap().unwrap()
         };
-        assert_eq!(count(runtime.clone()).await, "1:holder");
+        // Observe the real SQLite event rather than guessing how long the executor takes.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while count(runtime.clone()).await != "1:holder" {
+            assert!(std::time::Instant::now() < deadline, "holder event not recorded");
+        }
         runtime
             .host
             .executor
@@ -4423,9 +4434,14 @@ mod pump_tests {
             .await
             .unwrap()
             .unwrap();
+        // The first poll wrote the event; poll its completed result now to register
+        // the real retry timer, then advance it without sleeping on the wall clock.
+        tokio::time::pause();
+        poll_pending(wait.as_mut()).await;
+        tokio::time::advance(Duration::from_millis(1001)).await;
+        tokio::time::resume();
         assert!(tokio::time::timeout(Duration::from_secs(5), wait)
             .await
-            .unwrap()
             .unwrap()
             .unwrap());
         assert_eq!(count(runtime.clone()).await, "1:holder");
@@ -4458,7 +4474,7 @@ mod pump_tests {
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
     }
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn owner_file_lease_wait_is_visible_and_rechecks_release_and_expiry() {
         use cortex_core::store::owner_file_leases as leases;
         let root = std::env::temp_dir().join(format!("lease-wait-{}", crate::identity().unwrap()));
@@ -4485,12 +4501,9 @@ mod pump_tests {
                 })?;
                 Ok((owner, epoch, checkout, file, token))
             }).unwrap().await.unwrap().unwrap();
-            let r = runtime.clone();
-            let waiting_owner = owner.clone();
-            let wait = tokio::spawn(async move {
-                let (_cancel, cancelled) = watch::channel(false);
-                r.wait_for_write_holding(task, &waiting_owner, &cancelled).await
-            });
+            let (_cancel, cancelled) = watch::channel(false);
+            let mut wait = Box::pin(runtime.wait_for_write_holding(task, &owner, &cancelled));
+            poll_pending(wait.as_mut()).await;
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     let observed = runtime.host.executor.read(move |db| Ok(db.query_row(
@@ -4499,10 +4512,8 @@ mod pump_tests {
                          AND json_extract(payload_json,'$.paths[0]')='file.txt')", [task], |r| r.get::<_, bool>(0))?
                     )).unwrap().await.unwrap().unwrap();
                     if observed { break; }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }).await.expect("owner lease wait was not visible");
-            assert!(!wait.is_finished());
             runtime.host.executor.write(move |db| {
                 if expire {
                     db.execute("UPDATE code_owner_file_leases SET expires_at=0", [])?;
@@ -4512,8 +4523,22 @@ mod pump_tests {
                 }
                 Ok(())
             }).unwrap().await.unwrap().unwrap();
-            if !expire { runtime.wake.notify_waiters(); }
-            assert!(tokio::time::timeout(Duration::from_secs(5), wait).await.unwrap().unwrap().unwrap());
+            // The SQL write above completed after the initial conflict write. Register
+            // the waiter before sending a release wake or advancing the expiry poll.
+            if expire {
+                tokio::time::pause();
+            }
+            poll_pending(wait.as_mut()).await;
+            if expire {
+                tokio::time::advance(Duration::from_millis(1001)).await;
+                tokio::time::resume();
+            } else {
+                runtime.wake.notify_waiters();
+            }
+            assert!(tokio::time::timeout(Duration::from_secs(5), wait)
+                .await
+                .unwrap()
+                .unwrap());
             runtime.host.executor.write(move |db| {
                 let claimed = cortex_core::scheduler::claim_ready_tx(db, task, &owner, "fixture",
                     &cortex_core::scheduler::policy::NativePolicy::default())?;

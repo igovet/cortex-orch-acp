@@ -19,37 +19,34 @@ See [requirements](../requirements.md).
 ## Inputs
 
 - [CW-U10](CW-U10.md): the composer that hosts the control.
-- [CW-U07](CW-U07.md): per-machine settings, which hold the provider choice and the transcription language.
+- [CW-U07](CW-U07.md): per-machine settings, which hold the transcription language.
 - [Security](../security.md): credential and data handling rules.
-- Open decision (blocks implementation): **which speech provider is the default?** Paseo 0.15.0 offers the first two options as provider choices. The owner decides the default at design agreement:
-  1. On-device recognition, with no audio sent off the machine. Paseo's local models are sherpa-onnx models, including GigaAM v3 for Russian and Parakeet v3 for mixed Russian and English. The recommended default is local.
-  2. An OpenAI-compatible speech service chosen by the owner, with its key stored on the machine under CW-R16 and never displayed again.
-  3. A platform speech service through the Tauri webview. Its availability on the Ubuntu WebKitGTK target is not verified and must be checked before it is considered.
-- Further open points, to decide with the provider: whether `Auto` language detection is offered (Paseo shows an Auto-detect placeholder and a per-recording language choice); whether press-and-hold is offered alongside the toggle (recommended: both); and whether audio is retained (proposal: not retained).
+- **Decision:** Keep on-device sherpa-onnx recognition. Retain the Russian model, add a separate English-only model, and select Russian (RU) or English (EN) in Settings → Voice input. There is no automatic language detection or provider switch. Audio is not retained or sent off the machine. See [outgoing engine audio](../../features/input-history-and-replay/index.md#outgoing-engine-audio-2026-11-23).
+- Press-and-hold alongside the existing toggle remains an open interaction decision.
 - The speech service, its model catalogue and its settings are specified in [CW-U15](CW-U15.md). Where the transcription of a remote machine's task runs is an open decision (recommended: on the local machine).
 
 ## Deliverables
 
-- Microphone control in every composer (task, worker, sprint planning, Request changes, diff comments and New task description), with states: idle, listening, processing, unavailable (no provider, no downloaded model or no microphone), permission denied, error and interrupted.
-- Recording bar in place of the composer toolbar, with elapsed time, a level meter (static under reduced motion), a language choice, Cancel (Esc), Insert (Enter) and Insert and send (button only).
+- Microphone control in every composer (task, worker, sprint planning, Request changes, diff comments and New task description), with states: idle, listening, processing, unavailable (selected model not downloaded or no microphone), permission denied, error and interrupted.
+- Recording bar in place of the composer toolbar, with elapsed time, a level meter (static under reduced motion), Cancel (Esc), Insert (Enter) and Insert and send (button only).
 - Live partial transcript shown in grey at the cursor in the draft; it becomes normal text on Insert.
 - Recognised text inserted at the cursor in the composer. Nothing is sent until the owner presses send.
-- Provider behind a port, so the provider decision can change without changing the composer.
-- Per-machine provider and language settings through CW-U07 and the speech service of CW-U15.
+- Keep the speech provider behind a port so the composer stays independent of the recognizer.
+- Per-machine RU/EN language setting through CW-U07, with separate local models managed by the speech service of CW-U15.
 
 ## Acceptance
 
 Positive:
 
-- With a provider selected and a microphone available, dictated text appears in the composer and nothing is sent until the owner sends it.
-- The transcription language follows the owner's language setting, or the behaviour agreed for Auto.
+- With the selected language model downloaded and a microphone available, dictated text appears in the composer and nothing is sent until the owner sends it.
+- Dictation uses the Russian or English model selected in Settings → Voice input.
 - Ctrl/Cmd+D starts and stops dictation in a focused composer; it is not bound while the terminal has focus. Esc cancels an active recording.
 
 Negative:
 
-- With no provider selected, the control reads "Voice input unavailable" with its reason, and no recording starts.
+- If the selected language model is missing, show the model-not-downloaded state with a Download action; do not start recording without the model.
 - Microphone permission denial shows an explicit denied state; the app does not retry in a loop.
-- Audio is never sent to a provider the owner has not selected, and there is no silent fallback to another service.
+- Audio is never uploaded, and there is no fallback to another model or service.
 - A transcription error or timeout leaves the composer text unchanged.
 - Voice input never sends a message or applies a configuration change by itself.
 - Dictation never starts without a user gesture, and the recording indicator stays visible for as long as audio is captured.
@@ -59,22 +56,21 @@ Negative:
 
 - [CW-U10](CW-U10.md), [CW-U07](CW-U07.md) and [CW-U15](CW-U15.md) (machine speech service).
 - Gate records: CW-D05 (Gate D) must be recorded before implementation.
-- The open speech-provider question must be answered before this item is started.
 
 ## Validation
 
 - Adapter contract tests with a fake provider: success, error, timeout, and permission denied.
 - Microphone access in the Ubuntu Tauri 2 shell (WebKitGTK `getUserMedia`) is unverified. Check it in the CW-F01 shell before choosing the desktop path, and record it as not run until then.
 - Rendered run of the composer in the Ubuntu Tauri 2 shell (CW-F01) showing the unavailable, denied and recording states, with screenshots at 1280×800 and 1920×1080.
-- Real speech recognition with the chosen provider: run only after the provider is decided; until then it is recorded as not run.
-- For the chosen provider, a recorded statement of where audio is sent, or a network capture showing that no audio leaves the machine when on-device recognition is chosen.
+- Real speech recognition with the local Russian and English models remains to be verified.
+- Record evidence that microphone audio stays on the machine.
 - Record exact commands, environment and outcomes.
 
 ## Documentation impact
 
 - [SCREENS](../SCREENS.md): voice-input states in the composer.
-- [Security](../security.md): audio handling and provider data flow, once the provider is chosen.
-- [Requirements](../requirements.md) and [roadmap](../roadmap.md) when the provider decision changes qualification status.
+- [Security](../security.md): on-device audio handling and data flow.
+- [Requirements](../requirements.md) and [roadmap](../roadmap.md) when the implementation or qualification status changes.
 
 ## Size
 

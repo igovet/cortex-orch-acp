@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskProjection {
     pub task_id: String,
+    /// Owning sprint of a service-created planning draft, not sprint membership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning_sprint_id: Option<String>,
     pub description: String,
     pub title: Option<String>,
     pub title_availability: String,
@@ -15,6 +18,8 @@ pub struct TaskProjection {
     pub runtime_state: Option<String>,
     pub execution_state: String,
     pub wait_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_wait: Option<FilesWait>,
     pub last_confirmed_at: Option<String>,
     pub coordinator_route: Option<RouteLabel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -23,6 +28,14 @@ pub struct TaskProjection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description_availability: Option<String>,
 }
+/// Display context for a file wait with a holder in the same Workspace project.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilesWait {
+    pub holder_task_id: String,
+    pub release_target: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteLabel {

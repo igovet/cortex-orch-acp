@@ -4,6 +4,7 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "workspace_request",
             "workspace_notify",
+            "workspace_open_result_target",
             "workspace_close",
         ]),
     ))

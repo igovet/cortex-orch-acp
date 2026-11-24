@@ -94,6 +94,7 @@ fn field(code: &str) -> Option<&'static str> {
             "not_verified"
         }
         "invalid_question_batch" | "invalid_question_form" => "questions",
+        "question_recommendation_invalid" => "recommended",
         "unknown_model_hint" => "model",
         "unknown_command_ref" => "tool_call_ref",
         "unknown_large_output_ref" => "large_output_id",
@@ -147,6 +148,7 @@ fn hint(code: &str) -> &'static str {
         "unknown_model_hint" => "Use a model from list_route_options, or omit the model hint.",
         "worker_waiting_for_answer" => "A question from this assignment is still open. End the turn; the runtime resumes it with the answer.",
         "invalid_question_batch" | "invalid_question_form" => "Ask 1 to 8 self-contained questions, each with 2 to 8 distinct options.",
+        "question_recommendation_invalid" => "Set recommended to the 1-based position of one of this question's options.",
         "file_missing" => "The path does not exist. Read the parent directory with project_read and use an existing path.",
         "symlink_refused" => "A path component is a symbolic link; Cortex file tools never follow links.",
         "regular_file_required" | "regular_unlinked_file_required" => "The path must be one regular file (not a directory, link or hard-linked file).",

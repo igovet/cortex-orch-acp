@@ -1,4 +1,5 @@
-import { batchAnswers, batchForm, parseQuestionBatch, type QuestionBatch } from "../shared/question-batch.ts";
+import { batchAnswers, batchForm, parseQuestionBatch, questionOption, recommendation, type QuestionBatch } from "../shared/question-batch.ts";
+import { isConcreteEffort, orderedEfforts, preferredEffort } from "../shared/reasoning-effort.ts";
 import { ReplayController } from "./replay-connector.ts";
 import { ReplaySpool } from "./replay-spool.mjs";
 import { isHiddenOperation } from "../shared/timeline-visibility.ts";
@@ -918,17 +919,16 @@ export function withModelEfforts<T extends {
 ): T {
   return {
     ...catalog,
-    models: catalog.models.map((model) => ({
-      ...model,
-      thinkingOptions: (efforts[model.id] ?? []).map((value) => ({ id: value, label: value })),
-      // The ACP bridge gives us the effective session choice separately as
-      // `defaultThinkingOption`.  Once each model receives its own option
-      // list, carry that choice onto the matching model or Paseo falls back
-      // to the first option (usually "low") in its composer.
-      ...(catalog.defaultThinkingOption && (efforts[model.id] ?? []).includes(catalog.defaultThinkingOption)
-        ? { defaultThinkingOptionId: catalog.defaultThinkingOption }
-        : {}),
-    })),
+    defaultThinkingOption: catalog.defaultThinkingOption && isConcreteEffort(catalog.defaultThinkingOption)
+      ? catalog.defaultThinkingOption : undefined,
+    models: catalog.models.map((model) => {
+      const offered = orderedEfforts(efforts[model.id] ?? []);
+      return {
+        ...model,
+        thinkingOptions: offered.map((value) => ({ id: value, label: value })),
+        defaultThinkingOptionId: preferredEffort(offered, catalog.defaultThinkingOption),
+      };
+    }),
   };
 }
 
@@ -989,6 +989,7 @@ export function cortexTransformer(
     // for it; an effort the model offers is applied as before.
     async configure(change, context) {
       if (change.target !== "thinking") return "pass";
+      if (change.value !== null && !isConcreteEffort(change.value)) return "handled";
       const values = await context.config.read();
       if (!(THOUGHT_LEVEL_CONFIG_ID in values)) return "handled";
       const model = values[MODEL_CONFIG_ID];
@@ -1530,7 +1531,8 @@ export function wrapCortexConnection(
             const scalarOptions = displayActions.map((option, index) => ({ id: option.id, label: option.label, answer: actions[index].label }));
             const question = typeof event.request.input?.question === "string"
               ? event.request.input.question : event.request.title ?? "Choose an option";
-            const batch = { questionId: scalarId, questions: [{ questionId: scalarId, question, options: actions.map((action) => action.label) }] };
+            const choice = recommendation(event.request.input?.recommended, actions.length);
+            const batch = { questionId: scalarId, questions: [{ questionId: scalarId, question, options: actions.map((action) => action.label), ...choice }] };
             const key = JSON.stringify([event.sessionId, scalarId]);
             const existing = batches.get(key);
             if (existing && JSON.stringify(existing.batch) !== JSON.stringify(batch)) throw new Error("Conflicting Cortex question replay");
@@ -1551,7 +1553,7 @@ export function wrapCortexConnection(
               existing.presented = true;
             } else batches.set(key, { batch, scalarOptions, permissionId: event.request.id, permissions: new Set([event.request.id]), retired: new Set(), retiring: new Map(), submissions: new Map(), presented: true });
             listener({ ...event, request: { ...event.request, kind: "question", metadata: {}, input: { questions: [{
-              question, header: "Cortex", options: displayActions.map((option) => ({ label: option.label })),
+              question, header: "Cortex", options: displayActions.map((option, index) => questionOption(option.label, index, choice.recommended, event.request.input?.language)),
               multiSelect: false, allowOther: true,
             }] } } });
             return;

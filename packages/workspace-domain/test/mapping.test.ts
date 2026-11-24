@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Check as WireCheck, Decision as WireDecision, Result as WireResult, Task as WireTask } from "@cortex/workspace-contract";
 import { readableCheckReason, mapCheckOutcome, mapDecision, mapProjectSlice, mapResult, mapTask, statusOfRuntime } from "../src/mapping";
 import { overlayTask } from "../src/port";
-import { dependencyReady, isAutomaticQueue, runBlockerOf } from "../src/invariants";
+import { dependencyReady, isAutomaticQueue, runBlockerOf, taskCheckout } from "../src/invariants";
 import type { Sprint } from "../src/types";
 import { boardPhase } from "../src/projections";
 import { emptyWorkspace, LOCAL_MACHINE_ID } from "../src/empty";
@@ -33,7 +33,38 @@ const wireDecision = (patch: Partial<WireDecision> = {}): WireDecision => ({
 });
 const ctx = { projectId: "p" };
 
+it("uses the projected worktree ID and never replaces a missing binding with main or a stale task association", () => {
+  const task = mapTask(wireTask(), ctx);
+  const binding = { kind: "worktree", id: "p:wt:bound", path: "/bound", branch: "cw/task" } as const;
+  const main = { id: "p:main", projectId: "p", kind: "main", branch: "main", path: "/p", taskId: null, label: null, base: "main", ahead: 0, behind: 0, behindOf: {}, files: [], draft: "", sources: {}, updateConflict: null } as const;
+  const state = emptyWorkspace();
+  const checkouts = [{ ...main, files: [] }, { ...main, kind: "worktree" as const, id: "p:wt:stale", taskId: task.id, files: [] }, { ...main, ...binding, files: [] }];
+  state.repos.push({ projectId: "p", remote: "", tree: [], sources: {}, commits: [], branches: [], checkouts, fetchedAt: null });
+  expect(taskCheckout(state, { ...task, checkout: binding })?.id).toBe(binding.id);
+  expect(taskCheckout(state, { ...task, checkout: { ...binding, unavailable: true } })).toBeNull();
+  checkouts.pop();
+  expect(taskCheckout(state, { ...task, checkout: binding })).toBeNull();
+});
+
 describe("task mapping", () => {
+  it("preserves the file wait independently of owner decision text and removes it with the warning", () => {
+    const holder = { holderTaskId: "holder", releaseTarget: "src/lib.rs" };
+    const message = "Waiting for the task “Description” to release src/lib.rs";
+    const wire = wireTask({ filesWait: holder, waitReason: message, warnings: ["waiting_for_files"] });
+    const project = { id: "p" } as Parameters<typeof mapProjectSlice>[0];
+    const mapped = mapProjectSlice(project, [wire], [wireDecision()]).tasks[0];
+    expect(mapped.issue).toBe("Which?");
+    expect(mapped.filesWait).toEqual({ message, holder });
+    expect(mapTask({ ...wire, warnings: [] }, ctx)).not.toHaveProperty("filesWait");
+  });
+  it("preserves a pre-link planner identity without adding sprint membership", () => {
+    const draft = wireTask({ phase:"not_started", runtimeState:null, executionState:"not_started", executionId:null });
+    expect(mapTask({ ...draft, planningSprintId:"s" }, ctx)).toMatchObject({ status:"draft", planningSprintId:"s", sprintId:null });
+    for (const marker of [undefined, null, "", 1]) {
+      expect(mapTask({ ...draft, planningSprintId:marker }, ctx)).not.toHaveProperty("planningSprintId");
+    }
+  });
+
   it("keeps a policy-bound continuation and its recorded pauses out of the owner-wait state", () => {
     const recovery = wireTask({ phase:"recovery", runtimeState:"RECOVERING", executionState:"recovering", waitReason:"automatic_continuation_pending" });
     const automaticContinuation = { policy:"automatic_continuation", continuationCount:2, lastContinuationReason:"Verification did not pass", pause:null };
@@ -209,6 +240,16 @@ describe("decision mapping", () => {
     expect(mapDecision(wireDecision({ status: "superseded" })).withdrawn).toBe(true);
     expect(mapDecision(wireDecision({ status: "expired" })).withdrawn).toBe(true);
     expect(mapDecision(wireDecision({ status: "answered" })).answer).toEqual({ text: "Answered", at: null });
+  });
+  it.each(["question", "question_batch"] as const)("maps %s option detail to the description below its label", kind => {
+    const question = wireDecision({ kind, options: [
+      { optionId: "a", label: "A", detail: "Retains `src/index.ts:10`" },
+      { optionId: "b", label: "B" },
+    ] });
+    expect(mapDecision(question).options).toEqual([
+      { optionId: "a", label: "A", sub: "Retains `src/index.ts:10`" },
+      { optionId: "b", label: "B" },
+    ]);
   });
   it("names the worker role that asked, and no one for the coordinator's question", () => {
     expect(mapDecision(wireDecision({ askedBy: "devops-engineer" })).from).toBe("devops-engineer");

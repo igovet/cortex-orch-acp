@@ -477,7 +477,12 @@ Live worker view:
   not displayed, and a worker message keeps its single line breaks (results and reports wrap as before).
   File paths in messages, results, reports and questions are clickable: a path inside the project's checkout
   opens in Code at its line; a path outside the project or not found in the checkout opens a small menu with
-  Copy path and, on the local desktop, an explicit open in the external editor or default app. http(s) and
+  Copy path and, on the local desktop, an explicit open in the external editor or default app. Exception: a
+  Markdown link to a video or subtitle file (mp4, m4v, webm, ogv, mov, mkv, avi, srt, vtt, ass, ssa) never
+  opens Code, even when the file is in the checkout; it opens the path menu with Open in default app and Copy
+  path (see Result links in local-task-execution.md). A path in text is recognized when it is absolute, starts
+  with `./` or `../`, contains a `/` and ends in an extension, or carries a line suffix (`:12`, `#L12`); a bare
+  name such as `README.md` with no folder and no line stays text. http(s) and
   mailto links open outside the app; other schemes stay text. Question options and their per-option detail
   render inline Markdown (including these links); a link in an option does not select or submit it. Tool labels, icons, Worked summaries and which calls appear reuse the Paseo integration’s
   presentation functions, so both clients show the same rows; an engine's raw tool name never reaches the

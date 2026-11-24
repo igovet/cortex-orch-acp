@@ -37,7 +37,7 @@ function card(permissionId: string, questionId: string) {
     type: "session.permission", sessionId: "s",
     request: {
       id: permissionId, name: "Approve?", kind: "tool", title: "Approve?",
-      input: { [CORTEX_QUESTION_INPUT_MARKER]: true, questionId, question: "Approve?" },
+      input: { [CORTEX_QUESTION_INPUT_MARKER]: true, questionId, question: "Approve?", recommended: 2, language: "ru" },
       actions: [{ id: "cortex-question-1", label: "Approve", behavior: "allow" },
         { id: "cortex-question-2", label: "Finish", behavior: "allow" }],
     },
@@ -53,6 +53,9 @@ card("permission:q1", "pq_1");
 const question = seen.find((event) => event.type === "session.permission");
 assert.equal(question.request.kind, "question");
 assert.equal(question.request.input.questions[0].allowOther, true);
+assert.deepEqual(question.request.input.questions[0].options, [
+  { label: "1. Approve" }, { label: "2. Finish", description: "Рекомендуется" },
+]);
 
 // A typed answer reaches Cortex first, shows in the chat paired with the
 // question it answers, then retires the card.

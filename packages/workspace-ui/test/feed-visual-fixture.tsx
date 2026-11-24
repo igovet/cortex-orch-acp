@@ -1,12 +1,18 @@
 import { render } from "solid-js/web";
 import { emptyWorkspace, emptySession, type Activity, type Worker } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
-import { withTask } from "./support";
 import "../src/mockup-styles.css";
 import "../src/workspace.css";
 
 // Disposable, opt-in fake data and scripted UI responses. No service, engines or real stores.
-const s = withTask(emptyWorkspace(), "Inspect the landing page");
+const s = emptyWorkspace();
+s.projects = [{ id: "p", machineId: s.machines[0].id, name: "Project", repository: "/p", openBranch: "main", defaultBranch: "main" }];
+s.tasks = [{
+    id: "t", projectId: "p", sprintId: null, description: "Inspect the landing page", title: "Inspect the landing page", titleState: "generated", checkout: { kind: "main", branch: "main" }, targetBranch: null, dependencies: [],
+    status: "draft", resumeStatus: "working", issue: null, executionId: null, result: null, workspaceDigest: null, acceptance: null, conflict: "none", merge: null, resolvedBy: null, integration: null,
+    closedAs: null, notVerifiedByCortex: false, doneAt: null, archive: null, work: "unmerged", process: "stopped", unexpectedChanges: false, purgeBlocker: null,
+    settings: { model: "", effort: "", mode: "guarded", language: "auto" },
+}];
 s.machines[0].connection = "connected";
 Object.assign(s.tasks[0], { status: "working", process: "live", executionId: "e", coordinatorRoute: { model: "gpt-6-luna", effort: "medium" } });
 const step = (detail: object) => JSON.stringify(detail);
@@ -65,6 +71,17 @@ const port: any = {
   },
 };
 const selectedView = new URLSearchParams(location.search).get("view") ?? "worker";
+if (selectedView === "links") {
+  s.projects[0].repository = "/fixture";
+  s.repos = [{ projectId: "p", remote: "", tree: ["src/app.ts"], sources: { "src/app.ts": "line one\nline two\nline three\n" }, commits: [], branches: [], fetchedAt: null,
+    checkouts: [{ id: "p:main", projectId: "p", kind: "main", path: "/fixture", branch: "main", files: [], sources: {}, taskId: null, label: null, base: "main", ahead: 0, behind: 0, behindOf: {}, draft: "", updateConflict: null }] }];
+  session.decisions = [{ id: "links", kind: "question", from: "", workerId: null, at: null,
+    text: "Which layout should use `src/app.ts:2`?",
+    options: [{ label: "**Keep** the compact layout", sub: "See [design notes](/tmp/mock-workspace/a-very-long-example-design-notes-path-that-must-wrap.md)", optionId: "keep" },
+      { label: "Move to `grid`", sub: "Read the final behavior in `src/app.ts:3`.", optionId: "grid" }], answer: null, withdrawn: false }];
+  session.timeline = [{ id: "links-reply", kind: "cortex", text: "Start with src/app.ts:2.\nThe related fixture is src/missing.ts." },
+    { id: "links-decision", kind: "decision", decisionId: "links" }];
+}
 if (selectedView === "review") {
   Object.assign(s.tasks[0], {
     title: "Review the local landing page", status: "review", process: "stopped", workspaceDigest: "fixture-digest",
@@ -77,7 +94,7 @@ if (selectedView === "review") {
       ] }
   });
 }
-const VIEW: Record<string, string> = { review: "/m/local/t/t/changes", worker: "/m/local/t/t/workers/w", working: "/m/local/t/t/workers/w2", coordinator: "/m/local/t/t/workers/cortex", conversation: "/m/local/t/t", settings: "/settings/app/appearance", board: "/m/local/p/p/board" };
+const VIEW: Record<string, string> = { links: "/m/local/t/t", review: "/m/local/t/t/changes", worker: "/m/local/t/t/workers/w", working: "/m/local/t/t/workers/w2", coordinator: "/m/local/t/t/workers/cortex", conversation: "/m/local/t/t", settings: "/settings/app/appearance", board: "/m/local/p/p/board" };
 history.replaceState(null, "", VIEW[selectedView] ?? VIEW.worker);
-render(() => <Workspace port={port} />, document.getElementById("root")!);
+render(() => <Workspace port={port} openResultTarget={selectedView === "links" ? async () => { throw new Error("Native opening is not available in this fixture."); } : undefined} />, document.getElementById("root")!);
 (window as any).fixture = { emit };

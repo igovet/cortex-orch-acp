@@ -243,6 +243,15 @@ pub(super) async fn verify_cancelled(
 ) -> CoreResult<Value> {
     verify_in(root, argv, cancel, None).await
 }
+pub(super) async fn verify_worktree(
+    root: PathBuf, logical: PathBuf, argv: &[String], cancel: tokio::sync::watch::Receiver<bool>,
+) -> CoreResult<Value> {
+    let r = root.clone();
+    let sandbox = tokio::task::spawn_blocking(move || crate::native_command_sandbox::Sandbox::prepare_worktree(&r, &logical, &[]))
+        .await.map_err(|_| refused())?
+        .map_err(|_| CoreError::Refused("native_verification_sandbox_unavailable"))?;
+    run_verifier(Command::from(sandbox.command(argv)?), root, argv, cancel, VERIFICATION_DEADLINE).await
+}
 /// Production uses the owner's resolved tool path; tests can supply a fixture environment.
 async fn verify_in(
     root: PathBuf,
@@ -279,8 +288,14 @@ async fn verify_with_deadline(
     .await
     .map_err(|_| refused())?
     .map_err(|_| CoreError::Refused("native_verification_sandbox_unavailable"))?;
-    let c = Command::from(sandbox.command(argv)?);
-    let result = capture_limited(c, deadline, cancel, OUTPUT, is_test_fast(argv)).await;
+    run_verifier(Command::from(sandbox.command(argv)?), root, argv, cancel, deadline).await
+}
+
+async fn run_verifier(
+    command: Command, root: PathBuf, argv: &[String],
+    cancel: tokio::sync::watch::Receiver<bool>, deadline: Duration,
+) -> CoreResult<Value> {
+    let result = capture_limited(command, deadline, cancel, OUTPUT, is_test_fast(argv)).await;
     let receipt = match result {
         Ok(o) => {
             let mut observation = json!({"complete":o.complete,"exit_code":o.code,"output_truncated":o.truncated,
@@ -335,7 +350,9 @@ pub(crate) async fn git_with_limit(
     Ok(o.stdout)
 }
 /// Availability probe is not retained as verification evidence.
-pub(super) async fn plan_preflight(root: PathBuf, plan: &Value) -> CoreResult<()> {
+pub(super) async fn plan_preflight(
+    root: PathBuf, logical: Option<PathBuf>, plan: &Value,
+) -> CoreResult<()> {
     let canonical = cortex_core::lifecycle::plan::validate(plan)?;
     let tasks = canonical["tasks"].as_array().unwrap();
     fn depends(tasks: &[Value], id: &str, target: &str) -> bool {
@@ -378,8 +395,54 @@ pub(super) async fn plan_preflight(root: PathBuf, plan: &Value) -> CoreResult<()
             }
         }
     }
-    verification_preflight(root, &canonical["verification"]).await
+    checkout_preflight(root, logical, &canonical["verification"]).await
 }
+
+/// Probe executables in the sparse worktree command namespace, not the broader
+/// main-folder verifier. A successful probe counts only as availability.
+pub(super) async fn checkout_preflight(
+    root: PathBuf, logical: Option<PathBuf>, verification: &Value,
+) -> CoreResult<()> {
+    let Some(logical) = logical else { return verification_preflight(root, verification).await; };
+    let commands = cortex_core::lifecycle::plan::verification(verification)?;
+    if commands.is_empty() { return Ok(()); }
+    tokio::task::spawn_blocking(move || {
+        let view = crate::native_command_sandbox::Sandbox::prepare_worktree(&root, &logical, &[])
+            .map_err(|_| CoreError::Refused("native_verification_sandbox_unavailable"))?;
+        for argv in commands {
+            let mut programs = vec![argv[0].as_str()];
+            if let Some(inner) = cortex_core::lifecycle::completion::launched_program(&argv)
+                .filter(|p| !p.contains('/') || p.starts_with('/')) {
+                programs.push(inner);
+            }
+            for program in programs {
+                let mut child = view.command(&[
+                    "/usr/bin/bash".into(), "-c".into(),
+                    r#"case "$1" in */*) [ -f "$1" ] && [ -x "$1" ];; *) type -P -- "$1" >/dev/null;; esac || exit 42"#.into(),
+                    "cortex-preflight".into(), program.into(),
+                ])?.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    match child.try_wait()? {
+                        Some(status) if status.success() => break,
+                        // Bubblewrap itself can exit 1. Only our probe's
+                        // distinct code establishes a missing executable.
+                        Some(status) if status.code() == Some(42) => return Err(CoreError::Refused("verification_executable_unavailable")),
+                        Some(_) => return Err(CoreError::Refused("native_verification_sandbox_unavailable")),
+                        None if std::time::Instant::now() >= deadline => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(CoreError::Refused("native_verification_sandbox_unavailable"));
+                        }
+                        None => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    }
+                }
+            }
+        }
+        Ok(())
+    }).await.map_err(|_| CoreError::Refused("native_verification_sandbox_unavailable"))?
+}
+
 pub(super) async fn verification_preflight(root: PathBuf, verification: &Value) -> CoreResult<()> {
     // The same environment the verifier's launch takes: the owner's tool search path.
     verification_preflight_in(root, verification, crate::tool_path::environment()).await

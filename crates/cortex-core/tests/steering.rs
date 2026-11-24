@@ -4,10 +4,11 @@
 mod support;
 use cortex_core::{
     lifecycle::{completion, domain, plan, steering},
-    workspace::{control, create_draft, start_native},
+    workspace::{control, create_draft, start_native_input_with_policy, NativeExecutionPolicy},
     CoreResult, Store,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use support::Project;
 
 fn setup() -> (Project, Store) {
@@ -28,6 +29,14 @@ fn started(s: &Store, n: usize) -> (String, String) {
     started_with(s, n, "Steering fixture")
 }
 fn started_with(s: &Store, n: usize, description: &str) -> (String, String) {
+    started_with_policy(s, n, description, None)
+}
+fn started_with_policy(
+    s: &Store,
+    n: usize,
+    description: &str,
+    policy: Option<NativeExecutionPolicy>,
+) -> (String, String) {
     let create = json!({"protocol":{"major":1,"minor":8},"requestId":format!("create-{n}"),"projectId":"p","actorId":"owner",
         "operation":"tasks.create","target":"p","expectedVersion":"0","ownerEpoch":null,
         "payload":{"description":description,"checkout":{"kind":"main"}}});
@@ -37,7 +46,8 @@ fn started_with(s: &Store, n: usize, description: &str) -> (String, String) {
         .to_owned();
     let start = json!({"protocol":{"major":1,"minor":8},"requestId":format!("start-{n}"),"projectId":"p","actorId":"owner",
         "operation":"tasks.start","target":draft,"expectedVersion":"1","ownerEpoch":null,"payload":{}});
-    let started = start_native(s, "p", "owner", &start).unwrap();
+    let started =
+        start_native_input_with_policy(s, "p", "owner", &start, None, None, policy).unwrap();
     (
         started["task"].as_str().unwrap().to_owned(),
         started["receipt"]["target"].as_str().unwrap().to_owned(),
@@ -87,6 +97,222 @@ fn count(s: &Store, event: &str) -> i64 {
         )?)
     })
     .unwrap()
+}
+
+fn active_plan_args(s: &Store) -> Value {
+    let raw = one(s, "SELECT plan_json FROM runtime_tasks");
+    let stored: Value = serde_json::from_str(&raw).unwrap();
+    json!({
+        "expected_plan": format!("{:x}", Sha256::digest(raw.as_bytes())),
+        "source_request": "owner-steer",
+        "plan": plan::steerable_plan(&stored).unwrap(),
+    })
+}
+
+fn begin_plan(s: &Store, task: &str, proposed: &Value) {
+    s.write(|db| {
+        plan::accept_tx(db, task, "coordinator", "plan", proposed)?;
+        db.execute(
+            "UPDATE runtime_tasks SET state='EXECUTING' WHERE task_id=?",
+            [task],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+fn node(id: &str, role: &str, deps: &[&str]) -> Value {
+    json!({"id":id,"role":role,"objective":format!("Work on {id}"),
+        "dependencies":deps,"scope":["src"],"model":"auto"})
+}
+
+fn assert_amend_refused(s: &Store, task: &str, args: &Value, code: &str) {
+    let snapshot = || {
+        (
+            one(s, "SELECT plan_json FROM runtime_tasks"),
+            one(s, "SELECT json_group_array(json_array(node_id,role,objective,dependencies_json,scope_json,status,assignment_ref,result_json)) FROM (SELECT * FROM runtime_nodes ORDER BY node_id)"),
+            count(s, "PLAN_AMENDED"),
+        )
+    };
+    let before = snapshot();
+    assert_eq!(
+        s.write(|db| plan::amend_active_tx(db, task, args))
+            .unwrap_err()
+            .code(),
+        code
+    );
+    assert_eq!(snapshot(), before, "refusal must leave no partial amendment");
+}
+
+#[test]
+fn active_plan_replaces_only_unclaimed_work_and_locks_verification_routing_and_scope() {
+    let (_p, s) = setup();
+    let (task, execution) = started(&s, 1);
+    let proposed = json!({
+        "tasks":[node("claimed", "backend-dev", &[]), node("drop", "backend-dev", &["claimed"]),
+                 node("pending", "backend-dev", &["claimed"]), node("previouslyClaimed", "backend-dev", &["claimed"])],
+        "verification":[["cargo","test"]],
+    });
+    begin_plan(&s, &task, &proposed);
+    s.write(|db| {
+        db.execute(
+            "UPDATE runtime_nodes SET status='running',assignment_ref='a-claimed' WHERE task_id=? AND node_id='claimed'",
+            [&task],
+        )?;
+        // A previously claimed node may look pending again; the retained event still fences it.
+        cortex_core::lifecycle::event_tx(db, &task, "ASSIGNMENT_CREATED",
+            json!({"node":"previouslyClaimed","revision":1}))?;
+        Ok(())
+    }).unwrap();
+    say(&s, &execution, "deny", "deny-write: private").unwrap();
+
+    let mut next = active_plan_args(&s);
+    let tasks = next["plan"]["tasks"].as_array_mut().unwrap();
+    tasks.remove(1);
+    tasks[1]["objective"] = json!("Refined pending objective");
+    tasks.push(node("added", "backend-dev", &["pending"]));
+    for index in [0, 2] {
+        let mut args = next.clone();
+        args["plan"]["tasks"][index]["objective"] = json!("Attempt to change claimed work");
+        assert_amend_refused(&s, &task, &args, "active_plan_node_already_claimed");
+    }
+    let mut args = next.clone();
+    args["plan"]["verification"] = json!([["cargo", "check"]]);
+    assert_amend_refused(&s, &task, &args, "active_plan_verification_locked");
+
+    let mut args = next.clone();
+    args["plan"]["tasks"][1]["complexity"] = json!("high");
+    assert_amend_refused(&s, &task, &args, "active_plan_routing_locked");
+
+    let mut args = next.clone();
+    args["plan"]["tasks"][3]["scope"] = json!(["private/child"]);
+    assert_amend_refused(&s, &task, &args, "write_denied");
+
+    let receipt = s.write(|db| plan::amend_active_tx(db, &task, &next)).unwrap();
+    assert_eq!(receipt["revision"], 1);
+    assert_eq!(receipt["changed"], true);
+    assert_eq!(active_plan_args(&s)["plan"], next["plan"]);
+    assert_eq!(active_plan_args(&s)["expected_plan"], receipt["plan_digest"]);
+    assert_eq!(
+        one(&s, "SELECT group_concat(node_id || ':' || status, ',') FROM (SELECT * FROM runtime_nodes ORDER BY node_id)"),
+        "added:pending,claimed:running,pending:pending,previouslyClaimed:pending"
+    );
+    assert_eq!(one(&s, "SELECT assignment_ref FROM runtime_nodes WHERE node_id='claimed'"), "a-claimed");
+    assert_eq!(count(&s, "PLAN_AMENDED"), 1);
+    assert_amend_refused(&s, &task, &next, "active_plan_changed");
+}
+
+#[test]
+fn active_sprint_planning_amends_read_only_work_with_empty_verification() {
+    let (_p, s) = setup();
+    let (task, _) = started_with_policy(
+        &s,
+        1,
+        "Plan the sprint",
+        Some(NativeExecutionPolicy::SprintPlanning),
+    );
+    begin_plan(&s, &task, &json!({"tasks":[node("study", "explorer", &[])],"verification":[]}));
+    let mut args = active_plan_args(&s);
+    args["plan"]["tasks"][0]["objective"] = json!("Include the active sprint");
+    let mut writer = args.clone();
+    writer["plan"]["tasks"][0]["role"] = json!("backend-dev");
+    assert_amend_refused(&s, &task, &writer, "read_only_task_writer_refused");
+    let receipt = s.write(|db| plan::amend_active_tx(db, &task, &args)).unwrap();
+    assert_eq!(receipt["changed"], true);
+    assert_eq!(active_plan_args(&s)["plan"], args["plan"]);
+}
+
+#[test]
+fn active_consultation_plan_preserves_runtime_node_and_gates_new_work() {
+    let (_p, s) = setup();
+    let (task, _) = started(&s, 1);
+    // Record an escalation through its retained input and let plan intake insert the gate.
+    s.write(|db| {
+        cortex_core::lifecycle::event_tx(db, &task, "REPLAN_REQUEST_ACCEPTED",
+            json!({"operation":"escalation_request","revision":0,"proposal":{"reason":"Independent advice"}}))?;
+        Ok(())
+    }).unwrap();
+    let proposed = json!({"tasks":[node("study", "explorer", &[]), node("followup", "explorer", &["study"])],
+        "verification":[["cargo","test"]]});
+    begin_plan(&s, &task, &proposed);
+    s.write(|db| {
+        db.execute("UPDATE runtime_nodes SET status='running',assignment_ref='a-consult' WHERE task_id=? AND node_id='_consultation'", [&task])?;
+        Ok(())
+    }).unwrap();
+    let before: Value = serde_json::from_str(&one(&s, "SELECT plan_json FROM runtime_tasks")).unwrap();
+    assert_eq!(before["tasks"][0]["id"], "_consultation");
+    let mut args = active_plan_args(&s);
+    assert_eq!(args["plan"], proposed);
+    let unchanged = s.write(|db| plan::amend_active_tx(db, &task, &args)).unwrap();
+    assert_eq!(unchanged["changed"], false);
+    assert_eq!(count(&s, "PLAN_AMENDED"), 0);
+
+    let mut forged = args.clone();
+    forged["plan"]["tasks"][0]["id"] = json!("_consultation");
+    assert_amend_refused(&s, &task, &forged, "duplicate_or_invalid_node");
+    forged = args.clone();
+    forged["plan"]["tasks"][0]["role"] = json!("senior-consultant");
+    assert_amend_refused(&s, &task, &forged, "runtime_reserved_role");
+    forged = args.clone();
+    forged["plan"]["tasks"][0]["dependencies"] = json!(["_consultation"]);
+    assert_amend_refused(&s, &task, &forged, "unknown_dependency");
+
+    args["plan"]["tasks"][0]["objective"] = json!("Study the guidance");
+    args["plan"]["tasks"].as_array_mut().unwrap().push(node("new", "explorer", &[]));
+    let receipt = s.write(|db| plan::amend_active_tx(db, &task, &args)).unwrap();
+    assert_eq!(receipt["changed"], true);
+    assert_eq!(active_plan_args(&s)["plan"], args["plan"]);
+    let after: Value = serde_json::from_str(&one(&s, "SELECT plan_json FROM runtime_tasks")).unwrap();
+    assert_eq!(after["tasks"][0], before["tasks"][0]);
+    assert_eq!(after["tasks"][1]["dependencies"], json!(["_consultation"]));
+    assert_eq!(after["tasks"][2], before["tasks"][2]);
+    assert_eq!(after["tasks"][3]["dependencies"], json!(["_consultation"]));
+    assert_eq!(one(&s, "SELECT status || ':' || assignment_ref FROM runtime_nodes WHERE node_id='_consultation'"), "running:a-consult");
+    assert_eq!(one(&s, "SELECT dependencies_json FROM runtime_nodes WHERE node_id='new'"), r#"["_consultation"]"#);
+    assert_eq!(count(&s, "PLAN_AMENDED"), 1);
+}
+
+#[test]
+fn an_unobserved_active_handoff_survives_and_only_its_own_reply_can_confirm() {
+    let (_p, s) = setup();
+    let (task, execution) = started(&s, 1);
+    working(&s, &task, "EXECUTING", "execution");
+    say(&s, &execution, "one", "First guidance").unwrap();
+    say(&s, &execution, "two", "Second guidance").unwrap();
+    s.write(|db| {
+        let handed = steering::hand_active_tx(db, &task, "lost-steering-channel")?;
+        assert_eq!(handed.iter().map(|m| &m["request"]).collect::<Vec<_>>(), vec![&json!("one"), &json!("two")]);
+        assert!(handed.iter().all(|m| m["repeated"] == false));
+        assert_eq!(steering::confirm_tx(db, &task)?, 0);
+        assert_eq!(steering::pending(db, &task)?.len(), 2);
+        assert_eq!(completion::pending_input_tx(db, &task)?.len(), 2);
+        // A reply from a different channel does not inherit an abandoned hand-off.
+        let unrelated = cortex_core::lifecycle::event_tx(db, &task, "NATIVE_TURN_SETTLED",
+            json!({"channel_id":"unrelated","stop_reason":"end_turn"}))?;
+        steering::confirm_active_tx(db, &task, "lost-steering-channel", unrelated)?;
+        assert_eq!(steering::pending(db, &task)?.len(), 2);
+        Ok(())
+    }).unwrap();
+    say(&s, &execution, "three", "Third guidance").unwrap();
+    s.write(|db| {
+        let handed = steering::hand_active_tx(db, &task, "replacement-steering-channel")?;
+        assert_eq!(handed.iter().map(|m| &m["repeated"]).collect::<Vec<_>>(), vec![&json!(true), &json!(true), &json!(false)]);
+        let channel = "replacement-steering-channel";
+        let cancelled = cortex_core::lifecycle::event_tx(db, &task, "NATIVE_TURN_SETTLED",
+            json!({"channel_id":channel,"stop_reason":"cancelled"}))?;
+        steering::confirm_active_tx(db, &task, channel, cancelled)?;
+        assert_eq!(completion::pending_input_tx(db, &task)?.len(), 3);
+        let reply = cortex_core::lifecycle::event_tx(db, &task, "NATIVE_TURN_SETTLED",
+            json!({"channel_id":channel,"stop_reason":"end_turn"}))?;
+        steering::confirm_active_tx(db, &task, channel, reply)?;
+        steering::confirm_active_tx(db, &task, channel, reply)?;
+        assert!(completion::pending_input_tx(db, &task)?.is_empty());
+        Ok(())
+    }).unwrap();
+    assert_eq!(count(&s, "STEERING_DELIVERED"), 3);
+    assert_eq!(count(&s, "STEERING_APPLIED"), 3);
+    assert_eq!(one(&s, "SELECT state FROM runtime_tasks"), "EXECUTING");
+    assert_eq!(one(&s, "SELECT status FROM runtime_nodes"), "running");
 }
 
 #[test]

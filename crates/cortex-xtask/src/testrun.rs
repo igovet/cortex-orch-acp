@@ -11,6 +11,9 @@
 use crate::json::Res;
 use crate::proc::{which, TempDir};
 use std::collections::BTreeMap;
+
+#[path = "testrun_affected.rs"]
+mod affected;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -198,6 +201,7 @@ fn steps(root: &Path) -> Res<Vec<Step>> {
 
 pub struct Options {
     pub list: bool,
+    pub affected: Option<String>,
     pub only: Vec<String>,
     pub skip: Vec<String>,
 }
@@ -206,6 +210,7 @@ impl Options {
     pub fn parse(raw: &[String]) -> Res<Options> {
         let mut options = Options {
             list: false,
+            affected: None,
             only: Vec::new(),
             skip: Vec::new(),
         };
@@ -213,6 +218,13 @@ impl Options {
         while let Some(arg) = iter.next() {
             match arg.as_str() {
                 "--list" => options.list = true,
+                "--affected" => {
+                    let base = iter.next().filter(|base| !base.is_empty() && !base.starts_with('-'))
+                        .ok_or("--affected needs a Git base revision")?;
+                    if options.affected.replace(base.clone()).is_some() {
+                        return Err("--affected may be specified only once".into());
+                    }
+                }
                 "--only" | "--skip" => {
                     let value = iter
                         .next()
@@ -226,10 +238,13 @@ impl Options {
                 }
                 other => {
                     return Err(format!(
-                        "unknown option {other}; use --list, --only NAMES or --skip NAMES"
+                        "unknown option {other}; use --list, --only NAMES, --skip NAMES or --affected BASE"
                     ))
                 }
             }
+        }
+        if options.affected.is_some() && (!options.only.is_empty() || !options.skip.is_empty()) {
+            return Err("--affected cannot be combined with --only or --skip".into());
         }
         Ok(options)
     }
@@ -275,8 +290,32 @@ fn gnu_timeout(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf>
     })
 }
 
+fn find_gnu_timeout(cwd: &Path) -> Option<PathBuf> {
+    gnu_timeout(
+        ["timeout", "gnutimeout"]
+            .into_iter()
+            .filter_map(which)
+            .map(|path| cwd.join(path)),
+    )
+}
+
 pub fn run(root: &Path, options: &Options) -> Res<i32> {
-    let all = steps(root)?;
+    let mut all = steps(root)?;
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let mut verified_timeout = None;
+    if let Some(base) = &options.affected {
+        verified_timeout = find_gnu_timeout(&cwd);
+        let selection = verified_timeout
+            .as_deref()
+            .ok_or_else(|| "GNU timeout unavailable for change discovery".to_string())
+            .and_then(|timeout| affected::discover(root, timeout, base));
+        match selection {
+            Ok(selection) => affected::apply(&mut all, &selection),
+            Err(reason) => eprintln!(
+                "test-fast: affected selection unavailable ({reason}); running full suite"
+            ),
+        }
+    }
     for name in options.only.iter().chain(&options.skip) {
         if !all.iter().any(|s| &s.name == name) {
             return Err(format!("unknown step {name}; run `test-fast --list`"));
@@ -301,12 +340,7 @@ pub fn run(root: &Path, options: &Options) -> Res<i32> {
         }
         return Ok(0);
     }
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let candidates = ["timeout", "gnutimeout"]
-        .into_iter()
-        .filter_map(which)
-        .map(|path| cwd.join(path));
-    let Some(timeout) = gnu_timeout(candidates) else {
+    let Some(timeout) = verified_timeout.or_else(|| find_gnu_timeout(&cwd)) else {
         eprintln!("Requires GNU timeout (timeout or gnutimeout on PATH).");
         return Ok(2);
     };

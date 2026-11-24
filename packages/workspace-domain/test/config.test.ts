@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capture, configIssues, coordinatorResolution, emptyWorkspace, machineDefaults, profileChanges, sessionsOf, tierFor } from "../src";
+import { capture, configIssues, coordinatorResolution, emptyWorkspace, machineDefaults, orderedEfforts, profileChanges, resolveEffort, sessionsOf, tierFor } from "../src";
 
 describe("automatic role tiers", () => {
   it("scales planning, general work and exploration by complexity", () => {
@@ -14,6 +14,22 @@ describe("automatic role tiers", () => {
 });
 
 describe("task default routes", () => {
+  it("starts with the configured effort, or medium for absent and legacy defaults", () => {
+    const machine = emptyWorkspace().machines[0];
+    const defaults = machine.config.surfaces.user_defaults;
+    defaults.coordinator = null;
+    defaults.routeDefault = null;
+    expect(machineDefaults(machine).settings.effort).toBe("medium");
+    const choice = defaults.coordinator = {engine:"claude-agent-acp",model:"opus",effort:"high",parameters:{}};
+    machine.config.catalogue["claude-agent-acp"].models = [{id:"opus",label:"Opus",efforts:["default","high","medium","low"],observed:true}];
+    expect(machineDefaults(machine).settings.effort).toBe("high");
+    choice.effort = "default";
+    expect(machineDefaults(machine).settings.effort).toBe("medium");
+    expect(resolveEffort("default", "high", ["low", "high"])).toBe("high");
+    expect(resolveEffort("", "", ["high", "low"])).toBe("low");
+    expect(resolveEffort("", "", ["default"])).toBe("");
+    expect(orderedEfforts(["default", "max", "medium", "high", "xhigh", "low", "engine_default"])).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
   it("keeps the exact configured connection route instead of picking the first model", () => {
     const machine = emptyWorkspace().machines[0];
     machine.config.surfaces.user_defaults.coordinator = {engine:"claude-agent-acp",model:"opus",effort:"high",parameters:{}};

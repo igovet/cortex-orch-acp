@@ -1,7 +1,7 @@
 //! Python `acp.config_options`/`catalog.labels` presentation of the coordinator
 //! `provider`, `model` and `thought_level` options for an incoming ACP client.
 //! Display only: dispatch still resolves through `RouteResolver` eligibility.
-use super::{Candidate, RouteResolver};
+use super::{is_concrete_effort, Candidate, RouteResolver};
 use cortex_core::{CoreError, CoreResult};
 use serde_json::{json, Map, Value};
 use std::{collections::HashMap, path::Path};
@@ -495,15 +495,32 @@ fn effort_rank(value: &str) -> (usize, String) {
         folded,
     )
 }
-/// The efforts a route offers, in Python's strength order without `default`.
+/// Choose the nearest advertised effort; the ordered list favors lower effort on ties.
+pub(super) fn nearest_effort<'a>(values: &'a [String], preferred: Option<&str>) -> Option<&'a str> {
+    let preferred = preferred.filter(|v| is_concrete_effort(v)).unwrap_or("medium");
+    if let Some(exact) = values.iter().find(|v| *v == preferred) {
+        return Some(exact);
+    }
+    let rank = effort_rank(preferred).0;
+    let target = if rank == EFFORTS.len() {
+        effort_rank("medium").0
+    } else {
+        rank
+    };
+    values
+        .iter()
+        .min_by_key(|v| effort_rank(v).0.abs_diff(target))
+        .map(String::as_str)
+}
+
+/// The concrete efforts a route offers, in strength order.
 pub(super) fn efforts(candidate: &Candidate) -> Vec<String> {
     let pairs: Vec<(String, String)> =
         serde_json::from_value(candidate.entry["route"]["supported_parameters"].clone())
             .unwrap_or_default();
     let mut values: Vec<String> = Vec::new();
     for (name, value) in pairs {
-        if name == "thought_level" && value.to_lowercase() != "default" && !values.contains(&value)
-        {
+        if name == "thought_level" && is_concrete_effort(&value) && !values.contains(&value) {
             values.push(value);
         }
     }
@@ -517,18 +534,11 @@ fn thought_option(
     revision: Option<i64>,
 ) -> Option<Value> {
     let values = efforts(&entry?.candidate);
-    let first = values.first()?.clone();
+    let saved = parameters.get("thought_level").and_then(Value::as_str);
     let (current, description) = if unavailable_state(state) {
-        (first, Some(UNAVAILABLE_THOUGHT))
+        (nearest_effort(&values, None)?, Some(UNAVAILABLE_THOUGHT))
     } else {
-        let saved = parameters
-            .get("thought_level")
-            .and_then(Value::as_str)
-            .filter(|v| values.iter().any(|x| x == v));
-        (
-            saved.map(str::to_owned).unwrap_or(first),
-            state_suffix(state),
-        )
+        (nearest_effort(&values, saved)?, state_suffix(state))
     };
     let options: Vec<_> = values.iter().map(|v| json!({"value":v,"name":v})).collect();
     let mut option = json!({"id":"thought_level","name":"Thought level","type":"select",
@@ -723,7 +733,11 @@ impl RouteResolver {
             return Current {
                 route: text(&settings["model"]).map(str::to_owned),
                 state: Some("pending_next_use"),
-                parameters: effort_parameters(text(&settings["effort"])),
+                parameters: effort_parameters(
+                    text(&settings["effort"])
+                        .filter(|v| is_concrete_effort(v))
+                        .or_else(|| self.settings_effort()),
+                ),
                 ..Current::default()
             };
         }
@@ -938,9 +952,12 @@ mod tests {
             "cn_a",
             "xr_a1",
             "large",
-            &["high", "default", "Low", "zeta", "max"],
+            &["high", "default", "engine_default", "Low", "zeta", "max"],
         );
-        assert_eq!(efforts(&large.candidate), ["Low", "high", "max", "zeta"]);
+        let options = efforts(&large.candidate);
+        assert_eq!(options, ["Low", "high", "max", "zeta"]);
+        assert_eq!(nearest_effort(&options, Some("default")), Some("Low"));
+        assert_eq!(nearest_effort(&options, Some("high")), Some("high"));
         let entries = vec![
             large,
             entry("cn_b", "xr_b1", "large", &[]),

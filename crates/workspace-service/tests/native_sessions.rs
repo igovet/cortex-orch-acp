@@ -2059,7 +2059,7 @@ async fn access_modes_and_outside_routes() {
             .await;
             d.prompt(&call(
                 "ask_question",
-                json!({"question":"Wait?","options":["Yes","No"],"request_key":"wait"}),
+                json!({"recommended":1,"question":"Wait?","options":["Yes","No"],"request_key":"wait"}),
             ))
             .await
             .unwrap();
@@ -3268,9 +3268,18 @@ async fn worker_question_answer_exact_delivery_and_native_denial() {
         Ok(())
     })
     .unwrap();
+    let invalid = format!("call:{}", json!({"name":"ask_question",
+        "arguments":{"recommended":3,"question":"Which output?","options":["Detailed","Brief"],"request_key":"out-of-list"},
+        "__fixture_expect":{"/result/isError":true,"/result/structuredContent/code":"question_recommendation_invalid"}
+    }));
+    assert_eq!(d.prompt(&invalid).await.unwrap().stop_reason, "end_turn");
+    s.read(|db| {
+        assert_eq!(db.query_row("SELECT count(*) FROM pending_questions", [], |row| row.get::<_, i64>(0))?, 0);
+        Ok(())
+    }).unwrap();
     let q = call(
         "ask_question",
-        json!({"question":"Which output?","options":["Detailed","Brief"],"request_key":"question"}),
+        json!({"recommended":2,"question":"Which output?","options":["Detailed","Brief"],"request_key":"question"}),
     );
     assert_eq!(d.prompt(&q).await.unwrap().stop_reason, "end_turn");
     assert_eq!(d.prompt(&q).await.unwrap().stop_reason, "end_turn");
@@ -3294,6 +3303,15 @@ async fn worker_question_answer_exact_delivery_and_native_denial() {
             )?)
         })
         .unwrap();
+    s.read(|db| {
+        let stored: String = db.query_row(
+            "SELECT options_json FROM pending_questions WHERE id=?", [&question], |row| row.get(0),
+        )?;
+        assert_eq!(serde_json::from_str::<Value>(&stored)?, json!([
+            "Detailed", {"label":"Brief","recommended":true},
+        ]));
+        Ok(())
+    }).unwrap();
     assert_eq!(h.state("t".into()).await.unwrap(), TaskState::Executing);
     assert_eq!(
         h.answer(
@@ -3330,7 +3348,7 @@ async fn worker_question_answer_exact_delivery_and_native_denial() {
     .unwrap();
     let q = call(
         "ask_question",
-        json!({"question":"Wait for which result?","options":["First","Second"],"request_key":"question2"}),
+        json!({"question":"Wait for which result?","recommended":1,"options":["First","Second"],"request_key":"question2"}),
     );
     d.prompt(&q).await.unwrap();
     assert_eq!(d.prompt(&call("result_submit",json!({
@@ -3418,7 +3436,7 @@ async fn answer_turn_replan_settles_the_answer_delivery() {
         .unwrap();
     let q = call(
         "ask_question",
-        json!({"question":"Which route?","options":["Light","Stop"],"request_key":"route-question"}),
+        json!({"question":"Which route?","recommended":1,"options":["Light","Stop"],"request_key":"route-question"}),
     );
     assert_eq!(d.prompt(&q).await.unwrap().stop_reason, "end_turn");
     let question = s
@@ -4087,6 +4105,18 @@ async fn prompt_usage_follows_real_native_dispatches() {
     ] {
         assert_eq!(d.prompt(text).await.unwrap().stop_reason, "end_turn");
     }
+    // A settled reply already has its usage row before any shutdown write.
+    s.read(|db| {
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM usage_records WHERE task_id='t'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?,
+            3,
+        );
+        Ok(())
+    }).unwrap();
     assert_eq!(
         d.prompt("fixture-usage-refusal").await.unwrap().stop_reason,
         "refusal",
@@ -5380,7 +5410,7 @@ async fn native_workspace_binding_projects_activity_and_scoped_skills() {
         .read(|db| Ok(db.query_row("SELECT coalesce(max(seq),-1) FROM (SELECT seq FROM host_transcript UNION ALL SELECT seq FROM host_updates)", [], |r| r.get(0))?))
         .unwrap();
     let ask = json!({"name":"user_question_request","arguments":{"question":"Which layout?",
-        "options":["Split","Single"],"request_key":"midstream"},
+        "recommended":1,"options":["Split","Single"],"request_key":"midstream"},
         "__fixture_before":["Findings: the layout ","has two "],
         "__fixture_after":["options and ","one risk."]});
     assert_eq!(
@@ -7155,9 +7185,11 @@ async fn recovery_project_operations_and_structured_tool_errors() {
         &w,
         "ask_question",
         json!({"request_key":"topics","questions":[
-        {"question":"Run paid checks?","options":["Yes","No"],"topic":"Paid checks"},
-        {"question":"Which model?","options":["Small","Large"]}]}),
+        {"question":"Run paid checks?","recommended":2,"options":["Yes","No"],"topic":"Paid checks"},
+        {"question":"Which model?","recommended":1,"options":["Small","Large"]}]}),
         json!({"/result/isError":false,"/result/structuredContent/questions/0/topic":"Paid checks",
+            "/result/structuredContent/questions/0/recommended":2,
+            "/result/structuredContent/questions/1/recommended":1,
             "/result/structuredContent/questions/1/question":"Which model?"}),
         "end_turn",
     )
@@ -7423,6 +7455,12 @@ fn main() {
             tokio::time::timeout(Duration::from_secs(90), linked_checkout_command_journey())
                 .await.expect("linked checkout journey exceeded deadline");
             println!("linked checkout: supervised cwd, mounts, work-set receipts and refusals passed");
+            return;
+        }
+        if mode == "worker-question" {
+            tokio::time::timeout(Duration::from_secs(30), worker_question_answer_exact_delivery_and_native_denial())
+                .await.expect("worker question fixture exceeded deadline");
+            println!("worker question recommendation, answer delivery and native denial passed");
             return;
         }
         if mode == "prompt-usage" {

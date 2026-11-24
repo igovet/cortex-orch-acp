@@ -154,7 +154,9 @@ async fn settle(
         return Ok(Some(refusal("This result has no eligible passing runtime verification. Review the result or request changes.")));
     }
     // An unchanged refusal is not repeated on every background pass.
-    let probe = root.to_owned();
+    let checkout = context::owned_checkout(root, project, task)?;
+    let source_root = checkout.as_ref().map_or(root, |w| w.path.as_path());
+    let probe = source_root.to_owned();
     let signal = tokio::task::spawn_blocking(move || task_facts::folder_signal(&probe))
         .await
         .ok()
@@ -164,7 +166,7 @@ async fn settle(
     if let Some(outcome) = remembered(key, inputs.as_deref()) {
         return Ok(Some(outcome));
     }
-    let native = task_facts::native_observation(root).await;
+    let native = task_facts::native_observation(source_root).await;
     let candidate = store
         .read(|db| {
             let (actions, _, warnings, counts) = match task_facts::result_evidence_db(
@@ -258,7 +260,7 @@ fn validate(
         AND NOT EXISTS(SELECT 1 FROM workspace_starts WHERE execution_id=e.execution_id AND state='unknown')",
         (project, task, root.to_string_lossy().as_ref()), |r| r.get::<_, String>(0))
         .optional().map_err(|e| context::core(e.into()))?.ok_or_else(unavailable)?;
-    let (actions, _, warnings, counts) = task_facts::result_evidence_db(
+    let (actions, work, warnings, counts) = task_facts::result_evidence_db(
         db,
         store,
         root,
@@ -281,6 +283,11 @@ fn validate(
             "stale_result",
             "This result or its workspace changed. Rerun checks and review the new result.",
         ));
+    }
+    if super::task_merge::fresh_needed(db, project, &execution, record).map_err(context::core)?
+        || (!work && record["merge"]["freshChecks"].is_object())
+    {
+        return Err(refuse("review_required", super::task_merge::FRESH_CHECKS_REASON));
     }
     if actions["accept"] != true {
         return Err(refuse(
@@ -409,17 +416,20 @@ async fn accept_inner(
             "Activate Cortex and review its runtime result first.",
         )
     })?;
-    let record = product["tasks"][task].clone();
+    let mut record = product["tasks"][task].clone();
+    let checkout = context::owned_checkout(root, project, task)?;
+    if let Some(w) = &checkout { context::set_worktree(&mut record, w); }
+    let source_root = checkout.as_ref().map_or(root, |w| w.path.as_path());
     // Native verification keeps its full-checkout identity. In the project folder,
     // also retain an exact content witness for ordinary Commit when available.
-    let source = if record["checkout"]["kind"].as_str().unwrap_or("main") == "main" {
-        crate::native_effects::observe_commit(root.to_owned()).await
+    let source = if checkout.is_some() || record["checkout"]["kind"].as_str().unwrap_or("main") == "main" {
+        crate::native_effects::observe_commit(source_root.to_owned()).await
     } else {
         None
     };
     let native = match &source {
         Some(source) => Some(source.digest.clone()),
-        None => task_facts::native_observation(root).await,
+        None => task_facts::native_observation(source_root).await,
     };
     let native = native.as_deref();
     // Preserve result/version refusal order before resolving the checkout.
@@ -431,7 +441,7 @@ async fn accept_inner(
         })
         .map_err(context::core)??;
     checkout_shape(&record)?;
-    let path = super::retention::task_path(root, &record, git).await?;
+    let path = match &checkout { Some(w) => w.path.clone(), None => super::retention::task_path(root, &record, git).await? };
     let finish_consent = automatic_finish_consent(product, task, p)?;
     if let Some(consent) = finish_consent.as_ref() {
         let current_branch = git.out(&path, &["branch", "--show-current"]).await?;
@@ -460,6 +470,7 @@ async fn accept_inner(
             record["acceptance"]["version"] = actions["version"].clone();
             record["acceptance"]["commitSource"] =
                 json!({"head":source.head,"branch":source.branch,"content":source.content});
+            if let Some(w) = &checkout { record["acceptance"]["commitSource"]["checkoutId"] = json!(w.id); }
         }
         if automatic {
             record["acceptance"]["automatic"] = json!(true);

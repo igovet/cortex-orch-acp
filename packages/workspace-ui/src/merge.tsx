@@ -220,7 +220,7 @@ export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
       </Show>
     </div>}</Show>
     <Show when={remote() && t().integrationFacts?.pushStatus}>{status => <div class="cap faint">{status() === "pushed" ? "Target branch is pushed (last fetched state)." : status() === "not_pushed" ? "Target branch has unpushed commits (last fetched state)." : "Push status unknown; set a tracking upstream and fetch to check."} This never blocks closing.</div>}</Show>
-    <div class="cap faint">{contained() ? "Close task records your confirmation; no Git operation is needed." : same() ? "Close as is keeps the current result. Done outside the app is also available from the task menu or by moving the card to Done." : noGit()
+    <div class="cap faint">{contained() ? "Close task records your confirmation; no Git operation is needed." : same() ? "Close as is keeps the current result. Done outside the app is also available from the task menu." : noGit()
       ? "Every task stops here. Without Git there is nothing to merge: close the task once you are done with its result, or set up Git to merge it."
       : remote() ? "Every task stops here, including tasks in an automatic sprint. You choose the branch and confirm each merge or pull request." : "You choose the local target branch and confirm each merge. No remote is needed."}</div>
   </div></div></section>;

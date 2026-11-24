@@ -1,0 +1,6 @@
+{
+  "model_policy_version": 2,
+  "deny": [
+    "fixture-disabled-model"
+  ]
+}

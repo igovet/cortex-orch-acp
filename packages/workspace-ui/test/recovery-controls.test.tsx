@@ -1,6 +1,6 @@
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { emptyWorkspace, LOCAL_MACHINE_ID, mapTask, type WorkspaceState } from "@cortex/workspace-domain";
+import { emptyWorkspace, LOCAL_MACHINE_ID, mapTask, overlayTask, type WorkspaceState } from "@cortex/workspace-domain";
 import type { Task as WireTask } from "@cortex/workspace-contract";
 import { Workspace } from "../src";
 import { buildIndex } from "../src/selectors";
@@ -97,6 +97,63 @@ describe("the one state-to-action rule", () => {
   });
 });
 
+describe("the file-wait display", () => {
+  const running = { ...WIRE.running, executionId: "e" };
+  const releaseTarget = "src/lib.rs, test/a.js and 2 more";
+  const message = "Waiting for the task “Old description” to release " + releaseTarget;
+  const waiting = () => mapTask(wireTask({ ...running, taskId: "t", title: "Work", waitReason: message,
+    filesWait: { holderTaskId: "holder", releaseTarget }, warnings: ["waiting_for_files"] }), { projectId: "p" });
+  const holder = () => mapTask(wireTask({ ...running, executionId: "h", taskId: "holder",
+    description: "old description. More prose." }), { projectId: "p" });
+
+  it("uses the actual board title, including generated and owner titles and the normal no-title label", () => {
+    const s = world("running");
+    const card = () => buildIndex(s, 0).byId.get("t")!;
+    for (const overlay of [undefined, { title: "Generated title", titleState: "generated" }, { title: "Название владельца", titleState: "user" }] as const) {
+      s.tasks = [waiting(), overlayTask(holder(), overlay, "")];
+      const index = buildIndex(s, 0);
+      expect(index.byId.get("holder")!.task.title).toBe(overlay?.title ?? "Old description");
+      expect(card().fact).toMatchObject({
+        text: `Waiting for the task “${s.tasks[1].title}” to release ${releaseTarget}`, icon: "hourglass",
+      });
+      expect(card().column).toBe("work");
+    }
+    s.tasks = [waiting()];
+    expect(card().fact.text).toBe(message);
+    // A finished overlay can arrive before the next runtime read clears the old warning.
+    s.tasks = [{ ...waiting(), status: "done", process: "stopped" }];
+    expect(card().filesWait).toBeUndefined();
+  });
+
+  it("shows an unclamped linked wait in the opened task, then removes it on the next confirmed read", async () => {
+    const s = world("running");
+    const title = "Название владельца";
+    s.tasks = [waiting(), overlayTask(holder(), { title, titleState: "user" }, "")];
+    const port = await mount(s);
+    const notice = () => [...document.querySelectorAll(".l-task .l-strip")].find(el => el.textContent?.includes("to release"));
+    expect(notice()?.textContent).toBe(`Waiting for the task “${title}” to release ${releaseTarget}`);
+    expect(notice()?.classList.contains("l-strip-readable")).toBe(true);
+    const link = notice()?.querySelector("a");
+    expect(link?.textContent).toBe(title);
+    expect(link?.getAttribute("href")).toContain("/t/holder");
+
+    const resumed = { ...s, tasks: [world("running").tasks[0], s.tasks[1]] };
+    port.emit(projection("2", resumed)); await settle();
+    expect(notice()).toBeUndefined();
+  });
+
+  it("shows a Code edit wait as plain text without a task link", async () => {
+    const s = world("running");
+    const reason = "Waiting for you to finish editing src/lib.rs in Code";
+    s.tasks = [mapTask(wireTask({ ...running, taskId: "t", waitReason: reason,
+      warnings: ["waiting_for_files"] }), { projectId: "p" })];
+    await mount(s);
+    const line = [...document.querySelectorAll(".l-task .l-strip")].find(el => el.textContent === reason);
+    expect(line).toBeDefined();
+    expect(line?.querySelector("a")).toBeNull();
+  });
+});
+
 describe("the task page", () => {
   it("a pause offers Resume in the composer, and Resume in the menu, never Continue", async () => {
     const p = await mount(world("paused"));
@@ -189,6 +246,81 @@ describe("the task page", () => {
       expect(p.commands).toHaveLength(0);
     });
   }
+});
+
+describe("returning a closed task for rework", () => {
+  const closed = (warning = false) => {
+    const s = world("cancelled");
+    Object.assign(s.tasks[0], { status: "done", closedAs: "as_is", reworkAvailable: true, reworkVersion: "18",
+      reworkExecutionId: "e", reworkOwnerEpoch: "2", reworkWarnings: warning ? ["dependents_started"] : [],
+      result: { version: 3, digest: "old", checks: [], summary: "Old result" } });
+    return s;
+  };
+  const field = () => $<HTMLTextAreaElement>('[aria-label="Task composer"] textarea')!;
+  const type = (text: string) => { field().value = text; field().dispatchEvent(new Event("input", { bubbles: true })); };
+  const titleAction = () => buttons($(".tb-actions")!).find(b => b.textContent?.trim() === "Return for rework");
+  it("opens Chat from the title band, requires text, and lets the next result come from the projection", async () => {
+    const p = await mount(closed(), `/m/${LOCAL_MACHINE_ID}/t/t/changes`);
+    titleAction()!.click(); await settle();
+    expect(document.activeElement).toBe(field());
+    expect($('[aria-label="Task composer"]')?.textContent).toContain("Sending reopens this task for rework");
+    expect(composerAction().getAttribute("aria-label")).toBe("Send and reopen");
+    type("   "); composerAction().click(); await settle();
+    expect(p.commands).toHaveLength(0);
+    type("Correct the race"); composerAction().click(); await settle();
+    expect(p.commands.map(c => c.payload)).toEqual([{ type: "rework_task", taskId: "t", expectedVersion: "18", executionId: "e", ownerEpoch: "2", text: "Correct the race", attachments: [] }]);
+    p.receipt(); await settle();
+    const working = world("running"); p.emit(projection("2", working)); await settle();
+    expect(field().value).toBe("");
+    expect(titleAction()).toBeUndefined();
+    expect(buildIndex(working, 0).byId.get("t")?.column).toBe("work");
+    expect(buttons().some(b => b.textContent?.trim() === "Accept")).toBe(false);
+    expect(document.body.textContent).not.toContain("Old result");
+    const next = world("running");
+    Object.assign(next.tasks[0], { status: "review", process: "stopped", result: { version: 4, digest: "new", checks: [], summary: "Corrected the race" } });
+    p.emit(projection("3", next)); await settle();
+    expect(document.body.textContent).toContain("Corrected the race");
+    expect(document.body.textContent).toContain("v4");
+  });
+
+  it("warns about started dependents; Cancel keeps the text and the refusal leaves it editable", async () => {
+    const p = await mount(closed(true));
+    menuItem(await menuItems(), "Return for rework")!.click(); await settle();
+    type("Fix the old result");
+    composerAction().click(); await settle();
+    const dialog = () => $("dialog[open]")!;
+    expect(dialog().textContent).toContain("Dependent sprint tasks already started using the old result");
+    buttons(dialog()).find(b => b.textContent === "Cancel")!.click(); await settle();
+    expect(p.commands).toHaveLength(0);
+    expect(field().value).toBe("Fix the old result");
+    composerAction().click(); await settle();
+    buttons(dialog()).find(b => b.textContent === "Send and reopen")!.click(); await settle();
+    expect(p.commands).toHaveLength(1);
+    p.receipt(false, undefined, "stale_version", "The task changed. Refresh it before sending."); await settle();
+    expect($(".mc-effect[role=alert]")?.textContent).toBe("The task changed. Refresh it before sending.");
+    expect(field().value).toBe("Fix the old result");
+    expect(field().disabled).toBe(false);
+  });
+
+  it.each(["board", "list"])("uses the same composer from the %s menu without dragging out of Done", async area => {
+    await mount(closed(), `/m/${LOCAL_MACHINE_ID}/p/p/${area}`);
+    if (area === "board") expect($<HTMLElement>('.card[data-task="t"]')?.draggable).toBe(false);
+    $('[aria-label="Actions for Work"]')!.click(); await settle();
+    menuItem([...document.querySelectorAll<HTMLElement>('[role="menuitem"]')], "Return for rework")!.click(); await settle();
+    expect(document.activeElement).toBe(field());
+  });
+
+  it("offers rework for a closed-unverified projection, but not after archiving", async () => {
+    const s = closed();
+    Object.assign(s.tasks[0], { status: "closed_unverified", closedAs: "unconfirmed", process: "unknown" });
+    const p = await mount(s);
+    expect(titleAction()).toBeDefined();
+    p.emit(projection("2", { ...s, tasks: [{ ...s.tasks[0], status: "done", closedAs: "as_is", process: "stopped", archive: { at: 1 } as NonNullable<WorkspaceState["tasks"][number]["archive"]> }] }));
+    await settle();
+    expect(titleAction()).toBeUndefined();
+    expect(menuItem(await menuItems(), "Return for rework")).toBeUndefined();
+    expect(field().placeholder).toContain("Restore the task first.");
+  });
 });
 
 describe("the board card", () => {

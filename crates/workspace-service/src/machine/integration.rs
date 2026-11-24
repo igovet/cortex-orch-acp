@@ -1,7 +1,7 @@
 //! Integration admission and effects: squash merge, pull request and same-branch
 //! commit. Admission refuses before any effect; the durable intent precedes Git and
 //! nothing is ever delegated to another runtime.
-mod conflicts;
+pub(super) mod conflicts;
 mod effects;
 mod update;
 use super::{
@@ -102,7 +102,9 @@ async fn verified_result(
             )?)
         })
         .map_err(context::core)?;
-    let native = super::task_facts::native_observation(root).await;
+    let checkout = context::owned_checkout(root, project, task)?;
+    let source = checkout.as_ref().map_or(root, |w| w.path.as_path());
+    let native = super::task_facts::native_observation(source).await;
     super::task_facts::integration_result(
         &store,
         root,
@@ -355,7 +357,9 @@ async fn integrate(
     }
     let task = params["taskId"].as_str().ok_or_else(malformed)?;
     // Unsupported legacy shapes retain their interpreter before inspection.
+    let binding = context::owned_checkout(root, project, task)?;
     let mut inspected = record.clone();
+    if let Some(w) = &binding { context::set_worktree(&mut inspected, w); }
     if truth(&params["targetBranch"]) {
         inspected["targetBranch"] = params["targetBranch"].clone();
     }
@@ -396,13 +400,13 @@ async fn integrate(
         automatic,
     )
     .await?;
-    let path = super::retention::task_path(root, record, git).await?;
+    let path = match &binding { Some(w) => w.path.clone(), None => super::retention::task_path(root, record, git).await? };
     if record["requiresFreshResult"]
         == serde_json::json!({"resultId":verified["resultId"],"version":verified["version"]})
     {
         return Err(refuse("review_required", "The source changed after this result. Run fresh checks and review the new result before integration."));
     }
-    if truth(&record["acceptedRevision"]) {
+    if truth(&record["acceptedRevision"]) && !(binding.is_some() && record["acceptance"]["committedDigest"].is_string()) {
         let current = super::legacy_source::capture(&path).map_err(context::core)?;
         if current.as_deref() != record["acceptedRevision"].as_str() {
             return Err(refuse(
@@ -463,7 +467,7 @@ async fn integrate(
             "The target branch must exist locally.",
         ));
     }
-    if let Some(base) = record["baseRevision"].as_str().filter(|s| !s.is_empty()) {
+    if let Some(base) = inspected["baseRevision"].as_str().filter(|s| !s.is_empty()) {
         if !git
             .success(&path, &["merge-base", "--is-ancestor", base, target])
             .await?
@@ -533,6 +537,17 @@ async fn integrate(
             "Install and sign in to GitHub CLI (gh) to create a pull request.",
         ));
     }
+    if binding.is_some() && method == "squash" {
+        if params.get("deleteWorktree").is_some_and(|value| !value.is_boolean()) {
+            return Err(malformed());
+        }
+        if !git.clean(&path).await? || !git.operation(&path).await?.is_null() {
+            return Err(refuse("dirty_checkout", "Commit the task work first. Squash only changes the target checkout."));
+        }
+        if !git.success(&path, &["merge-base", "--is-ancestor", &format!("refs/heads/{target}"), "HEAD"]).await? {
+            return Err(refuse("review_required", "Update the task branch from the target, then run fresh checks and review it before squash."));
+        }
+    }
     let same = |a: &Path, b: &Path| {
         a == b
             || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
@@ -545,6 +560,12 @@ async fn integrate(
         .and_then(|t| t["path"].as_str())
         .map(std::path::PathBuf::from);
     if let Some(tree) = target_tree.as_deref().filter(|t| !same(t, &path)) {
+        if binding.is_some() && method == "squash" {
+            context::require_idle_checkout(root, project, tree)?;
+            if !git.operation(tree).await?.is_null() {
+                return Err(refuse("operation_in_progress", "Finish or abort the target checkout's Git operation first."));
+            }
+        }
         if !git.clean(tree).await? {
             return Err(refuse(
                 "dirty_target",
@@ -625,6 +646,7 @@ async fn integrate(
         target_tree,
         automatic,
         already_landed,
+        owned_worktree: binding.is_some(),
     };
     let outcome = effects::apply(&plan, &mut product, git).await;
     // An overlay failure after Git is ambiguous, not safe to rerun.

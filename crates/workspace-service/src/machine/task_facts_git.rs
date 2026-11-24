@@ -245,6 +245,16 @@ pub(super) fn sprint_availability(
 
 pub async fn read(root: &Path, record: &Value, task: &str, git: &mut Git) -> Result<Value> {
     let mut facts = read_for_finish(root, record, task, git).await?;
+    if let (Some(id), Some(store)) = (record["checkout"]["id"].as_str(), context::open(root, OpenMode::LiveReadOnly)?) {
+        if let Some(project) = id.split_once(":wt:").map(|(project,_)| project) {
+            use cortex_core::workspace::worktrees;
+            if let Err(error) = worktrees::cleanup_preflight(&store, project, task) {
+                facts["deleteWorktree"] = json!({"available":false,"default":true,"reason":error.code()});
+            } else {
+                facts["deleteWorktree"] = json!({"available":true,"default":true});
+            }
+        }
+    }
     // The scheduler uses these paths to request repair. Keep the public facts shape stable.
     if let Some(fields) = facts.as_object_mut() {
         fields.remove("repairPaths");
@@ -265,6 +275,11 @@ pub(super) async fn read_for_finish(
         None => String::new(),
     };
     let mut facts = json!({"targetBranch":target,"alreadyInTarget":false,"pushStatus":null});
+    if record["checkout"]["unavailable"] == true {
+        facts["reason"] = json!("The original task worktree is unavailable.");
+        facts["checkoutUnavailable"] = json!(true);
+        return Ok(facts);
+    }
     if !has_git {
         return Ok(facts);
     }

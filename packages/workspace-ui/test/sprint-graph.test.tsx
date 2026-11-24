@@ -224,6 +224,8 @@ describe("finding and selecting in the graph", () => {
   it("dims what search and the status filter leave out, in place, with a count and a way back", async () => {
     const c = created();
     await open(c.sprint, c.tasks);
+    // A created sprint opens on its live tasks; the approved plan is one press away and keeps its own graph.
+    button("Approved plan v1")!.click(); await settled();
     const field = $<HTMLInputElement>('[aria-label="Search tasks in the graph"]')!;
     field.value = "export"; field.dispatchEvent(new Event("input", { bubbles: true }));
     await wait(120); await settled();
@@ -429,6 +431,7 @@ describe("Request changes and the plan's other versions", () => {
   it("shows no states and no Status filter for a past version or a draft", async () => {
     const c = created({ planning: "created", materializedVersion: 2, history: [{ version: 1, items: plan(15) }], plan: { version: 2, items: plan(15) } });
     await open(c.sprint, c.tasks);
+    button("Approved plan v2")!.click(); await settled();
     expect($(".gv-bar")?.textContent).toContain("Status");
     expect(node("k1").dataset.f).toBe("needs");
     button("Previous plan")!.click();

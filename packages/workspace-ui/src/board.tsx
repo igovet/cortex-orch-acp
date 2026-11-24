@@ -15,6 +15,11 @@ import { closeBlocked, EXTERNAL_DONE_LABEL, externalDoneBlocked, offersExternalD
 import { KnowledgePage, ProjectSettingsPage } from "./project-pages";
 import { createQueueStrip, QueueButton, QueueHelp, RunMode, SprintTarget, TargetChoices } from "./sprint";
 import { EmptyUntilRead, projectsPending } from "./skeleton";
+import { watchLiveGraphs } from "./live-graph";
+
+/** On a sprint's own board and list, what runs comes before what waits: Working, then Not started. Mixed work keeps the global order. */
+const SPRINT_COLUMNS = COLUMNS.map(c => COLUMNS.find(x => x.id === (c.id === "todo" ? "work" : c.id === "work" ? "todo" : c.id))!);
+const columnOrder = (sprint: boolean) => sprint ? SPRINT_COLUMNS : COLUMNS;
 
 const CARD_GAP = 8;
 const SECONDARY: { id: ProjectView; label: string }[] = [
@@ -110,14 +115,15 @@ const SprintHead = (props: { row: Extract<GroupedRow, { kind: "sprint" }>; machi
   <I n="layers" s={12} /><span data-tooltip-cut="" class="trunc">{sprintTitle(props.row.sprint)}</span><span class="n">{props.row.count}</span>
 </A>;
 
-function Board(props: { summary?: ProjectSummary; views: TaskView[]; onQuick?: () => void; machine: string; grouped?: boolean }) {
+function Board(props: { summary?: ProjectSummary; views: TaskView[]; onQuick?: () => void; machine: string; grouped?: boolean; sprint?: boolean }) {
   const ws = useWs();
-  const columns = createMemo(() => columnsOf(props.views));
+  // Each sprint's tasks in the service's execution order, in the places they hold in their column.
+  const columns = createMemo(() => columnsOf(props.views, ws.store.index()));
   const columnLabel = (id: ColumnId, label: string) => id === "merge" && columns().merge.some(v => sameBranch(v.task, v.target)) ? "Ready to finish" : label;
   const quick = () => props.summary && !props.summary.offline && props.onQuick;
   const rows = (id: ColumnId): GroupedRow[] => props.grouped ? bySprint(columns()[id]) : columns()[id].map(view => ({ kind: "task", view }));
   return <div class="board-wrap" classList={{ "machine-board": !props.summary }} onKeyDown={moveOnBoard}>
-    <For each={COLUMNS.filter(col => col.id !== "closed_unverified" || columns()[col.id].length > 0)}>{col => {
+    <For each={columnOrder(!!props.sprint).filter(col => col.id !== "closed_unverified" || columns()[col.id].length > 0)}>{col => {
       const open = () => columns()[col.id].length > 0 || (col.id === "todo" && !!quick());
       return <section class={`col${open() ? "" : " strip"}`} data-col={col.id} aria-label={columnLabel(col.id, col.label)}>
         <Show when={open()} fallback={<><I n={col.icon} s={14} class="faint" /><span class="v">{columnLabel(col.id, col.label)}</span></>}>
@@ -148,11 +154,11 @@ export function MachineBoard() {
 }
 
 type ListRow = { kind: "head"; id: ColumnId; count: number } | GroupedRow;
-function List(props: { views: TaskView[]; grouped: boolean; machine: string }) {
+function List(props: { views: TaskView[]; grouped: boolean; machine: string; sprint?: boolean }) {
   const ws = useWs();
   const rows = createMemo(() => {
-    const columns = columnsOf(props.views);
-    return COLUMNS.flatMap((col): ListRow[] => columns[col.id].length ? [{ kind: "head", id: col.id, count: columns[col.id].length }, ...(props.grouped ? bySprint(columns[col.id]).map(r => r.kind === "sprint" ? { ...r, column: col.id } : r) : columns[col.id].map((view): GroupedRow => ({ kind: "task", view })))] : []);
+    const columns = columnsOf(props.views, ws.store.index());
+    return columnOrder(!!props.sprint).flatMap((col): ListRow[] => columns[col.id].length ? [{ kind: "head", id: col.id, count: columns[col.id].length }, ...(props.grouped ? bySprint(columns[col.id]).map(r => r.kind === "sprint" ? { ...r, column: col.id } : r) : columns[col.id].map((view): GroupedRow => ({ kind: "task", view })))] : []);
   });
   const onKey = (e: KeyboardEvent) => {
     const row = (e.target as Element).closest?.(".lrow");
@@ -189,7 +195,8 @@ function SprintBar(props: { summary: ProjectSummary; sprintId: string; reason: s
     start={<><RunMode sprint={sprint()} describedBy={props.reason} /><QueueHelp sprint={sprint()} /></>}
     mid={<>
       <Show when={view().now}>{v => <QueueFact view={v()} label="Now running" class="l-tight-hide" />}</Show>
-      <Show when={view().next}>{v => <QueueFact view={v()} label="Next" class={view().now ? "l-roomy-only" : "l-tight-hide"} />}</Show>
+      {/* Next only when the service's order names one; a Manual sprint's order is a suggestion, never a promise. */}
+      <Show when={view().next ?? (sprint().runMode === "manual" ? view().suggested : null)}>{v => <QueueFact view={v()} label={view().next ? "Next" : "Suggested"} class={view().now ? "l-roomy-only" : "l-tight-hide"} />}</Show>
       <Show when={view().blocked > 0}><span class="l-fact l-fact-n"><span class="lab">Blocked</span><b>{view().blocked}</b></span></Show>
     </>}
     end={<>
@@ -273,6 +280,9 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
   // Git too, and away from the board it folds Board and List, so the scope, the open area and the menu always fit.
   const folds = (id: ProjectView) => id !== "code" && id !== "git";
   const queueSprint = () => { const id = sprintId(); return id && isWork() && props.summary.project.activated !== false ? ws.store.state().sprints.find(s => s.id === id) ?? null : null; };
+  // The order Board, List and the queue bar show comes from each shown sprint's live graph.
+  watchLiveGraphs(ws.store, () => !isWork() || props.summary.project.activated === false ? []
+    : sprintId() ? props.summary.sprints.filter(s => s.id === sprintId()) : props.summary.sprints);
   const queueReason = createUniqueId();
   const queueStrip = createQueueStrip(queueSprint, queueReason);
   const activate = () => ws.run({ type: "activate_project", projectId: props.summary.project.id });
@@ -343,7 +353,7 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
           <Show when={!props.summary.offline && (!sprintId() || (addSprint() && !missing()))}><button class="btn btn-line btn-sm" onClick={onQuick}><I n="plus" s={14} />New task</button></Show></div></EmptyUntilRead>}>
           <Show when={views().length > 0} fallback={<div class="note-panel"><span class="w500">No tasks match this filter</span><button class="btn btn-sm" onClick={() => setFilter("")}>Clear filter</button></div>}>
             <div class="main-body">
-              <Show when={view() === "board"} fallback={<List views={views()} grouped={grouped()} machine={props.summary.machine.id} />}><Board summary={props.summary} views={views()} onQuick={onQuick} machine={props.summary.machine.id} grouped={grouped()} /></Show>
+              <Show when={view() === "board"} fallback={<List views={views()} grouped={grouped()} machine={props.summary.machine.id} sprint={sprintId() !== null} />}><Board summary={props.summary} views={views()} onQuick={onQuick} machine={props.summary.machine.id} grouped={grouped()} sprint={sprintId() !== null} /></Show>
             </div>
           </Show>
         </Show>

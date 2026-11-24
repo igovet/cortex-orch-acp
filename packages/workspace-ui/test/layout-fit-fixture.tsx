@@ -89,12 +89,26 @@ const VERBS = ["Add", "Write", "Wire", "Test", "Document", "Migrate", "Index", "
 const NOUNS = ["audit events", "billing export", "login history", "API keys", "retention job", "admin search", "CSV writer", "upload worker", "rate limits", "event schema"];
 const bigTitle = (i: number) => `${VERBS[i % VERBS.length]} the ${NOUNS[(i * 7) % NOUNS.length]}${i % 5 === 0 ? " for every workspace and region" : ""}`;
 const bigDeps = (i: number) => i < 3 ? [] : [...new Set([i - 1 - (i * 7) % 3, i - 3 - (i * 5) % 7].filter(d => d >= 0))];
+// `live` adds two drafts created after the plan and answers the service's live graph (contract version 1) for these sprints.
+const LIVE = query.has("live");
 function bigSprint(id: string, n: number) {
   const ids = Array.from({ length: n }, (_, i) => `${id}-${i + 1}`);
   const items: PlanItem[] = ids.map((key, i) => ({ key, title: bigTitle(i), description: `${bigTitle(i)}, with its checks.`, dependsOn: bigDeps(i).map(d => ids[d]) }));
-  const tasks = ids.map((taskId, i) => boardTask(taskId, "", i % 11 === 3 ? "waiting" : i % 13 === 5 ? "execution" : "not_started", bigTitle(i)));
-  const overlays: Record<string, TaskOverlay> = Object.fromEntries(ids.map((taskId, i) => [taskId, { dependencies: bigDeps(i).map(d => ids[d]) }]));
-  return { tasks, overlays, sprint: { ...sprint, id, title: `Audit platform rollout, ${n} tasks`, runMode: "manual", planning: "created", planningTaskId: null, materializedVersion: 1, plan: { version: 1, items }, taskIds: ids } };
+  const later = LIVE ? [`${id}-later-1`, `${id}-later-2`] : [];
+  const state = (i: number) => i % 11 === 3 ? "waiting" : i % 13 === 5 ? "execution" : "not_started";
+  const tasks = [...ids.map((taskId, i) => boardTask(taskId, "", state(i), bigTitle(i))), ...later.map((taskId, i) => boardTask(taskId, "", "not_started", i ? "Document the new export format" : "Add an audit log for exports"))];
+  const deps = (i: number) => i < n ? bigDeps(i).map(d => ids[d]) : [];
+  const all = [...ids, ...later];
+  const overlays: Record<string, TaskOverlay> = Object.fromEntries(all.map((taskId, i) => [taskId, { dependencies: deps(i) }]));
+  const started = (i: number) => i < n && state(i) !== "not_started";
+  const live = { contractVersion: 1, sprintId: id, graphRevision: "c".repeat(64), complete: true, priority: all,
+    members: all.map((taskId, i) => ({ taskId, readStatus: "confirmed", dependencies: deps(i), editable: !started(i), canBePredecessor: true, approvedPlanKey: i < n ? taskId : null })),
+    order: { mode: "manual", queueState: "idle", working: all.flatMap((taskId, i) => i < n && state(i) === "execution" ? [{ taskId, startOrder: String(i) }] : []),
+      notStarted: all.flatMap((taskId, i) => started(i) ? [] : [{ taskId, rank: deps(i).length ? null : 0, reason: deps(i).length ? "dependencies_blocked" : null, next: false, conditional: false }]) } };
+  let rank = 0;
+  for (const p of live.order.notStarted) if (p.rank !== null) p.rank = ++rank;
+  live.order.notStarted.sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity));
+  return { tasks, overlays, live, sprint: { ...sprint, id, title: `Audit platform rollout, ${n} tasks`, runMode: "manual", planning: "created", planningTaskId: null, materializedVersion: 1, plan: { version: 1, items }, taskIds: all } };
 }
 const graphs = !query.has("graph") && !scroll ? [] : query.get("graph") === "200" ? [bigSprint("huge", 200)] : [bigSprint("big", 60)];
 // The service hands tasks over in pages of 50, as the contract's limit says.
@@ -147,6 +161,8 @@ const s = scriptedTransport({
     if (op === "repo.snapshot") return { ok: true, result: repoFacts };
     if (op === "product.read") { const allSprints = [sprint, pausedSprint, ...boardSprints, ...graphs.map(x => x.sprint)]; const sprints = query.has("sidebarRows") ? allSprints.filter(s => s.id === "b-auto-cont" || s.id === "b-auto-files") : allSprints; return { ok: true, result: structuredClone({ tasks: Object.assign({ "task-1": { planning: true }, ...boardOverlays }, ...graphs.map(x => x.overlays)), sprints, messages: queued }) }; }
     if (op === "workers") return { ok: true, result: [] };
+    const live = LIVE && op === "product.sprint" ? graphs.find(x => x.sprint.id === (params as unknown as { sprintId?: string }).sprintId) : undefined;
+    if (live) return { ok: true, result: (params as unknown as { action?: string }).action === "live_graph" ? structuredClone(live.live) : { changed: false } };
     if (op === "overview") return { ok: true, result: { name: "Desk", retentionDays: 30, autoArchiveDays: 7, worktreeRoot: "~/t", version: "1", diskMb: 2, storage: [], cleanup: null, diagnostics: null } };
     if (op === "config.read") return { ok: true, result: { config, connections: [], tokens: {}, usage: [] } };
     if (op === "project.config.read") return { ok: true, result: { value: { revisions: {} }, tokens: {} } };
@@ -167,7 +183,7 @@ if (query.get("world") === "review") {
     return reply;
   };
   history.replaceState(null, "", (query.get("route") ?? "/m/<M>/t/rg/changes").replaceAll("<M>", LOCAL_MACHINE_ID));
-  render(() => <Workspace port={port.port} />, document.getElementById("root")!);
+  render(() => <Workspace port={port.port} terminal={query.has("checkoutTerminal") ? printedShell() : undefined} />, document.getElementById("root")!);
   setTimeout(() => port.emit(projection("1", reviewWorld())), 0);
 } else if (query.get("world") === "conversation" || query.get("world") === "pages" || query.get("world") === "settings") {
   // The task screen as a conversation: a question waiting, work running with a queued message, and a result to review.

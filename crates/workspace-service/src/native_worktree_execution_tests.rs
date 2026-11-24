@@ -1,0 +1,467 @@
+//! Real Git authority and an offline ACP peer, with no provider calls.
+use super::*;
+use sha2::{Digest, Sha256};
+use std::{fs, os::unix::fs::DirBuilderExt, path::Path};
+
+struct Fixture(PathBuf);
+impl Fixture {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "cortex-worktree-exec-{}",
+            crate::identity().unwrap()
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+        Self(path.canonicalize().unwrap())
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn git(root: &Path, args: &[&str]) {
+    let run = std::process::Command::new("/usr/bin/git")
+        .current_dir(root)
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(args)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+fn repo(f: &Fixture) -> (ProjectKey, PathBuf) {
+    let root = f.0.join("project");
+    let trees = f.0.join("checkouts");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&trees).unwrap();
+    git(&root, &["init", "-q"]);
+    fs::write(root.join("source.txt"), "committed").unwrap();
+    git(&root, &["add", "source.txt"]);
+    git(&root, &["commit", "-qm", "initial"]);
+    (
+        ProjectKey::new(&root, cortex_core::StoreChannel::Dev).unwrap(),
+        trees,
+    )
+}
+
+fn provision(
+    store: &cortex_core::Store,
+    trees: &Path,
+    suffix: &str,
+) -> CoreResult<(String, OwnerEpoch, PathBuf)> {
+    use cortex_core::workspace::{create_draft, start_native_worktree, worktrees::resolve};
+    let name = format!("Worktree {suffix}");
+    let draft = create_draft(
+        store,
+        "p",
+        "owner",
+        &json!({
+            "protocol":{"major":1,"minor":8},"requestId":format!("draft-{suffix}"),
+            "projectId":"p","actorId":"owner","operation":"tasks.create","target":"p","expectedVersion":"0",
+            "ownerEpoch":null,"payload":{"description":name,"checkout":{"kind":"worktree"}}
+        }),
+    )?;
+    let value = start_native_worktree(
+        store,
+        "p",
+        "owner",
+        &json!({
+            "protocol":{"major":1,"minor":8},"requestId":format!("start-{suffix}"),
+            "projectId":"p","actorId":"owner","operation":"tasks.start","target":draft.receipt["target"],
+            "expectedVersion":"1","ownerEpoch":null,"payload":{}
+        }),
+        trees,
+    )?;
+    let task = value["task"].as_str().unwrap().to_owned();
+    let owner = OwnerEpoch {
+        owner: "owner".into(),
+        epoch: value["owner"]["epoch"].as_i64().unwrap(),
+    };
+    let root = resolve(store, &task, &owner)?.path().to_path_buf();
+    Ok((task, owner, root))
+}
+
+fn register(store: &cortex_core::Store) -> CoreResult<()> {
+    store.write(|db| {
+        db.execute(
+            "INSERT INTO workspace_projects VALUES ('p',?,'owner','now',1)",
+            [store.key().root().to_str()],
+        )?;
+        Ok(())
+    })
+}
+
+fn worker(db: &rusqlite::Transaction<'_>, task: &str) -> CoreResult<()> {
+    db.execute(
+        "UPDATE runtime_tasks SET state='EXECUTING', revision=1 WHERE task_id=?",
+        [task],
+    )?;
+    db.execute("INSERT INTO runtime_nodes VALUES (?,1,'writer','worker-backend-dev','Work','[]','[\"source.txt\"]','execution','running','fixture-assignment',NULL)", [task])?;
+    Ok(())
+}
+
+#[test]
+fn worktree_file_effects_require_checkout_bound_coverage_and_receipts() {
+    use crate::native_project;
+    let f = Fixture::new();
+    let (key, trees) = repo(&f);
+    let store = cortex_core::Store::open(key.clone(), cortex_core::OpenMode::Initialize).unwrap();
+    register(&store).unwrap();
+    let (task, owner, root) = provision(&store, &trees, "files").unwrap();
+    let (_, _, sibling) = provision(&store, &trees, "other").unwrap();
+    let (credential, identity) = store
+        .write(|db| {
+            worker(db, &task)?;
+            let c = channels::issue_tx(
+                db,
+                &task,
+                &owner,
+                Principal::Worker {
+                    assignment: "fixture-assignment",
+                },
+            )?;
+            channels::bind_session_tx(db, &c, "fake-session")?;
+            let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
+            let hash = format!("{:x}", Sha256::digest(b"committed"));
+            // The same bytes, on the same channel, are not proof of a worktree read
+            // when the record carries no worktree identity.
+            let coverage = json!({"complete":true,"observed":true,"sha256":hash,"lines":[1]});
+            db.execute(
+                "INSERT INTO runtime_requests VALUES (?, ?, ?, 'native_file_read', ?, ?)",
+                (
+                    &task,
+                    format!("file-read:{:x}", Sha256::digest(b"source.txt")),
+                    &c.channel_id,
+                    hash,
+                    coverage.to_string(),
+                ),
+            )?;
+            Ok((c, i))
+        })
+        .unwrap();
+    let invoke = |tool, args| {
+        native_project::execute(
+            &store,
+            &identity,
+            &credential,
+            tool,
+            &args,
+            false,
+            &root,
+            true,
+        )
+    };
+    let edit = json!({"path":"source.txt","edits":[{"old_string":"committed","new_string":"edited worktree"}]});
+    assert_eq!(
+        invoke("project_edit", edit.clone()).unwrap()["structuredContent"]["error"],
+        "gateway_read_required"
+    );
+    assert!(invoke(
+        "project_read",
+        json!({"path":key.root().join("source.txt")})
+    )
+    .is_err());
+    for path in [
+        ".git",
+        ".cortex/private",
+        ".cortex-dev/private",
+        "../source.txt",
+    ] {
+        assert!(
+            invoke("project_read", json!({"path":path})).is_err(),
+            "{path}"
+        );
+    }
+    assert!(invoke("project_read", json!({"path":sibling.join("source.txt")})).is_err());
+    assert_eq!(
+        invoke(
+            "project_read",
+            json!({"path":"source.txt","line_numbers":false})
+        )
+        .unwrap()["structuredContent"]["content"],
+        "committed"
+    );
+    let mut edit = edit;
+    edit["request_key"] = json!("write");
+    assert_eq!(
+        invoke("project_edit", edit.clone()).unwrap()["structuredContent"]["outcome"],
+        "written"
+    );
+    let binding = native_project::checkout_binding(&store, &identity)
+        .unwrap()
+        .unwrap();
+    assert!(native_project::retained_checkout_matches(&store, &task, &binding).unwrap());
+    let mut wrong = binding.clone();
+    wrong["root"] = json!(key.root());
+    assert!(!native_project::retained_checkout_matches(&store, &task, &wrong).unwrap());
+    let saved: Value = store
+        .read(|db| {
+            let value: String = db.query_row(
+                "SELECT result_json FROM runtime_requests WHERE task_id=? AND request_key='write'",
+                [&task],
+                |r| r.get(0),
+            )?;
+            Ok(serde_json::from_str(&value)?)
+        })
+        .unwrap();
+    assert_eq!(saved["checkout"], binding);
+    assert_eq!(
+        invoke("project_edit", edit).unwrap()["structuredContent"]["outcome"],
+        "written"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("source.txt")).unwrap(),
+        "edited worktree"
+    );
+    assert_eq!(
+        fs::read_to_string(key.root().join("source.txt")).unwrap(),
+        "committed"
+    );
+    assert_eq!(
+        fs::read_to_string(sibling.join("source.txt")).unwrap(),
+        "committed"
+    );
+}
+
+fn have_namespace() -> bool {
+    let available = std::process::Command::new("/usr/bin/bwrap")
+        .args([
+            "--unshare-pid",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--symlink",
+            "usr/bin",
+            "/bin",
+            "--symlink",
+            "usr/lib",
+            "/lib",
+            "--symlink",
+            "usr/lib64",
+            "/lib64",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--",
+            "/usr/bin/true",
+        ])
+        .env_clear()
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if std::env::var_os("CORTEX_REQUIRE_NAMESPACE_FIXTURES").is_some() {
+        assert!(available, "worktree fixtures require Bubblewrap namespaces");
+    }
+    available
+}
+
+// Return the observed process cwd only if it matches ACP session/new cwd. The
+// linked route also checks that the accounts/engine can start without granting
+// write authority over Git inputs or access to adjacent checkouts and stores.
+const PEER: &str = r#"
+cwd=$(pwd -P)
+if [ "$1" = linked ]; then
+    logical=${2#logical=}
+    sibling=${3#sibling=}
+    [ ! -e "$logical/source.txt" ] && [ ! -e "$sibling/source.txt" ] || exit 21
+    [ ! -e "$logical/.cortex" ] && [ ! -e "$logical/.cortex-dev" ] || exit 22
+    ! (printf 'bad' > source.txt) && ! (printf 'bad' > .git) || exit 23
+fi
+options='[{"id":"model","currentValue":"fake","options":[{"value":"fake"}]},{"id":"mode","currentValue":"default","options":[{"value":"default"}]}]'
+while IFS= read -r frame; do
+    id=$(printf '%s\n' "$frame" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+    case "$frame" in
+       *'"method":"initialize"'*) result='{"protocolVersion":1}';;
+       *'"method":"session/new"'*)
+          case "$frame" in *"\"cwd\":\"$cwd\""*) ;; *) exit 24;; esac
+          result=$(printf '{"sessionId":"%s","configOptions":%s}' "$cwd" "$options");;
+       *'"method":"session/set_config_option"'*) result=$(printf '{"configOptions":%s}' "$options");;
+       *) continue;;
+    esac
+    printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"
+done
+"#;
+
+#[test]
+fn worktree_native_cwd_and_command_mounts_with_real_namespace() {
+    if !have_namespace() {
+        return;
+    }
+    let f = Fixture::new();
+    let (key, trees) = repo(&f);
+    let logical = key.root().to_path_buf();
+    let home = f.0.join("home");
+    let state = f.0.join("state");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::create_dir(&state).unwrap();
+    let peer = f.0.join("fake-acp.sh");
+    fs::write(&peer, PEER).unwrap();
+    let broker = key.directory();
+    let mut host = NativeHost::open(key).unwrap();
+    host.workspace_state = Some(state);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let ((task, owner, root), (_, _, sibling)) = receive(
+            host.executor
+                .publication(move |store| {
+                    register(store)?;
+                    Ok((
+                        provision(store, &trees, "engine")?,
+                        provision(store, &trees, "sibling")?,
+                    ))
+                })
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let route = |mode: &str| SessionRoute {
+            launch: LaunchSpec {
+                engine: cortex_engine::environment::EngineKind::Claude,
+                executable: "/usr/bin/bash".into(),
+                args: vec![
+                    peer.display().to_string(),
+                    mode.into(),
+                    format!("logical={}", logical.display()),
+                    format!("sibling={}", sibling.display()),
+                ],
+                cwd: logical.clone(),
+                native_home: home.clone(),
+                credential_directory: home.join(".claude"),
+                base_environment: [("PATH".into(), "/usr/bin:/bin".into())].into(),
+                codex_launcher: None,
+                confinement: None,
+            },
+            relay: std::env::current_exe().unwrap(),
+            broker_parent: broker.clone(),
+            connection: "fake-acp".into(),
+            connection_limit: 2,
+            model: "fake".into(),
+            parameters: Default::default(),
+            instructions: "Offline fixture only".into(),
+            deadline: Duration::from_secs(5),
+        };
+        let mut unsupported = route("linked");
+        unsupported.launch.engine = cortex_engine::environment::EngineKind::OpenCode;
+        assert!(matches!(
+            host.dispatch(
+                task.clone(),
+                owner.clone(),
+                SessionRole::Coordinator,
+                unsupported
+            )
+            .await,
+            Err(CoreError::Refused("worktree_engine_route_unavailable"))
+        ));
+        let session = host
+            .dispatch(
+                task.clone(),
+                owner.clone(),
+                SessionRole::Coordinator,
+                route("linked"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(session.session_id(), root.to_str().unwrap());
+        assert_eq!(session.policy.logical, logical);
+        let creds = Credentials::new(
+            session.credential.channel_id.clone(),
+            logical.clone(),
+            session.credential.secret().into(),
+        )
+        .unwrap();
+        let channel = session.policy.authenticate(&creds).await.unwrap();
+        let read = session
+            .policy
+            .dispatch_call(
+                &creds,
+                &channel,
+                "project_read",
+                json!({"path":"source.txt","line_numbers":false}),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(read["structuredContent"]["content"], "committed");
+        session.shutdown().await.unwrap();
+        let main_owner = host
+            .create("main".into(), "Main fixture".into(), "owner".into())
+            .await
+            .unwrap();
+        let main = host
+            .dispatch(
+                "main".into(),
+                main_owner,
+                SessionRole::Coordinator,
+                route("main"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(main.session_id(), logical.to_str().unwrap());
+        assert!(main.policy.worktree.is_none());
+        main.shutdown().await.unwrap();
+
+        let sub = root.join("sub");
+        fs::create_dir(&sub).unwrap();
+        // Source is read from the physical checkout and the optional cwd is its
+        // actual subdirectory. Private .git control remains read-only.
+        let sandbox =
+            crate::native_command_sandbox::Sandbox::prepare_worktree(&root, &logical, &[]).unwrap();
+        let argv = vec![
+            "/bin/bash".into(),
+            "-ec".into(),
+            r#"
+            [ "$(pwd -P)" = "$1" ]
+            [ "$(cat ../source.txt)" = committed ]
+            [ ! -e "$2/source.txt" ] && [ ! -e "$3/source.txt" ]
+            [ ! -e "$2/.cortex" ] && [ ! -e "$2/.cortex-dev" ]
+            ! (printf bad > ../source.txt) && ! (printf bad > ../.git)
+            [ "$(git -C .. rev-parse --show-toplevel)" = "$4" ]
+            printf good > "$TMPDIR/cortex-check-output"
+        "#
+            .into(),
+            "mounts".into(),
+            sub.display().to_string(),
+            logical.display().to_string(),
+            sibling.display().to_string(),
+            root.display().to_string(),
+        ];
+        let out = sandbox
+            .command_at(&argv, Some(&sub))
+            .unwrap()
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(sandbox.command_at(&argv, Some(&logical)).is_err());
+        assert!(sandbox.command_at(&argv, Some(&sibling)).is_err());
+        assert_eq!(
+            fs::read_to_string(root.join("source.txt")).unwrap(),
+            "committed"
+        );
+        fs::rename(&root, root.with_extension("moved")).unwrap();
+        assert!(matches!(
+            host.dispatch(task, owner, SessionRole::Coordinator, route("linked"))
+                .await,
+            Err(CoreError::Refused("worktree_unavailable"))
+        ));
+    });
+}

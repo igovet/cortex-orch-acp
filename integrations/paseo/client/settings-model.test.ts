@@ -147,7 +147,7 @@ function routing(rules: Record<string, unknown> | undefined, extra: Partial<Rout
 
 test("routing effort choices distinguish exact observations, default-only and unknown models", () => {
   const view = routing({});
-  view.builtin.model_efforts = { opencode: { "provider/one": ["low", "high"], "provider/two": ["medium"], "provider/default": [], "provider/conflict": null } };
+  view.builtin.model_efforts = { opencode: { "provider/one": ["high", "default", "low"], "provider/two": ["medium"], "provider/default": ["engine_default"], "provider/conflict": null } };
   const vocabulary = routingVocabulary(view);
   assert.deepEqual(modelEffortChoices(vocabulary, "opencode", "provider/one").levels, ["low", "high"]);
   assert.deepEqual(modelEffortChoices(vocabulary, "opencode", "provider/two", true).levels, ["medium"]);
@@ -159,7 +159,7 @@ test("routing effort choices distinguish exact observations, default-only and un
     assert.match(modelEffortChoices(vocabulary, "opencode", model).hint!, /unknown/);
   }
   assert.equal(modelEffortChoices(vocabulary, "codex-acp", "provider/one").known, false);
-  assert.deepEqual(modelEffortOptions(vocabulary, "opencode", "provider/one", ["medium"]), [
+  assert.deepEqual(modelEffortOptions(vocabulary, "opencode", "provider/one", ["default", "medium"]), [
     { value: "low", label: "low" }, { value: "high", label: "high" },
     { value: "medium", label: "medium (not supported by this model)", disabled: true },
   ]);

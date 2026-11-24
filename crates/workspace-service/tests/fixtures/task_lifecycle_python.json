@@ -7111,6 +7111,7 @@
         "tasks": {
           "t1": {
             "acceptance": null,
+            "alreadyInTargetBranch": "main",
             "automaticReady": false,
             "baseRevision": "db08d8700ae1850e83f37ddfe5c29cc1ade34bb8",
             "checkout": {

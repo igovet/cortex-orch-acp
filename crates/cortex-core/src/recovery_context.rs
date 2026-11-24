@@ -307,9 +307,15 @@ fn decision(row: Value) -> Value {
     let payload = &row["payload"];
     let compact = match kind {
         // The accepted plan is carried once, in `plan_summary` and `current_nodes`.
-        "PLAN_ACCEPTED" => {
+        "PLAN_ACCEPTED" | "PLAN_AMENDED" => {
             json!({"revision":payload["revision"],"plan":"see plan_summary and current_nodes"})
         }
+        // The registered target gets the instruction through its own prompt,
+        // not through the task-wide event digest shown to sibling workers.
+        "NATIVE_COORDINATOR_GUIDANCE_QUEUED" => json!({
+            "source_request":payload["source_request"],"request_key":payload["request_key"],
+            "attempt":payload["attempt"],"assignment_ref":payload["assignment_ref"]
+        }),
         // Worker results are carried once, in `current_nodes`.
         "WORKER_COMPLETED" | "WORKER_FAILED" => json!({"assignment_ref":payload["assignment_ref"],
             "attempt_id":payload["attempt_id"],"report_ref":payload["result"]["report_ref"],"result":"see current_nodes"}),

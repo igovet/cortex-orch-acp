@@ -1,6 +1,9 @@
-import type { Activity, Check, CheckOutcome, ConfigFault, Connection, Delivery, PlanItem, SurfaceKey, Task, WorkspaceCommand as SharedCommand, WorkspaceState as SharedState } from "@cortex/workspace-domain";
+import type { Activity, Check, CheckOutcome, ConfigFault, Connection, Delivery, PlanItem, SurfaceKey, Task as SharedTask, WorkspaceCommand as SharedCommand, WorkspaceState as SharedState } from "@cortex/workspace-domain";
 
 export type * from "@cortex/workspace-domain";
+
+/** Archive prompts are part of the prototype's simulated cleanup, not the shared task contract. */
+export type Task = SharedTask & { archiveQuestion?: boolean; archiveAskAfter?: number | null };
 
 /** What only the simulation can do: nothing here is an owner action, and none of it reaches the shared packages. */
 export type SimulationCommand =
@@ -17,6 +20,7 @@ export type SimulationCommand =
   | { type: "plan_question"; sprintId: string; question: string; options?: string[]; now?: number }
   | { type: "publish_plan"; sprintId: string; items: PlanItem[]; now?: number }
   | { type: "archive_due" | "purge_due"; now: number }
+  | { type: "answer_archive"; taskId: string; discard: boolean; now: number }
   | { type: "set_safety"; taskId: string; process: Task["process"]; unexpectedChanges: boolean }
   | { type: "simulate_delivery"; messageId: string; delivery: Delivery; now?: number; failure?: string }
   | { type: "ask_decision"; taskId: string; workerId: string | null; text: string; options: { label: string; sub?: string }[]; now?: number }
@@ -26,7 +30,7 @@ export type SimulationCommand =
   | { type: "set_conflict" | "advance_resolution"; taskId: string; now?: number }
 export type WorkspaceCommand = SharedCommand | SimulationCommand;
 /** The mock hands out its own ids. A real machine owns identity, so this counter stops here. */
-export type WorkspaceState = SharedState & { nextId: number };
+export type WorkspaceState = Omit<SharedState, "tasks"> & { tasks: Task[]; nextId: number };
 export type MockReceipt = { ok: boolean; mock: true; message: string; entityId?: string };
 export interface WorkspacePort {
   readonly mock: true;

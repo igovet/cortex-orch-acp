@@ -203,9 +203,11 @@ describe("the screens of a partially deleted sprint", () => {
     item.click();
     const confirm = await vi.waitFor(() => { const b = [...document.querySelectorAll("button")].find(x => x.textContent === "Delete sprint"); expect(b).toBeDefined(); return b!; });
     confirm.click();
+    expect(document.querySelector("dialog[open] .ws-request-status")?.textContent).toBe("Requesting deletion…");
     // Part of the sprint is deleted: the dialog closes instead of offering the same press again.
     await vi.waitFor(() => expect([...document.querySelectorAll("button")].some(x => x.textContent === "Delete sprint")).toBe(false), { timeout: 4000 });
     expect(document.body.textContent).toContain("Waiting for confirmed stop or cleanup");
+    expect(document.body.textContent).not.toContain("Requesting deletion…");
     await vi.waitFor(() => expect(root.textContent).toContain("Deleting, 1 task left: Stuck member, waiting for its stop"), { timeout: 4000 });
     expect([...root.querySelectorAll("button")].some(b => b.textContent === "Retry delete…")).toBe(true);
   });

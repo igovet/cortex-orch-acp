@@ -77,7 +77,8 @@ pub fn preflight_result_tx(
             json!({"outcome":"refused","error":"review_resubmit_required"}),
         ));
     }
-    if bindings.last().unwrap()["revision_digest"] == d {
+    if bindings.last().unwrap()["revision_digest"] == d
+        && crate::workspace::worktrees::receipt_matches(db, task, bindings.last().unwrap(), true)? {
         return Ok(None);
     }
     // A change by another actor outside the task's own files (a whole-checkout
@@ -134,9 +135,9 @@ pub fn preflight_result_tx(
         db,
         task,
         "REVIEW_STARTED",
-        tag(json!({"assignment_ref":assignment,"revision_digest":d,
+        tag(super::completion::tag_checkout(json!({"assignment_ref":assignment,"revision_digest":d,
         "rebound_from":bindings.last().unwrap()["revision_digest"],"rebind":bindings.len(),"refused_request_key":key,
-        "after_unstable":bindings.len() > MAX_REVIEW_REBINDS})),
+        "after_unstable":bindings.len() > MAX_REVIEW_REBINDS}), e)),
     )?;
     Ok(Some(
         json!({"outcome":"refused","error":"review_project_revision_changed"}),
@@ -878,6 +879,26 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
                 json!({"review":review,"revision":revision,"report_ref":result["report_ref"],
                     "verdict":result["verdict"],"blocked":blocked}),
             )?;
+            // Retry only a review whose actionable blocker is access. Mixed
+            // dead ends and concrete findings still take the ordinary route.
+            if blocked.iter().all(|b| matches!(b["blocker"].as_str(), Some("missing_access" | "tool_unavailable"))) {
+                if let Some(b) = blocked.iter().find(|b| b["blocker"] == "missing_access") {
+                    let assignment: Option<String> = db.query_row(
+                        "SELECT assignment_ref FROM runtime_nodes WHERE task_id=? AND revision=? AND node_id=?",
+                        (task, revision, &review), |r| r.get(0),
+                    )?;
+                    let found = super::obstacles::classify(&super::obstacles::Signals {
+                        blocker_kind: Some("missing_access".into()),
+                        blocker_detail: Some(format!("{}: {}", b["item"].as_str().unwrap_or(""), b["reason"].as_str().unwrap_or(""))),
+                        ..Default::default()
+                    });
+                    if let Some(assignment) = assignment {
+                        if super::obstacles::park_review_access_tx(db, task, &review, &assignment, revision, found)? {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
             // An owner decision the owner already made is not asked again
             // (`decided_owner_item_tx`: the same item, also reworded, routed before
             // with an owner answer since, or a reason citing an answered question;

@@ -1,6 +1,6 @@
 import { plainChoice, classifiedPlanningFailure, stoppedPlanningComposerText } from "./selectors";
 import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, useContext, type Accessor, type JSX } from "solid-js";
-import { capabilityOf, FEATURES, type Attachment, type AttachmentInput, type AttachmentRef, type Message, type SessionOptions, type TaskSettings, type WorkspaceCommand } from "@cortex/workspace-domain";
+import { capabilityOf, FEATURES, machineEffort, orderedEfforts, resolveEffort, type Attachment, type AttachmentInput, type AttachmentRef, type Message, type SessionOptions, type TaskSettings, type WorkspaceCommand } from "@cortex/workspace-domain";
 import { attachmentFile, attachmentName, attachmentPreview, attachmentRef, keepBytes, readAttachments, wireAttachments } from "./attachments";
 import { autoGrow } from "./autogrow";
 import { useWs } from "./ctx";
@@ -157,7 +157,14 @@ export function CBar(props: { children: JSX.Element }) {
 export function RouteBar(props: { id: string; settings: TaskSettings; onChange: (patch: Partial<TaskSettings>) => void; up?: boolean; disabled?: string; compact?: boolean; needs?: WorkspaceCommand["type"]; options?: SessionOptions }) {
   const ws = useWs();
   const options = () => props.options ?? ws.store.state().options;
-  const efforts = () => { const selected = options().models.find(m => m.id === props.settings.model); return options().efforts.filter(e => !selected?.efforts || selected.efforts.includes(e.id)); };
+  const effortsFor = (model: string) => {
+    const offered = options().models.find(m => m.id === model)?.efforts;
+    const choices = options().efforts.filter(e => !offered || offered.includes(e.id));
+    return orderedEfforts(choices.map(e => e.id)).map(id => choices.find(e => e.id === id)!);
+  };
+  const efforts = () => effortsFor(props.settings.model);
+  const effortFor = (model: string) => resolveEffort(props.settings.effort, machineEffort(ws.machine()),
+    effortsFor(model).filter(e => !e.unavailable).map(e => e.id));
   const align = () => props.up ? "up" as const : "left" as const;
   const cls = () => props.up ? "pop-up" : "pop-anchor";
   // A session that offers no list leaves its control off. A choice is never filled in for it.
@@ -173,18 +180,18 @@ export function RouteBar(props: { id: string; settings: TaskSettings; onChange: 
   const settingsText = () => [options().modes.length ? `Access mode: ${label(options().modes, props.settings.mode)}` : "", options().languages.length ? `Message language: ${label(options().languages, props.settings.language)}` : ""].filter(Boolean).join(", ");
   return <div class="c-route">
     {trigger("model", "Coordinator model", "cpu", () => options().models, () => props.settings.model)}
-    {trigger("effort", "Reasoning effort", "gauge", efforts, () => props.settings.effort)}
+    {trigger("effort", "Reasoning effort", "gauge", efforts, () => effortFor(props.settings.model))}
     <Show when={!props.compact}>
       <button data-tooltip="" type="button" class="ib c-set" popovertarget={settingsOff() ? undefined : `m-set-${props.id}`} aria-disabled={settingsOff() ? "true" : undefined} data-why={settingsOff()} aria-label={`Settings${settingsText() ? `. ${settingsText()}` : ""}`}><I n="sliders" /></button>
     </Show>
     <Show when={!props.needs || !ws.gate(props.needs)}>
     <Pop id={`m-model-${props.id}`} class={cls()} align={align()} label="Coordinator model" style={{ width: "280px" }}>
       <div class="mi-h">Coordinator model for this task</div>
-      <For each={options().models}>{m => <MenuItem label={m.label} sub={m.unavailable ?? m.engine} disabled={m.unavailable} check={m.id === props.settings.model} onSelect={() => props.onChange({ model: m.id, ...(m.efforts ? {effort:m.efforts.includes(props.settings.effort) ? props.settings.effort : m.efforts[0] ?? ""} : {}) })} />}</For>
+      <For each={options().models}>{m => <MenuItem label={m.label} sub={m.unavailable ?? m.engine} disabled={m.unavailable} check={m.id === props.settings.model} onSelect={() => props.onChange({ model: m.id, effort: effortFor(m.id) })} />}</For>
     </Pop>
     <Pop id={`m-effort-${props.id}`} class={cls()} align={align()} label="Effort">
       <div class="mi-h">Effort</div>
-      <For each={efforts()}>{e => <MenuItem label={e.label} sub={e.unavailable} disabled={e.unavailable} check={e.id === props.settings.effort} onSelect={() => props.onChange({ effort: e.id })} />}</For>
+      <For each={efforts()}>{e => <MenuItem label={e.label} sub={e.unavailable} disabled={e.unavailable} check={e.id === effortFor(props.settings.model)} onSelect={() => props.onChange({ effort: e.id })} />}</For>
     </Pop>
     <Show when={!props.compact}>
       <Pop id={`m-set-${props.id}`} class={cls()} align={align()} label="Settings" style={{ width: "300px" }}>

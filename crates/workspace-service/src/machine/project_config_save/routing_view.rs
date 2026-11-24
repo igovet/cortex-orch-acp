@@ -593,7 +593,7 @@ fn efforts_at(state: &Path, registry: &Value, home: Option<&Path>) -> Result<Val
                             p[0] == "thought_level"
                                 && p[1]
                                     .as_str()
-                                    .is_some_and(|s| !s.eq_ignore_ascii_case("default"))
+                                    .is_some_and(crate::native_routes::is_concrete_effort)
                         })
                         .map(|p| p[1].as_str().unwrap().to_owned())
                         .collect::<Vec<_>>();

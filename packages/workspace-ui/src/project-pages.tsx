@@ -11,9 +11,9 @@ import { SetH, Srow } from "./settings-kit";
 export function KnowledgePage(props: { summary: ProjectSummary }) {
   const ws = useWs();
   const off = () => props.summary.offline ? `${props.summary.machine.name} is offline` : undefined;
-  const create = async (description: string) => {
+  const create = async (description: string, run: typeof ws.run) => {
     const { settings } = machineDefaults(props.summary.machine);
-    const receipt = await ws.run({ type: "create_task", projectId: props.summary.project.id, description, settings, checkout: { kind: "main" } });
+    const receipt = await run({ type: "create_task", projectId: props.summary.project.id, description, settings, checkout: { kind: "main" } });
     if (!receipt.ok || !receipt.entityId) return false;
     if (ws.can(capabilityOf("generate_title"))) void ws.run({ type: "generate_title", taskId: receipt.entityId });
     ws.go({ name: "task", machine: props.summary.machine.id, task: receipt.entityId });
@@ -21,9 +21,9 @@ export function KnowledgePage(props: { summary: ProjectSummary }) {
   };
   // The scope or the skill is written in the shared composer; the plane creates an ordinary draft task, which does not start.
   const ask = (title: string, label: string, prefix: string, placeholder: string, optional: boolean) => ws.open({ kind: "describe", title, label, placeholder, optional, send: "Create the task",
-    effect: "Creates a task in this project. It does not start until you start it.", settings: machineDefaults(props.summary.machine).settings, go: async scope => {
+    effect: "Creates a task in this project. It does not start until you start it.", settings: machineDefaults(props.summary.machine).settings, go: async (scope, run) => {
       const description = ws.store.mode === "real" ? String((await ws.store.machineAction("workflow.describe", {action:prefix, scope})).description) : `${prefix}: ${scope}`;
-      return create(description);
+      return create(description, run);
     } });
   const button = (text: string, run: () => void) => <button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) run(); }}>{text}</button>;
   return <div class="page"><div class="page-in">

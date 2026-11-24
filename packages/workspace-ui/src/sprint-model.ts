@@ -1,7 +1,7 @@
 import { dependencyReady, isOpen, openPlanningQuestion, queueDrivenMode, runBlockerOf, runOrder, type AttachmentInput, type PlanItem, type Sprint, type Task, type TaskSession } from "@cortex/workspace-domain";
 import type { Ask } from "./questions";
 import { checksLine } from "./review-model";
-import { humanStatus, readyLabel, readyStep, type TaskView, type WorkspaceIndex } from "./selectors";
+import { humanStatus, orderOf, readyLabel, readyStep, type TaskView, type WorkspaceIndex } from "./selectors";
 
 export const itemTitle = (item: PlanItem) => item.title ?? item.description;
 
@@ -79,22 +79,27 @@ const planVersionOf = (sprint: Sprint, items: PlanItem[]) =>
  * come from; task states belong only to the version the tasks were created from, so a past version or a draft never
  * takes the current tasks' states, whatever its length. Omitted, it is found by identity among the sprint's plan and
  * history, so a copy such as a draft has none. `"tasks"` marks items built from the sprint's own tasks, keyed by task id.
- * Tasks were created in run order, so that order, not plan position, pairs each item with its task.
+ * Tasks are paired with items by stable task id: `created` (plan key to task id, as the service proves it) when given,
+ * otherwise by the roster's first tasks, which were created in run order before any later draft was added. That pairing is
+ * used only when each of those tasks still waits for exactly the tasks of its item's dependencies; anything else carries no
+ * state rather than another task's.
  */
-export function planRows(index: WorkspaceIndex, sprint: Sprint, items: PlanItem[], version?: number | "tasks" | null): PlanRow[] {
+export function planRows(index: WorkspaceIndex, sprint: Sprint, items: PlanItem[], version?: number | "tasks" | null, created?: ReadonlyMap<string, string> | null): PlanRow[] {
   const source = version === undefined ? planVersionOf(sprint, items) : version;
   let views: Map<string, TaskView | null> | null = null, order: (TaskView | null)[] = [];
   if (source === "tasks") {
     views = new Map(items.map(i => [i.key, index.byId.get(i.key) ?? null]));
     order = [...views.values()];
-  } else if (source !== null && source === sprint.materializedVersion && sprint.taskIds.length === items.length) {
-    const run = runOrder(items);
-    if (run.length === items.length) {
-      views = new Map(run.map((key, i) => [key, index.byId.get(sprint.taskIds[i]) ?? null]));
+  } else if (source !== null && source === sprint.materializedVersion) {
+    const ids = created && created.size ? created : createdByRoster(index, sprint, items);
+    if (ids) {
+      views = new Map(items.map(i => [i.key, ids.has(i.key) ? index.byId.get(ids.get(i.key)!) ?? null : null]));
       order = sprint.taskIds.map(id => index.byId.get(id) ?? null);
     }
   }
-  const nextId = order.find(v => v?.task.status === "draft" && !v.task.dependencies.some(id => { const d = index.byId.get(id); return !d || !dependencyReady(d.task, sprint.runMode); }))?.id;
+  const live = orderOf(index, sprint);
+  const nextId = live ? live.notStarted.find(p => p.next)?.taskId
+    : order.find(v => v?.task.status === "draft" && !v.task.dependencies.some(id => { const d = index.byId.get(id); return !d || !dependencyReady(d.task, sprint.runMode); }))?.id;
   const numbers = new Map<string, number>();
   items.forEach((i, n) => { if (!numbers.has(i.key)) numbers.set(i.key, n + 1); });
   const no = (key: string) => numbers.get(key) ?? 0;
@@ -103,6 +108,23 @@ export function planRows(index: WorkspaceIndex, sprint: Sprint, items: PlanItem[
     const view = views?.get(item.key) ?? null;
     return { item, no: i + 1, deps: item.dependsOn.map(no), view, word: view ? wordOf(view, view.id === nextId, index) : null, waits: item.dependsOn.filter(unready).map(no), backed: views !== null };
   });
+}
+
+/**
+ * Plan keys to the tasks made from them, read from the roster alone: its first tasks in the plan's run order. Null unless
+ * every one of them that is loaded waits exactly for the tasks of its item's dependencies, so a moved or relinked member
+ * never lends its state to another row. A task not loaded proves nothing either way; its row reads as Unknown.
+ */
+function createdByRoster(index: WorkspaceIndex, sprint: Sprint, items: PlanItem[]): Map<string, string> | null {
+  const run = runOrder(items);
+  if (run.length !== items.length || sprint.taskIds.length < items.length) return null;
+  const ids = new Map(run.map((key, i) => [key, sprint.taskIds[i]]));
+  const byKey = new Map(items.map(i => [i.key, i]));
+  for (const [key, id] of ids) {
+    const task = index.byId.get(id)?.task, want = new Set(byKey.get(key)!.dependsOn.map(k => ids.get(k)));
+    if (task && (task.dependencies.length !== want.size || task.dependencies.some(d => !want.has(d)))) return null;
+  }
+  return ids;
 }
 
 const short = (text: string) => text.length > 15 ? `${text.slice(0, 14).trimEnd()}…` : text;
@@ -170,7 +192,9 @@ export function sprintSummary(index: WorkspaceIndex, sprint: Sprint) {
   const views = sprint.taskIds.flatMap(id => { const v = index.byId.get(id); return v ? [v] : []; });
   const loaded = new Set(views.map(v => v.id));
   const rows = planRows(index, sprint, views.map(v => ({ key: v.id, title: v.task.title, description: v.task.description, dependsOn: v.task.dependencies.filter(d => loaded.has(d)) })), "tasks");
-  const next = views.find(v => v.task.status === "draft" && v.task.dependencies.every(id => { const d = index.byId.get(id); return !!d && dependencyReady(d.task, sprint.runMode); }));
+  const order = orderOf(index, sprint);
+  const next = order ? views.find(v => v.id === order.notStarted.find(p => p.next)?.taskId)
+    : views.find(v => v.task.status === "draft" && v.task.dependencies.every(id => { const d = index.byId.get(id); return !!d && dependencyReady(d.task, sprint.runMode); }));
   const list: SummaryRow[] = views.map(view => {
     const word = wordOf(view, view.id === next?.id, index);
     return { view, word, checks: checksOf(view.task, word, index, sprint.runMode), branch: view.task.checkout.branch };

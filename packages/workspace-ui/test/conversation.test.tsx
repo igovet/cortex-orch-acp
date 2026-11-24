@@ -74,6 +74,28 @@ it("folds the general composer while a question waits, and opening it says it is
   expect($('.dc [aria-label="Send answer"]')?.getAttribute("aria-disabled")).toBe("true");
 });
 
+it("formats an ordinary question’s answer labels and details inline without selecting on link activation", async () => {
+  await mount(world(live, [question({ text: "Read `src/choice.ts:10` first.", options: [
+    { label: "**Pick** `A`", sub: "Inspect [the fixture](/tmp/outside.txt)", optionId: "a" },
+    { label: "Use B", optionId: "b" },
+  ] })]));
+  const row = $(".dc .opt")!;
+  const radio = row.querySelector<HTMLButtonElement>('button[role="radio"]')!;
+  expect($(".dc-q code a")?.textContent).toBe("src/choice.ts:10");
+  expect(row.querySelector("strong")?.textContent).toBe("Pick");
+  expect(row.querySelector("code")?.textContent).toBe("A");
+  expect(row.querySelector(".sub")?.textContent).toBe("Inspect the fixture");
+  expect(radio.querySelector("a,div,p")).toBeNull();
+  row.querySelector<HTMLAnchorElement>(".sub a")!.click(); await settle();
+  expect(radio.getAttribute("aria-checked")).toBe("false");
+  expect($(".ws-path-pop")?.textContent).toContain("/tmp/outside.txt");
+  document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  radio.click();
+  expect(radio.getAttribute("aria-checked")).toBe("true");
+  expect($(".dc-answer .mc-effect")?.textContent).toBe("Answer: Pick A");
+  expect($(".dc-answer .mc-effect strong")?.textContent).toBe("Pick");
+});
+
 it("delivers by the visible choice only: Ctrl+Enter does not queue, and Enter follows Queue once it is chosen", async () => {
   const p = await mount(world(live));
   typeMessage("Lock the row").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));

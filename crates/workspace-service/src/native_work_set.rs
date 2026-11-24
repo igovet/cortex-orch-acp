@@ -195,6 +195,7 @@ pub(crate) fn finish(
     root: PathBuf,
     work_set: Vec<String>,
     start: String,
+    checkout: Option<Value>,
 ) {
     tokio::spawn(async move {
         let done = running.lock().await.get(&reference).map(|r| r.done.clone());
@@ -220,16 +221,15 @@ pub(crate) fn finish(
         let Some(end) = observe(root, work_set.clone()).await else {
             return;
         };
-        if let Ok(written) = executor.write(move |db| {
-            worker_checks::record_work_set_tx(
-                db,
-                &task,
-                &reference,
-                &assignment,
-                &work_set,
-                &start,
-                &end,
-            )
+        if let Ok(written) = executor.publication(move |store| {
+            if let Some(checkout) = &checkout {
+                if !crate::native_project::retained_checkout_matches(store, &task, checkout)? {
+                    return Ok(());
+                }
+            }
+            store.write(|db| worker_checks::record_work_set_tx(
+                db, &task, &reference, &assignment, &work_set, &start, &end,
+            ))
         }) {
             let _ = written.await;
         }
@@ -259,7 +259,20 @@ pub(crate) fn binding_at_submission(
     {
         return Ok(None);
     }
-    let root = store.key().root().to_path_buf();
+    let root = match record.get("checkout") {
+        Some(binding) if crate::native_project::retained_checkout_matches(store, task, binding)? => {
+            let Some(root) = binding["root"].as_str() else { return Ok(None); };
+            PathBuf::from(root)
+        }
+        Some(_) => return Ok(None),
+        None => {
+            let root = store.key().root();
+            if store.read(|db| Ok(crate::native_project::task_root(db, task)? != root))? {
+                return Ok(None);
+            }
+            root.to_path_buf()
+        }
+    };
     let current = digests
         .entry(work_set.clone())
         .or_insert_with(|| digest(&root, &work_set));

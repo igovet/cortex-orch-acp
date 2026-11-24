@@ -360,7 +360,7 @@ test("a command the user stopped renders as stopped by user, with the reason vis
   assert.ok(texts.includes("npm install"), "the stopped command");
   assert.ok(texts.includes("Reason: Installing packages is not approved."), "the reason is visible without expanding");
   assert.ok(view.find("Stopped by user. Reason: Installing packages is not approved.", "Text"));
-  const reason = view.runtime.elements().find((element) => textOf(element.props?.children) === "Reason: Installing packages is not approved.");
+  const reason = view.runtime.elements().find((element) => element.type === "Text" && textOf(element.props?.children) === "Reason: Installing packages is not approved.");
   assert.equal((reason!.props.style as Array<{ color?: string }>)[1].color, "color:statusWarning");
 });
 

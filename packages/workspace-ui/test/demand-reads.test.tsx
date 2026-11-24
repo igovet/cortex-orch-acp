@@ -5,6 +5,7 @@ import type { Decision as WireDecision } from "@cortex/workspace-contract";
 import { emptyConfig, LOCAL_MACHINE_ID, type NativeTaskDelta } from "@cortex/workspace-domain";
 import { homeView } from "../src/selectors";
 import { Workspace } from "../src";
+import type { ResultTarget } from "../src/result-links";
 import { createRealPort, GIT_VISIBLE_REFRESH_MS, MACHINE_POLL_MS } from "../src/port/real";
 import { createWorkspaceStore } from "../src/store";
 import { capabilitiesWire, scriptedTransport, wireDecision, wireTask } from "./support";
@@ -250,10 +251,112 @@ it("reads worker rows only for the task on view, not every started task's", asyn
   await store.refreshProjectFacts("p", false);
   const all = replyBytes;
   expect(store.state().workers).toHaveLength(30);
-  // The task page of t3 is on view: its project's facts carry t3's workers only.
+  // The task page of t3 is on view: the read carries t3's workers only, and the rows an earlier read confirmed for the
+  // other tasks' current executions are kept, so the other tasks do not lose their workers.
   store.interest("p", "facts", "t3");
-  await vi.waitFor(() => expect(store.state().workers.map(w => w.taskId)).toEqual(["t3", "t3", "t3"]));
+  await vi.waitFor(() => expect(replyBytes).toBeLessThan(all));
+  await vi.waitFor(() => expect(store.state().workers.slice(0, 3).map(w => w.taskId)).toEqual(["t3", "t3", "t3"]));
+  expect(store.state().workers).toHaveLength(30);
   const one = replyBytes;
   expect(one * 9).toBeLessThan(all);
   console.info(`worker rows in a facts read: every started task ${all} bytes, the task on view ${one} bytes`);
 });
+
+// The retry case waits for the real 5 s checkout timer before asserting the popup state.
+// Keep its 6.5 s assertion deadline inside the overall test deadline.
+it.each(["late checkout", "retry"])("keeps a relative Result media popup open through a %s", async scenario => {
+  const worktree = "/worktrees/p-t";
+  const summary = "[Subtitles](out/linked/../sub%20titles.srt)";
+  const task = wireTask({ taskId: "t", executionId: "t-e", phase: "result", executionState: "completed", runtimeState: "COMPLETED" });
+  const saved = { status: "review", checkout: { kind: "worktree", id: "t-checkout", branch: "main" } };
+  const checkout = (id: string, kind: string, path: string, taskId: string | null) =>
+    ({ id, kind, path, taskId, projectId: "p", branch: "main", files: [], sources: {}, label: null, base: "main", ahead: 0, behind: 0, behindOf: {}, draft: "", updateConflict: null });
+  const repo = (ready: boolean) => ({ projectId: "p", remote: "", tree: [], sources: {}, commits: [], branches: [], fetchedAt: null, openBranch: "main", defaultBranch: "main",
+    checkouts: [checkout("p:main", "main", "/p", null), ...(ready ? [checkout("t-checkout", "worktree", worktree, "t")] : [])] });
+  let publishRepo!: (value: ReturnType<typeof repo>) => void;
+  const lateRepo = new Promise<ReturnType<typeof repo>>(resolve => { publishRepo = resolve; });
+  let repoReads = 0, allowLateRead = false;
+  const s = scriptedTransport({
+    "service.capabilities": () => ({ methods: ["native.query", "native.board", "native.open_editor"], machine: true }),
+    "projects.list": () => [{ projectId: "p", displayName: "P", canonicalRoot: "/p", activation: {} }],
+    "capabilities.get": () => capabilitiesWire(["capabilities.get", "project.snapshot", "history.page"]),
+    "native.board": () => ({ protocol: { major: 2, mapping: 2 }, projectId: "p", generation: "g", version: "2", highWatermark: "3",
+      data: { type: "board", value: { items: [task], nextCursor: null, highWatermark: "3" } } }),
+    "native.query": () => ({ protocol: { major: 2, mapping: 2 }, projectId: "p", generation: "g", version: "2", highWatermark: "0",
+      data: { type: "history", value: { items: [], nextCursor: null, highWatermark: "0" } } }),
+    "machine.call": async raw => {
+      switch ((raw as { op: string }).op) {
+        case "config.read": return { ok: true, result: { config: emptyConfig(), connections: [], tokens: {} } };
+        case "project.config.read": return { ok: true, result: { value: {}, tokens: {} } };
+        case "repo.snapshot":
+          repoReads++;
+          return { ok: true, result: allowLateRead ? await lateRepo : repo(false) };
+        case "workers": return { ok: true, result: [] };
+        case "product.board": return { ok: true, result: { hasGit: true, sprints: [], tasks: { t: saved } } };
+        case "product.read": return { ok: true, result: { hasGit: true, sprints: [], tasks: { t: {
+          ...saved,
+          result: { version: 1, digest: "d", summary, checks: [] }, workspaceDigest: "d",
+        } } } };
+        default: return { ok: true, result: {} };
+      }
+    },
+  });
+  const port = createRealPort({ transport: s.transport, actorId: "owner", registry: true, streamFactsMs: 60_000 });
+  const query = vi.spyOn(port, "query");
+  const open = vi.fn(async (_target: ResultTarget) => {});
+  history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}/t/t`);
+  dispose = render(() => <Workspace port={port} openResultTarget={open} />, document.body);
+  const route = location.href;
+  const link = await vi.waitFor(() => {
+    const link = document.querySelector<HTMLAnchorElement>('.rcard a[href="out/linked/../sub%20titles.srt"]');
+    expect(link).not.toBeNull();
+    return link!;
+  });
+  const activate = () => {
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+    link.dispatchEvent(click);
+    expect(click.defaultPrevented).toBe(true);
+  };
+  const pop = () => document.querySelector('[role="dialog"][aria-label="File path"]');
+  const button = (label: string) => [...(pop()?.querySelectorAll("button") ?? [])].find(b => b.textContent === label);
+  const readCount = repoReads, queryCount = query.mock.calls.length;
+  allowLateRead = scenario === "late checkout";
+  activate();
+  const dialog = pop();
+  expect(dialog?.textContent).toContain("Finding the checkout path");
+  expect(dialog?.querySelector(".ws-path-value")?.textContent).toBe("out/linked/../sub titles.srt");
+  expect(link.getAttribute("aria-busy")).toBe("true");
+  expect(button("Open in default app")).toBeUndefined();
+  expect(open).not.toHaveBeenCalled();
+  await vi.waitFor(() => expect(repoReads).toBeGreaterThan(readCount));
+  const factsIndex = query.mock.calls.findIndex(([op, args], i) => i >= queryCount && op === "project.facts" && "git" in args && args.git === true);
+  expect(factsIndex).toBeGreaterThanOrEqual(queryCount);
+  await query.mock.results[factsIndex].value;
+  expect(pop()).toBe(dialog);
+  expect(button("Open in default app")).toBeUndefined();
+
+  if (scenario === "retry") {
+    await vi.waitFor(() => expect(button("Retry")).toBeDefined(), { timeout: 6500 });
+    expect(dialog?.textContent).toContain("Could not confirm the checkout path.");
+    expect(link.hasAttribute("aria-busy")).toBe(false);
+    const retryReads = repoReads;
+    allowLateRead = true;
+    button("Retry")!.focus();
+    button("Retry")!.click();
+    expect(dialog?.textContent).toContain("Finding the checkout path");
+    expect(document.activeElement).toBe(button("Copy path"));
+    await vi.waitFor(() => expect(repoReads).toBeGreaterThan(retryReads));
+  }
+  publishRepo(repo(true));
+  await vi.waitFor(() => expect(button("Open in default app")).toBeDefined());
+  expect(pop()).toBe(dialog);
+  const path = `${worktree}/out/linked/../sub titles.srt`;
+  expect(dialog?.querySelector(".ws-path-value")?.textContent).toBe(path);
+  expect(link.hasAttribute("aria-busy")).toBe(false);
+  expect(open).not.toHaveBeenCalled();
+  expect(location.href).toBe(route);
+  button("Open in default app")!.click();
+  await vi.waitFor(() => expect(pop()).toBeNull());
+  expect(open).toHaveBeenCalledExactlyOnceWith({ kind: "file", path });
+  expect(location.href).toBe(route);
+}, 10_000);

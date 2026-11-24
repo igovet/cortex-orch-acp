@@ -203,7 +203,7 @@ export function FilePreview(props: { path: string; plan: ViewPlan; text: string 
   const needsText = () => !isMedia(kind()) && kind() !== "pdf" && kind() !== "binary";
   return <div class="ebody fv-body" data-view-kind={kind()} ref={el => el.addEventListener("click", stay)}>
     <Show when={!needsText() || props.text !== null} fallback={fallback(props.reason ?? "This file has no text to preview.")}>
-      {kind() === "markdown" ? <div class="fv-doc"><ResultText text={props.text!} /></div>
+      {kind() === "markdown" ? <div class="fv-doc"><ResultText inertLinks text={props.text!} /></div>
         : kind() === "csv" ? <Table text={props.text!} sep="," />
         : kind() === "tsv" ? <Table text={props.text!} sep={"\t"} />
         : kind() === "json" ? <Json path={props.path} text={props.text!} />

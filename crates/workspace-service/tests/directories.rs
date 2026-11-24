@@ -255,6 +255,7 @@ async fn a_request_that_names_more_than_text_is_refused_and_changes_nothing() {
         false
     );
     let methods = call(&s, "service.capabilities", json!({})).await;
+    assert_eq!(methods["result"]["taskWorktrees"], true);
     assert!(methods["result"]["methods"]
         .as_array()
         .unwrap()

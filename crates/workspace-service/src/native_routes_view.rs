@@ -167,6 +167,7 @@ pub(crate) struct Builder {
     environment: BTreeMap<String, String>,
     mapped: Vec<(PathBuf, PathBuf)>,
     granted: Vec<PathBuf>,
+    excluded: Vec<PathBuf>,
 }
 impl Builder {
     /// The system runtime and private `/tmp`. Requires an unprivileged bubblewrap.
@@ -186,6 +187,7 @@ impl Builder {
             environment: BTreeMap::from([("TMPDIR".into(), "/tmp".into())]),
             mapped: Vec::new(),
             granted: vec![PathBuf::from("/usr")],
+            excluded: Vec::new(),
         };
         view.flags([
             "--die-with-parent",
@@ -248,6 +250,12 @@ impl Builder {
     fn bind(&mut self, source: &Path, target: &Path, read_only: bool) -> io::Result<()> {
         if !normal(target) {
             return Err(unavailable("invalid_mount_target"));
+        }
+        if self.excluded.iter().any(|p| {
+            source.starts_with(p) || p.starts_with(source)
+                || target.starts_with(p) || p.starts_with(target)
+        }) {
+            return Err(unavailable("worktree_route_overlapping_mount"));
         }
         filesystem_view::bind(&mut self.args, &mut self.pins, source, target, read_only)
     }
@@ -582,7 +590,9 @@ impl Builder {
                 return Err(unavailable("unsafe_broker_directory"));
             }
             let shown = Path::new(cortex_engine::broker::VIEW_DIRECTORY).join(&name);
-            self.bind(&real, &shown, true)?;
+            // The precisely scoped per-channel relay directory is the only
+            // approved grant from inside the logical project store.
+            filesystem_view::bind(&mut self.args, &mut self.pins, &real, &shown, true)?;
             self.mapped.push((directory.clone(), shown.clone()));
             if real != *directory {
                 self.mapped.push((real, shown));
@@ -654,13 +664,32 @@ fn beside_test_binary(executable: &Path) -> bool {
 pub(crate) struct RouteConfiner {
     pub(crate) state: PathBuf,
     pub(crate) connection: String,
+    excluded: Vec<PathBuf>,
 }
 impl RouteConfiner {
     pub(crate) fn request(state: &Path, connection: &str) -> ConfinementRequest {
         ConfinementRequest::new(Arc::new(Self {
             state: state.to_owned(),
             connection: connection.to_owned(),
+            excluded: Vec::new(),
         }))
+    }
+
+    pub(crate) fn worktree(
+        state: &Path, connection: &str, logical: &Path, cwd: &Path,
+    ) -> cortex_core::CoreResult<ConfinementRequest> {
+        let siblings = cwd.parent().ok_or(cortex_core::CoreError::Refused("worktree_binding_invalid"))?;
+        let excluded = vec![logical.to_owned(), siblings.to_owned()];
+        let system = ["/usr", "/etc", "/proc", "/dev", "/run"];
+        if excluded.iter().any(|path| {
+            system.iter().any(|p| path.starts_with(p) || Path::new(p).starts_with(path))
+                || state.starts_with(path)
+        }) {
+            return Err(cortex_core::CoreError::Refused("worktree_route_overlapping_mount"));
+        }
+        Ok(ConfinementRequest::new(Arc::new(Self {
+            state: state.to_owned(), connection: connection.to_owned(), excluded,
+        })))
     }
 }
 impl Confiner for RouteConfiner {
@@ -672,6 +701,9 @@ impl Confiner for RouteConfiner {
     ) -> io::Result<Confinement> {
         let private = private_root(&self.state, &self.connection)?;
         let mut view = Builder::new()?;
+        // HOME is tmpfs; its cache, account, install and launcher are
+        // separate grants which must not overlap any checkout.
+        view.excluded = self.excluded.clone();
         view.home(&spec.native_home, &private)?;
         view.install(
             std::iter::once(spec.executable.as_path())

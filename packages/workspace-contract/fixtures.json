@@ -93,7 +93,7 @@
         "minor": 0
       },
       "buildIdentity": "1.0.6+test",
-      "schemaFingerprint": "1e16662965c450f7cb8142751a54573723bc5d985a030f99cecb6c636f145464",
+      "schemaFingerprint": "fd26eab7d29b063b508dc2117619fb29bdb02c3f4fa4bb187132fcc52a199d37",
       "mappingVersion": "1",
       "operations": [
         "capabilities.get",
@@ -1369,7 +1369,7 @@
         "futureField": true
       },
       "buildIdentity": "1.0.6+test",
-      "schemaFingerprint": "1e16662965c450f7cb8142751a54573723bc5d985a030f99cecb6c636f145464",
+      "schemaFingerprint": "fd26eab7d29b063b508dc2117619fb29bdb02c3f4fa4bb187132fcc52a199d37",
       "mappingVersion": "1",
       "operations": [
         "capabilities.get",
@@ -1515,5 +1515,30 @@
         "answers": []
       }
     }
+  },
+  {
+    "name": "task waiting for files",
+    "type": "Task",
+    "value": {
+      "taskId": "t",
+      "description": "task",
+      "title": null,
+      "titleAvailability": "not_connected",
+      "version": "1",
+      "executionId": "e",
+      "phase": "execution",
+      "runtimeState": "EXECUTING",
+      "executionState": "running",
+      "filesWait": {
+        "holderTaskId": "holder",
+        "releaseTarget": "src/lib.rs"
+      },
+      "waitReason": "Waiting for the task “Format source” to release src/lib.rs",
+      "lastConfirmedAt": null,
+      "warnings": [
+        "waiting_for_files"
+      ]
+    },
+    "valid": true
   }
 ]

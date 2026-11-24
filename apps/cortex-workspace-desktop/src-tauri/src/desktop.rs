@@ -297,6 +297,20 @@ fn watch_main_thread(window: WebviewWindow, traffic: Arc<stall::Traffic>) {
     });
 }
 
+/// Local window only; the renderer invokes this on an explicit link or file-menu activation.
+#[tauri::command]
+async fn workspace_open_result_target(
+    window: WebviewWindow,
+    target: crate::opener::ResultTarget,
+) -> Result<(), String> {
+    if window.label() != "main"
+        || !policy::local_url(window.url().map_err(|_| "bridge_origin_refused")?.as_str())
+    {
+        return Err("bridge_origin_refused".into());
+    }
+    crate::opener::open_result_target(target).await
+}
+
 /// Called only after the frontend unsaved guard and pending request barrier.
 #[tauri::command]
 fn workspace_close(window: WebviewWindow, state: State<'_, Native>) -> Result<(), String> {
@@ -354,6 +368,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             workspace_request,
             workspace_notify,
+            workspace_open_result_target,
             workspace_close
         ])
         .setup(move |app| {

@@ -60,6 +60,14 @@ fn archived(record: &Value) -> bool {
     record["archive"].is_object()
 }
 
+fn active_merge(record: &Value) -> bool {
+    let merge = &record["merge"];
+    merge.is_object()
+        && !(merge["finished"] == true
+            && merge["gitState"] == "completed"
+            && record["conflict"] == "none")
+}
+
 fn normalize(record: &mut Value, event: Option<i64>) -> bool {
     let Some(event) = event.map(|id| id.to_string()) else {
         return false;
@@ -74,6 +82,7 @@ fn normalize(record: &mut Value, event: Option<i64>) -> bool {
         "status",
         "doneAt",
         "closedAs",
+        "alreadyInTargetBranch",
         "notVerifiedByCortex",
         "acceptance",
         "automaticReady",
@@ -207,7 +216,7 @@ pub(super) fn project(
                 Err(CoreError::Refused("task_archived"))
             } else if record["purged"] == true {
                 Err(CoreError::Refused("invalid_task"))
-            } else if record["merge"].is_object() {
+            } else if active_merge(record) {
                 Err(CoreError::Refused("merge_in_progress"))
             } else {
                 match (&execution, &runtime) {
@@ -246,7 +255,7 @@ pub(super) fn open_rework(task: &Value) -> bool {
     task["reworkEvent"].is_string() && !closed(task) && task["purged"] != true
 }
 
-fn normalize_on(
+pub(super) fn normalize_on(
     db: &Connection,
     project: &str,
     product: &mut Value,
@@ -256,11 +265,15 @@ fn normalize_on(
     let event = control::owner_rework_event(db, runtime)?;
     let record = &mut product["tasks"][task];
     if normalize(record, event) {
-        let (base, target): (Option<String>, Option<String>) = db.query_row(
-            "SELECT json_extract(payload_json,'$.baseRevision'),json_extract(payload_json,'$.targetBranch')
+        let (base, target, reset_changes_base): (Option<String>, Option<String>, bool) = db.query_row(
+            "SELECT json_extract(payload_json,'$.baseRevision'),json_extract(payload_json,'$.targetBranch'),
+                    COALESCE(json_extract(payload_json,'$.resetChangesBase'),0)
              FROM runtime_events WHERE id=? AND task_id=?",
-            (event, runtime), |r| Ok((r.get(0)?, r.get(1)?)),
+            (event, runtime), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
+        if reset_changes_base {
+            record.as_object_mut().unwrap().remove("changesBaseRevision");
+        }
         if let Some(base) = base {
             record["baseRevision"] = json!(base);
             if let Some(target) = target {
@@ -308,6 +321,7 @@ pub(crate) fn with_plain_start_guard<T>(
     state: &Path,
     project: &str,
     request: &Value,
+    queued: Option<(&Store, &super::sprint_live::Expectation)>,
     start: impl FnOnce() -> CoreResult<T>,
 ) -> CoreResult<T> {
     let _lock = Lock::new(state, "machine.lock").map_err(|e| CoreError::Refused(e.code))?;
@@ -315,6 +329,9 @@ pub(crate) fn with_plain_start_guard<T>(
         .as_str()
         .ok_or(CoreError::Refused("invalid_task"))?;
     let saved = product(state, project).map_err(|e| CoreError::Refused(e.code))?;
+    if let Some((store, expected)) = queued {
+        super::sprint_live::check_start(store, &saved, project, expected, task)?;
+    }
     if closed(&saved["tasks"][task]) || archived(&saved["tasks"][task]) {
         return Err(CoreError::Refused("task_not_resumable"));
     }
@@ -348,6 +365,9 @@ pub(crate) fn preflight(
             if !closed(record) || record["purged"] == true {
                 return Err(CoreError::Refused("task_not_closed"));
             }
+            if active_merge(record) {
+                return Err(CoreError::Refused("merge_in_progress"));
+            }
             store.read(|db| {
                 let (version, execution): (i64, Option<String>) = db.query_row(
                     "SELECT t.version,t.execution_id FROM workspace_tasks t JOIN workspace_projects p USING(project_id)
@@ -373,6 +393,9 @@ pub(crate) fn preflight(
             }
             if record["purged"] == true {
                 return Err(CoreError::Refused("invalid_task"));
+            }
+            if active_merge(record) {
+                return Err(CoreError::Refused("merge_in_progress"));
             }
             let closed = closed(record)
                 || control::unconfirmed_close_current(
@@ -427,18 +450,21 @@ pub(crate) fn admit(
     if record["purged"] == true {
         return Err(error("invalid_task"));
     }
-    if record["merge"].is_object() {
+    if active_merge(record) {
         return Err(error("merge_in_progress"));
     }
     let history = json!({"status":record["status"],"closedAs":record["closedAs"],
         "doneAt":record["doneAt"],"notVerifiedByCortex":record["notVerifiedByCortex"],
         "acceptance":record["acceptance"],"integration":record["integration"],
+        "alreadyInTargetBranch":record["alreadyInTargetBranch"],
         "worktreeCleanup":record["worktreeCleanup"],"baseRevision":record["baseRevision"]});
     let (mut receipt, b) = if let Some(b) = binding {
-        let integrated = record["work"] == "merged"
+        let contained_target = record["alreadyInTargetBranch"].as_str();
+        let integrated = contained_target.is_some()
+            || record["work"] == "merged"
             || (record["integration"].is_object() && record["integration"]["method"] != "pr");
-        let target = record["integration"]["targetBranch"]
-            .as_str()
+        let target = contained_target
+            .or_else(|| record["integration"]["targetBranch"].as_str())
             .or_else(|| record["targetBranch"].as_str())
             .or_else(|| {
                 (record["checkout"]["kind"] == "main")

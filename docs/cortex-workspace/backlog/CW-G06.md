@@ -1,6 +1,6 @@
 # CW-G06: Optional worktree lifecycle
 
-**Status:** Partly implemented: worktree screens, the Worktrees settings page and worktree cleanup exist, but the service reports `taskWorktrees: false` and every task runs in the project folder ([IDE and Git](../ide-and-git.md)) · **Phase:** 3+ · **Size:** L
+**Status:** Implemented in the local desktop service, with no-paid source coverage; see [separate worktrees](../local-task-execution.md#separate-worktrees) · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Optional worktree lifecycle.
@@ -12,7 +12,7 @@ CW-R19, CW-R25; see [requirements](../requirements.md).
 [Domain model](../domain-model.md), [testing and acceptance](../testing-and-acceptance.md), [desktop rework](../design/desktop-rework-proposal.ru.md) and dependencies below. Owner decisions supersede conflicting historical proposal text.
 
 ## Deliverables
-Define safe checkout choice, worktree creation, task binding, cleanup and orphan handling against verified runtime behavior. Dedicated worktrees are created under the machine's worktree root, which is set on the Worktrees settings page of [CW-U07](CW-U07.md) (default `~/.local/share/cortex-workspace/worktrees`, layout `<root>/<project>/<task>`). The root is validated when it is saved and again at creation: it must be absolute, writable and outside every registered project checkout. An invalid or unavailable root blocks creation and shows the reason; it never falls back to another folder. Split before implementation if effort exceeds L.
+The Worktrees settings page ([CW-U07](CW-U07.md)) controls the machine root. Start provisions from committed HEAD and binds execution and checkout operations to that folder. Invalid roots, missing Git and absent committed HEAD refuse without fallback. Cleanup verifies provenance and cleanliness: ordinary close and archive keep the folder, explicit close-and-delete and purge can remove it, and confirmed squash defaults to requesting cleanup when safe. The main checkout and branches are never deleted by cleanup.
 
 ## Acceptance
 - Positive: Choose current checkout and open branch or a dedicated worktree; bind the session to the chosen directory. A dedicated worktree is created under the configured root and bound to its task.

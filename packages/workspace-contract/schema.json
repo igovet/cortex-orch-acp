@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://cortex.local/workspace/wire-1.8.schema.json",
+  "$id": "https://cortex.local/workspace/wire-1.11.schema.json",
   "title": "Cortex Workspace wire subset",
   "x-wire-version": {
     "major": 1,
-    "minor": 8
+    "minor": 11
   },
   "x-mapping-version": "1",
   "x-limits": {
@@ -46,7 +46,731 @@
     "permissions.resolve",
     "executions.cancel"
   ],
+  "x-local-code-machine-operations": {
+    "repo.file.lease.acquire": {
+      "params": "CodeLeaseAcquireParams",
+      "result": "CodeLeaseAcquireResult"
+    },
+    "repo.file.lease.renew": {
+      "params": "CodeLeaseTokenParams",
+      "result": "CodeLeaseRenewResult"
+    },
+    "repo.file.lease.release": {
+      "params": "CodeLeaseTokenParams",
+      "result": "CodeLeaseReleaseResult"
+    },
+    "repo.file.lease.status": {
+      "params": "CodeLeaseStatusParams",
+      "result": "CodeLeaseStatusResult"
+    },
+    "repo.file.save": {
+      "params": "CodeSaveParams",
+      "result": "CodeSaveResult"
+    },
+    "repo.lsp.open": {
+      "params": "CodeLspOpenParams",
+      "result": "CodeLspOpenResult"
+    },
+    "repo.lsp.change": {
+      "params": "CodeLspChangeParams",
+      "result": "CodeLspSnapshot"
+    },
+    "repo.lsp.close": {
+      "params": "CodeLspHandleParams",
+      "result": "CodeLspCloseResult"
+    },
+    "repo.lsp.status": {
+      "params": "CodeLspHandleParams",
+      "result": "CodeLspSnapshot"
+    },
+    "repo.lsp.definition": {
+      "params": "CodeLspDefinitionParams",
+      "result": "CodeLspDefinitionResult"
+    },
+    "repo.lsp.settings": {
+      "params": "CodeLspSettingsParams",
+      "result": "CodeLspSettingsResult"
+    }
+  },
   "$defs": {
+    "CodeLspDocumentId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "CodeLspVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "CodeLspPosition": {
+      "type": "object",
+      "properties": {
+        "line": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "character": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      },
+      "required": [
+        "line",
+        "character"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLspRange": {
+      "type": "object",
+      "properties": {
+        "start": {
+          "$ref": "#/$defs/CodeLspPosition"
+        },
+        "end": {
+          "$ref": "#/$defs/CodeLspPosition"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLspDiagnostic": {
+      "type": "object",
+      "properties": {
+        "range": {
+          "$ref": "#/$defs/CodeLspRange"
+        },
+        "severity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "range",
+        "severity",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLspOpenParams": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "checkoutId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "taskId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 524288
+        },
+        "version": {
+          "$ref": "#/$defs/CodeLspVersion"
+        }
+      },
+      "required": [
+        "file",
+        "text",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLspHandleParams": {
+      "type": "object",
+      "properties": {
+        "documentId": {
+          "$ref": "#/$defs/CodeLspDocumentId"
+        }
+      },
+      "required": [
+        "documentId"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLspChangeParams": {
+      "type": "object",
+      "properties": {
+        "documentId": {
+          "$ref": "#/$defs/CodeLspDocumentId"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 524288
+        },
+        "version": {
+          "$ref": "#/$defs/CodeLspVersion"
+        }
+      },
+      "required": [
+        "documentId",
+        "text",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLspDefinitionParams": {
+      "type": "object",
+      "properties": {
+        "documentId": {
+          "$ref": "#/$defs/CodeLspDocumentId"
+        },
+        "version": {
+          "$ref": "#/$defs/CodeLspVersion"
+        },
+        "position": {
+          "$ref": "#/$defs/CodeLspPosition"
+        }
+      },
+      "required": [
+        "documentId",
+        "version",
+        "position"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLspSnapshot": {
+      "type": "object",
+      "properties": {
+        "eventId": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 32
+        },
+        "version": {
+          "$ref": "#/$defs/CodeLspVersion"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "status": {
+          "enum": [
+            "starting",
+            "ready",
+            "lsp_unavailable"
+          ]
+        },
+        "diagnostics": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CodeLspDiagnostic"
+              },
+              "maxItems": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "eventId",
+        "version",
+        "generation",
+        "status",
+        "diagnostics"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLspOpenResult": {
+      "type": "object",
+      "properties": {
+        "documentId": {
+          "$ref": "#/$defs/CodeLspDocumentId"
+        },
+        "eventId": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 32
+        },
+        "version": {
+          "$ref": "#/$defs/CodeLspVersion"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "status": {
+          "enum": [
+            "starting",
+            "ready",
+            "lsp_unavailable"
+          ]
+        },
+        "diagnostics": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CodeLspDiagnostic"
+              },
+              "maxItems": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "documentId",
+        "eventId",
+        "version",
+        "generation",
+        "status",
+        "diagnostics"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLspCloseResult": {
+      "type": "object",
+      "properties": {
+        "closed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "closed"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLspDefinitionTarget": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "checkoutId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "range": {
+          "$ref": "#/$defs/CodeLspRange"
+        }
+      },
+      "required": [
+        "file",
+        "checkoutId",
+        "range"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLspDefinitionResult": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/CodeLspVersion"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CodeLspDefinitionTarget"
+          },
+          "maxItems": 16
+        }
+      },
+      "required": [
+        "version",
+        "generation",
+        "targets"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLspSettingsParams": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "CodeLspSettingsResult": {
+      "type": "object",
+      "properties": {
+        "rustAnalyzerPath": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "typescriptLanguageServerPath": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "CodeLspEvent": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "code_lsp"
+        },
+        "projectId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "eventId": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 32
+        },
+        "version": {
+          "$ref": "#/$defs/CodeLspVersion"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "status": {
+          "enum": [
+            "starting",
+            "ready",
+            "lsp_unavailable"
+          ]
+        },
+        "diagnostics": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CodeLspDiagnostic"
+              },
+              "maxItems": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "type",
+        "projectId",
+        "eventId",
+        "version",
+        "generation",
+        "status",
+        "diagnostics"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLeaseToken": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "CodeLeaseAcquireParams": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "checkoutId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "taskId": {
+          "$ref": "#/$defs/Identity"
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLeaseTokenParams": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "checkoutId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "taskId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "leaseToken": {
+          "$ref": "#/$defs/CodeLeaseToken"
+        }
+      },
+      "required": [
+        "file",
+        "leaseToken"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLeaseStatusParams": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "checkoutId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "taskId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "leaseToken": {
+          "$ref": "#/$defs/CodeLeaseToken"
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "additionalProperties": false
+    },
+    "CodeSaveParams": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "checkoutId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "taskId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "leaseToken": {
+          "$ref": "#/$defs/CodeLeaseToken"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 524288
+        }
+      },
+      "required": [
+        "file",
+        "leaseToken",
+        "revision",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLeaseAcquireResult": {
+      "type": "object",
+      "properties": {
+        "leaseToken": {
+          "$ref": "#/$defs/CodeLeaseToken"
+        },
+        "expiresInMs": {
+          "const": 60000
+        },
+        "renewAfterMs": {
+          "const": 20000
+        }
+      },
+      "required": [
+        "leaseToken",
+        "expiresInMs",
+        "renewAfterMs"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLeaseRenewResult": {
+      "type": "object",
+      "properties": {
+        "expiresInMs": {
+          "const": 60000
+        }
+      },
+      "required": [
+        "expiresInMs"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLeaseReleaseResult": {
+      "type": "object",
+      "properties": {
+        "released": {
+          "const": true
+        }
+      },
+      "required": [
+        "released"
+      ],
+      "additionalProperties": false
+    },
+    "CodeLeaseStatusResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "available"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "held",
+                "yours"
+              ]
+            },
+            "expiresInMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 60000
+            }
+          },
+          "required": [
+            "status",
+            "expiresInMs"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "CodeLeaseTaskRefusal": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "const": false
+        },
+        "code": {
+          "const": "task_file_lease_held"
+        },
+        "message": {
+          "type": "string"
+        },
+        "holderTaskId": {
+          "$ref": "#/$defs/Identity"
+        }
+      },
+      "required": [
+        "ok",
+        "code",
+        "message",
+        "holderTaskId"
+      ],
+      "additionalProperties": false
+    },
+    "CodeSaveResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "const": "saved"
+            },
+            "revision": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 524288
+            }
+          },
+          "required": [
+            "outcome",
+            "revision",
+            "size"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "const": "conflict"
+            },
+            "revision": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "outcome",
+            "revision"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
     "Identity": {
       "type": "string",
       "minLength": 1,
@@ -940,6 +1664,22 @@
         },
         "executionState": {
           "$ref": "#/$defs/ExecutionState"
+        },
+        "filesWait": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "holderTaskId": {
+              "$ref": "#/$defs/Identity"
+            },
+            "releaseTarget": {
+              "$ref": "#/$defs/Text"
+            }
+          },
+          "required": [
+            "holderTaskId",
+            "releaseTarget"
+          ]
         },
         "waitReason": {
           "anyOf": [
@@ -3201,6 +3941,31 @@
           "answers": []
         }
       }
+    },
+    {
+      "name": "task waiting for files",
+      "type": "Task",
+      "value": {
+        "taskId": "t",
+        "description": "task",
+        "title": null,
+        "titleAvailability": "not_connected",
+        "version": "1",
+        "executionId": "e",
+        "phase": "execution",
+        "runtimeState": "EXECUTING",
+        "executionState": "running",
+        "filesWait": {
+          "holderTaskId": "holder",
+          "releaseTarget": "src/lib.rs"
+        },
+        "waitReason": "Waiting for the task “Format source” to release src/lib.rs",
+        "lastConfirmedAt": null,
+        "warnings": [
+          "waiting_for_files"
+        ]
+      },
+      "valid": true
     }
   ]
 }

@@ -4,7 +4,7 @@ use workspace_protocol::*;
 #[test]
 fn shared_vectors() {
     let vectors: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../packages/workspace-contract/fixtures.json"
+        "../../../../packages/workspace-contract/fixtures.json"
     ))
     .unwrap();
     for vector in vectors {
@@ -58,7 +58,7 @@ fn json_schema_numbers_and_unicode_boundaries() {
     assert!(validate("Protocol", &json!({"major":1.5,"minor":0})).is_err());
     assert!(validate("Protocol", &json!({"major":true,"minor":0})).is_err());
     let vectors: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../packages/workspace-contract/fixtures.json"
+        "../../../../packages/workspace-contract/fixtures.json"
     ))
     .unwrap();
     let mut command = vectors.iter().find(|v| v["name"] == "create").unwrap()["value"].clone();
@@ -112,7 +112,7 @@ fn framed_json_and_limits() {
 #[test]
 fn typed_command_deserialization_is_strict() {
     let vectors: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../packages/workspace-contract/fixtures.json"
+        "../../../../packages/workspace-contract/fixtures.json"
     ))
     .unwrap();
     let mut command = vectors

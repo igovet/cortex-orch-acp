@@ -8,6 +8,7 @@
   "permissions": [
     "allow-workspace-request",
     "allow-workspace-notify",
+    "allow-workspace-open-result-target",
     "allow-workspace-close",
     "core:event:allow-listen",
     "core:event:allow-unlisten",

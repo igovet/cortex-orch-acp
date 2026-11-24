@@ -34,7 +34,7 @@ export function createDemoBackend(createPort: () => MockPort, now: number) {
   const port: Port = {
     mode: "demo",
     query<O extends QueryOperation>(operation: O, _parameters: QueryParameters[O]): Promise<QueryResults[O]> {
-      const answers: QueryResults = { "capabilities.get": EVERYTHING, "project.snapshot": [projection()], "project.facts": [], "machine.facts": [] };
+      const answers: QueryResults = { "capabilities.get": EVERYTHING, "project.snapshot": [projection()], "project.facts": [], "machine.facts": [], "machine.overview": [] };
       return Promise.resolve(answers[operation]);
     },
     command(envelope) {

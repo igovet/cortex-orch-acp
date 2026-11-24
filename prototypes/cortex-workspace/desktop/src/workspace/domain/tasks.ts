@@ -120,6 +120,7 @@ export function handleTask(state: WorkspaceState, command: WorkspaceCommand): bo
     case "close_task": {
       validTime(command.now);
       requireFact(command.choice !== "already_in_target", "Contained-work closure is available on the real service only");
+      requireFact(command.choice !== "remove_worktree", "Closing and removing the worktree is available on the real service only");
       requireFact(command.confirmed, "Owner confirmation required");
       requireFact(task.status !== "stopping" && task.process !== "unknown", "Engine stop is not confirmed");
       requireFact(!task.integration || task.integration.method !== "squash", "Task is already merged");

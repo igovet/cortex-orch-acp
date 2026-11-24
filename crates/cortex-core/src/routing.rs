@@ -84,7 +84,7 @@ fn selected_choice<'a>(text: &str, options: &'a [Value]) -> (bool, Option<&'a st
     }
     let mut matches = options
         .iter()
-        .filter_map(Value::as_str)
+        .filter_map(crate::lifecycle::waits::option_label)
         .filter_map(|label| {
             if choice(label) == normalized {
                 Some(None)

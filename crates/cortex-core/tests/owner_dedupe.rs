@@ -233,14 +233,11 @@ fn an_answered_decision_in_a_new_revision_is_not_asked_again() {
     };
     fail(1, "export", "Keep the deprecated /v1/export endpoint for existing clients or remove it in this release?");
     assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 1);
+    let question = latest(&s, &task, "USER_QUESTION_REQUESTED")["question_id"].as_str().unwrap().to_owned();
     s.write(|db| {
-        answered(
-            db,
-            &task,
-            "pq_d8e38b669c30480da5cd3adbfa0cce45",
-            "Keep /v1/export?",
-            "Remove it in this release",
-        );
+        answered(db, &task, "other-question", "Unrelated decision?", "Not relevant");
+        assert_eq!(obstacles::open_decisions(db, &task)?.len(), 1);
+        assert!(waits::answer_tx(db, &task, &question, "Remove it in this release", "text", None)?);
         Ok(())
     })
     .unwrap();
@@ -273,7 +270,7 @@ fn an_answered_decision_in_a_new_revision_is_not_asked_again() {
         db.execute("UPDATE runtime_tasks SET state='PLANNING',revision=3,blocker=NULL WHERE task_id=?", [&task])?;
         lifecycle::event_tx(db, &task, "REVIEW_DEAD_END_ROUTED", json!({"review":"_review_1","revision":3,"verdict":"INCOMPLETE",
             "blocked":[{"blocker":"owner_decision","item":"src/api/v1/export.rs",
-                "reason":"Owner answers pq_d8e38b669c30480da5cd3adbfa0cce45 decided removal"},
+                "reason":format!("Owner answers {question} decided removal")},
                 {"blocker":"other_role_work","item":"docs/api.md","reason":"the writer must update it"}]}))?;
         domain::stop_tx(db, &task, "review_incomplete")?;
         Ok(())
@@ -411,7 +408,7 @@ fn a_duplicate_question_returns_the_earlier_answer() {
                 "t",
                 "coord",
                 "q1",
-                &json!({"question":question,"options":options}),
+                &json!({"recommended":1,"question":question,"options":options}),
             )
         })
         .unwrap();
@@ -441,7 +438,7 @@ fn a_duplicate_question_returns_the_earlier_answer() {
                 "q2",
                 &json!({
                 "question":"как поступить с  планом спринта первой серии «Life Is Broken»",
-                "options":[options[1], options[0]]}),
+                "recommended":2,"options":[options[1], options[0]]}),
             )
         })
         .unwrap();
@@ -479,7 +476,7 @@ fn a_duplicate_question_returns_the_earlier_answer() {
             cortex_core::channels::bind_session_tx(db, &c, "engine")?;
             waits::request_tx_bound(db, "t", &c.channel_id, "wq", &[waits::QuestionForm {
                 question: question.into(),
-                options: options.as_array().unwrap().iter().map(|o| o.as_str().unwrap().to_owned()).collect(),
+                options: options.as_array().unwrap().clone(),
             }])
         })
         .unwrap();
@@ -505,7 +502,7 @@ fn a_duplicate_question_returns_the_earlier_answer() {
             "t",
             "coord",
             "q3",
-            &json!({"question":question,"options":options}),
+            &json!({"recommended":1,"question":question,"options":options}),
         )?;
         assert_eq!(asked["state"], "WAITING_USER");
         Ok(())

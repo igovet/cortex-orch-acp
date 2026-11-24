@@ -10,6 +10,20 @@ The packaged owner-scale walkthrough (`tests/workspace_support/run_owner_walkthr
 
 For the local slice, the no-paid checks use fake engines and the scripted protocol peer. A browser run does not qualify the WebKitGTK window. Native checks run in the container build ([platforms](platforms.md)); a native check that cannot run is recorded as blocked rather than passed. Rendered Ubuntu observations are recorded as structured text outcomes, without screenshots.
 
+The no-paid `worktree-bound-probe` case in `crates/workspace-service/tests/native_desktop.rs`
+uses real disposable Git checkouts and a fake ACP peer. It exercises overlapping
+writes to the same relative path in two worktrees, checkout-specific Changes,
+Code, review and verification, and clean removal versus dirty retention after
+squash. Run it on a host supporting the real Bubblewrap namespaces:
+
+```bash
+umask 022
+CORTEX_REQUIRE_NAMESPACE_FIXTURES=1 timeout --kill-after=5 900 "$HOME/.cargo/bin/cargo" test --locked --offline -p workspace-service --test native_desktop -- worktree-bound-probe
+```
+
+This is source-level coverage, not installed-archive, rendered-desktop or
+live-engine qualification.
+
 A control is shown to work only when a real pointer clicks it. `scripts/cortex-xtask.sh check-real-input [--channel dev|release] [--prefix /usr] [--app <desktop-binary>]` (the in-container stage of the installed gate; the host side needs Docker) clicks the installed window with X server input (XTEST through xdotool) on a private Xvfb display with a disposable HOME, runtime directory and session bus, and leaves nothing running. AT-SPI is only read, to find a control and to see what the screen shows next; nothing is dispatched into the page. It clicks only once the machine reads Connected, in a fresh home and in a home whose project runtime is away while its saved sprint plan names tasks the runtime has not listed. Checks that drive the page through DOM events, a preloaded probe or accessible actions skip hit-testing, and any check covers only the states its fixtures create, so neither establishes that a person can use the window. A build that is not installed is checked by passing its desktop binary as `--app`, because the service accepts only its installed runtime or a source checkout.
 
 Before any desktop archive is handed to an owner, require the [installed real-input gate](../project/verification.md#installed-desktop-real-input-gate) on that exact archive. It installs through apt in disposable systemd containers, launches the installed desktop entry on private X11 and Wayland screens, uses real OS input and closes its own window. Extracted-binary, browser, preload and accessible-action checks cannot replace it. Keep complete output and the archive-bound result; an incomplete or failed gate blocks handoff.

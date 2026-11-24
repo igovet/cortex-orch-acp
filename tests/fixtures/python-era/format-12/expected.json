@@ -1,0 +1,179 @@
+{
+  "tasks": [
+    [
+      "t_682c7de28079",
+      "/tmp/cortex-python-era-fixture-v1/format-12",
+      "2026-11-24T09:55:47.091677+00:00"
+    ],
+    [
+      "t_e14c775524fd",
+      "/tmp/cortex-python-era-fixture-v1/format-12",
+      "2026-11-24T09:55:47.083298+00:00"
+    ]
+  ],
+  "reports": [
+    [
+      "r_5e7336c836f8",
+      "t_e14c775524fd",
+      "report",
+      "r_5e7336c836f8.md"
+    ],
+    [
+      "r_95b95c45694a",
+      "t_e14c775524fd",
+      "report",
+      "r_95b95c45694a.md"
+    ],
+    [
+      "r_af84f0fed915",
+      "t_e14c775524fd",
+      "pipeline",
+      "pipeline.md"
+    ],
+    [
+      "r_bb29a7a448b4",
+      "t_682c7de28079",
+      "report",
+      "r_bb29a7a448b4.md"
+    ]
+  ],
+  "editions": [
+    [
+      1,
+      "r_5e7336c836f8",
+      "Original user request",
+      "Original task context.",
+      "user request",
+      "ff10f16e295fb25896cb50e44f12adef929dccae0f1e2ed99dfcfe19c2397d0e",
+      30
+    ],
+    [
+      2,
+      "r_bb29a7a448b4",
+      "Original user request",
+      "Original task context.",
+      "user request",
+      "03c505fb07133b37c2f1de5679dbc85731620c297df683ddaadb5e771673e409",
+      37
+    ],
+    [
+      3,
+      "r_95b95c45694a",
+      "Fixture report",
+      "Historical fixture content.",
+      "fixture-author",
+      "e4b2f08600898af61ce49e6e64276ea1a63cbe1744e40f8a4801137f467ff5f9",
+      73
+    ],
+    [
+      4,
+      "r_af84f0fed915",
+      "Fixture pipeline",
+      "Historical fixture content.",
+      "fixture-author",
+      "da4b7a336c18e0add12c19426bb95230b5a0d13c2b234913557e3781e3023ab8",
+      86
+    ]
+  ],
+  "drafts": [
+    [
+      "d_24ec8a6fbb91",
+      "t_e14c775524fd",
+      "4550f4ea-6d70-4c77-bbdb-cad42e975014",
+      "report",
+      "general",
+      "/tmp/cortex-python-era-fixture-v1/format-12/.cortex/draft-reports/d_24ec8a6fbb91.md",
+      "2026-11-24T09:55:47.105194+00:00",
+      "r_95b95c45694a"
+    ],
+    [
+      "d_2cb7b6321878",
+      "t_682c7de28079",
+      "5bbfd161-447d-403b-8506-28ce09a0f6a7",
+      "report",
+      "general",
+      "/tmp/cortex-python-era-fixture-v1/format-12/.cortex/draft-reports/d_2cb7b6321878.md",
+      "2026-11-24T09:55:47.146653+00:00",
+      null
+    ],
+    [
+      "d_f35492467e0f",
+      "t_e14c775524fd",
+      "4550f4ea-6d70-4c77-bbdb-cad42e975014",
+      "pipeline",
+      "pipeline",
+      "/tmp/cortex-python-era-fixture-v1/format-12/.cortex/pipeline-drafts/d_f35492467e0f.md",
+      "2026-11-24T09:55:47.127685+00:00",
+      "r_af84f0fed915"
+    ]
+  ],
+  "defaults": [
+    [
+      "/tmp/cortex-python-era-fixture-v1/format-12",
+      {
+        "language": "en"
+      },
+      {
+        "allowed_connections": null,
+        "allowed_data_recipients": null,
+        "allowed_routes": null,
+        "fallback_policy": {
+          "allowed_failure_classes": null,
+          "allowed_target_routes": null,
+          "budget": null,
+          "data_recipient_consent": false
+        },
+        "limits": {},
+        "permission_level": null,
+        "spend_limit": null,
+        "spend_limit_enforceable": false
+      },
+      "2026-11-24T09:55:47.171927+00:00"
+    ]
+  ],
+  "sessions": [
+    [
+      "9b40b9a3-1de9-4a1f-a7ba-444af198d95c",
+      "/tmp/cortex-python-era-fixture-v1/format-12",
+      "t_e14c775524fd",
+      {
+        "name": "python-era-fixture",
+        "version": "1"
+      },
+      {},
+      [],
+      "2026-11-24T09:55:47.152134+00:00",
+      null
+    ]
+  ],
+  "transcript": [
+    [
+      "9b40b9a3-1de9-4a1f-a7ba-444af198d95c",
+      0,
+      "user_message",
+      "Historical question",
+      [],
+      "2026-11-24T09:55:47.163721+00:00"
+    ],
+    [
+      "9b40b9a3-1de9-4a1f-a7ba-444af198d95c",
+      1,
+      "agent_message",
+      "Historical Python answer",
+      [],
+      "2026-11-24T09:55:47.168574+00:00"
+    ]
+  ],
+  "runtime_tasks": [
+    [
+      "t_682c7de28079",
+      "PLANNING",
+      "Historical unfinished goal"
+    ],
+    [
+      "t_e14c775524fd",
+      "CANCELLED",
+      "Historical terminal goal"
+    ]
+  ]
+}

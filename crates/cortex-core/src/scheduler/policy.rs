@@ -207,7 +207,16 @@ fn review_holder_tx(db: &Connection, task: &str) -> CoreResult<Option<String>> {
     Ok(db.query_row("SELECT t.task_id FROM runtime_tasks t JOIN tasks b ON b.id=t.task_id
         LEFT JOIN task_workspaces w ON w.task_id=t.task_id
         WHERE t.task_id!=? AND coalesce(w.workspace_root,b.project_root)=?
-        AND (t.state IN ('REVIEWING','VERIFYING') OR (t.state IN ('RECONCILING','ANSWER_READY')
+        AND (t.state='VERIFYING' OR (t.state='REVIEWING' AND NOT EXISTS(
+            SELECT 1 FROM runtime_nodes n WHERE n.rowid=(SELECT max(r.rowid) FROM runtime_nodes r
+                WHERE r.task_id=t.task_id AND r.revision=t.revision AND r.stage='review')
+            AND n.status='failed' AND EXISTS(SELECT 1 FROM runtime_events f
+                WHERE f.task_id=t.task_id AND f.type='FAILURE_CLASSIFIED'
+                AND json_extract(f.payload_json,'$.assignment_ref')=n.assignment_ref
+                AND json_extract(f.payload_json,'$.class')='access')
+            AND NOT EXISTS(SELECT 1 FROM capacity_reservations c
+                WHERE c.task_id=t.task_id AND c.assignment_ref=n.assignment_ref AND c.state!='released')
+        )) OR (t.state IN ('RECONCILING','ANSWER_READY')
           AND EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=t.task_id
             AND e.type='VERIFICATION_PASSED' AND json_extract(e.payload_json,'$.revision')=t.revision)) OR (t.state='EXECUTING'
           AND EXISTS(SELECT 1 FROM runtime_nodes n WHERE n.task_id=t.task_id AND n.revision=t.revision)

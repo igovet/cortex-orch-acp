@@ -3,7 +3,7 @@ import { taskRoute } from "./board";
 import { useWs } from "./ctx";
 import { I, Keyed, Modal } from "./kit";
 import { rowIcon, sprintRoute, sprintTitle } from "./selectors";
-import { closeBlocked, resumeState, sessionModel } from "./session-model";
+import { closeBlocked, EXTERNAL_DONE_LABEL, externalDoneBlocked, offersExternalDone, resumeState, sessionModel } from "./session-model";
 
 type Entry = { id: string; group: string; label: string; sub?: string; icon: string; keys?: string; disabled?: string; run: () => void };
 const RESULT_LIMIT = 8;
@@ -31,6 +31,7 @@ export function Palette(props: { open: boolean; onClose: () => void }) {
       { id: "a:resume", group: "Task", label: "Resume task", icon: "play", disabled: run?.action === "continue_task" ? ws.gate("continue_task") : notResumable, run: () => ws.run({ type: "continue_task", taskId: id, now: ws.store.clock() }) },
       ...(run?.action === "retry_task" ? [{ id: "a:continue", group: "Task", label: "Continue task", icon: "play", disabled: ws.gate("retry_task"), run: () => void ws.run({ type: "retry_task", taskId: id, now: ws.store.clock() }) }] : []),
       { id: "a:close", group: "Task", label: "Close task…", icon: "x", disabled: blocked ?? ws.gate("close_task"), run: () => ws.closeTask(id) },
+      ...(offersExternalDone(model.view) ? [{ id: "a:external-done", group: "Task", label: EXTERNAL_DONE_LABEL, icon: "check", disabled: externalDoneBlocked(model) ?? ws.gate("close_task"), run: () => ws.closeTask(id, "external") }] : []),
     ];
   };
   // The sprint plan on view offers its graph: Show graph from the List view, Fit graph and Full view in the Graph view.

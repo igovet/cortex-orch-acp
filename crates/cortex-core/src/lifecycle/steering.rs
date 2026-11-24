@@ -1,5 +1,5 @@
-//! Owner messages to a task that is working: recorded once, never interrupting the
-//! running work, and handed to the coordinator at its next turn boundary.
+//! Durable owner messages. During execution a dedicated coordinator turn can
+//! handle them without changing task state; other phases use their safe boundary.
 //! Python oracle: orchestration/policy.py (`parse_denials`, `steer`,
 //! `apply_pending_steering`).
 //!
@@ -23,6 +23,7 @@ use std::collections::BTreeSet;
 
 pub const BOUNDARY: &str = "boundary";
 pub const RESTART: &str = "restart";
+pub const ACTIVE_STAGE: &str = "active_steering";
 /// Python `project_paths.PRIVATE`: never an owner denial path either.
 const PRIVATE: [&str; 5] = [
     ".cortex",
@@ -356,7 +357,8 @@ pub fn undelivered(db: &Connection, task: &str) -> CoreResult<Vec<Value>> {
 pub fn confirm_tx(db: &Transaction<'_>, task: &str) -> CoreResult<usize> {
     let handed = db
         .prepare("SELECT json_extract(h.payload_json,'$.request'),max(h.id) FROM runtime_events h
-            WHERE h.task_id=?1 AND h.type='STEERING_HANDED' AND NOT EXISTS(SELECT 1 FROM runtime_events d
+            WHERE h.task_id=?1 AND h.type='STEERING_HANDED'
+            AND json_type(h.payload_json,'$.channel_id') IS NULL AND NOT EXISTS(SELECT 1 FROM runtime_events d
                 WHERE d.task_id=h.task_id AND d.type='STEERING_DELIVERED'
                 AND json_extract(d.payload_json,'$.request')=json_extract(h.payload_json,'$.request'))
             GROUP BY json_extract(h.payload_json,'$.request') ORDER BY min(h.id)")?
@@ -367,7 +369,9 @@ pub fn confirm_tx(db: &Transaction<'_>, task: &str) -> CoreResult<usize> {
         let replied: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM runtime_events s JOIN trusted_channels c
                 ON c.channel_id=json_extract(s.payload_json,'$.channel_id') AND c.role='coordinator'
-                WHERE s.task_id=? AND s.type='NATIVE_TURN_SETTLED' AND s.id>?)",
+                WHERE s.task_id=? AND s.type='NATIVE_TURN_SETTLED' AND s.id>?
+                  AND NOT EXISTS(SELECT 1 FROM runtime_events a WHERE a.task_id=s.task_id
+                     AND a.type='NATIVE_ACTIVE_STEER_CHANNEL' AND json_extract(a.payload_json,'$.channel_id')=c.channel_id))",
             (task, at),
             |r| r.get(0),
         )?;
@@ -397,6 +401,127 @@ pub fn deliver_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<Value>> {
     }
     Ok(messages)
 }
+/// Bind only this turn's inputs to its exact channel. Leave them pending until
+/// that channel's reply is observed: an interrupted turn cannot clear the barrier.
+pub fn hand_active_tx(db: &Transaction<'_>, task: &str, channel: &str) -> CoreResult<Vec<Value>> {
+    let mut messages = pending(db, task)?;
+    messages.truncate(16);
+    for message in &mut messages {
+        let request = &message["request"];
+        let repeated: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='STEERING_HANDED'
+                AND json_extract(payload_json,'$.request')=?)",
+            (task, request.as_str()), |r| r.get(0),
+        )?;
+        event_tx(db, task, "STEERING_HANDED", json!({"request":request,"channel_id":channel}))?;
+        message["repeated"] = json!(repeated);
+    }
+    Ok(messages)
+}
+
+/// Called in the same transaction that records the observed prompt reply.
+pub fn confirm_active_tx(db: &Transaction<'_>, task: &str, channel: &str, reply: i64) -> CoreResult<()> {
+    let observed: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND id=? AND type='NATIVE_TURN_SETTLED'
+             AND json_extract(payload_json,'$.channel_id')=?
+             AND json_extract(payload_json,'$.stop_reason') NOT IN ('cancelled','refusal'))",
+        (task, reply, channel), |r| r.get(0),
+    )?;
+    if !observed { return Ok(()); }
+    let pending = pending(db, task)?;
+    for message in pending {
+        let request = &message["request"];
+        let in_turn: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND id<? AND type='STEERING_HANDED'
+             AND json_extract(payload_json,'$.channel_id')=? AND json_extract(payload_json,'$.request')=?)",
+            (task, reply, channel, request.as_str()), |r| r.get(0),
+        )?;
+        if in_turn {
+            event_tx(db, task, "STEERING_APPLIED", json!({"request":request,"state":"EXECUTING","channel_id":channel}))?;
+            event_tx(db, task, "STEERING_DELIVERED", json!({"request":request,"channel_id":channel,"reply_event":reply}))?;
+        }
+    }
+    Ok(())
+}
+
+pub fn source_was_handed(db: &Connection, task: &str, channel: &str, request: &str) -> CoreResult<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='STEERING_HANDED'
+          AND json_extract(payload_json,'$.channel_id')=? AND json_extract(payload_json,'$.request')=?)",
+        (task, channel, request), |r| r.get(0),
+    )?)
+}
+
+/// Authenticated coordinator actions are keyed to a source in this exact turn.
+/// Unlike the channel id, the action identity survives an unconfirmed turn.
+pub fn active_action_tx(
+    db: &Transaction<'_>,
+    identity: &crate::channels::Identity,
+    channel: &str,
+    name: &str,
+    args: &Value,
+) -> CoreResult<Value> {
+    let task = &identity.task;
+    let source = args["source_request"].as_str().unwrap_or_default();
+    let key = args["request_key"].as_str().unwrap_or_default();
+    if identity.role != "coordinator" || identity.stage.as_deref() != Some(ACTIVE_STAGE)
+        || !source_was_handed(db, task, channel, source)?
+    {
+        return refuse("active_steering_source_not_handed");
+    }
+    super::request_tx(db, task, &format!("active-steering:{source}"), key, name, args, || {
+        match name {
+            "steer_plan" => super::plan::amend_active_tx(db, task, args),
+            "steer_worker" => {
+                let target = args["attempt"].as_str().unwrap_or_default();
+                let text = args["text"].as_str().unwrap_or_default();
+                if text.trim().is_empty() { return refuse("active_guidance_empty"); }
+                use rusqlite::OptionalExtension;
+                // An interrupted coordinator may choose a fresh key for the same
+                // instruction. Its source, attempt and exact text still bind one action.
+                let replay: Option<i64> = db.query_row(
+                    "SELECT id FROM runtime_events WHERE task_id=? AND type='NATIVE_COORDINATOR_GUIDANCE_QUEUED'
+                        AND json_extract(payload_json,'$.source_request')=? AND json_extract(payload_json,'$.attempt')=?
+                        AND json_extract(payload_json,'$.text')=? ORDER BY id LIMIT 1",
+                    (task, source, target, text), |r| r.get(0),
+                ).optional()?;
+                if let Some(event) = replay {
+                    return Ok(json!({"delivery":"queued","attempt":target,"guidance_id":event}));
+                }
+                let assignment: Option<String> = db.query_row(
+                    "SELECT n.assignment_ref FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+                     JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
+                     JOIN trusted_channels c ON c.channel_id=p.channel_id AND c.attempt_id=p.attempt_id
+                     WHERE n.task_id=? AND p.attempt_id=? AND p.owner_epoch=? AND p.status='ready'
+                       AND c.revoked_at IS NULL AND t.state='EXECUTING' AND n.revision=t.revision
+                       AND n.stage='execution' AND n.status='running' AND n.result_json IS NULL",
+                    (task, target, identity.epoch), |r| r.get(0),
+                ).optional()?;
+                let assignment = assignment.ok_or(CoreError::Refused("native_worker_not_live"))?;
+                let queued = pending_guidance(db, task, target)?;
+                if queued.len() >= 16 { return refuse("native_guidance_busy"); }
+                let event = event_tx(db, task, "NATIVE_COORDINATOR_GUIDANCE_QUEUED",
+                    json!({"source_request":source,"request_key":key,"attempt":target,
+                           "assignment_ref":assignment,"text":text}))?;
+                Ok(json!({"delivery":"queued","attempt":target,"guidance_id":event}))
+            }
+            _ => refuse("tool_refused"),
+        }
+    })
+}
+
+pub fn pending_guidance(db: &Connection, task: &str, attempt: &str) -> CoreResult<Vec<Value>> {
+    let raw = db.prepare("SELECT json_set(e.payload_json,'$.guidance_id',e.id) FROM runtime_events e
+        WHERE e.task_id=? AND e.type='NATIVE_COORDINATOR_GUIDANCE_QUEUED'
+          AND json_extract(e.payload_json,'$.attempt')=?
+          AND NOT EXISTS(SELECT 1 FROM runtime_events s WHERE s.task_id=e.task_id
+             AND s.type='NATIVE_COORDINATOR_GUIDANCE_SETTLED' AND json_extract(s.payload_json,'$.guidance_id')=e.id)
+        ORDER BY e.id LIMIT 16")?
+        .query_map((task, attempt), |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    raw.iter().map(|s| serde_json::from_str(s).map_err(CoreError::from)).collect()
+}
+
 /// Every owner message of the task with its delivery state, oldest first:
 /// `recorded` (waiting for the coordinator's next step) or `delivered` (with the time
 /// the engine's reply to the prompt carrying it was observed).

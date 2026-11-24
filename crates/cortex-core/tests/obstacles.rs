@@ -262,54 +262,100 @@ fn access_parks_its_node_once_unrelated_work_continues_and_resolution_retries_it
 }
 
 #[test]
-fn an_owner_decision_asks_the_owner_without_using_a_rung() {
-    let (_p, s, task) = started();
-    plan(
-        &s,
-        &task,
-        json!({"kind":"owner_decision","detail":"Keep the v1 endpoint or remove it?"}),
-    );
-    s.write(|db| {
-        db.execute("UPDATE runtime_nodes SET status='completed',result_json='{}' WHERE task_id=? AND node_id='b'", [&task])?;
+fn an_owner_decision_is_answerable_while_an_independent_node_runs() {
+    let (project, s, task) = started();
+    plan(&s, &task, json!({"kind":"owner_decision","detail":"Keep the v1 endpoint or remove it?"}));
+    let question = s.write(|db| {
+        db.execute("UPDATE runtime_nodes SET status='running',assignment_ref='asg-b' WHERE task_id=? AND node_id='b'", [&task])?;
         obstacles::classify_failed_tx(db, &task)?;
-        assert!(obstacles::settle_parked_tx(db, &task)?);
-        Ok(())
-    })
-    .unwrap();
+        obstacles::classify_failed_tx(db, &task)?;
+        assert!(!obstacles::settle_parked_tx(db, &task)?);
+        assert_eq!(domain::task_tx(db, &task)?.0, TaskState::Executing);
+        Ok(db.query_row("SELECT id FROM pending_questions WHERE task_id=? AND assignment_ref='asg-a' AND status='open'",
+            [&task], |r| r.get::<_, String>(0))?)
+    }).unwrap();
     assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 1);
-    let cont = latest(&s, &task, "AUTOMATIC_CONTINUATION");
-    assert_eq!(cont["strategy"], "ask_owner");
-    assert_eq!(cont["class"], "owner_decision");
-    assert!(cont["instruction"]
-        .as_str()
-        .unwrap()
-        .contains("user_question_request"));
-    // A plan is refused until the coordinator asked.
+    assert_eq!(count(&s, &task, "USER_QUESTION_REQUESTED"), 1);
+    assert_eq!(count(&s, &task, "AUTOMATIC_CONTINUATION"), 0);
+    drop(s);
+    let s = project.open();
+    let decision = workspace::control::decisions(&s, "p", "owner",
+        &json!({"operation":"decisions.get","target":format!("wd_{question}")})).unwrap();
+    assert_eq!(decision["status"], "pending");
+    assert_eq!(decision["scope"], "asg-a");
+    assert_eq!(decision["allowedOperations"], json!(["decisions.answer"]));
+    assert_eq!(decision["options"], json!([]));
+    let answer = json!({
+        "protocol":{"major":1,"minor":8}, "requestId":"answer-v1", "projectId":"p", "actorId":"owner",
+        "operation":"decisions.answer", "target":decision["decisionId"], "expectedVersion":decision["version"],
+        "ownerEpoch":decision["ownerEpoch"],
+        "payload":{"executionId":decision["executionId"], "acpSessionId":decision["acpSessionId"], "batchId":null,
+            "answers":[{"decisionId":decision["decisionId"],"questionId":question,
+                "expectedVersion":decision["version"], "optionId":null, "text":"Keep v1"}]}
+    });
+    workspace::control::answer(&s, "p", "owner", &answer).unwrap();
     s.write(|db| {
-        let refused = obstacles::require_owner_question_tx(db, &task).unwrap_err();
-        assert_eq!(refused.code(), "owner_question_required");
-        lifecycle::event_tx(
-            db,
-            &task,
-            "USER_QUESTION_REQUESTED",
-            json!({"question_id":"pq_x"}),
-        )?;
-        obstacles::require_owner_question_tx(db, &task)?;
-        // No rung was used: the next technical stop is still the first rung.
-        db.execute(
-            "UPDATE runtime_tasks SET state='EXECUTING',blocker=NULL WHERE task_id=?",
-            [&task],
-        )?;
-        domain::stop_tx(db, &task, "worker_failed")?;
+        assert!(!lifecycle::waits::answer_tx(db, &task, &question, "Remove v1", "text", None)?);
+        assert_eq!(domain::task_tx(db, &task)?.0, TaskState::Executing);
+        assert!(obstacles::open_decisions(db, &task)?.is_empty());
+        assert_eq!(obstacles::retry_decision_answer(db, &task, "a", 1)?.as_deref(), Some("Keep v1"));
+        assert_eq!(obstacles::retry_decision_answer(db, &task, "b", 1)?, None);
+        let sibling: String = db.query_row("SELECT status FROM runtime_nodes WHERE task_id=? AND node_id='b' AND assignment_ref='asg-b'",
+            [&task], |r| r.get(0))?;
+        assert_eq!(sibling, "running");
         Ok(())
-    })
-    .unwrap();
-    let technical = latest(&s, &task, "AUTOMATIC_CONTINUATION");
-    assert_eq!(
-        (technical["strategy"].as_str(), technical["count"].as_i64()),
-        (Some("repair"), Some(1))
-    );
-    assert_eq!(technical["class"], "technical");
+    }).unwrap();
+    assert_eq!(count(&s, &task, "ASSIGNMENT_RETRIED"), 1);
+    assert_eq!(latest(&s, &task, "ASSIGNMENT_RETRIED")["previous_assignment"], "asg-a");
+}
+
+#[test]
+fn environment_deadline_survives_store_reopen_and_terminal_cancel_closes_card() {
+    let (project, s, task) = started();
+    plan(&s, &task, json!({"kind":"missing_access","detail":"gh says: not logged into any GitHub hosts"}));
+    let id = s.write(|db| {
+        obstacles::classify_failed_tx(db, &task)?;
+        let ids = obstacles::claim_environment_rechecks_tx(db, &task, 100)?;
+        assert_eq!(ids.len(), 1);
+        assert!(obstacles::claim_environment_rechecks_tx(db, &task, 100)?.is_empty());
+        Ok(ids[0].clone())
+    }).unwrap();
+    drop(s);
+    let s = project.open();
+    s.write(|db| {
+        assert!(obstacles::claim_environment_rechecks_tx(db, &task, 159)?.is_empty());
+        assert_eq!(obstacles::claim_environment_rechecks_tx(db, &task, 160)?, vec![id.clone()]);
+        assert!(obstacles::claim_environment_rechecks_tx(db, &task, 279)?.is_empty());
+        domain::cancel_task_tx(db, &task, "owner_cancelled")?;
+        assert!(obstacles::open_actions(db, &task)?.is_empty());
+        assert!(obstacles::claim_environment_rechecks_tx(db, &task, 280)?.is_empty());
+        assert!(obstacles::resolve_environment_actions_tx(db, &task,
+            &json!({"gh_auth":{"status":"logged_in"}}), Some(&[id.clone()]))?.is_empty());
+        Ok(())
+    }).unwrap();
+    assert_eq!(count(&s, &task, "OWNER_ACTION_RESOLVED"), 1);
+    assert_eq!(latest(&s, &task, "OWNER_ACTION_RESOLVED")["by"], "task_terminal");
+}
+
+
+#[test]
+fn genuine_completion_closes_remaining_owner_action_without_granting_access() {
+    let p = Project::new();
+    let s = p.open();
+    lifecycle::TaskMachine::new(&s).create("answer", "One answer", "owner").unwrap();
+    s.write(|db| {
+        let found = obstacles::classify(&signals(Some("missing_access"), "GitHub is not logged in", &[], ""));
+        let id = obstacles::open_obstacle_tx(db, "answer", &found, None, 0)?.unwrap();
+        db.execute("UPDATE runtime_tasks SET state='ANSWER_READY',synthesis='Retained answer' WHERE task_id='answer'", [])?;
+        lifecycle::event_tx(db, "answer", "ANSWER_SUBMITTED", json!({"text":"Retained answer"}))?;
+        lifecycle::completion::complete_tx(db, "answer", &Default::default())?;
+        assert_eq!(domain::task_tx(db, "answer")?.0, TaskState::Completed);
+        assert!(obstacles::open_actions(db, "answer")?.is_empty());
+        assert!(!obstacles::open_actions(db, "answer")?.iter().any(|a| a["id"] == id));
+        Ok(())
+    }).unwrap();
+    assert_eq!(count(&s, "answer", "OWNER_ACTION_RESOLVED"), 1);
+    assert_eq!(latest(&s, "answer", "OWNER_ACTION_RESOLVED")["state"], "COMPLETED");
 }
 
 #[test]

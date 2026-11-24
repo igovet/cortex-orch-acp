@@ -261,6 +261,19 @@ mod cancellation_tests {
         }
     }
 
+    #[test]
+    fn question_recommendation_is_metadata_not_a_new_answer_label() {
+        let decision = json!({"questionId":"pq_exact","prompt":"Which layout?",
+            "options":[{"label":"Compact"},{"label":"Spacious","recommended":true}]});
+        let labels = ["Compact", "Spacious"];
+        let card = crate::question_card(&decision, &labels, true);
+        assert_eq!(card["toolCall"]["rawInput"]["recommended"], 2);
+        assert_eq!(card["toolCall"]["rawInput"]["language"], "ru");
+        assert_eq!(card["options"][1]["name"], "Spacious");
+        let response = json!({"outcome":{"outcome":"selected","optionId":"cortex-question-2"}});
+        assert_eq!(crate::card_choice(&response, &labels), Some("Spacious"));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn delayed_engine_permission_response_keeps_its_correlation() {
         let (p, mut client) = permissions();
@@ -1439,6 +1452,9 @@ async fn follow(
                         let mut v=json!({"questionId":m["questionId"],"question":m["prompt"],
                             "options":m["options"].as_array().unwrap().iter().map(|o|o["label"].clone()).collect::<Vec<_>>()});
                         if m["topic"].is_string() {v["topic"]=m["topic"].clone();}
+                        if let Some(position) = recommended_position(m) {
+                            v["recommended"] = json!(position);
+                        }
                         v}).collect();
                     // Python `elicit_batch` option ids, which the Paseo plugin's
                     // question form validates: `cortex-batch:<question>:<n>`.
@@ -1452,7 +1468,7 @@ async fn follow(
                         .collect();
                     let body = json!({"toolCall":{"toolCallId":format!("cortex-question-batch:{batch}"),"kind":"other",
                         "title":if ru { "Ответьте на связанные вопросы" } else { "Answer related questions" },"rawInput":{"__cortex_question":true,"batchId":batch,
-                        "questionId":d["questionId"],"questions":members}},"options":options,"_meta":{"cortexQuestion":true}});
+                        "questionId":d["questionId"],"questions":members,"language":if ru {"ru"} else {"en"}}},"options":options,"_meta":{"cortexQuestion":true}});
                     // ACP returns a single option only. A batch needs the complete
                     // typed config submission, not that one-option response.
                     let _ = permissions.question(sid, body, &cancelled).await;
@@ -1500,10 +1516,19 @@ fn question_card(d: &Value, labels: &[&str], ru: bool) -> Value {
         .collect();
     let question = d["prompt"].as_str().unwrap_or_default();
     let question: String = question.chars().take(4000).collect();
+    let mut input = json!({"__cortex_question":true,"questionId":d["questionId"],
+        "question":question,"language":if ru {"ru"} else {"en"}});
+    if let Some(position) = recommended_position(d) {
+        input["recommended"] = json!(position);
+    }
     json!({"toolCall":{"toolCallId":format!("cortex-question:{}",d["questionId"].as_str().unwrap_or_default()),
-        "kind":"other","title":question,
-        "rawInput":{"__cortex_question":true,"questionId":d["questionId"],"question":question}},
+        "kind":"other","title":question,"rawInput":input},
         "options":options,"_meta":{"cortexQuestion":true}})
+}
+
+fn recommended_position(decision: &Value) -> Option<usize> {
+    decision["options"].as_array()?.iter().position(|option| option["recommended"] == true)
+        .map(|index| index + 1)
 }
 /// The offered label a selected card option names, if any.
 fn card_choice<'a>(answer: &Value, labels: &[&'a str]) -> Option<&'a str> {

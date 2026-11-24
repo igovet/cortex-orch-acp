@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import { isConcreteEffort, orderedEfforts } from "../shared/reasoning-effort.ts";
 import type {
   ConfigError,
   ConfigUpdateInput,
@@ -565,9 +566,9 @@ export function routingVocabulary(view: RoutingView): RoutingVocabulary {
   return {
     engines: [...new Set([...view.builtin.supported_engines, ...view.builtin.optional_engines])],
     optionalEngines: [...view.builtin.optional_engines],
-    efforts: [...view.builtin.efforts],
+    efforts: orderedEfforts(view.builtin.efforts),
     modelEfforts: view.builtin.model_efforts,
-    policyEfforts: [...(view.builtin.policy_efforts ?? view.builtin.efforts)],
+    policyEfforts: orderedEfforts(view.builtin.policy_efforts ?? view.builtin.efforts),
     tiers: [...view.builtin.tiers],
     workKinds: [...view.builtin.work_kinds, "*"],
   };
@@ -578,7 +579,7 @@ export function modelEffortChoices(vocabulary: RoutingVocabulary, engine: string
   const models = vocabulary.modelEfforts?.[engine];
   const observed = models && Object.prototype.hasOwnProperty.call(models, model) ? models[model] : undefined;
   const known = Array.isArray(observed);
-  const levels = known ? observed : policy ? vocabulary.policyEfforts ?? vocabulary.efforts : vocabulary.efforts;
+  const levels = orderedEfforts(known ? observed : policy ? vocabulary.policyEfforts ?? vocabulary.efforts : vocabulary.efforts);
   return {
     known, levels,
     hint: known
@@ -603,7 +604,7 @@ export function modelEffortOptions(vocabulary: RoutingVocabulary, engine: string
   const { known, levels } = modelEffortChoices(vocabulary, engine, model, policy);
   return [
     ...levels.map((value) => ({ value, label: value })),
-    ...[...new Set(stored)].filter((value) => value && !levels.includes(value)).map((value) => ({
+    ...[...new Set(stored)].filter((value) => isConcreteEffort(value) && !levels.includes(value)).map((value) => ({
       value, label: `${value} (${known ? "not supported by this model" : "unknown"})`, disabled: true,
     })),
   ];

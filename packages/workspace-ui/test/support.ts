@@ -42,6 +42,12 @@ export function scriptedPort(options: { mode?: "real" | "demo"; capabilities?: P
   };
 }
 
+export function stoppedMerge(): NonNullable<Task["merge"]> {
+  return { conflictId: "mc_1", gitState: "stopped", source: "main", into: "dev", files: [], clean: [], checks: [],
+    startedAt: null, handedAt: null, finishedAt: null, guidance: null, step: 0, failure: null, finished: false,
+    before: { status: "ready_to_merge", acceptance: null, result: null, digest: null } };
+}
+
 export function draftTask(): Task {
   return {
     id: "t", projectId: "p", sprintId: null, description: "Fix the race", title: "Fix the race", titleState: "generated", checkout: { kind: "main", branch: "main" }, targetBranch: null, dependencies: [],

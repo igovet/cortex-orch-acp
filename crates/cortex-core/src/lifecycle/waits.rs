@@ -134,8 +134,66 @@ pub fn check_mutation_tx(db: &Transaction<'_>, task: &str, assignment: &str) -> 
 #[derive(Debug, Clone)]
 pub struct QuestionForm {
     pub question: String,
-    pub options: Vec<String>,
+    pub options: Vec<Value>,
 }
+
+/// Annotate the stored option without changing its label or moving it.
+pub fn recommended_options(
+    mut options: Vec<Value>,
+    recommended: &Value,
+    default_to_first: bool,
+) -> CoreResult<Vec<Value>> {
+    if options.iter().any(|option| option.get("recommended").is_some()) {
+        return refuse("question_recommendation_invalid");
+    }
+    let position = if recommended.is_null() && default_to_first {
+        1
+    } else {
+        recommended.as_u64().ok_or(CoreError::Refused("question_recommendation_invalid"))?
+    };
+    let option = usize::try_from(position)
+        .ok()
+        .and_then(|i| i.checked_sub(1))
+        .and_then(|i| options.get_mut(i))
+        .ok_or(CoreError::Refused("question_recommendation_invalid"))?;
+    if option.is_string() {
+        *option = json!({"label":option.clone()});
+    }
+    option
+        .as_object_mut()
+        .ok_or(CoreError::Refused("invalid_question_form"))?
+        .insert("recommended".into(), json!(true));
+    Ok(options)
+}
+
+pub(super) fn recommended_position(options: &[Value]) -> Option<usize> {
+    options.iter().position(|o| o["recommended"] == true).map(|i| i + 1)
+}
+
+/// Options with metadata share the persisted JSON array with legacy string labels.
+pub fn option_label(option: &Value) -> Option<&str> {
+    option.as_str().or_else(|| option["label"].as_str())
+}
+
+pub(super) fn valid_question_option(option: &Value, max_label: usize) -> bool {
+    let bounded = |s: &str, max| !s.trim().is_empty() && s.chars().count() <= max;
+    option_label(option).is_some_and(|s| bounded(s, max_label))
+        && option.as_object().is_none_or(|o| {
+            o.keys().all(|k| matches!(k.as_str(), "label" | "detail" | "recommended"))
+                && o.get("recommended").is_none_or(|value| value == true)
+                && o.get("detail")
+                    .is_none_or(|d| d.as_str().is_some_and(|s| bounded(s, 1000)))
+        })
+}
+
+fn labels(options: &[Value]) -> Vec<String> {
+    options
+        .iter()
+        .filter_map(option_label)
+        .map(str::to_owned)
+        .collect()
+}
+
 fn validate_forms(forms: &[QuestionForm]) -> CoreResult<()> {
     if forms.is_empty() || forms.len() > 8 {
         return refuse("invalid_question_batch");
@@ -147,7 +205,7 @@ fn validate_forms(forms: &[QuestionForm]) -> CoreResult<()> {
             || f.options.len() > 8
             || f.options
                 .iter()
-                .any(|s| s.trim().is_empty() || s.chars().count() > 8000)
+                .any(|o| !valid_question_option(o, if o.is_object() { 1000 } else { 8000 }))
         {
             return refuse("invalid_question_form");
         }
@@ -196,11 +254,7 @@ pub fn answered_question_tx(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     for (id, text, options, answer) in rows {
-        let options: Vec<String> = serde_json::from_str::<Vec<Value>>(&options)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|o| o.as_str().map(str::to_owned))
-            .collect();
+        let options = labels(&serde_json::from_str::<Vec<Value>>(&options).unwrap_or_default());
         if question_identity(&text, &options) == wanted {
             return Ok(Some((id, answer)));
         }
@@ -218,7 +272,7 @@ pub(crate) fn already_answered_tx(
 ) -> CoreResult<Option<Value>> {
     let mut answers = Vec::new();
     for f in forms {
-        if let Some((id, answer)) = answered_question_tx(db, task, &f.question, &f.options)? {
+        if let Some((id, answer)) = answered_question_tx(db, task, &f.question, &labels(&f.options))? {
             answers.push(json!({"question":f.question,"question_id":id,"answer":answer}));
         }
     }
@@ -228,7 +282,7 @@ pub(crate) fn already_answered_tx(
     for a in &answers {
         let (question, mut options) = (a["question"].as_str().unwrap_or(""), Vec::new());
         if let Some(f) = forms.iter().find(|f| f.question == question) {
-            options = f.options.clone();
+            options = labels(&f.options);
             options.sort();
         }
         event_tx(
@@ -321,7 +375,10 @@ pub fn request_tx_bound_topics(
             db.execute("INSERT INTO pending_questions(id,task_id,assignment_ref,dedup_key,text,options_json,status,created_at)
                 VALUES (?,?,?,?,?,?,'open',?)",
                 (&id,task,&assignment,format!("{channel}:{key}:{i}"),&f.question,json!(f.options).to_string(),crate::now()))?;
-            let mut q = json!({"question_id":id,"question":f.question,"options":f.options});
+            let mut q = json!({"question_id":id,"question":f.question,"options":labels(&f.options)});
+            if let Some(position) = recommended_position(&f.options) {
+                q["recommended"] = json!(position);
+            }
             if let Some(t) = topic(i) {
                 q["topic"] = json!(t);
             }
@@ -330,7 +387,10 @@ pub fn request_tx_bound_topics(
         let mut w = json!({"wait_id":format!("ww_{}",uuid::Uuid::new_v4().simple()),"task_id":task,
             "assignment_ref":assignment,"attempt_id":attempt,"channel_id":channel,"owner_epoch":epoch,
             "engine_session_ref":session,"revision":revision,"created_at":crate::now(),"status":"open",
-            "question_id":questions[0]["question_id"],"question":forms[0].question,"options":forms[0].options});
+            "question_id":questions[0]["question_id"],"question":forms[0].question,"options":questions[0]["options"]});
+        if let Some(position) = questions[0].get("recommended") {
+            w["recommended"] = position.clone();
+        }
         if forms.len() > 1 {
             w["batch_id"] = json!(format!("qb_{}", uuid::Uuid::new_v4().simple()));
             w["questions"] = json!(questions);
@@ -490,6 +550,13 @@ pub fn answer_tx(
     } else if state.terminal() {
         return Ok(false);
     }
+    let node_question: bool = db.query_row(
+        "SELECT dedup_key LIKE 'obstacle:%' FROM pending_questions WHERE task_id=? AND id=?",
+        (task, question), |r| r.get(0),
+    )?;
+    if node_question && !super::obstacles::node_question_is_current(db, task, question)? {
+        return Ok(false);
+    }
     db.execute("UPDATE pending_questions SET status='answered',answer_text=?,answer_source=?,answered_at=? WHERE id=?",
         (text,source,crate::now(),question))?;
     // The owner's answer is an owner message: an `allow-write: <path>` in it lifts that
@@ -509,6 +576,13 @@ pub fn answer_tx(
         "NATIVE_QUESTION_ANSWERED",
         json!({"question_id":question,"session_id":session,"answer_source":source}),
     )?;
+    if node_question {
+        event_tx(db, task, "OWNER_DECISION_ANSWERED", json!({"question_id":question,"answer_source":source}))?;
+        if state == TaskState::Executing {
+            super::obstacles::retry_unblocked_tx(db, task)?;
+        }
+        return Ok(true);
+    }
     if let Some(w) = wait.as_mut() {
         for q in question_ids(w) {
             let answered: bool = db.query_row(

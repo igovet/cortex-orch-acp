@@ -8,21 +8,22 @@ use crate::{
 use rusqlite::{OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+const CONSULTATION: &str = "_consultation";
+const RESERVED_ROLES: [&str; 3] = ["code-reviewer", "build-verification", "senior-consultant"];
+
+fn unprefixed_role(role: &str) -> &str {
+    role.strip_prefix("worker-").unwrap_or(role)
+}
+
 pub fn role(value: &str) -> CoreResult<String> {
+    if RESERVED_ROLES.contains(&unprefixed_role(value)) {
+        return refuse("runtime_reserved_role");
+    }
     let role = if value.starts_with("worker-") {
         value.to_owned()
     } else {
         format!("worker-{value}")
     };
-    if [
-        "worker-code-reviewer",
-        "worker-build-verification",
-        "worker-senior-consultant",
-    ]
-    .contains(&role.as_str())
-    {
-        return refuse("runtime_reserved_role");
-    }
     if ![
         "accessibility-auditor",
         "accessibility-fixer",
@@ -278,6 +279,163 @@ pub fn accept_tx(
 ) -> CoreResult<Value> {
     accept_routed_tx(db, task, actor, key, plan, &json!([]))
 }
+fn plan_nodes(plan: &Value) -> CoreResult<&[Value]> {
+    plan["tasks"]
+        .as_array()
+        .map(Vec::as_slice)
+        .ok_or(CoreError::Refused("invalid_plan_fields"))
+}
+
+fn runtime_node_ids(nodes: &[Value]) -> BTreeSet<&str> {
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let id = node["id"].as_str()?;
+            let role = node["role"].as_str().map(unprefixed_role);
+            (id.starts_with('_') || role.is_some_and(|r| RESERVED_ROLES.contains(&r))).then_some(id)
+        })
+        .collect()
+}
+
+/// The editable view of the active plan. The digest still covers the complete stored plan.
+pub fn steerable_plan(stored: &Value) -> CoreResult<Value> {
+    let prior = plan_nodes(stored)?;
+    let runtime_ids = runtime_node_ids(prior);
+    let mut tasks = Vec::new();
+    for node in prior {
+        if node["id"].as_str().is_some_and(|id| runtime_ids.contains(id)) {
+            continue;
+        }
+        let mut node = node.clone();
+        if let Some(role) = node["role"].as_str().map(unprefixed_role) {
+            node["role"] = json!(role);
+        }
+        node["dependencies"]
+            .as_array_mut()
+            .ok_or(CoreError::Refused("invalid_dependencies"))?
+            .retain(|dep| !dep.as_str().is_some_and(|id| runtime_ids.contains(id)));
+        tasks.push(node);
+    }
+    Ok(json!({"tasks":tasks,"verification":stored["verification"]}))
+}
+
+/// Overlay runtime-owned nodes and edges from the digest-bound plan, never from
+/// the proposal. In a consultation revision even newly added work must wait on
+/// the consultation. Compare and persist only the fully restored graph.
+fn restore_runtime_nodes(prior: &[Value], supplied: &mut Vec<Value>) -> CoreResult<()> {
+    let runtime_ids = runtime_node_ids(prior);
+    if runtime_ids.is_empty() {
+        return Ok(());
+    }
+    for node in supplied.iter_mut() {
+        let previous = prior.iter().find(|p| p["id"] == node["id"]);
+        let deps = node["dependencies"].as_array_mut().unwrap(); // Validated proposal.
+        if let Some(previous) = previous {
+            let old_deps = previous["dependencies"]
+                .as_array()
+                .ok_or(CoreError::Refused("invalid_dependencies"))?;
+            for (i, dep) in old_deps.iter().enumerate() {
+                if dep.as_str().is_some_and(|id| runtime_ids.contains(id)) {
+                    deps.insert(i.min(deps.len()), dep.clone());
+                }
+            }
+        } else if runtime_ids.contains(CONSULTATION) {
+            deps.insert(0, json!(CONSULTATION));
+        }
+    }
+    for (i, node) in prior.iter().enumerate() {
+        if node["id"].as_str().is_some_and(|id| runtime_ids.contains(id)) {
+            supplied.insert(i.min(supplied.len()), node.clone());
+        }
+    }
+    let graph = supplied
+        .iter()
+        .map(|n| {
+            Ok(scheduler::Node {
+                id: n["id"]
+                    .as_str()
+                    .ok_or(CoreError::Refused("invalid_plan_node"))?
+                    .into(),
+                stage: "execution".into(),
+                status: "pending".into(),
+                dependencies: serde_json::from_value(n["dependencies"].clone())?,
+            })
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+    scheduler::dependency_ready(&graph, "execution")?;
+    Ok(())
+}
+
+/// Replace only work that has never been claimed, on the same execution revision.
+/// Keeping both the node rows and active custody unchanged preserves channel and
+/// result authority. The current digest and claim status are checked in the writer transaction.
+pub fn amend_active_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    args: &Value,
+) -> CoreResult<Value> {
+    let (state, revision) = domain::task_tx(db, task)?;
+    if state != TaskState::Executing || super::automatic::held(db, task)? {
+        return refuse("active_plan_not_expected");
+    }
+    let raw: String = db.query_row("SELECT plan_json FROM runtime_tasks WHERE task_id=?", [task], |r| r.get(0))?;
+    if args["expected_plan"] != crate::digest(raw.as_bytes()) {
+        return refuse("active_plan_changed");
+    }
+    let mut old: Value = serde_json::from_str(&raw)?;
+    let mut next = super::sprint_planning::validate_plan(db, task, &args["plan"], validate)?;
+    if old["verification"] != next["verification"] {
+        return refuse("active_plan_verification_locked");
+    }
+    super::sprint_planning::require_read_only_plan(db, task, &next)?;
+    let prior = plan_nodes(&old)?;
+    let supplied = next["tasks"].as_array_mut().unwrap();
+    restore_runtime_nodes(prior, supplied)?;
+    let denials = super::steering::denials(db, task)?;
+    for node in prior {
+        let id = node["id"].as_str().unwrap_or_default();
+        if supplied.iter().any(|n| n == node) { continue; }
+        let unclaimed: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_nodes n WHERE task_id=?1 AND revision=?2 AND node_id=?3
+                AND stage='execution' AND status='pending' AND assignment_ref IS NULL AND result_json IS NULL
+                AND NOT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND type='ASSIGNMENT_CREATED'
+                  AND json_extract(e.payload_json,'$.node')=n.node_id AND json_extract(e.payload_json,'$.revision')=n.revision))",
+            (task, revision, id), |r| r.get(0),
+        )?;
+        if !unclaimed { return refuse("active_plan_node_already_claimed"); }
+        db.execute("DELETE FROM runtime_nodes WHERE task_id=? AND revision=? AND node_id=?", (task, revision, id))?;
+    }
+    for node in supplied.iter() {
+        if prior.contains(node) { continue; }
+        let id = node["id"].as_str().unwrap();
+        let role = node["role"].as_str().unwrap();
+        // An amendment cannot select or change a provider/model outside ordinary
+        // plan intake. Unchanged route choices on an edited pending node are retained.
+        let previous = prior.iter().find(|p| p["id"] == id);
+        let allowed_routing = previous.map(routing_fields).unwrap_or_else(|| json!({"model":"auto"}));
+        if routing_fields(node) != allowed_routing {
+            return refuse("active_plan_routing_locked");
+        }
+        if !policy::read_only(role, "execution") && node["scope"].as_array().unwrap().iter().any(|s| {
+            denials.iter().any(|p| policy::overlaps(s.as_str().unwrap(), p))
+        }) {
+            return refuse("write_denied");
+        }
+        db.execute("INSERT INTO runtime_nodes VALUES (?,?,?,?,?,?,?,'execution','pending',NULL,NULL)",
+            (task, revision, id, role, node["objective"].as_str(),
+             node["dependencies"].to_string(), node["scope"].to_string()))?;
+    }
+    old["tasks"] = next["tasks"].take();
+    let updated = old.to_string();
+    let digest = crate::digest(updated.as_bytes());
+    if updated != raw {
+        db.execute("UPDATE runtime_tasks SET plan_json=? WHERE task_id=?", (&updated, task))?;
+        event_tx(db, task, "PLAN_AMENDED", json!({"revision":revision,"plan":old,
+            "source_request":args["source_request"],"plan_digest":digest}))?;
+    }
+    Ok(json!({"accepted":true,"revision":revision,"plan_digest":digest,"changed":updated!=raw}))
+}
+
 /// Runtime-derived previews are retained with the exact plan receipt, never recomputed on replay.
 pub fn accept_routed_tx(
     db: &Transaction<'_>,
@@ -361,15 +519,15 @@ pub fn accept_routed_tx(
                     n["dependencies"]
                         .as_array_mut()
                         .unwrap()
-                        .insert(0, json!("_consultation"));
+                        .insert(0, json!(CONSULTATION));
                 }
-                proposed.insert(0,json!({"id":"_consultation","role":"worker-senior-consultant","objective":objective,"scope":["."],"dependencies":[]}));
+                proposed.insert(0,json!({"id":CONSULTATION,"role":"worker-senior-consultant","objective":objective,"scope":["."],"dependencies":[]}));
                 event_tx(
                     db,
                     task,
                     "CONSULTATION_REQUIRED",
                     json!({"role":"worker-senior-consultant","source_revision":revision-1,
-                    "revision":revision,"node":"_consultation","dependency_reports":packet}),
+                    "revision":revision,"node":CONSULTATION,"dependency_reports":packet}),
                 )?;
             }
         }
@@ -383,6 +541,8 @@ pub fn accept_routed_tx(
         // lineage across revisions and grants further fix rounds only while the
         // findings strictly shrink (`review::advance_tx`), so a continuation's new
         // plan never starts a fresh budget.
+        db.execute("UPDATE pending_questions SET status='superseded',answered_at=?
+            WHERE task_id=? AND dedup_key LIKE 'obstacle:%' AND status='open'", (crate::now(), task))?;
         db.execute("UPDATE runtime_tasks SET revision=?,plan_json=?,synthesis=NULL,review_cycle=0 WHERE task_id=?",
             (revision,stored.to_string(),task))?;
         for n in &proposed {

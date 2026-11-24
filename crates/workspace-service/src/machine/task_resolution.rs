@@ -29,6 +29,7 @@ pub(super) fn replay(reply: Value) -> Result<Value> {
     let code = match reply["code"].as_str() {
         Some("outcome_unknown") => "outcome_unknown",
         Some("unsafe_conflict") => "unsafe_conflict",
+        Some("legacy_merge_still_open") => "legacy_merge_still_open",
         Some("unresolved_conflict") => "unresolved_conflict",
         Some("binary_conflict") => "binary_conflict",
         Some("invalid_path") => "invalid_path",
@@ -60,7 +61,7 @@ pub async fn resolve_block(
     lock: &Lock,
 ) -> Result<Value> {
     let record = &product["tasks"][task];
-    if record["conflict"] == "resolving" {
+    if super::task_merge::manual_blocked(record) {
         return Err(refuse(
             "busy",
             "Stop Cortex and wait for the task to stop before resolving manually.",
@@ -71,14 +72,18 @@ pub async fn resolve_block(
     {
         return Err(malformed());
     }
-    let path = retention::task_path(root, record, git).await?;
+    let path = match super::context::owned_checkout(root, project, task)? {
+        Some(worktree) => worktree.path,
+        None => retention::task_path(root, record, git).await?,
+    };
     let merge = &record["merge"];
-    if !truthy(merge) {
+    if !truthy(merge) || merge["finished"] == true {
         return Err(refuse(
             "no_conflict",
             "There is no retained merge conflict for this task.",
         ));
     }
+    super::task_merge::manual_ready(root, project, task, record)?;
     let all = merge["files"].as_array().ok_or_else(malformed)?;
     if all.iter().any(|f| !f.is_object() || !f["path"].is_string()) {
         return Err(malformed());
@@ -134,8 +139,14 @@ pub async fn resolve_block(
             ledger::Begin::Replay(reply) => return replay(reply),
             ledger::Begin::Run(intent) => intent,
         };
+    let merge = merge.clone();
     let mut effects = false;
     let outcome: Result<Value> = async {
+        if merge["sourceRevision"].is_string()
+            && super::task_merge::observe(&path, &merge, git).await? != super::task_merge::Observed::Stopped
+        {
+            return Err(super::task_merge::unsafe_merge());
+        }
         // Literal pathspecs cannot expand a displayed file into another conflict.
         let literal = format!(":(literal){name}");
         let stages = git.out(&path, &["ls-files", "-u", "--", &literal]).await?;

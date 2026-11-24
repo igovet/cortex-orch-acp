@@ -1,4 +1,4 @@
-import type { AutomaticContinuation, AutomaticQueue, Check, HoldActor, OwnerHoldAction, PlanItem, ProjectRepo, RepoCheckout, Sprint, SprintEntry, SprintRunMode, Task, TaskSession, WorkspaceState } from "./types";
+import type { AutomaticContinuation, AutomaticQueue, Check, HoldActor, LiveSprintGraph, LiveSprintMember, OwnerHoldAction, PlanItem, ProjectRepo, RepoCheckout, Sprint, SprintEntry, SprintOrderPending, SprintOrderWorking, SprintRunMode, Task, TaskSession, WorkspaceState } from "./types";
 import { DomainError, entity, machineFor, nonempty, projectFor, requireFact } from "./core";
 
 /**
@@ -217,3 +217,49 @@ export const emptySession = (taskId: string, createdAt: number | null = null): T
   coordinator: { note: "", elapsedMs: null, usage: null }, verification: [], changes: null,
 });
 export const isOpen = (d: { answer: unknown; withdrawn: boolean }) => !d.answer && !d.withdrawn;
+
+const LIVE_ID = /^[A-Za-z0-9_:.-]{1,128}$/;
+const liveIds = (v: unknown, max: number): v is string[] => Array.isArray(v) && v.length <= max && v.every(x => typeof x === "string" && LIVE_ID.test(x));
+/**
+ * A live sprint graph exactly as contract version 1 shapes it, or null. Any other shape (an older service, a partial reply)
+ * is not a graph this app can edit: the caller shows the sprint read-only and never fills a gap with a guess.
+ */
+export function parseLiveSprintGraph(value: unknown): LiveSprintGraph | null {
+  if (!record(value) || value.contractVersion !== 1 || typeof value.sprintId !== "string" || !LIVE_ID.test(value.sprintId)
+    || typeof value.graphRevision !== "string" || !/^[0-9a-f]{64}$/.test(value.graphRevision) || typeof value.complete !== "boolean"
+    || !Array.isArray(value.members) || value.members.length > 1000 || !liveIds(value.priority, 1000) || !record(value.order)) return null;
+  const members: LiveSprintMember[] = [];
+  for (const m of value.members) {
+    if (!record(m) || typeof m.taskId !== "string" || !LIVE_ID.test(m.taskId) || !["confirmed", "missing", "unreadable", "purged"].includes(m.readStatus as string)
+      || !(m.dependencies === null || liveIds(m.dependencies, 10_000)) || typeof m.editable !== "boolean" || typeof m.canBePredecessor !== "boolean"
+      || !(m.approvedPlanKey === null || m.approvedPlanKey === undefined || typeof m.approvedPlanKey === "string")) return null;
+    members.push({ taskId: m.taskId, readStatus: m.readStatus as LiveSprintMember["readStatus"], dependencies: m.dependencies === null ? null : [...m.dependencies as string[]],
+      editable: m.editable, canBePredecessor: m.canBePredecessor, approvedPlanKey: typeof m.approvedPlanKey === "string" ? m.approvedPlanKey : null });
+  }
+  if (new Set(members.map(m => m.taskId)).size !== members.length) return null;
+  const o = value.order;
+  if (!isSprintRunMode(o.mode) || !["idle", "running", "paused", "complete"].includes(o.queueState as string) || !Array.isArray(o.working) || !Array.isArray(o.notStarted)) return null;
+  const working: SprintOrderWorking[] = [], notStarted: SprintOrderPending[] = [];
+  for (const w of o.working) {
+    if (!record(w) || typeof w.taskId !== "string" || !LIVE_ID.test(w.taskId) || !(w.startOrder === null || (typeof w.startOrder === "string" && /^(0|[1-9][0-9]*)$/.test(w.startOrder)))) return null;
+    working.push({ taskId: w.taskId, startOrder: w.startOrder });
+  }
+  for (const p of o.notStarted) {
+    if (!record(p) || typeof p.taskId !== "string" || !LIVE_ID.test(p.taskId) || !(p.rank === null || (typeof p.rank === "number" && Number.isSafeInteger(p.rank) && p.rank >= 1))
+      || !(p.reason === null || (typeof p.reason === "string" && p.reason.length <= 64)) || typeof p.next !== "boolean" || typeof p.conditional !== "boolean") return null;
+    notStarted.push({ taskId: p.taskId, rank: p.rank, reason: p.reason, next: p.next, conditional: p.conditional });
+  }
+  // At most one current candidate, and only a ranked one.
+  if (notStarted.filter(p => p.next).length > 1 || notStarted.some(p => p.next && p.rank === null)) return null;
+  return { contractVersion: 1, sprintId: value.sprintId, graphRevision: value.graphRevision, complete: value.complete, members, priority: [...value.priority],
+    order: { mode: o.mode, queueState: o.queueState as LiveSprintGraph["order"]["queueState"], working, notStarted } };
+}
+/** Why a not-started member has no place in the order, in words. Unknown codes stay generic rather than guessed. */
+export function orderReasonText(reason: string | null): string | null {
+  if (reason === null) return null;
+  return ({
+    task_missing: "Task details not loaded", task_state_unknown: "Task state unknown", sprint_closed: "Sprint closed",
+    queue_paused: "Queue paused", queue_held: "Queue held", queue_complete: "Queue complete", queue_blocked: "Queue blocked",
+    dependencies_blocked: "Waits for a prerequisite", native_worktree_unavailable: "Worktree unavailable",
+  } as Record<string, string>)[reason] ?? "Not in the order";
+}

@@ -1,5 +1,6 @@
 import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Match, on, onCleanup, Show, Switch, useContext, type Accessor } from "solid-js";
-import { automaticQueueOf, dependencyProblem, queueDrivenMode, runBlocker, sprintCloseBlockers, SPRINT_RUN_MODES, type PlanItem, type Sprint, type TaskSettings, type WorkspaceState } from "@cortex/workspace-domain";
+import { automaticQueueOf, dependencyProblem, queueDrivenMode, runBlocker, sprintCloseBlockers, SPRINT_RUN_MODES, type PlanItem, type Sprint, type SprintGraphEdit, type TaskSettings, type WorkspaceState } from "@cortex/workspace-domain";
+import { dependentWhy, editNotice, linkProblem, linkWords, liveModel, placeWords, watchLiveGraphs, type LiveModel } from "./live-graph";
 import { AttachChips, createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
 import { useWs } from "./ctx";
 import { autoGrow } from "./autogrow";
@@ -24,7 +25,7 @@ import { CopySource, MessageTools } from "./message-copy";
 import { SentMessages } from "./sent";
 import { createLabel, itemTitle, planCaption, planGraph, planningAsks, planningThread, planRows, queueStall, sprintGap, sprintSummary, SPRINT_CLOSE_NOTE, type PlanRow } from "./sprint-model";
 import { graphCounts, planLayers } from "./plan-graph";
-import { GraphView, type GraphApi, type GraphMemory } from "./sprint-graph";
+import { GraphView, type GraphApi, type GraphLinks, type GraphMemory } from "./sprint-graph";
 import { arrange, INLINE_FLOOR, inlineScale, type Opened } from "./sprint-space";
 
 type SprintRoute = Extract<Route, { name: "sprint" }>;
@@ -376,11 +377,90 @@ const planState = (r: PlanRow) => {
   return { tone: r.word.tone, icon: r.word.text === "Next" ? "play" : r.word.icon, spin: r.word.spin, text: ready ? "Ready" : r.word.text };
 };
 
+const SAVING = "Saving the last change";
+/** The owner's edits of a live graph: one at a time, each with the revision shown, and an honest word when it did not go through. */
+type LinkEditor = GraphLinks & { move: (taskId: string, direction: "up" | "down") => Promise<boolean> };
+function createLinkEditor(ws: ReturnType<typeof useWs>, sprint: Accessor<Sprint>, model: Accessor<LiveModel>): LinkEditor {
+  const [busy, setBusy] = createSignal(false);
+  const [notice, setNotice] = createSignal<string | null>(null);
+  // A new read of the graph is a new picture: an old notice no longer describes it.
+  createEffect(on(() => model().revision, () => setNotice(null), { defer: true }));
+  type Edit = SprintGraphEdit extends infer E ? E extends unknown ? Omit<E, "expectedGraphRevision" | "sprintId"> : never : never;
+  const send = async (edit: Edit) => {
+    const m = model();
+    if (busy() || !m.revision || m.why) return false;
+    setBusy(true); setNotice(null);
+    try {
+      const result = await ws.store.editLiveGraph({ ...edit, sprintId: sprint().id, expectedGraphRevision: m.revision } as SprintGraphEdit);
+      setNotice(editNotice(result));
+      return result.outcome === "changed";
+    } finally { setBusy(false); }
+  };
+  const linked = (p: string, d: string) => model().member(d)?.dependencies?.includes(p) ?? false;
+  return {
+    get why() { return model().why; },
+    get busy() { return busy(); }, get notice() { return notice(); }, get queueNote() { return model().queueNote; },
+    linked,
+    problem: (p, d) => linked(p, d) ? dependentWhy(model(), d) : linkProblem(model(), d, p),
+    words: (p, d) => linkWords(model(), p, d),
+    save: (p, d, present) => send({ action: "set_dependency", dependentTaskId: d, predecessorTaskId: p, present }),
+    move: (taskId, direction) => send({ action: "move_priority", taskId, direction }),
+  };
+}
+
+/** A live task's links and priority in its details: each prerequisite with Remove, a picker to add one, and Move up or down. */
+function LiveLinks(props: { row: PlanRow; model: LiveModel; editor: LinkEditor }) {
+  const key = () => props.row.item.key;
+  const no = (id: string) => props.model.items.findIndex(i => i.key === id) + 1;
+  const name = (id: string) => { const n = no(id); return n ? `${n} ${itemTitle(props.model.items[n - 1])}` : "A deleted task"; };
+  // Every saved prerequisite, also one no longer drawn (a deleted task), so a bad link can still be removed.
+  const deps = () => props.model.member(key())?.dependencies ?? props.row.item.dependsOn;
+  const why = () => props.editor.why ?? dependentWhy(props.model, key());
+  const [adding, setAdding] = createSignal("");
+  const options = () => props.model.items.filter(i => i.key !== key() && !deps().includes(i.key));
+  const addWhy = () => adding() ? props.editor.problem(adding(), key()) : "Choose a task first.";
+  const priority = () => props.model.priority.filter(id => props.model.member(id)?.editable);
+  const place = () => placeWords(props.model, key());
+  const add = async () => { if (!addWhy() && !props.editor.busy && await props.editor.save(adding(), key(), true)) setAdding(""); };
+  return <div class="ws-live-links">
+    <div class="ins-h ws-read-s"><span>Waits for</span></div>
+    <Show when={props.model.member(key())?.dependencies !== null} fallback={<p class="cap muted">This task could not be read, so its links are unknown.</p>}>
+      <Show when={deps().length} fallback={<p class="cap muted">Nothing. It can start first.</p>}>
+        <ul class="ws-plain-list"><For each={deps()}>{d => <li class="row"><span class="grow trunc">{name(d)}</span>
+          <button class="btn btn-line btn-sm" aria-disabled={why() || props.editor.busy ? "true" : undefined} data-why={why() ?? (props.editor.busy ? SAVING : undefined)}
+            aria-label={`Remove the link: task ${props.row.no} will no longer wait for ${name(d)}`} onClick={() => { if (!why() && !props.editor.busy) void props.editor.save(d, key(), false); }}>Remove</button></li>}</For></ul>
+      </Show>
+    </Show>
+    <Show when={!why()} fallback={<p class="cap muted">{why()}</p>}>
+      <label class="fld"><span class="lab">Add a prerequisite</span>
+        <select class="inp" value={adding()} onChange={e => setAdding(e.currentTarget.value)} aria-label={`Task ${props.row.no} waits for`}>
+          <option value="">Choose a task</option>
+          <For each={options()}>{i => <option value={i.key}>{name(i.key)}</option>}</For>
+        </select>
+      </label>
+      <Show when={adding()}><p class="cap">{props.editor.words(adding(), key())}</p><Show when={addWhy()}>{w => <p class="cap st-warn" role="status">{w()}</p>}</Show>
+        <Show when={props.editor.queueNote}>{q => <p class="cap muted">{q()}</p>}</Show></Show>
+      <button class="btn btn-line btn-sm" aria-disabled={addWhy() || props.editor.busy ? "true" : undefined} data-why={addWhy() ?? (props.editor.busy ? SAVING : undefined)} onClick={() => void add()}>Add link</button>
+    </Show>
+    <div class="ins-h ws-read-s"><span>Priority among ready tasks</span></div>
+    <Show when={place()}>{p => <p class="cap">{p()}</p>}</Show>
+    <Show when={!why()} fallback={<p class="cap muted">Only a draft that has not started can move.</p>}>
+      <div class="row">
+        <button class="btn btn-line btn-sm" aria-disabled={priority()[0] === key() || props.editor.busy ? "true" : undefined} data-why={priority()[0] === key() ? "Already first among ready tasks" : props.editor.busy ? SAVING : undefined} onClick={() => { if (priority()[0] !== key()) void props.editor.move(key(), "up"); }}><I n="arrow-up" s={14} />Move up</button>
+        <button class="btn btn-line btn-sm" aria-disabled={priority().at(-1) === key() || props.editor.busy ? "true" : undefined} data-why={priority().at(-1) === key() ? "Already last among ready tasks" : props.editor.busy ? SAVING : undefined} onClick={() => { if (priority().at(-1) !== key()) void props.editor.move(key(), "down"); }}><I n="arrow-down" s={14} />Move down</button>
+      </div>
+      <Show when={props.editor.queueNote}>{q => <p class="cap muted">{q()}</p>}</Show>
+      <p class="cap faint">Priority orders tasks that are ready at the same time. Links still decide what waits.</p>
+    </Show>
+    <Show when={props.editor.notice}>{n => <p class="cap st-warn" role="status">{n()}</p>}</Show>
+  </div>;
+}
+
 /**
  * A plan may hold very long tasks, so the list names them and this holds the full text. It scrolls by itself and is always
  * docked beside the plan; on a window with no room for both it takes the plan's place and `back` names the way back.
  */
-function PlanItemPanel(props: { row: PlanRow; total: number; onClose: () => void; back?: string }) {
+function PlanItemPanel(props: { row: PlanRow; total: number; onClose: () => void; back?: string; live?: { model: LiveModel; editor: LinkEditor } }) {
   let close!: HTMLButtonElement;
   const back = document.activeElement as HTMLElement | null;
   const shut = () => { props.onClose(); if (back?.isConnected) back.focus({ preventScroll: true }); };
@@ -398,6 +478,7 @@ function PlanItemPanel(props: { row: PlanRow; total: number; onClose: () => void
         <Show when={planState(props.row)}>{w => <><dt>State</dt><dd class={w().tone}>{w().text}</dd></>}</Show>
       </dl>
       <div class="ws-read-d"><ResultText breaks text={props.row.item.description} /></div>
+      <Show when={props.live}>{l => <LiveLinks row={props.row} model={l().model} editor={l().editor} />}</Show>
       <Show when={props.row.item.acceptance}><div class="ins-h ws-read-s"><span>Acceptance and checks</span></div><div class="ws-read-d"><ResultText breaks text={props.row.item.acceptance} /></div></Show>
     </div>
     <Show when={props.row.view}>{v => <ActionBar class="ws-read-f"><A class="btn btn-line" to={decisionRoute(v())}>Open task<I n="arrow-right" s={14} /></A></ActionBar>}</Show>
@@ -412,6 +493,8 @@ type PlanProps = {
   hidden?: boolean; full: boolean; setFull: (on: boolean) => void; conv: ConvControl;
   request: { why: string | null; run: () => void };
   memory: Map<string, GraphMemory>; active: Accessor<boolean>; api?: (api: GraphApi | null) => void;
+  /** A created sprint: its live graph, which of the two surfaces is shown, and the owner's link and priority edits. */
+  live: Accessor<LiveModel>; surface: "live" | "plan"; setSurface: (surface: "live" | "plan") => void; editor: LinkEditor;
 };
 function Plan(props: PlanProps) {
   const ws = useWs();
@@ -420,10 +503,21 @@ function Plan(props: PlanProps) {
   const [viewing, setViewing] = createSignal<number | null>(null);
   const [errors, setErrors] = createSignal<Record<string, string>>({});
   const past = () => viewing() === null ? null : s().history?.find(h => h.version === viewing()) ?? null;
-  const items = () => props.draft ?? past()?.items ?? s().plan?.items ?? [];
-  const version = () => past()?.version ?? s().plan?.version;
-  // States belong only to the version the tasks were made from, so a past version or a draft shows none.
-  const rows = createMemo(() => planRows(ws.store.index(), s(), items(), props.draft ? null : version() ?? null));
+  /** After creation the sprint opens on its tasks as they are now; the approved plan stays one press away, read only. */
+  const liveOn = () => s().planning === "created" && props.surface === "live" && props.draft === null && viewing() === null;
+  const items = () => liveOn() ? props.live().items : props.draft ?? past()?.items ?? s().plan?.items ?? [];
+  const version = () => liveOn() ? undefined : past()?.version ?? s().plan?.version;
+  // States belong only to the version the tasks were made from, so a past version or a draft shows none. Live rows are the
+  // tasks themselves, keyed by task id; plan rows find their tasks by the ids the service proved.
+  const rows = createMemo(() => liveOn() ? planRows(ws.store.index(), s(), items(), "tasks")
+    : planRows(ws.store.index(), s(), items(), props.draft ? null : version() ?? null, props.live().created));
+  /** The live list in the saved priority; numbers stay the roster's, so a move never renumbers a task. */
+  const listRows = createMemo(() => {
+    const r = rows();
+    if (!liveOn()) return r;
+    const at = new Map(props.live().priority.map((id, i) => [id, i]));
+    return [...r].sort((a, b) => (at.get(a.item.key) ?? Infinity) - (at.get(b.item.key) ?? Infinity) || a.no - b.no);
+  });
   createEffect(() => props.rows?.(rows()));
   const selected = () => picked() ?? items()[0]?.key ?? null;
   const keys = createMemo(() => new Set(items().map(i => i.key)));
@@ -436,8 +530,13 @@ function Plan(props: PlanProps) {
   const graph = () => view() === "graph" && items().length > 0;
   const setView = (v: "list" | "graph") => { if (v !== "graph") props.setFull(false); ws.panels.setPlanView(v); };
   const plural = (n: number) => `${n} task${n === 1 ? "" : "s"}`;
-  const title = () => `${version() ? `Plan v${version()}` : "Plan"}${items().length ? ` · ${plural(items().length)}` : ""}`;
-  const memoryKey = () => `${version() ?? 0}${editing() ? ":draft" : ""}`;
+  const heading = () => liveOn() ? "Live sprint" : version() ? `${created() && !past() ? "Approved plan" : "Plan"} v${version()}` : "Plan";
+  const title = () => `${heading()}${items().length ? ` · ${plural(items().length)}` : ""}`;
+  const memoryKey = () => liveOn() ? "live" : `${version() ?? 0}${editing() ? ":draft" : ""}`;
+  const approved = () => s().materializedVersion ?? s().plan?.version;
+  const priority = createMemo(() => liveOn() ? props.live().priority.filter(id => props.live().member(id)?.editable) : []);
+  const movable = (key: string) => liveOn() && !props.editor.why && !!props.live().member(key)?.editable;
+  const move = (key: string, dir: "up" | "down") => { if (!props.editor.busy && priority()[dir === "up" ? 0 : priority().length - 1] !== key) void props.editor.move(key, dir); };
   const graphRequest = { get shown() { return !created() && !past(); }, get why() { return props.request.why; }, run: () => props.request.run() };
   const [paneW, setPaneW] = createSignal(0);
   const watchWidth = (el: HTMLElement) => {
@@ -461,9 +560,13 @@ function Plan(props: PlanProps) {
     ws.ok({ type: "edit_plan", sprintId: s().id, items: draft, now: ws.store.clock() }, () => { props.setDraft(null); setErrors({}); });
   };
   const lead = <Show when={props.conv.chip}>{c => <button class={`chip${c().warn ? " st-warn" : ""}`} onClick={() => props.conv.show()}><Show when={c().warn}><I n="question" s={12} /></Show>{c().text}</button>}</Show>;
-  return <section class="sp-plan" aria-label={version() ? `Plan v${version()}` : "Plan"} ref={revealCutIn} hidden={props.hidden} data-view={graph() ? "graph" : "list"}>
-    <Show when={!(props.full && graph())}><SectionHead class="sp-plan-h" lead={lead} title={version() ? `Plan v${version()}` : "Plan"} count={items().length > 0 ? items().length : undefined}>
-      <Show when={past() || editing()}><span class="gv-tag">{past() ? "Past version · read only" : "Draft · not saved"}</span></Show>
+  return <section class="sp-plan" aria-label={liveOn() ? "Live sprint" : version() ? `Plan v${version()}` : "Plan"} ref={revealCutIn} hidden={props.hidden} data-view={graph() ? "graph" : "list"}>
+    <Show when={!(props.full && graph())}><SectionHead class="sp-plan-h" lead={lead} title={heading()} count={items().length > 0 ? items().length : undefined}>
+      <Show when={created() && !editing()}><div class="seg" role="group" aria-label="Sprint graph">
+        <button aria-current={liveOn() ? "true" : "false"} onClick={() => { setViewing(null); props.setSurface("live"); }}>Live sprint</button>
+        <button aria-current={liveOn() ? "false" : "true"} onClick={() => props.setSurface("plan")}>{approved() ? `Approved plan v${approved()}` : "Approved plan"}</button>
+      </div></Show>
+      <Show when={past() || editing() || (created() && !liveOn())}><span class="gv-tag">{past() ? "Past version · read only" : editing() ? "Draft · not saved" : "Read only"}</span></Show>
       <Show when={items().length > 0}><div class="seg" role="group" aria-label="Plan view">
         <button aria-current={graph() ? "false" : "true"} onClick={() => setView("list")}>List</button>
         <button aria-current={graph() ? "true" : "false"} onClick={() => setView("graph")}>Graph</button>
@@ -474,7 +577,7 @@ function Plan(props: PlanProps) {
         </Show>
       </Show>
       {/* A first plan has nothing before it, so there is nothing to offer. */}
-      <Show when={past()} fallback={<Show when={s().history?.length}><button class="btn btn-sm" popovertarget="m-plan-history">Previous plan</button></Show>}>
+      <Show when={past()} fallback={<Show when={s().history?.length && !liveOn()}><button class="btn btn-sm" popovertarget="m-plan-history">Previous plan</button></Show>}>
         <button class="btn btn-sm" onClick={() => setViewing(null)}>Back to v{s().plan?.version}</button>
       </Show>
       <Pop id="m-plan-history" class="pop-right" align="right" label="Previous plans">
@@ -482,15 +585,20 @@ function Plan(props: PlanProps) {
       </Pop>
     </SectionHead></Show>
     <Show when={items().length > 0} fallback={<div class="note-panel"><span class="w500">No plan yet</span><span>Linked tasks appear here after the conversation.</span></div>}>
-      <Show when={!graph()} fallback={<Show when={memoryKey()} keyed>{key => <GraphView items={items()} rows={rows()} title={title()} mode={editing() ? "draft" : past() ? "past" : "plan"}
+      <Show when={!graph()} fallback={<Show when={memoryKey()} keyed>{key => <GraphView items={items()} rows={rows()} title={title()} mode={editing() ? "draft" : past() ? "past" : liveOn() ? "live" : "plan"}
+        links={key === "live" && props.live().source === "service" ? props.editor : undefined}
         created={created()} manual={s().runMode === "manual"} picked={pick()} onPick={setPicked} details={props.reading} onDetails={k => { setPicked(k); props.onRead(k); }}
         full={props.full} onFull={props.setFull} request={graphRequest} onOpenList={() => setView("list")}
         memory={props.memory} memoryKey={key} active={props.active} api={props.api} />}</Show>}>
       <div class="sp-scroll" ref={watchWidth}>
         <div class={`pt-row th${accepted() ? "" : " ws-plain"}`}><span>#</span><span>Task</span><Show when={accepted()}><span>Acceptance and checks</span></Show><span>{created() ? "State" : "Depends on"}</span></div>
-        <Show when={editing()} fallback={<Keyed each={rows()} by={r => r.item.key}>{r => <div class={`pt-row${accepted() ? "" : " ws-plain"}`} data-selected={selected() === r().item.key ? "true" : undefined} onClick={() => setPicked(r().item.key)}>
+        <Show when={editing()} fallback={<Keyed each={listRows()} by={r => r.item.key}>{r => <div class={`pt-row${accepted() ? "" : " ws-plain"}`} data-selected={selected() === r().item.key ? "true" : undefined} onClick={() => setPicked(r().item.key)}>
           <span class="no">{r().no}</span>
-          <span class="ws-pt-t"><button class="tt trunc" aria-current={selected() === r().item.key ? "true" : undefined}>{itemTitle(r().item)}</button><button class="lnk ws-more-l" aria-label={`Read more about task ${r().no}`} aria-expanded={props.reading === r().item.key} onClick={e => { e.stopPropagation(); setPicked(r().item.key); props.onRead(r().item.key); }}>Read more</button></span>
+          <span class="ws-pt-t"><button class="tt trunc" aria-current={selected() === r().item.key ? "true" : undefined}>{itemTitle(r().item)}</button><button class="lnk ws-more-l" aria-label={liveOn() ? `Links and details of task ${r().no}` : `Read more about task ${r().no}`} aria-expanded={props.reading === r().item.key} onClick={e => { e.stopPropagation(); setPicked(r().item.key); props.onRead(r().item.key); }}>{liveOn() ? "Links" : "Read more"}</button>
+            <Show when={movable(r().item.key)}><span class="ws-prio" role="group" aria-label={`Priority of task ${r().no}`}>
+              <button data-tooltip="" class="ib ws-ib" aria-label={`Move task ${r().no} up`} aria-disabled={priority()[0] === r().item.key || props.editor.busy ? "true" : undefined} data-why={priority()[0] === r().item.key ? "Already first among ready tasks" : props.editor.busy ? SAVING : undefined} onClick={e => { e.stopPropagation(); move(r().item.key, "up"); }}><I n="arrow-up" s={14} /></button>
+              <button data-tooltip="" class="ib ws-ib" aria-label={`Move task ${r().no} down`} aria-disabled={priority().at(-1) === r().item.key || props.editor.busy ? "true" : undefined} data-why={priority().at(-1) === r().item.key ? "Already last among ready tasks" : props.editor.busy ? SAVING : undefined} onClick={e => { e.stopPropagation(); move(r().item.key, "down"); }}><I n="arrow-down" s={14} /></button>
+            </span></Show></span>
           <Show when={accepted()}><span class="ac trunc">{r().item.acceptance}</span></Show>
           <span class="dep"><Show when={planState(r())} fallback={<Show when={r().deps.length} fallback={<span class="faint">Starts first</span>}><span class="muted">After {r().deps.join(", ")}</span></Show>}>{w => <span class={`st ${w().tone}`}><I n={w().icon} s={12} class={w().spin ? "spin" : undefined} />{w().text}</span>}</Show></span>
         </div>}</Keyed>}>
@@ -502,7 +610,7 @@ function Plan(props: PlanProps) {
             <Show when={errors()[r().item.key]}><span class="err"><I n="alert" s={12} /> {errors()[r().item.key]}</span></Show>
           </div>}</Keyed>
         </Show>
-        <Graph items={items()} selected={pick()} onPick={setPicked} width={paneW()} onOpen={() => setView("graph")} />
+        <Show when={!liveOn()}><Graph items={items()} selected={pick()} onPick={setPicked} width={paneW()} onOpen={() => setView("graph")} /></Show>
       </div>
       <ActionBar class="sp-foot" hint="Every task waits for your final confirmation.">
         <Show when={!created() && !past()}><button class="btn btn-line btn-sm" aria-disabled={props.request.why ? "true" : undefined} data-why={props.request.why ?? undefined} onClick={() => { if (!props.request.why) props.request.run(); }}>Request changes</button></Show>
@@ -545,7 +653,7 @@ function CreatedLine(props: { sprint: Sprint }) {
     <Show when={then().length > 0}><span class="faint ws-gap">Then</span> {then().join(", ")}</Show>
     <Show when={blocked() > 0}><span class="faint ws-gap">Blocked</span> {blocked()} task{blocked() === 1 ? "" : "s"}</Show>
   </span>}>
-    <span><Show when={view().next} fallback="Manual: start each ready task yourself.">{v => <>Manual: task {props.sprint.taskIds.indexOf(v().id) + 1} is ready. Start it when you want, starting one never starts its neighbours.</>}</Show></span>
+    <span><Show when={view().next ?? view().suggested} fallback="Manual: start each ready task yourself.">{v => <>Manual: task {props.sprint.taskIds.indexOf(v().id) + 1} is {view().ordered ? "suggested next" : "ready"}. Start it when you want, starting one never starts its neighbours.</>}</Show></span>
   </Show>;
 }
 
@@ -557,6 +665,14 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
   const [rows, setRows] = createSignal<PlanRow[]>([]);
   const read = () => rows().find(r => r.item.key === reading());
   const created = () => s().planning === "created";
+  // ---------- The live graph: read while this page shows a created sprint, and again whenever what it shows changes ----------
+  watchLiveGraphs(ws.store, () => created() ? [s()] : []);
+  const live = createMemo(() => liveModel(ws.store.index(), s(), ws.store.liveGraph(s().id)));
+  const editor = createLinkEditor(ws, s, live);
+  const [surface, setSurface] = createSignal<"live" | "plan">("live");
+  const liveShown = () => created() && surface() === "live" && props.route.tab === "plan";
+  // A different surface is different rows: what Details read belongs to the one left.
+  createEffect(on(surface, () => setReading(null), { defer: true }));
   const cancelled = () => s().planning === "cancelled";
   const failure = createMemo(() => planningFailureDetails(s()));
   const warning = () => activePlanningWarning(s());
@@ -635,8 +751,19 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
   const warned: StripItem = { id: "planning-warning", tone: "warn", role: "status", icon: <I n="alert" s={14} />,
     get text() { return warning()?.text; } };
   const line: StripItem = { id: "created", tone: "info", icon: <I n="play" s={14} class="faint" />, text: <CreatedLine sprint={s()} /> };
+  // A live graph read only in part is said, and editing stays off until it reads completely; Retry only reads again.
+  const unreadStrip: StripItem = { id: "live-unread", tone: "warn", role: "status", icon: <I n="alert" s={14} />,
+    get text() { const m = live(); return m.stale ? `Live graph not current: ${m.stale} The links shown are from the last read; editing is off.` : `Live graph read incomplete: ${m.unread} task${m.unread === 1 ? "" : "s"} could not be read. They are shown as placeholders and links cannot be changed.`; },
+    action: <button class="btn btn-sm" onClick={() => void ws.store.readLiveGraph(s().id, null, true)}>Retry</button> };
+  const divergedStrip: StripItem = { id: "live-diverged", tone: "info", role: "status", icon: <I n="layers" s={14} class="faint" />,
+    get text() { return `${live().divergence ?? ""} The approved plan stays as approved.`; },
+    action: <button class="btn btn-sm" onClick={() => setSurface("plan")}>Show approved plan</button> };
+  const liveStrips = (): StripItem[] => !liveShown() ? [] : [
+    ...(live().source === "service" && (live().unread > 0 || live().stale) ? [unreadStrip] : []),
+    ...(live().divergence ? [divergedStrip] : []),
+  ];
   const status = createMemo<StripItem[]>(() => created()
-    ? [line, ...(gapStrip() ? [gapStrip()!] : []), ...(queueStrip() ? [queueStrip()!] : [])]
+    ? [line, ...(gapStrip() ? [gapStrip()!] : []), ...liveStrips(), ...(queueStrip() ? [queueStrip()!] : [])]
     : cancelled() ? [failure() ? failed : stopped] : warning() ? [warned, planning] : [planning]);
 
   // ---------- Space: the chat and the plan are tabs; in the plan, one yield rule and Full view ----------
@@ -721,7 +848,7 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
           {/* A long title shortens here; a press opens the whole of it. */}
           <span class="tt trunc" ref={revealWhenCut} data-whole="">{sprintTitle(s())}</span>
           <Show when={created()} fallback={<span class="st st-idle l-tight-hide"><I n={cancelled() ? "x" : "pencil"} s={12} />{cancelled() ? "Planning cancelled" : "Planning"}</span>}>
-            <span class="st st-ok l-compact-hide"><I n="check-circle" s={12} />{s().taskIds.length} task{s().taskIds.length === 1 ? "" : "s"} created from Plan v{s().materializedVersion}</span>
+            <span class="st st-ok l-compact-hide"><I n="check-circle" s={12} />{s().taskIds.length} task{s().taskIds.length === 1 ? "" : "s"} · Plan v{s().materializedVersion} approved</span>
           </Show>
         </>}
         end={<>
@@ -753,8 +880,9 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
       <Show when={workersTab() && planningTask()} keyed>{task => <PlanningTaskWorkers sprint={s()} taskId={task} worker={props.route.worker} />}</Show>
       <Plan sprint={s()} draft={draft()} setDraft={setDraft} reading={reading()} onRead={key => { if (key) setOpened("details"); setReading(key); }} rows={setRows}
         hidden={chatTab() || (space().replaced && details())} full={fullOn()} setFull={setFull} conv={conv}
-        request={request} memory={memory} active={shown} api={setApi} />
-      <Show when={details()}><PlanItemPanel row={read()!} total={rows().length} back={space().replaced ? (graphOn() ? "Back to graph" : "Back to list") : undefined} onClose={() => setReading(null)} /></Show></div>
+        request={request} memory={memory} active={shown} api={setApi} live={live} surface={surface()} setSurface={setSurface} editor={editor} />
+      <Show when={details()}><PlanItemPanel row={read()!} total={rows().length} back={space().replaced ? (graphOn() ? "Back to graph" : "Back to list") : undefined} onClose={() => setReading(null)}
+        live={liveShown() && !draft() ? { model: live(), editor } : undefined} /></Show></div>
   </Page>;
 }
 

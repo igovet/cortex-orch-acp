@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The host must use safe artifact reads and fresh project/process observations.
 #[derive(Default)]
 pub struct EvidenceSnapshot {
+    pub checkout_evidence: Option<Value>,
     pub project_digest: Option<String>,
     /// Metadata digest (type, mode, size, mtime, link target) of Git-ignored files.
     /// Absent when they could not be observed; a review waiver then cannot be granted.
@@ -38,6 +39,21 @@ pub struct EvidenceSnapshot {
     /// metadata past the host's byte bound. A bound file missing here makes that
     /// binding unavailable, never satisfied.
     pub task_files: BTreeMap<String, String>,
+}
+pub(super) fn tag_checkout(mut payload: Value, snapshot: &EvidenceSnapshot) -> Value {
+    if let Some(binding) = &snapshot.checkout_evidence {
+        payload["checkout"] = binding["checkout"].clone();
+        payload["cwd"] = binding["cwd"].clone();
+    }
+    payload
+}
+fn require_checkout(db: &rusqlite::Connection, task: &str, snapshot: &EvidenceSnapshot) -> CoreResult<()> {
+    if !crate::workspace::worktrees::receipt_matches(
+        db, task, snapshot.checkout_evidence.as_ref().unwrap_or(&Value::Null), true
+    )? {
+        return refuse("worktree_binding_invalid");
+    }
+    Ok(())
 }
 fn digest(snapshot: &EvidenceSnapshot) -> CoreResult<&str> {
     snapshot
@@ -97,6 +113,7 @@ pub(super) fn review_digest_tx(
     assignment: &str,
     snapshot: &EvidenceSnapshot,
 ) -> CoreResult<(String, &'static str)> {
+    require_checkout(db, task, snapshot)?;
     match review_bound_files(db, task, assignment)? {
         Some(paths) => Ok((task_files_digest(&paths, snapshot)?, "task_files")),
         None => Ok((
@@ -145,6 +162,7 @@ fn bound_digest_tx(
             |r| r.get(0),
         )
         .optional()?;
+    require_checkout(db, task, snapshot)?;
     match review.flatten() {
         Some(assignment) => Ok(review_digest_tx(db, task, &assignment, snapshot)?.0),
         None => Ok(digest(snapshot)?.to_owned()),
@@ -593,14 +611,15 @@ pub fn execution_baseline_tx(
     if state != TaskState::PlanReady {
         return refuse("execution_not_expected");
     }
+    require_checkout(db, task, snapshot)?;
     let d = digest(snapshot)?;
     event_tx(
         db,
         task,
         "EXECUTION_BASELINE",
-        json!({"revision":revision,"kind":"observed","revision_digest":d,"head":snapshot.head,
+        tag_checkout(json!({"revision":revision,"kind":"observed","revision_digest":d,"head":snapshot.head,
             "ignored_digest":snapshot.ignored_digest,
-            "metadata_only":snapshot.metadata_only,"cap_reached":snapshot.cap_reached,"incomplete":snapshot.incomplete}),
+            "metadata_only":snapshot.metadata_only,"cap_reached":snapshot.cap_reached,"incomplete":snapshot.incomplete}), snapshot),
     )?;
     domain::state_tx(db, task, TaskState::Executing, None)
 }
@@ -784,7 +803,7 @@ pub fn start_review_tx(
         db,
         task,
         "REVIEW_STARTED",
-        json!({"assignment_ref":assignment,"revision_digest":revision_digest,"binding":binding}),
+        tag_checkout(json!({"assignment_ref":assignment,"revision_digest":revision_digest,"binding":binding}), snapshot),
     )?;
     Ok(())
 }
@@ -1628,6 +1647,7 @@ pub fn record_result_tx(
         }
         result["review_digest"] = json!(bound);
         result["review_binding"] = json!(binding);
+        result = tag_checkout(result, snapshot);
     }
     db.execute(
         "UPDATE runtime_nodes SET status=?,result_json=? WHERE task_id=? AND assignment_ref=?",
@@ -1656,6 +1676,9 @@ pub fn record_result_tx(
         },
         json!({"assignment_ref":assignment,"attempt_id":attempt,"result":result}),
     )?;
+    if failed && stage == "execution" {
+        super::obstacles::classify_failed_tx(db, task)?;
+    }
     Ok(())
 }
 pub(super) fn review_binding_tx(db: &Transaction<'_>, task: &str) -> CoreResult<(i64, String)> {
@@ -1745,24 +1768,35 @@ pub fn retain_check_tx(
     if reviewed != bound_digest_tx(db, task, snapshot)? {
         return refuse("verification_review_revision_changed");
     }
-    let value = json!({"argv":argv,"complete":observed.complete,"exit_code":observed.exit_code,
+    let mut value = json!({"argv":argv,"complete":observed.complete,"exit_code":observed.exit_code,
         "receipt_ref":observed.receipt_ref,"revision":revision,"revision_digest":reviewed,"owner_epoch":owner.epoch,"review_event":review_event});
     // Why an incomplete or failing run failed (a timeout, a signal, an unavailable
     // sandbox), from the runtime's own retained output receipt of the same run;
     // without one the cause stays unknown (null), never invented.
-    let cause: Option<String> = db
+    let raw: Option<String> = db
         .query_row(
-            "SELECT json_extract(result_json,'$.observation') FROM runtime_requests
+            "SELECT result_json FROM runtime_requests
              WHERE task_id=? AND actor='native-verifier-output' AND operation='native_command_output'
              AND json_extract(result_json,'$.tool_call_ref')=? LIMIT 1",
             (task, &observed.receipt_ref),
             |r| r.get(0),
         )
-        .optional()?
-        .flatten();
-    let cause: Value = cause
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(Value::Null);
+        .optional()?;
+    let raw: Value = raw.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or(Value::Null);
+    if !crate::workspace::worktrees::receipt_matches(db, task, &raw, true)? {
+        return refuse("verification_checkout_mismatch");
+    }
+    let cause = &raw["observation"];
+    if let Some(binding) = raw.get("checkout") {
+        if raw["task"] != task || raw["owner_epoch"] != owner.epoch || raw["argv"] != json!(argv)
+            || raw["revision_digest"] != reviewed || raw["profile"] != "native-readonly-bubblewrap"
+            || cause["complete"] != observed.complete || cause["exit_code"] != json!(observed.exit_code) {
+            return refuse("verification_checkout_mismatch");
+        }
+        value["checkout"] = binding.clone();
+        value["task"] = json!(task);
+        value["cwd"] = raw["cwd"].clone();
+    }
     let mut retained = value.clone();
     retained["failure"] = cause["failure"].clone();
     retained["signal"] = cause["signal"].clone();
@@ -1861,8 +1895,13 @@ pub fn worker_passed_tx(
     task: &str,
     argv: &[String],
     digests: &[&str],
+    verifier: &Value,
 ) -> CoreResult<bool> {
+    if !crate::workspace::worktrees::receipt_matches(db, task, verifier, true)? {
+        return Ok(false);
+    }
     let argv = serde_json::to_string(argv)?;
+    let checkout = verifier.get("checkout").map(Value::to_string);
     for digest in digests.iter().filter(|d| !d.is_empty()) {
         let passed: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM (SELECT CASE WHEN operation='outside_command'
@@ -1870,8 +1909,9 @@ pub fn worker_passed_tx(
                FROM runtime_requests WHERE task_id=? AND operation IN ('command_run','outside_command'))
              WHERE json_valid(r) AND json_extract(r,'$.argv')=json(?) AND json_extract(r,'$.complete')=1
                AND json_extract(r,'$.exit_code')=0 AND json_extract(r,'$.failure') IS NULL
-               AND json_extract(r,'$.revision_digest')=?)",
-            (task, &argv, digest),
+               AND json_extract(r,'$.revision_digest')=?
+                AND (?4 IS NULL OR (json_extract(r,'$.checkout')=json(?4) AND json_extract(r,'$.cwd')=?5)))",
+            (task, &argv, digest, checkout.as_deref(), verifier["cwd"].as_str()),
             |r| r.get(0),
         )?;
         if passed {
@@ -2471,7 +2511,9 @@ pub fn record_verification_tx(
             && v["revision_digest"] == reviewed
             && v["review_event"] == review_event
             && v["owner_epoch"] == epoch
-            && commands.get(index) == Some(&v["argv"]);
+            && commands.get(index) == Some(&v["argv"])
+            && crate::workspace::worktrees::receipt_matches(db, task, &v, true)?
+            && (v.get("checkout").is_none() || v["task"] == task);
         if !valid {
             passed = false;
             unresolved.extend(commands.get(index).cloned());
@@ -2548,6 +2590,7 @@ pub fn submit_answer_tx(db: &Transaction<'_>, task: &str, text: &str) -> CoreRes
         || !informational
         || text.trim().is_empty()
         || super::automatic::enabled(db, task)?
+        || domain::owner_rework_needs_plan(db, task)?
     {
         return refuse("direct_answer_not_allowed");
     }
@@ -2991,6 +3034,12 @@ pub fn complete_tx(
             || v["review_event"] != review_id
         {
             return refuse("completion_verification_missing");
+        }
+        for check in v["checks"].as_array().into_iter().flatten() {
+            if !crate::workspace::worktrees::receipt_matches(db, task, check, true)?
+                || (check.get("checkout").is_some() && check["task"] != task) {
+                return refuse("verification_checkout_mismatch");
+            }
         }
         if v["revision_digest"] != reviewed || bound_digest_tx(db, task, snapshot)? != reviewed {
             return refuse("completion_project_revision_changed");

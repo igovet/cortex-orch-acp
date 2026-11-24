@@ -123,7 +123,27 @@ it("shows only work decisions and exact integration holds in Automatic attention
   expect(view().column).toBe("merge");
 });
 
-it.each([false, true])("falls back to Project folder when worktrees are unavailable (Git: %s)", async hasGit => {
+it("disables the worktree choice on a non-Git project even on a supporting service", async () => {
+  await mount("new?kind=task&project=p", false, true);
+  const input = document.querySelector<HTMLInputElement>('input[name="checkout"]')!;
+  expect(input.disabled).toBe(true);
+  expect(input.closest("label")?.textContent).toContain("needs a Git repository");
+});
+
+it("disables worktrees while Automatic is selected, but allows Hybrid", async () => {
+  await mount("new?kind=sprint&project=p");
+  const mode = (value: string) => [...document.querySelectorAll<HTMLInputElement>('input[name="sprint-run"]')].find(input => input.closest("label")?.querySelector(".t")?.textContent === value)!;
+  const inputs = () => [...document.querySelectorAll<HTMLInputElement>('input[name="checkout"]')];
+  mode("Automatic").click(); await settle();
+  expect(inputs()[0].disabled).toBe(true);
+  expect(inputs()[0].closest("label")?.textContent).toContain("Choose Manual or Hybrid");
+  expect(inputs()[1].checked).toBe(true);
+  mode("Hybrid").click(); await settle();
+  expect(inputs()[0].disabled).toBe(false);
+  expect(inputs()[0].checked).toBe(true);
+});
+
+it.each([false, true])("selects Project folder when worktrees are unsupported (Git: %s)", async hasGit => {
   await mount("new?kind=sprint&project=p", hasGit, false);
   const inputs = [...document.querySelectorAll<HTMLInputElement>('input[name="checkout"]')];
   expect(inputs[0].disabled).toBe(true);

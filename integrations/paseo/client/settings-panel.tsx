@@ -935,7 +935,7 @@ function RoutingEditor({ form, onChange, vocabulary, theme, errors }: {
             onChangeText={(model) => update({ ...row, model })} />
           <ChoiceField label={`Pin ${index + 1} effort`} value={row.effort} theme={theme}
             hint={modelEffortChoices(vocabulary, row.engine, row.model).hint}
-            options={[{ value: "", label: "Engine default" }, ...modelEffortOptions(vocabulary, row.engine, row.model, [row.effort])]}
+            options={[{ value: "", label: "Use routing policy" }, ...modelEffortOptions(vocabulary, row.engine, row.model, [row.effort])]}
             onChange={(effort) => update({ ...row, effort })} />
           <ReadOnlyRow label="Pinned route" value={composePin(row) || "—"} theme={theme} />
         </View>} />}

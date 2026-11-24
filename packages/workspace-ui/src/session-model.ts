@@ -1,7 +1,7 @@
 import { readableCheckReason, ACCESS_MODES, effortLabel, emptySession, engineLabel, isOpen, LANGUAGES, machineDefaults } from "@cortex/workspace-domain";
 import type { Check, Decision, EngineKey, Machine, Message, SessionOptions, TaskSession, TaskSettings, Worker, WorkerRoute, WorkerStatus } from "@cortex/workspace-domain";
 import { automaticAcceptanceHold, automaticStaleResultHold, staleResult, clock, interruptedTurn, ownerHold, plainChoice, readyLabel, readyStep, replanStopping, sameBranch, type TaskView, type WorkspaceIndex } from "./selectors";
-import { inTask } from "./status-text";
+import { inTask, plainReason } from "./status-text";
 
 /** Read models for the task session. Every count on the screen comes from these lists; nothing here changes state. */
 export type Face = { label: string; tone: string; icon: string; spin?: boolean };
@@ -76,7 +76,7 @@ export type SessionModel = {
   messages: Message[]; queue: Message[]; open: Decision[]; mode: ComposerMode; planDone: number; planTotal: number;
 };
 function composerMode(v: TaskView): ComposerMode {
-  if (v.column === "archive") return "archived";
+  if (v.task.archive || v.column === "archive") return "archived";
   if (v.machine.connection !== "connected") return "offline";
   if (v.unknown && v.task.status !== "stopping") return "unconfirmed";
   if (v.ownerDecision) return "live";
@@ -331,6 +331,13 @@ export const closeBlocked = (m: SessionModel) =>
     : m.mode === "closed" ? "This task is already closed" : m.view.task.integration?.method === "squash" ? "This task is already merged"
     : m.view.task.conflict !== "none" ? "A merge is in progress. Abort it first" : null;
 
+export const EXTERNAL_DONE_LABEL = "Done outside the app…";
+export const offersExternalDone = (v: TaskView) => !v.unknown && v.task.status !== "done" && v.column !== "closed_unverified";
+export const externalDoneBlocked = (m: SessionModel) =>
+  m.view.task.process !== "stopped" || ["working", "needs_you", "stopping"].includes(m.view.task.status)
+    ? "Stop the task and wait for every worker to stop first."
+    : closeBlocked(m);
+
 /**
  * Which existing run control a stopped, held or ended task offers, read from its projection alone. The card, the task menu,
  * the palette, the title band, the strip and the composer all ask this one rule, so a state never offers Resume in one place
@@ -347,6 +354,15 @@ export const closeBlocked = (m: SessionModel) =>
 export type ResumeKind = "paused" | "held" | "automatic" | "evidence" | "final" | "unknown";
 export type ResumeState = { kind: ResumeKind; action: "continue_task" | "retry_task" | null; text: string; why: string };
 export const NOT_CONFIRMED = "Unavailable until this task's state is confirmed";
+export const REWORK_LABEL = "Return for rework";
+/** The machine decides eligibility; no inferred eligibility from a card's column or an old result. */
+export function reworkBinding(v: TaskView) {
+  const t = v.task;
+  if (v.task.archive || v.column === "archive" || v.unknown || v.machine.connection !== "connected" || t.reworkAvailable !== true ||
+      typeof t.reworkVersion !== "string" ||
+      !(t.reworkExecutionId === null ? t.reworkOwnerEpoch === null : typeof t.reworkExecutionId === "string" && typeof t.reworkOwnerEpoch === "string")) return null;
+  return { expectedVersion: t.reworkVersion, executionId: t.reworkExecutionId ?? null, ownerEpoch: t.reworkOwnerEpoch ?? null };
+}
 export function resumeState(v: TaskView): ResumeState | null {
   const t = v.task, mode = composerMode(v), warnings = t.warnings ?? [];
   if (mode === "archived") return null;
@@ -357,7 +373,8 @@ export function resumeState(v: TaskView): ResumeState | null {
   if (warnings.includes("process_exit_pending") || replanStopping(t)) return { kind: "evidence", action: null, text: "Waiting for processes to stop",
     why: "The service is confirming that this task's processes stopped and then continues by itself. Nothing can resume or continue until then." };
   if (mode === "unconfirmed") return { kind: "unknown", action: null, text: "Not confirmed", why: NOT_CONFIRMED };
-  if (t.status === "done" || t.status === "closed_unverified") return { kind: "final", action: null, text: "Closed", why: "This task is closed. A closed task is never resumed." };
+  if (reworkBinding(v)) return { kind: "final", action: null, text: "Closed", why: "Use Return for rework to reopen this task with a new plan." };
+  if (t.status === "done" || t.status === "closed_unverified") return { kind: "final", action: null, text: "Closed", why: plainReason(t.reworkUnavailableReason, "This task is closed. Rework is not available.") };
   if (t.status === "cancelled") return { kind: "final", action: null, text: "Run cancelled",
     why: "This run was cancelled. A cancelled run is final and cannot be resumed; Close task moves it to Done and keeps what was done." };
   if (t.status === "failed") return { kind: "final", action: null, text: "Run failed",

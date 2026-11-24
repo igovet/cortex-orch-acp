@@ -456,12 +456,24 @@ fn record_actions(
                 work = evidence;
                 value
             }
+            Err(error) if error.code.starts_with("worktree_") => {
+                let mut actions = unavailable();
+                actions["reason"] = json!("The original task worktree is unavailable. Restore it or use task history.");
+                actions
+            }
             Err(_) => match earlier_version_task(store, execution) {
                 Some(version) => earlier_version(version, execution),
                 None => unavailable(),
             },
         };
-        if record["requiresFreshResult"]
+        let pending_merge_checks = store.read(|db| {
+            super::task_merge::fresh_needed(db, project, execution, record)
+        }).unwrap_or(true);
+        if pending_merge_checks || (!work && record["merge"]["freshChecks"].is_object()) {
+            actions["accept"] = json!(false);
+            actions["reason"] = json!(super::task_merge::FRESH_CHECKS_REASON);
+            actions["unblockAction"] = json!("request_changes");
+        } else if record["requiresFreshResult"]
             == json!({"resultId":actions["resultId"],"version":actions["version"].as_str().unwrap_or("")})
         {
             actions["accept"] = json!(false);
@@ -500,17 +512,33 @@ pub(crate) fn native_review(
 /// reviews share one observation of the project folder per read (see
 /// `legacy_source::memoized`) instead of walking it twice per result, and reuse a
 /// recent one of an unchanged folder (`legacy_source::memoized_recent`).
+pub(crate) async fn execution_observation(
+    root: &Path, project: &str, execution: &str, main: Option<&str>, recent: bool,
+) -> Option<String> {
+    use cortex_core::workspace::worktrees;
+    let store = context::open(root, OpenMode::LiveReadOnly).ok()??;
+    let checkout = store.read(|db| worktrees::desktop_checkout_on(
+        db, store.key(), project, None, Some(execution)
+    )).ok()?;
+    match checkout.and_then(|c| c.worktree) {
+        Some(w) if recent => presented_observation(&w.path).await,
+        Some(w) => native_observation(&w.path).await,
+        None => main.map(str::to_owned),
+    }
+}
+
 pub(crate) fn native_reviews(
     root: &Path,
     project: &str,
     completed: &[(String, Value)],
-    native: Option<&str>,
+    observations: &[Option<String>],
 ) -> Vec<(Value, bool)> {
     super::legacy_source::memoized_recent(|| {
         completed
             .iter()
-            .map(|(execution, record)| {
-                native_review(root, project, execution, "COMPLETED", record, native)
+            .zip(observations)
+            .map(|((execution, record), native)| {
+                native_review(root, project, execution, "COMPLETED", record, native.as_deref())
             })
             .collect()
     })
@@ -519,6 +547,7 @@ pub async fn read(root: &Path, state: &Path, project: &str, git: &mut Git) -> Re
     materialized(root, project)?;
     let mut product = context::product(root, state, project, git).await?;
     if let Some(store) = context::open(root, OpenMode::LiveReadOnly)? {
+        super::task_rework::project(&store, project, &mut product, true)?;
         let rows = store.read(|db| {
             let mut q = db.prepare("SELECT t.task_id,t.version,e.execution_id,r.state FROM workspace_tasks t
                 JOIN workspace_executions e ON e.execution_id=t.execution_id
@@ -538,6 +567,9 @@ pub async fn read(root: &Path, state: &Path, project: &str, git: &mut Git) -> Re
             if !record.is_object() {
                 *record = json!({});
             }
+            let native = if status.as_deref() == Some("COMPLETED") {
+                execution_observation(root, project, &execution, native.as_deref(), true).await
+            } else { None };
             let (mut actions, _) = record_actions(
                 &store,
                 root,
@@ -616,6 +648,9 @@ pub(crate) async fn native_presented(
 ) -> Result<Value> {
     materialized(root, project)?;
     let mut product = context::product(root, state, project, git).await?;
+    if let Some(store) = context::open(root, OpenMode::LiveReadOnly)? {
+        super::task_rework::project(&store, project, &mut product, true)?;
+    }
     super::task_facts_presented::apply(root, &mut product, git, defer).await?;
     Ok(product)
 }
@@ -739,6 +774,11 @@ pub(super) fn integration_result(
             "This result or its workspace changed. Rerun checks and review the new result.",
         ));
     }
+    if store.read(|db| super::task_merge::fresh_needed(db, project, execution, record))
+        .map_err(context::core)?
+    {
+        return Err(refuse("review_required", super::task_merge::FRESH_CHECKS_REASON));
+    }
     if !work {
         return Err(refuse(
             "checks_required",
@@ -815,6 +855,7 @@ pub(super) fn result_evidence_db(
             AND NOT EXISTS(SELECT 1 FROM workspace_starts WHERE execution_id=e.execution_id AND state='unknown')",
             (project,execution,root.to_string_lossy().as_ref()),|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
     let (task, status, synthesis, version) = row.ok_or(CoreError::Refused("result_unavailable"))?;
+    cortex_core::workspace::worktrees::desktop_checkout_on(db, store.key(), project, None, Some(execution))?;
     if synthesis.as_deref().is_none_or(str::is_empty) {
         return Err(CoreError::Refused("result_unavailable"));
     }

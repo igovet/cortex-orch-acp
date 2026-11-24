@@ -19,9 +19,12 @@ fn questions(store: &Store, i: &Identity) -> CoreResult<Vec<Value>> {
         let mut records=db.prepare("SELECT id,text,answer_text,answer_source,created_at,answered_at,options_json,assignment_ref,dedup_key FROM pending_questions WHERE task_id=? AND status='answered' AND answer_source IN ('text','elicitation') AND answer_text IS NOT NULL ORDER BY created_at,id")?
             .query_map([&i.task],|r|{
                 let id:String=r.get(0)?;let assignment:Option<String>=r.get(7)?;let dedup:String=r.get(8)?;
+                let options = r.get::<_,Option<String>>(6)?
+                    .and_then(|raw| serde_json::from_str::<Vec<Value>>(&raw).ok())
+                    .map(|options| options.iter().filter_map(cortex_core::lifecycle::waits::option_label).map(str::to_owned).collect::<Vec<_>>());
                 Ok(json!({"source_ref":format!("{id}:answer"),"question_id":id,"kind":"question_answer",
                     "question_text":r.get::<_,String>(1)?,"answer_text":r.get::<_,String>(2)?,"answer_source":r.get::<_,String>(3)?,
-                    "asked_at":r.get::<_,String>(4)?,"answered_at":r.get::<_,Option<String>>(5)?,"options":serde_json::from_str::<Value>(&r.get::<_,Option<String>>(6)?.unwrap_or("null".into())).unwrap_or(Value::Null),
+                    "asked_at":r.get::<_,String>(4)?,"answered_at":r.get::<_,Option<String>>(5)?,"options":options,
                     "assignment_ref":assignment,"asked_by":if dedup.starts_with("runtime:stop:"){"runtime"}else if assignment.is_some(){"worker"}else{"coordinator"},
                     "trust_label":"user_direct","session_id":null,"origin":null,"session_binding":"unavailable","session_binding_reason":"answer_session_not_recorded"}))
             })?.collect::<Result<Vec<_>,_>>()?;

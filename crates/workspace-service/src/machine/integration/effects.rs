@@ -32,6 +32,7 @@ pub(super) struct Plan<'a> {
     pub target_tree: Option<PathBuf>,
     pub automatic: bool,
     pub already_landed: bool,
+    pub owned_worktree: bool,
 }
 
 fn helper(name: &str) -> bool {
@@ -178,7 +179,7 @@ pub(super) async fn apply(plan: &Plan<'_>, product: &mut Value, git: &mut Git) -
             ));
         }
     }
-    if !plan.already_landed {
+    if !plan.already_landed && !(plan.owned_worktree && plan.method == "squash") {
         commit_source(plan, git).await?;
     }
     let source_head = git
@@ -204,6 +205,9 @@ pub(super) async fn apply(plan: &Plan<'_>, product: &mut Value, git: &mut Git) -
             )
             .await?
     {
+        if plan.owned_worktree && plan.method == "squash" {
+            return Err(refuse("review_required", "The target changed. Update the task and rerun review before squash."));
+        }
         return update_from_target(plan, product, &source_head, git).await;
     }
     if plan.method == "pr" {
@@ -220,11 +224,14 @@ async fn update_from_target(
 ) -> Result<Value> {
     let path = plan.path;
     let target_revision = super::update::target_revision(path, plan.target, git).await?;
+    let before = crate::machine::task_merge::abort_snapshot(path, git).await?;
     let merged = git
         .success(
             path,
             &[
                 "merge",
+                "--no-autostash",
+                "--no-edit",
                 "-m",
                 "Update task branch from target",
                 "--",
@@ -233,26 +240,21 @@ async fn update_from_target(
         )
         .await?;
     if !merged {
-        if git
-            .out(path, &["diff", "--name-only", "--diff-filter=U"])
-            .await?
-            .trim()
-            .is_empty()
-        {
+        let (marker, other) = git.merge_marker(path).await?;
+        if other || !marker.try_exists()? {
             return Err(refuse(
                 "git_failed",
                 "Git could not update the task branch. Inspect it before retrying.",
             ));
         }
-        let record = product["tasks"][plan.task].clone();
-        let mut merge = conflicts::build(path, plan.source, plan.target, &record, git).await?;
-        merge["targetRevision"] = json!(target_revision);
-        merge["sourceRevision"] = json!(source_head);
+        let record = &product["tasks"][plan.task];
+        let merge = conflicts::retain(path, plan.source, plan.target, record, source_head, &target_revision, before, git).await?;
         let record = &mut product["tasks"][plan.task];
         record["requiresFreshResult"] = fresh(plan);
         record["conflict"] = json!("conflict");
         record["merge"] = merge;
         record["acceptance"] = Value::Null;
+        record["automaticReady"] = json!(false);
         save(plan, product)?;
         return Err(refuse(
             "merge_conflict",
@@ -689,6 +691,14 @@ async fn squash(
             folder
         }
     };
+    if plan.owned_worktree {
+        let branch = git.out(&tree, &["branch", "--show-current"]).await?;
+        let source_common = git.out(plan.root, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).await?;
+        let target_common = git.out(&tree, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).await?;
+        if branch.trim() != plan.target || source_common.trim() != target_common.trim() || !git.clean(&tree).await? {
+            return Err(refuse("unsafe_target", "The chosen target checkout changed. No squash was attempted."));
+        }
+    }
     let snapshot = IndexSnapshot::capture(&tree, git).await?;
     let result = integration_squash::squash(&tree, plan.source, plan.message, snapshot, git).await;
     // A clean temporary checkout is removed without force; a dirty or uncertain one stays.
@@ -707,7 +717,15 @@ async fn squash(
     save(plan, product)?;
     remove_temp(plan, &temporary, git).await;
     // The merge is recorded before optional cleanup: cleanup failure cannot undo it.
-    if plan.params["deleteWorktree"] == true
+    if plan.owned_worktree && plan.params["deleteWorktree"] != false {
+        let cleanup = finish_owned_cleanup(plan);
+        let record = &mut product["tasks"][plan.task]["integration"];
+        record["worktreeCleanup"] = cleanup["status"].clone();
+        record["worktreeCleanupReason"] = cleanup["reason"].clone();
+        let _ = save(plan, product);
+        return Ok(json!({"done":true,"worktreeCleanup":cleanup}));
+    }
+    if !plan.owned_worktree && plan.params["deleteWorktree"] == true
         && product["tasks"][plan.task]["checkout"]["kind"] == "worktree"
     {
         let mut cleanup = "retained";
@@ -728,6 +746,22 @@ async fn squash(
     }
     Ok(json!({"done":true}))
 }
+fn finish_owned_cleanup(plan: &Plan<'_>) -> Value {
+    use cortex_core::{OpenMode, CoreError, workspace::worktrees::{self, Cleanup}};
+    let settled = (|| {
+        let store = super::context::open(plan.root, OpenMode::RuntimeValidate)?
+            .ok_or_else(|| super::context::core(CoreError::Refused("worktree_not_owned")))?;
+        store.write(|db| worktrees::queue_merge_cleanup_tx(db, plan.project, plan.task))
+            .map_err(super::context::core)?;
+        worktrees::finish_cleanup(&store, plan.project, plan.task, Cleanup::Close)
+            .map_err(super::context::core)?
+            .ok_or_else(|| super::context::core(CoreError::Refused("worktree_cleanup_unconfirmed")))
+    })();
+    settled.unwrap_or_else(|error| json!({
+        "status":"retained","path":plan.path,"reason":error.code
+    }))
+}
+
 async fn remove_temp(plan: &Plan<'_>, temporary: &Option<PathBuf>, git: &mut Git) {
     if let Some(folder) = temporary {
         let text = folder.to_string_lossy().into_owned();

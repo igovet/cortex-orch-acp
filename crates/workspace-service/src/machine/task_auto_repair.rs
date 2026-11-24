@@ -377,6 +377,10 @@ pub(crate) async fn dispatch(
         || record["status"] == "done"
         || record["acceptance"].is_object() && record["acceptance"]["automatic"] != true
         || record["conflict"].as_str().is_some_and(|c| c != "none")
+        || matches!(
+            record["merge"]["freshChecks"]["state"].as_str(),
+            Some("not_requested" | "request_unknown")
+        )
         || record["integration"].is_object()
     {
         return Ok(Dispatch::Refused(None));

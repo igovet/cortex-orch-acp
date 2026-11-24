@@ -185,6 +185,26 @@ smaller images"). The reply carries the request's own `id` when the frame's
 first 64 KiB show it as a top-level integer or string member, so the client
 ends that turn instead of waiting forever; otherwise the id is `null`.
 
+### Outgoing engine audio (2026-11-23)
+
+An ACP v1 `initialize` check of the installed Workspace Dev bundle and the
+installed OpenCode CLI returned the following
+`agentCapabilities.promptCapabilities`. No session was created and no prompt
+was sent.
+
+| Adapter | Version | `audio` | `image` | `embeddedContext` | Handling of ACP audio blocks (source or docs) |
+| --- | --- | --- | --- | --- | --- |
+| codex-acp | 2.6.0 (bundled Codex 0.166.0) | omitted | `true` | `true` | The adapter's `buildPromptItems` drops them before dispatch. |
+| claude-agent-acp | 0.107.0 (Claude Agent SDK 0.3.323) | omitted | `true` | `true` | The ACP v1 prompt handler rejects them as invalid parameters before queuing. |
+| OpenCode (`opencode acp`, also checked as `opencode2 acp`) | 2.2.0 | omitted | `true` | `true` | The [OpenCode ACP docs](https://opencode.ai/docs/cli/acp/#prompt-content) say it ignores them. |
+
+None of these adapters advertises direct audio input: an omitted `audio`
+flag defaults to `false` in [ACP v1](https://agentclientprotocol.com/protocol/v1/initialization#prompt-capabilities).
+This is separate from Cortex's incoming ACP agent, which explicitly advertises
+`audio: false`. Workspace keeps recognition on-device: the composer shows
+editable text before anything is sent, and the microphone audio stays on the
+machine.
+
 ## Paseo uploaded files
 
 Owner prompt text may reference an absolute upload path, including a standalone

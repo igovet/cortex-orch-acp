@@ -258,7 +258,11 @@ pub fn request(
                 }
                 asked.push(super::waits::QuestionForm {
                     question: f["question"].as_str().unwrap().to_owned(),
-                    options: options.clone(),
+                    options: super::waits::recommended_options(
+                        options.clone(),
+                        &f["recommended"],
+                        proposal.is_some(),
+                    )?,
                 });
             }
             // A question the owner already answered (the same text and options) is
@@ -296,12 +300,19 @@ pub fn request(
                     text = format!("{header}\n{text}");
                 }
                 db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,options_json,status,created_at) VALUES (?,?,?,?,?,'open',?)",
-                (&id,task,format!("{key}:{}",questions.len()),&text,f["options"].to_string(),crate::now()))?;
+                (&id,task,format!("{key}:{}",questions.len()),&text,json!(options).to_string(),crate::now()))?;
                 let labels: Vec<_> = options.iter().filter_map(super::waits::option_label).collect();
-                questions.push(json!({"question_id":id,"question":text,"options":labels,"topic":f["topic"]}));
+                let mut question = json!({"question_id":id,"question":text,"options":labels,"topic":f["topic"]});
+                if let Some(position) = super::waits::recommended_position(options) {
+                    question["recommended"] = json!(position);
+                }
+                questions.push(question);
             }
             let mut saved = json!({"question_id":questions[0]["question_id"],"question":questions[0]["question"],
             "options":questions[0]["options"],"resume_state":"PLANNING","revision":revision,"channel_id":channel,"coordinator":true});
+            if let Some(position) = questions[0].get("recommended") {
+                saved["recommended"] = position.clone();
+            }
             if state == TaskState::Reconciling {
                 saved["after_verification"] = json!(true);
             }

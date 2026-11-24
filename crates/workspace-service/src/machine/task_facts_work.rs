@@ -551,10 +551,14 @@ fn evaluate_exact(
         let mut all_passed = true;
         for i in 0..expected.len().max(checks.len()) {
             let check = checks.get(i);
+            let checkout_matches = match check {
+                Some(check) => cortex_core::workspace::worktrees::receipt_matches(db, task, check, true)?,
+                None => false,
+            };
             let outcome = match check {
                 None => "not_run",
                 Some(c)
-                    if !current || expected.get(i) != c.get("argv") || c["complete"] != true =>
+                    if !current || !checkout_matches || expected.get(i) != c.get("argv") || c["complete"] != true =>
                 {
                     "unverified"
                 }

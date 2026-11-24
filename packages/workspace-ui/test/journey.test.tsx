@@ -1,8 +1,8 @@
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { LOCAL_MACHINE_ID } from "@cortex/workspace-domain";
+import { emptyWorkspace, LOCAL_MACHINE_ID } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
-import { createRealPort, type ProjectLocator } from "../src/port/real";
+import { createRealPort, sessionOptions, type ProjectLocator } from "../src/port/real";
 import { capabilitiesWire, flush, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
 
 let dispose: (() => void) | undefined;
@@ -16,6 +16,20 @@ function input(label: string, value: string) {
   const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[aria-label="${label}"]`)!;
   el.value = value; el.dispatchEvent(new Event("input", { bubbles: true }));
 }
+
+it("builds ordered concrete effort choices for each enabled model", () => {
+  const config = emptyWorkspace().machines[0].config;
+  const engine = "codex-acp";
+  config.setup[engine].status = "connected";
+  config.surfaces.routing.engines[engine].enabled = ["one", "two"];
+  config.catalogue[engine].models = [
+    {id:"one",label:"One",efforts:["max","default","high","low","medium","xhigh"],observed:true},
+    {id:"two",label:"Two",efforts:["engine_default","high"],observed:true},
+  ];
+  const options = sessionOptions(config);
+  expect(options.efforts.map(e => e.label)).toEqual(["Low", "Medium", "High", "Extra high", "Max"]);
+  expect(options.models.find(m => m.id === "two")?.efforts).toEqual(["high"]);
+});
 
 it("registers, explicitly activates, saves then starts, reopens a question and streaming, and reads the runtime result", async () => {
   let registered = false, activated = false, phase = "empty", answer: any, refusedOnce = false;

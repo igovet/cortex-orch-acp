@@ -2,7 +2,7 @@
 //! restart observers read its durable status; they never execute the payload.
 use crate::{
     native_command_live::{Profile, Sandbox as LiveSandbox},
-    native_command_sandbox::{Sandbox, CODEX_SCRATCH},
+    native_command_sandbox::{Sandbox, CODEX_SCRATCH, WORKTREE_READ_ONLY},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -65,6 +65,8 @@ pub(crate) struct Spec {
     pub cwd: PathBuf,
     pub argv: Vec<String>,
     pub profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<Value>,
     pub writes: Vec<PathBuf>,
     pub protected: Vec<PathBuf>,
     pub output: PathBuf,
@@ -209,6 +211,7 @@ pub fn run() -> io::Result<()> {
     }
     let spec: Spec = serde_json::from_slice(&bytes)?;
     let scoped = spec.profile == CODEX_SCRATCH;
+    let lease = scoped || spec.profile == WORKTREE_READ_ONLY;
     let mut timings = std::collections::BTreeMap::new();
     let prepared = if scoped {
         if !spec.writes.is_empty() || !spec.cwd.starts_with(&spec.root) {
@@ -216,6 +219,15 @@ pub fn run() -> io::Result<()> {
         }
         handshake(&mut input, json!({"authorize":true}))?;
         Sandbox::prepare_scoped(&spec.root, &spec.protected).map(Prepared::Scoped)
+    } else if spec.profile == WORKTREE_READ_ONLY {
+        let logical = spec.checkout.as_ref().and_then(|v| v["logical"].as_str())
+            .map(Path::new).ok_or_else(|| io::Error::other("invalid_worktree_command_spec"))?;
+        if !spec.writes.is_empty() || !spec.cwd.starts_with(&spec.root)
+            || spec.checkout.as_ref().and_then(|v| v["root"].as_str()).map(Path::new) != Some(spec.root.as_path()) {
+            return Err(io::Error::other("invalid_worktree_command_spec"));
+        }
+        handshake(&mut input, json!({"authorize":true}))?;
+        Sandbox::prepare_worktree(&spec.root, logical, &spec.protected).map(Prepared::Scoped)
     } else {
         let profile = live_profile(&spec.profile)?;
         LiveSandbox::prepare_authorized(
@@ -317,7 +329,7 @@ pub fn run() -> io::Result<()> {
                     failure = Some("owner_stopped");
                     break;
                 }
-                if scoped && !scope_alive(&mut input, &mut renewed) {
+                if lease && !scope_alive(&mut input, &mut renewed) {
                     failure = Some("authority_changed");
                     break;
                 }

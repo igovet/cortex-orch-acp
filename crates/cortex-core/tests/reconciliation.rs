@@ -292,7 +292,7 @@ fn reconciling_question_answer_returns_to_planning_and_cannot_skip_certification
                 "t",
                 "coordinator",
                 "q",
-                &json!({"question":"Continue?","options":["Explain","Change"],"request_key":"q"}),
+                &json!({"question":"Continue?","recommended":1,"options":["Explain","Change"],"request_key":"q"}),
             )
         })
         .unwrap();
@@ -340,7 +340,7 @@ fn released_answer_with_changed_project_fails_without_fabricated_certification()
                 "t",
                 "coordinator",
                 "q",
-                &json!({"question":"Explain?","options":["Yes","Change"],"request_key":"q"}),
+                &json!({"question":"Explain?","recommended":1,"options":["Yes","Change"],"request_key":"q"}),
             )
         })
         .unwrap();

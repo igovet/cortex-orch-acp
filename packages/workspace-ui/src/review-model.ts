@@ -79,6 +79,20 @@ export type Cx = "none" | "running" | "failed" | "done";
 /** Which of the approved conflict states this task is in. */
 export const cxOf = (task: Task): Cx => task.conflict === "resolving" ? "running" : task.conflict === "failed" ? "failed" : task.conflict === "conflict" ? "none" : task.merge?.finished ? "done" : "none";
 export const inConflict = (task: Task) => task.conflict !== "none";
+export function mergeControls(task: Task) {
+  const merge = task.merge, state = merge?.handoff?.state;
+  const legacy = !!merge && !merge.conflictId && !merge.finished && inConflict(task);
+  const uncertain = merge?.gitState === "unknown" || state === "unknown" || state === "dispatch_unknown";
+  const active = !uncertain && (state === "active" || (task.conflict === "resolving" && !!merge?.conflictId));
+  const manual = !!merge?.conflictId && !merge.finished && !uncertain && !active && task.conflict !== "resolving";
+  return {
+    uncertain, active, legacy,
+    finish: manual && (merge.gitState === "stopped" || merge.gitState === "completed"),
+    abort: manual && merge.gitState === "stopped",
+    handoff: manual && merge.gitState === "stopped" && !merge.handoff && !!task.executionId,
+    inspect: !legacy && !!task.executionId && !!merge && (uncertain || merge.freshChecks?.state === "request_unknown"),
+  };
+}
 export const blocksLeft = (files: ConflictFile[]) => files.reduce((n, f) => n + f.blocks.filter(b => !b.choice).length, 0);
 export const fileResolved = (f: ConflictFile) => f.blocks.every(b => b.choice);
 export function conflictFacts(merge: MergeState) {
@@ -139,10 +153,11 @@ export type CheckoutFiles = { diffs: FileDiff[]; tree: string[] };
 export function checkoutFiles(state: WorkspaceState, repo: ProjectRepo, checkout: RepoCheckout): CheckoutFiles {
   const review = checkout.taskId ? reviewFor(state, checkout.taskId) : null;
   const diffs: FileDiff[] = checkout.files.length ? checkout.files : review?.files ?? [];
-  return { diffs, tree: [...new Set([...repo.tree, ...diffs.map(d => d.path)])].sort() };
+  const tree = checkout.kind === "worktree" && !repo.mock ? [] : repo.tree;
+  return { diffs, tree: [...new Set([...tree, ...diffs.map(d => d.path)])].sort() };
 }
 export function sourceOf(repo: ProjectRepo, checkout: RepoCheckout, diffs: FileDiff[], path: string): { lines: string[]; partial: boolean } | null {
-  const text = checkout.sources[path] ?? repo.sources[path];
+  const text = checkout.sources[path] ?? (checkout.kind === "worktree" && !repo.mock ? undefined : repo.sources[path]);
   if (text !== undefined) return { lines: text.replace(/\n$/, "").split("\n"), partial: false };
   // There is no full copy of this file, so show only the lines its diff recorded.
   const file = diffs.find(d => d.path === path);
@@ -272,5 +287,9 @@ export function worktreeRows(index: WorkspaceIndex, summary: ProjectSummary, rep
   }));
   return [...recorded, ...others];
 }
-export const defaultCheckout = (repo: ProjectRepo, id: string | undefined) => repo.checkouts.find(c => c.id === id) ?? repo.checkouts.find(c => c.taskId && c.kind === "worktree") ?? repo.checkouts[0];
+export const defaultCheckout = (repo: ProjectRepo, id?: string) => id === undefined
+  ? repo.checkouts.find(c => c.taskId && c.kind === "worktree") ?? repo.checkouts[0]
+  : repo.checkouts.find(c => c.id === id);
+export const unavailableCheckout = (state: WorkspaceState, projectId: string, id: string) => state.tasks.some(t =>
+  t.projectId === projectId && t.checkout.kind === "worktree" && t.checkout.id === id && t.checkout.unavailable);
 export { repoOf, taskCheckout, worktreeWork };

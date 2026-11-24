@@ -145,6 +145,64 @@ fn exact_portable_and_saved_coordinator_binding_and_native_argv() {
     assert_ne!(selected.route_id(), "obsolete");
 }
 #[test]
+fn task_effort_inherits_settings_and_ignores_legacy_sentinels() {
+    use workspace_service::{native_routes::ConfiguredRoutes, native_runtime::NativeRoutes};
+    let f = Fixture::new();
+    let mut snapshot = f.snapshot("cs_fixture");
+    let route = &mut snapshot["entries"][0]["route"];
+    route.as_object_mut().unwrap().remove("id");
+    route["supported_parameters"] = json!([
+        ["thought_level", "default"], ["thought_level", "high"],
+        ["thought_level", "low"], ["thought_level", "medium"]
+    ]);
+    route["id"] = json!(format!(
+        "xr_{}",
+        &digest(&serde_json::to_vec(route).unwrap())[..24]
+    ));
+    f.write("state/cortex/catalog/cn_fixture/cs_fixture.json", &snapshot);
+    let provider = ConfiguredRoutes {
+        environment: f.environment(),
+        relay: PathBuf::from("/bin/true"),
+    };
+    let root = f.base.join("project");
+    for (stored, expected) in [("high", "high"), ("default", "medium"), ("", "medium")] {
+        let mut parameters = json!({});
+        if !stored.is_empty() {
+            parameters["thought_level"] = json!(stored);
+        }
+        f.write(
+            "config/cortex/defaults.json",
+            &json!({"defaults":{"coordinator":{
+                "engine":"codex-acp","model":"fixture-model","parameters":parameters
+            }}}),
+        );
+        for effort in [Value::Null, json!(""), json!("default")] {
+            let settings = json!({"effort":effort});
+            let selected = provider.task_route(&root, &settings).unwrap();
+            assert_eq!(selected.parameters["thought_level"], expected);
+            let pin = provider.coordinator_pin(&root, &settings).unwrap().unwrap();
+            let pinned = provider.pinned_route(&root, &pin, Some("default")).unwrap();
+            assert_eq!(pinned.parameters["thought_level"], expected);
+        }
+        let options = provider.options(&root, &json!({}));
+        let thought = options
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "thought_level")
+            .unwrap();
+        assert_eq!(thought["currentValue"], expected);
+        let values: Vec<_> = thought["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["value"].as_str().unwrap())
+            .collect();
+        assert_eq!(values, ["low", "medium", "high"]);
+    }
+}
+
+#[test]
 fn per_task_model_and_effort_require_existing_exact_eligible_catalog_values() {
     use workspace_service::{native_routes::ConfiguredRoutes, native_runtime::NativeRoutes};
     let f = Fixture::new();
@@ -154,6 +212,27 @@ fn per_task_model_and_effort_require_existing_exact_eligible_catalog_values() {
     rules["models"]["codex-acp"]["tiers"]["fixture-other"] = json!(["standard"]);
     f.write("config/cortex/routing.json", &rules);
     let mut snapshot = f.snapshot("cs_fixture");
+    // This test also writes owner settings, which requires a complete registry record.
+    let id = "cn_000000000001";
+    std::fs::rename(
+        f.base.join("state/cortex/catalog/cn_fixture"),
+        f.base.join(format!("state/cortex/catalog/{id}")),
+    ).unwrap();
+    let mut record = f.record();
+    record["id"] = json!(id);
+    record["name"] = json!("Fixture");
+    record["key_kind"] = Value::Null;
+    record["created_at"] = json!("2026-11-12T00:00:00Z");
+    record["updated_at"] = record["created_at"].clone();
+    f.write("config/cortex/connections.json", &json!({"schema_version":1, "connections":{id:record}}));
+    let first = &mut snapshot["entries"][0];
+    first["connection_id"] = json!(id);
+    first["route"]["connection_id"] = json!(id);
+    first["route"].as_object_mut().unwrap().remove("id");
+    first["route"]["id"] = json!(format!(
+        "xr_{}",
+        &digest(&serde_json::to_vec(&first["route"]).unwrap())[..24]
+    ));
     let mut other = snapshot["entries"][0].clone();
     other["route"]["model"] = json!("fixture-other");
     other["route"].as_object_mut().unwrap().remove("id");
@@ -162,7 +241,7 @@ fn per_task_model_and_effort_require_existing_exact_eligible_catalog_values() {
         &digest(&serde_json::to_vec(&other["route"]).unwrap())[..24]
     ));
     snapshot["entries"].as_array_mut().unwrap().push(other);
-    f.write("state/cortex/catalog/cn_fixture/cs_fixture.json", &snapshot);
+    f.write(&format!("state/cortex/catalog/{id}/cs_fixture.json"), &snapshot);
     let provider = ConfiguredRoutes {
         environment: f.environment(),
         relay: PathBuf::from("/bin/true"),
@@ -202,6 +281,16 @@ fn per_task_model_and_effort_require_existing_exact_eligible_catalog_values() {
     assert_eq!(
         provider.pinned_route(&root, &pinned, None).unwrap().model,
         "fixture-other"
+    );
+
+    let mut inherited = settings.clone();
+    inherited["effort"] = json!("");
+    assert!(provider
+        .persist_default_route(&root, &json!({}), &inherited, "model")
+        .unwrap());
+    assert_eq!(
+        provider.route(&root, "orchestrator").unwrap().parameters["thought_level"],
+        "high"
     );
 
     rules["deny"] = json!(["codex-acp/*"]);
@@ -1756,7 +1845,7 @@ fn recorded_route_option_comment_grants_only_the_selected_route() {
                     "t_fixture",
                     "fixture-coordinator",
                     "ask-audit-route",
-                    &json!({"question":"Which model for the audit?", "options":labels}),
+                    &json!({"recommended":1,"question":"Which model for the audit?", "options":labels}),
                 )?;
                 let id = receipt["question_id"].as_str().unwrap();
                 assert!(waits::answer_tx(db, "t_fixture", id, answer, "text", None)?);

@@ -39,6 +39,7 @@ verification:
   check-pins                          reviewed Rust/CLI dependency pins (no build, no network)
   prerequisite-probe                  read-only inventory of native-build prerequisites (inventory only)
   test-fast             [--list] [--only NAMES] [--skip NAMES]   bounded no-paid cargo + npm suites, sequential
+                        [--list] --affected BASE        select Rust packages by Git merge-base changes; full fallback
 package identity:
   package               stamp|check   content hash stamp / validation
   runtime-payload       list          the exact shipped runtime file set

@@ -13,7 +13,7 @@ import { createRealPort } from "../src/port/real";
 import { sessionModel } from "../src/session-model";
 import { createSettingsState } from "../src/settings-state";
 import { createWorkspaceStore } from "../src/store";
-import { capabilitiesWire, draftTask, flush, refOf, scriptedPort, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
+import { capabilitiesWire, draftTask, flush, refOf, scriptedPort, scriptedTransport, snapshot, stoppedMerge, wireDecision, wireTask } from "./support";
 
 const OFFERED = ["capabilities.get", "project.snapshot", "tasks.create", "tasks.start", "decisions.list", "decisions.answer", "results.get", "executions.get", "history.page"];
 const png = { name: "clip.png", mimeType: "image/png", data: btoa("fixture png") };
@@ -516,12 +516,12 @@ describe("every message form sends its files", () => {
 });
 
 describe("dialogs and comments", () => {
-  function mount(options: { status?: Task["status"]; messages?: Message[]; comments?: ReviewComment[]; composer?: boolean } = {}) {
+  function mount(options: { conflict?: boolean; status?: Task["status"]; messages?: Message[]; comments?: ReviewComment[]; composer?: boolean } = {}) {
     const state = emptyWorkspace(), cap = { everything: true, operations: [] };
     state.machines[0].connection = "connected";
     state.projects.push({ id: "p", machineId: state.machines[0].id, name: "Project", repository: "/p", openBranch: "dev", defaultBranch: "main" });
     state.messages.push(...(options.messages ?? []));
-    state.tasks.push({ ...draftTask(), status: options.status ?? "review", checkout: { kind: "main", branch: "dev" }, result: { version: 1, digest: "d", summary: "R", checks: [], acceptanceAvailable: true, at: null, warnings: [] } as never });
+    state.tasks.push({ ...draftTask(), status: options.status ?? "review", ...(options.conflict ? { executionId: "e", conflict: "conflict", merge: stoppedMerge() } : {}), checkout: { kind: "main", branch: "dev" }, result: { version: 1, digest: "d", summary: "R", checks: [], acceptanceAvailable: true, at: null, warnings: [] } as never });
     const script = scriptedPort({ capabilities: cap });
     let openDialog!: (d: WsDialog) => void;
     const root = document.createElement("div"); document.body.append(root);
@@ -571,8 +571,8 @@ describe("dialogs and comments", () => {
     expect(commandOf(h.script, "add_comment").attachments?.map(a => a.name)).toEqual(["note.png"]);
   });
 
-  it("conflict guidance sends its files", async () => {
-    const h = mount();
+  it("conflict guidance sends its files with the saved conflict identity", async () => {
+    const h = mount({ conflict: true });
     h.open({ kind: "cortex", taskId: "t" });
     const dlg = $("dialog[open]")!;
     const box = dlg.querySelector<HTMLTextAreaElement>("textarea")!;
@@ -580,9 +580,9 @@ describe("dialogs and comments", () => {
     paste(box, { types: ["Files"], files: [new File(["bytes"], "both.png", { type: "image/png" })] });
     await settled();
     expect(dlg.querySelector(".ws-att")?.textContent).toContain("both.png");
-    [...dlg.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Resolve automatically")!.click();
+    [...dlg.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Hand to the app")!.click();
     await settled();
-    expect(commandOf(h.script, "resolve_with_cortex")).toMatchObject({ guidance: "Keep the tz argument", attachments: [{ name: "both.png" }] });
+    expect(commandOf(h.script, "resolve_with_cortex")).toMatchObject({ conflictId: "mc_1", guidance: "Keep the tz argument", attachments: [{ name: "both.png" }] });
   });
 
   it("editing a diff comment keeps, removes and adds files", async () => {

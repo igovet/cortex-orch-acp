@@ -264,7 +264,7 @@ fn reconciliation_fixture(mode: &str, scenario: &str, context: &Value) -> Option
         && !has("USER_ANSWER_RECEIVED")
     {
         return Some(
-            json!({"name":"user_question_request","arguments":{"question":"How should we finish?","options":["Explain and finish","Plan changes"],"request_key":"reconcile-question"}}),
+            json!({"name":"user_question_request","arguments":{"question":"How should we finish?","recommended":1,"options":["Explain and finish","Plan changes"],"request_key":"reconcile-question"}}),
         );
     }
     if context["revision"] == 1 && !has("REPLAN_REQUEST_ACCEPTED") {
@@ -1037,7 +1037,7 @@ pub async fn main() {
                             .is_some_and(|a| a.iter().any(|e| e["type"] == "VERIFICATION_FAILED"))
                     {
                         json!({"name":"user_question_request","arguments":{"question":"The owner stopped verification. How should we continue?",
-                            "options":["Keep the stopped result","Plan another check"],"request_key":"stopped-verification"}})
+                            "recommended":2,"options":["Keep the stopped result","Plan another check"],"request_key":"stopped-verification"}})
                     } else if mode == "desktop-coordinator" && full_scenario == "incoming-legacy-open" {
                         json!({"name":"answer_submit","arguments":{
                             "text":"The new session can answer without changing the old project.",
@@ -1152,20 +1152,20 @@ pub async fn main() {
                                     || raw.contains("Second guidance"))
                         );
                         wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Guidance observed in same worker session."}}}})).await.unwrap();
-                        json!({"name":"ask_question","arguments":{"question":"Guidance received; next?","options":["Continue","Wait"],"request_key":"guidance-question"}})
+                        json!({"name":"ask_question","arguments":{"question":"Guidance received; next?","recommended":1,"options":["Continue","Wait"],"request_key":"guidance-question"}})
                     } else if mode == "desktop-worker" && checkpoint
                         && assignment["node"] == "work" && *n == 1
                     {
                         json!({"name":"ask_question","arguments":{
                             "question":"Keep this output before pausing?",
-                            "options":[CHECKPOINT_ANSWER,"Discard the checkpoint output"],
+                            "recommended":1,"options":[CHECKPOINT_ANSWER,"Discard the checkpoint output"],
                             "request_key":"checkpoint-question"}})
                     } else if scenario.trim() == "batch" && *n == 1 {
                         json!({"name":"ask_question","arguments":{"questions":[
-                            {"question":"Which output?","options":["Detailed","Brief"]},
-                            {"question":"Which language?","options":["English","Russian"]}],"request_key":"batch"}})
+                            {"recommended":2,"question":"Which output?","options":["Detailed","Brief"]},
+                            {"question":"Which language?","recommended":1,"options":["English","Russian"]}],"request_key":"batch"}})
                     } else if matches!(scenario.trim(), "question" | "question-exit") && *n == 1 {
-                        json!({"name":"ask_question","arguments":{"question":"Which output?","options":["Detailed","Brief"],"request_key":"question"}})
+                        json!({"name":"ask_question","arguments":{"recommended":2,"question":"Which output?","options":["Detailed","Brief"],"request_key":"question"}})
                     } else {
                         if scenario.trim() == "access-retry" {
                             assert_eq!(*n, 2);

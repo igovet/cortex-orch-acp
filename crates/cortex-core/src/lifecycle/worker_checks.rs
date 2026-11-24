@@ -53,6 +53,7 @@ impl Run {
             && other.identity()
             && self.receipt["argv"] == other.receipt["argv"]
             && self.receipt["cwd"] == other.receipt["cwd"]
+            && self.receipt.get("checkout") == other.receipt.get("checkout")
             && (self.operation != other.operation
                 || self.receipt["profile"] == other.receipt["profile"])
     }
@@ -67,6 +68,7 @@ impl Run {
             && other.identity()
             && self.receipt["argv"] == other.receipt["argv"]
             && self.receipt["cwd"] == other.receipt["cwd"]
+            && self.receipt.get("checkout") == other.receipt.get("checkout")
     }
     pub fn verified_failure(&self) -> bool {
         self.complete() && self.receipt["exit_code"].as_i64().is_some_and(|c| c != 0)
@@ -107,7 +109,7 @@ pub fn load_runs(db: &Connection, task: &str, channel: &str) -> CoreResult<Vec<R
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    rows.into_iter()
+    let runs = rows.into_iter()
         .map(|(operation, raw, order)| {
             let saved: Value = serde_json::from_str(&raw)?;
             let receipt = if operation == "outside_command" {
@@ -123,7 +125,17 @@ pub fn load_runs(db: &Connection, task: &str, channel: &str) -> CoreResult<Vec<R
                 work_set: None,
             })
         })
-        .collect()
+        .collect::<CoreResult<Vec<_>>>()?;
+    let mut matched = Vec::new();
+    for run in runs {
+        if crate::workspace::worktrees::receipt_matches(db, task, &run.receipt, false)? {
+            matched.push(run);
+        } else if run.receipt["complete"] != true && run.receipt["checkout"].is_null() {
+            // A not-yet-observed intent is not proof of any checkout.
+            matched.push(run);
+        }
+    }
+    Ok(matched)
 }
 
 /// At most this many entries (scope entries plus written paths) form a work set;
@@ -211,15 +223,15 @@ pub fn record_work_set_tx(
     start: &str,
     end: &str,
 ) -> CoreResult<()> {
-    let started: Option<i64> = db
+    let started: Option<(i64, String)> = db
         .query_row(
-            "SELECT id FROM runtime_events WHERE task_id=? AND type='NATIVE_COMMAND_STARTED'
+            "SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type='NATIVE_COMMAND_STARTED'
              AND json_extract(payload_json,'$.ref')=? ORDER BY id LIMIT 1",
             (task, reference),
-            |r| r.get(0),
+            |r| Ok((r.get(0)?,r.get(1)?)),
         )
         .optional()?;
-    let Some(started) = started else {
+    let Some((started, payload)) = started else {
         return Ok(());
     };
     let seen: bool = db.query_row(
@@ -231,13 +243,14 @@ pub fn record_work_set_tx(
     if seen {
         return Ok(());
     }
-    super::event_tx(
-        db,
-        task,
-        "NATIVE_CHECK_WORK_SET",
-        json!({"ref":reference,"assignment_ref":assignment,"work_set":work_set,
-            "started_event":started,"start_digest":start,"end_digest":end,"stable":start==end}),
-    )?;
+    let payload: Value = serde_json::from_str(&payload)?;
+    let mut event = json!({"ref":reference,"assignment_ref":assignment,"work_set":work_set,
+        "started_event":started,"start_digest":start,"end_digest":end,"stable":start==end});
+    if let Some(checkout) = payload.get("checkout") {
+        event["checkout"] = checkout.clone();
+        event["cwd"] = payload["cwd"].clone();
+    }
+    super::event_tx(db, task, "NATIVE_CHECK_WORK_SET", event)?;
     Ok(())
 }
 /// The retained work-set observation of `reference`, when it is stable (the work
@@ -280,7 +293,12 @@ pub fn wrote_outside_after(
 }
 /// The binding a verified work-set run gives its passed check.
 pub fn work_set_binding(record: &Value) -> Value {
-    json!({"kind":"work_set","work_set":record["work_set"],"digest":record["end_digest"]})
+    let mut binding = json!({"kind":"work_set","work_set":record["work_set"],"digest":record["end_digest"]});
+    if let Some(checkout) = record.get("checkout") {
+        binding["checkout"] = checkout.clone();
+        binding["cwd"] = record["cwd"].clone();
+    }
+    binding
 }
 /// At completion, re-establish each recorded work-set binding from the runtime's own
 /// records: the submission-time comparison was made by the host and recorded with
@@ -306,7 +324,11 @@ pub fn accept_recorded_bindings(
             continue;
         }
         for run in runs.iter_mut().filter(|r| r.reference() == reference) {
-            run.work_set = Some(binding.clone());
+            if binding.get("checkout") == run.receipt.get("checkout")
+                && (binding.get("checkout").is_none() || binding["cwd"] == run.receipt["cwd"])
+            {
+                run.work_set = Some(binding.clone());
+            }
         }
     }
     Ok(())

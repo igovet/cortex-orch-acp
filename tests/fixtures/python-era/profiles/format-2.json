@@ -1,0 +1,51 @@
+{
+  "format": 2,
+  "active": "historical-v2",
+  "applied": {
+    "profile": "historical-v2",
+    "at": "2026-11-24T09:55:47.283008+00:00",
+    "revisions": {
+      "routing": "absent",
+      "user_defaults": "absent",
+      "mcp_servers": "absent",
+      "connections": "absent"
+    }
+  },
+  "pending": null,
+  "profiles": {
+    "historical-v2": {
+      "description": "Historical Python format 2",
+      "created_at": "2026-11-24T09:55:47.283008+00:00",
+      "updated_at": "2026-11-24T09:55:47.283008+00:00",
+      "sections": [
+        "routing",
+        "user_defaults",
+        "mcp_servers",
+        "connections"
+      ],
+      "settings": {
+        "routing": {},
+        "user_defaults": {
+          "defaults": {},
+          "ceiling": {
+            "allowed_connections": null,
+            "allowed_data_recipients": null,
+            "allowed_routes": null,
+            "fallback_policy": {
+              "allowed_failure_classes": null,
+              "allowed_target_routes": null,
+              "budget": null,
+              "data_recipient_consent": false
+            },
+            "limits": {},
+            "permission_level": null,
+            "spend_limit": null,
+            "spend_limit_enforceable": false
+          }
+        },
+        "mcp_servers": {},
+        "connections": {}
+      }
+    }
+  }
+}

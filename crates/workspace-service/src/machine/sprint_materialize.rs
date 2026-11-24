@@ -93,32 +93,18 @@ fn ordered(items: &[Value]) -> Result<Vec<Item<'_>>> {
             checkout: item.get("checkout").filter(|c| !c.is_null()),
         });
     }
-    for item in &parsed {
-        for dep in &item.depends {
-            if *dep == item.key || !keys.contains(dep) {
-                return Err(invalid_plan(format!(
-                    "task {} waits for a task that is not in the plan",
-                    item.key
-                )));
-            }
-        }
-    }
-    let mut done = HashSet::new();
-    let mut out = Vec::with_capacity(parsed.len());
-    let mut left: Vec<Option<Item>> = parsed.into_iter().map(Some).collect();
-    while out.len() < left.len() {
-        let next = left.iter().position(|i| {
-            i.as_ref()
-                .is_some_and(|i| i.depends.iter().all(|d| done.contains(d)))
-        });
-        let Some(next) = next else {
-            return Err(invalid_plan("its dependencies form a cycle"));
-        };
-        let item = left[next].take().unwrap();
-        done.insert(item.key);
-        out.push(item);
-    }
-    Ok(out)
+    let graph: Vec<_> = parsed.iter().map(|item| (item.key, item.depends.clone())).collect();
+    use super::sprint_dag::Error;
+    let indices = super::sprint_dag::ordered(&graph).map_err(|error| match error {
+        Error::DuplicateId(key) => invalid_plan(format!("two tasks share the key {key}")),
+        Error::SelfEdge(key) | Error::Missing(key, _) => invalid_plan(format!(
+            "task {key} waits for a task that is not in the plan"
+        )),
+        Error::DuplicateEdge => invalid_plan("a task repeats the same dependency"),
+        Error::Cycle => invalid_plan("its dependencies form a cycle"),
+    })?;
+    let mut left: Vec<_> = parsed.into_iter().map(Some).collect();
+    Ok(indices.into_iter().map(|i| left[i].take().unwrap()).collect())
 }
 
 /// Earlier, partly finished Create tasks could leave tasks that name the sprint but

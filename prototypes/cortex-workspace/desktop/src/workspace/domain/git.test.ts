@@ -97,7 +97,7 @@ describe("integration", () => {
 describe("conflicts", () => {
   it("updating a stale branch can stop at a conflict, and aborting restores everything", () => {
     const p = port(), before = task(p, C.merge);
-    send(p, { type: "update_from_target", taskId: C.merge, now: NOW });
+    send(p, { type: "update_from_target", taskId: C.merge, confirmed: true, digest: before.result!.digest, now: NOW });
     expect(task(p, C.merge)).toMatchObject({ conflict: "conflict", status: "needs_you", acceptance: null });
     expect(boardPhase(p.snapshot(), C.merge)).toBe("needs_you");
     send(p, { type: "abort_merge", taskId: C.merge, now: NOW });

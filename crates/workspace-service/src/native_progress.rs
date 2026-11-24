@@ -287,6 +287,50 @@ pub(crate) fn token_total(tokens: &Value) -> Option<u64> {
     known.into_iter().try_fold(0_u64, u64::checked_add)
 }
 
+/// Reported native prompt subtotal by authenticated attempt. Unknown reports
+/// are absent, and a reported zero remains a real subtotal.
+pub(crate) fn attempt_tokens(
+    db: &rusqlite::Connection,
+    task: &str,
+) -> cortex_core::CoreResult<BTreeMap<String, u128>> {
+    let mut query = db.prepare(
+        "SELECT attempt_id,tokens_json FROM usage_records
+         WHERE task_id=? AND attempt_id IS NOT NULL AND basis='engine_reported'
+         AND substr(id,1,length(?2))=?2",
+    )?;
+    let mut rows = query.query((task, NATIVE_USAGE_PREFIX))?;
+    let mut totals = BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        let raw: String = row.get(1)?;
+        if let Some(n) = serde_json::from_str::<Value>(&raw)
+            .ok()
+            .and_then(|v| prompt_reported_tokens(&v))
+            .and_then(|v| token_total(&v))
+        {
+            *totals.entry(row.get(0)?).or_default() += u128::from(n);
+        }
+    }
+    Ok(totals)
+}
+
+/// Do not expose integers a JSON/JavaScript client cannot represent exactly.
+pub(crate) fn visible_tokens(tokens: u128) -> Option<u64> {
+    (tokens <= 9_007_199_254_740_991).then_some(tokens as u64)
+}
+
+/// Time for a recorded attempt, never growing after its recorded end.
+pub(crate) fn attempt_elapsed(
+    start: Option<i64>,
+    end: Option<i64>,
+    active: bool,
+) -> (Option<i64>, Option<i64>) {
+    match (start, end, active) {
+        (Some(start), Some(end), _) => (Some(end.saturating_sub(start).max(0)), None),
+        (start, None, true) => (None, start),
+        _ => (None, None),
+    }
+}
+
 /// What one engine and model did for a task.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct EngineSpend {

@@ -18,7 +18,7 @@ See [requirements](../requirements.md).
 ## Inputs
 - [Desktop concepts](../design/desktop-concepts.md) and the shared 500-task fixture in [prototype fixtures](../design/prototype-fixtures.md).
 - [Screens](../SCREENS.md) (desktop project board/list, create task) and [design direction](../DESIGN.md).
-- [Performance targets](../performance.md): cold board under 700 ms; scroll and drag at 16.7 ms per frame with no run over three dropped frames; 500-task baseline.
+- [Performance targets](../performance.md): cold board under 700 ms; scrolling at 16.7 ms per frame with no run over three dropped frames; 500-task baseline.
 - Typed task projections from CW-C04 and project registration from CW-H02, consumed through the public contract in [protocol](../protocol.md).
 - The accepted prototype code (Gate D, 2026-11-05) is the starting point. Validate the current service contract before implementation.
 
@@ -37,7 +37,7 @@ Positive:
 - Filtering by wait reason or by stage gives the same counts in the board and in the list.
 
 Negative:
-- Dragging a card to another stage sends an intent. The displayed stage changes only when the service returns a newer projection version.
+- Dragging a card does not change its stage or send an intent. External completion is an explicit, confirmed task-menu action. The displayed stage changes only when the service returns a newer projection version.
 - Creating a task does not start execution unless the owner selects the explicit start intent.
 - A missing or unknown field renders as "unknown", never as blank or success styling.
 - A projection older than the version already shown is rejected; the card keeps its current version and age label.

@@ -73,17 +73,25 @@ await main(async () => {
 
   async function move(pj) {
     await load(`${pj}/board`);
-    await call(() => { window.__seen = {flew: 0, frames: []}; const tick = () => { const g = document.querySelector(".ws-fly"); if (g) { __seen.flew++; const m = new DOMMatrix(getComputedStyle(g).transform); __seen.frames.push(Math.round(m.m41) + "," + Math.round(m.m42)); } requestAnimationFrame(tick); }; requestAnimationFrame(tick); return 1; });
+    await call(() => {
+      window.__flight = false;
+      const watch = new MutationObserver(records => {
+        if (records.some(r => r.attributeName === "data-flying" ||
+          [...r.addedNodes].some(n => n instanceof Element && n.matches(".ws-fly")))) window.__flight = true;
+      });
+      watch.observe(document.body, {subtree: true, childList: true, attributes: true, attributeFilter: ["data-flying"]});
+      return 1;
+    });
     const at = await call(() => { const b = [...document.querySelectorAll(".card-a button")].find(b => b.textContent === "Start"); if (!b) return null; const card = b.closest(".card"); window.__id = card.dataset.task; window.__from = card.closest(".col").dataset.col; window.__start = __box(card); const r = b.getBoundingClientRect(); return [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)]; });
     if (at === null) { (facts.not_on_screen ??= []).push("a startable card"); return; }
     await x("mousemove", ...at);
     await x("click", 1);
     await sleep(.7);
     await x("mousemove", ...PARK);
-    const after = await call(() => { const card = document.querySelector(`.card[data-task="${__id}"]`); return {flew: __seen.flew, frames: [...new Set(__seen.frames)].length, from: __from, to: card?.closest(".col")?.dataset.col, left: document.querySelectorAll(".ws-fly").length, hidden: card && getComputedStyle(card).visibility, flying: document.querySelector(".board-wrap").hasAttribute("data-flying")}; });
-    check("a card flies between columns in several frames", after.from !== after.to && after.frames >= 3, {after});
-    check("the flight ends clean", after.left === 0 && after.hidden === "visible" && !after.flying, {after});
-    facts.flight = after;
+    const after = await call(() => { const card = document.querySelector(`.card[data-task="${__id}"]`); return {flight: __flight, from: __from, to: card?.closest(".col")?.dataset.col, left: document.querySelectorAll(".ws-fly").length, hidden: card && getComputedStyle(card).visibility, flying: document.querySelector(".board-wrap").hasAttribute("data-flying")}; });
+    check("the card changes columns", !!after.to && after.from !== after.to, {after});
+    check("the destination is visible without a card flight", !after.flight && after.left === 0 && after.hidden === "visible" && !after.flying, {after});
+    facts.move = after;
   }
 
   async function plan(sprint) {

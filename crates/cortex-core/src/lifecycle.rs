@@ -202,16 +202,7 @@ impl<'a> TaskMachine<'a> {
                 if target == TaskState::Blocked {
                     domain::stop_tx(db, task, blocker.unwrap_or("unknown"))?;
                 } else {
-                    db.execute(
-                        "UPDATE runtime_tasks SET state=?,blocker=?,updated_at=? WHERE task_id=?",
-                        (target.as_str(), blocker, crate::now(), task),
-                    )?;
-                    event_tx(
-                        db,
-                        task,
-                        "TASK_STATE_CHANGED",
-                        json!({"previous":source,"state":target,"blocker":blocker}),
-                    )?;
+                    domain::state_tx(db, task, target, blocker)?;
                 }
                 let actual: String = db.query_row(
                     "SELECT state FROM runtime_tasks WHERE task_id=?",

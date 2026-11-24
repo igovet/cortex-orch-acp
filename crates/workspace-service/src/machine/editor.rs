@@ -3,7 +3,7 @@
 use super::{context, files, git::Git, native::*, settings::Lock};
 use cortex_core::{
     store::owner_file_leases::{self as leases, Checkout, Editor, EditorEpoch, RelativePath},
-    CoreError, CoreResult, OpenMode, Store,
+    CoreError, CoreResult, OpenMode, ProjectKey, Store,
 };
 use serde_json::{json, Value};
 use std::{
@@ -86,6 +86,32 @@ fn token(params: &Value) -> Result<&str> {
         .ok_or_else(|| lease_error(CoreError::Refused("edit_lease_lost")))
 }
 
+fn lease_schema_installed(db: &rusqlite::Connection) -> CoreResult<bool> {
+    // Store validation already checks that this additive group is all-or-none.
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='code_owner_file_leases')",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+fn open_for_acquire(key: ProjectKey) -> CoreResult<Store> {
+    // A normal edit is a WAL write, not exclusive schema maintenance. In
+    // particular, a live read must not block an edit on an initialized store.
+    match Store::open(key.clone(), OpenMode::RuntimeValidate) {
+        Ok(store) => {
+            if store.read(lease_schema_installed)? {
+                return Ok(store);
+            }
+        }
+        Err(CoreError::Refused("legacy_storage_migration_required")) => {}
+        Err(error) if crate::local::store_missing(&key, &error) => {}
+        Err(error) => return Err(error),
+    }
+    // Only explicit Edit can bootstrap storage or install the missing group.
+    Store::open(key, OpenMode::Initialize)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run(
     authority: &Authority,
@@ -135,7 +161,7 @@ pub(super) async fn run(
         // store for a registered folder that has never run a task.
         let key = context::key(root)?;
         crate::project_guard::activate(key.root())?;
-        let store = Store::open(key, OpenMode::Initialize).map_err(lease_error)?;
+        let store = open_for_acquire(key).map_err(lease_error)?;
         authority.prepare(&store).map_err(lease_error)?;
         store
     } else {
@@ -185,11 +211,7 @@ pub(super) async fn run(
             }
             // An existing format-12 store may predate the optional lease
             // schema. Writable Initialize installs it; status never does.
-            let installed: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='code_owner_file_leases')",
-                [], |r| r.get(0),
-            )?;
-            if !installed {
+            if !lease_schema_installed(db)? {
                 return Ok(json!({"status":"available"}));
             }
             let coverage = leases::Coverage::FileConfined(std::slice::from_ref(&path));

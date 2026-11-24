@@ -691,7 +691,8 @@ test("routing: observed model efforts constrain pins, policy and ordered ladders
   assert.ok(!screen.has("Pin 1 effort: low"));
   await screen.type("Pin 1 model (full id)", "provider/default");
   assert.ok(!screen.has("Pin 1 effort: high"));
-  assert.ok(screen.has("Pin 1 effort: Engine default"));
+  assert.ok(screen.has("Pin 1 effort: Use routing policy"));
+  assert.ok(!screen.has("Pin 1 effort: Engine default"));
   await screen.type("Pin 1 model (full id)", "hand/typed");
   assert.ok(screen.has("Pin 1 effort: low"));
   assert.ok(screen.has("Pin 1 effort: medium"));

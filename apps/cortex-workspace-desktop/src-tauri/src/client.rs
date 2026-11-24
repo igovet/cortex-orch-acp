@@ -1,6 +1,6 @@
 //! The desktop's bridge to the machine service: the shared [`workspace_client::Bridge`]
 //! over this account's Unix socket, with the service-manager start and the desktop-only
-//! operations (native login, editor and log openers, the native capability entries).
+//! operations (native login, editor, file manager and log openers, native capabilities).
 use crate::opener;
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -14,6 +14,12 @@ use workspace_service::{
 
 /// Marks an error as the machine's own answer, so a caller can tell it from a reply that never came.
 const REFUSED: &str = "refused:";
+fn add_reveal_capability(methods: &mut Vec<Value>, file_manager: bool, system: bool) {
+    if file_manager || system {
+        methods.push(json!("native.reveal_file"));
+    }
+}
+
 const STARTUP_DEADLINE: Duration = workspace_client::bridge::STARTUP_DEADLINE;
 
 /// This account's service socket, started through the user service manager when absent.
@@ -163,7 +169,9 @@ impl Bridge {
                 }
                 let vs_code = opener::vs_code().is_some();
                 let system = opener::system_opener().is_some();
+                let file_manager = !system && opener::file_manager_available().await;
                 if let Some(methods) = value["methods"].as_array_mut() {
+                    add_reveal_capability(methods, file_manager, system);
                     if vs_code {
                         methods.push(json!("native.open_editor.vscode"));
                     }
@@ -211,6 +219,10 @@ impl Bridge {
             }
             "native.open_editor" => self
                 .open_editor(&call.message)
+                .await
+                .map_err(|text| format!("{REFUSED}{text}")),
+            "native.reveal_file" => self
+                .reveal_file(&call.message)
                 .await
                 .map_err(|text| format!("{REFUSED}{text}")),
             "native.open_logs" => self
@@ -287,6 +299,13 @@ impl Bridge {
         }
         Ok(json!({"outcome":"opened"}))
     }
+    async fn reveal_file(&self, message: &Value) -> Result<Value, String> {
+        let (_, file) = self.located(message).await?;
+        let file = file.as_deref().ok_or("This file could not be found.")?;
+        opener::reveal_file(file).await?;
+        Ok(json!({"outcome":"opened"}))
+    }
+
     /// Same handoff used by the real View PR call. An extracted app must never fall
     /// through to an installed opener, including when no recorder was configured.
     fn capture_pull_request(&self, url: &str) -> Result<bool, String> {
@@ -374,7 +393,8 @@ impl Bridge {
 
 #[cfg(test)]
 mod tests {
-    use super::{Bridge, Startup};
+    use super::{add_reveal_capability, Bridge, Startup};
+    use serde_json::json;
     use std::{
         io::Write,
         os::unix::fs::{DirBuilderExt, PermissionsExt},
@@ -472,6 +492,19 @@ mod tests {
             "extracted_dev_service_unavailable"
         );
         std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn reveal_capability_requires_a_file_manager_or_system_opener() {
+        for (file_manager, system) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut methods = vec![json!("native.open_editor")];
+            add_reveal_capability(&mut methods, file_manager, system);
+            let expected = usize::from(file_manager || system);
+            assert_eq!(
+                methods.iter().filter(|m| **m == "native.reveal_file").count(),
+                expected
+            );
+        }
     }
 
     #[tokio::test]

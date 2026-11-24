@@ -1,5 +1,5 @@
 import type { Ceiling, EngineKey, Machine, MachineConfig, McpPolicy, McpServer, Problem, Profile, ProfileSection, ProfileSections, RoutingRules, SurfaceKey, TaskSettings, UserDefaults } from "./types";
-import { engineLabel, ENGINE_KEYS } from "./catalog";
+import { engineLabel, ENGINE_KEYS, orderedEfforts, resolveEffort } from "./catalog";
 import { pathMissing } from "./mcp";
 import { modelLabel, notOffered, type PreviewContext } from "./routing-rules";
 
@@ -29,18 +29,27 @@ export function capture(surfaces: MachineConfig["surfaces"], sessions: Record<st
 export const sessionsOf = (machine: Machine) => Object.fromEntries(machine.connections.map(c => [c.id, c.sessions]));
 export const captureProfile = (machine: Machine) => capture(machine.config.surfaces, sessionsOf(machine));
 
+/** Configured effort before narrowing to the particular model's advertised levels. */
+export function machineEffort(machine: Machine): string {
+  const { coordinator, routeDefault } = machine.config.surfaces.user_defaults;
+  return routeDefault ? resolveEffort(routeDefault.parameters.thought_level)
+    : resolveEffort(coordinator?.effort, coordinator?.parameters.thought_level);
+}
+
 /** What a new task on this machine starts with. A task keeps its own copy, so saving here never touches running work. */
 export function machineDefaults(machine: Machine): { settings: TaskSettings; checkout: "worktree" | "main" } {
   const d = machine.config.surfaces.user_defaults;
   const choice = d.coordinator;
-  const model = choice ? machine.config.catalogue[choice.engine].models.find(m => m.id === choice.model)?.routeId ?? choice.model : d.routeDefault?.routeId ?? "";
-  const effort = choice?.effort ?? d.routeDefault?.parameters.thought_level ?? "";
+  const model = d.routeDefault?.routeId ?? (choice ? machine.config.catalogue[choice.engine].models.find(m => m.id === choice.model)?.routeId ?? choice.model : "");
+  const offered = ENGINE_KEYS.flatMap(engine => machine.config.catalogue[engine].models)
+    .find(m => (m.routeId ?? m.id) === model)?.efforts;
+  const effort = resolveEffort(machineEffort(machine), "", offered);
   return { settings: { model, effort, mode: d.mode, language: d.language }, checkout: d.checkout };
 }
 /** The levels this model reports. Max stays for light work. An unknown model gets a list that says it was not observed. */
 export function coordinatorEfforts(catalogue: MachineConfig["catalogue"], engine: EngineKey, model: string) {
   const found = catalogue[engine].models.find(m => m.id === model);
-  return found ? { levels: found.efforts.filter(e => e !== "max"), observed: true } : { levels: ["low", "medium", "high"], observed: false };
+  return found ? { levels: orderedEfforts(found.efforts).filter(e => e !== "max"), observed: true } : { levels: ["low", "medium", "high"], observed: false };
 }
 export type Resolution = { ok: true; route: string } | { ok: false; code: string; text: string };
 export function coordinatorResolution(machine: Machine): Resolution {

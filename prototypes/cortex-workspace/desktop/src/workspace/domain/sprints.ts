@@ -22,7 +22,7 @@ export function advanceSprint(state: WorkspaceState, sprint: Sprint, now?: numbe
   }
   const next = tasks.find(t => t.status === "draft" && t.dependencies.every(id => dependencyReady(entity(state.tasks, id))));
   if (next) startTask(state, next, now);
-  else if (tasks.every(dependencyReady)) sprint.queueState = "complete";
+  else if (tasks.every(task => dependencyReady(task))) sprint.queueState = "complete";
   else { sprint.queueState = "paused"; sprint.pauseReason = "Dependencies are not ready"; }
 }
 export function handleSprint(state: WorkspaceState, command: WorkspaceCommand): boolean {

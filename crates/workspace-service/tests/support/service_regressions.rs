@@ -18,9 +18,9 @@ const ANSWERS: [&str; 3] = [
 
 fn question() -> Value {
     json!({"name":"user_question_request","arguments":{"request_key":"owner-decisions","questions":[
-        {"question":QUESTIONS[0],"options":["Detailed","Brief"]},
-        {"question":QUESTIONS[1],"options":["English","French"]},
-        {"question":QUESTIONS[2],"options":["Text","HTML"]}
+        {"question":QUESTIONS[0],"recommended":2,"options":["Detailed","Brief"]},
+        {"question":QUESTIONS[1],"recommended":1,"options":["English","French"]},
+        {"question":QUESTIONS[2],"recommended":2,"options":["Text","HTML"]}
     ]}})
 }
 
@@ -520,7 +520,7 @@ pub(super) async fn peer() {
                     {
                         json!({"name":"answer_submit","arguments":{"request_key":"finish","text":"Corrected check passed."}})
                     } else if context["state"] == "RECONCILING" {
-                        json!({"name":"user_question_request","arguments":{"request_key":"acknowledge","question":"Use the corrected check?","options":["Accept corrected check","Keep original"]}})
+                        json!({"name":"user_question_request","arguments":{"request_key":"acknowledge","question":"Use the corrected check?","recommended":1,"options":["Accept corrected check","Keep original"]}})
                     } else if failed {
                         json!({"name":"verification_submit","arguments":{"request_key":"revise-check","verification":[FIXED]}})
                     } else {

@@ -135,9 +135,10 @@ pub fn require_prior_worker_repairs(
         let run = receipt(db, task, &assignment, &reference)?;
         failures.retain(|failed| {
             !(failed.run.same_intent(&run)
-                || name
-                    .as_deref()
-                    .is_some_and(|n| !n.trim().is_empty() && failed.check["name"] == n))
+                || ((failed.run.receipt.get("checkout").is_none() && run.receipt.get("checkout").is_none()
+                    || (failed.run.receipt.get("checkout") == run.receipt.get("checkout")
+                        && failed.run.receipt["cwd"] == run.receipt["cwd"]))
+                    && name.as_deref().is_some_and(|n| !n.trim().is_empty() && failed.check["name"] == n)))
         });
     }
     for check in verification["checks"].as_array().into_iter().flatten() {
@@ -145,13 +146,13 @@ pub fn require_prior_worker_repairs(
             break;
         }
         // The authoritative verification and native output name the same unique run.
-        let mut q = db.prepare("SELECT json_extract(result_json,'$.cwd') FROM runtime_requests
+        let mut q = db.prepare("SELECT result_json FROM runtime_requests
             WHERE task_id=? AND actor='native-verifier-output' AND operation='native_command_output'
             AND json_extract(result_json,'$.tool_call_ref')=? AND json_extract(result_json,'$.argv')=?
             AND json_extract(result_json,'$.revision_digest')=? AND json_extract(result_json,'$.observation.complete')=1
             AND json_extract(result_json,'$.observation.exit_code')=0 AND json_extract(result_json,'$.observation.output_truncated')=0
             AND json_extract(result_json,'$.observation.failure') IS NULL LIMIT 2")?;
-        let dirs = q
+        let receipts = q
             .query_map(
                 (
                     task,
@@ -162,11 +163,17 @@ pub fn require_prior_worker_repairs(
                 |r| r.get::<_, String>(0),
             )?
             .collect::<Result<Vec<_>, _>>()?;
-        if let [cwd] = dirs.as_slice() {
+        if let [raw] = receipts.as_slice() {
+            let receipt: Value = serde_json::from_str(raw)?;
+            if !crate::workspace::worktrees::receipt_matches(db, task, &receipt, true)?
+                || check.get("checkout") != receipt.get("checkout") {
+                continue;
+            }
             failures.retain(|f| {
                 !(f.run.operation == "command_run"
                     && f.run.receipt["argv"] == check["argv"]
-                    && f.run.receipt["cwd"] == cwd.as_str())
+                    && f.run.receipt["cwd"] == receipt["cwd"]
+                    && f.run.receipt.get("checkout") == receipt.get("checkout"))
             });
         }
     }

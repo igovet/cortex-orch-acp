@@ -1,11 +1,11 @@
 import { render } from "solid-js/web";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { emptyWorkspace, emptySession, LOCAL_MACHINE_ID, mapDecision, type Decision, type Worker } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { flush, projection, scriptedPort, withTask } from "./support";
 
 let dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); document.body.innerHTML = ""; localStorage.clear(); });
+afterEach(() => { dispose?.(); document.body.innerHTML = ""; localStorage.clear(); vi.restoreAllMocks(); });
 const settle = async () => { for (let i = 0; i < 8; i++) await flush(); };
 
 const reviewer: Worker = {
@@ -62,6 +62,21 @@ it("shows each answer's consequence and the recommendation, and opens the review
   document.querySelector<HTMLAnchorElement>(".task-panel .ws-dc-targets a:nth-of-type(2)")!.click(); await settle();
   expect(location.pathname).toBe(`/m/${LOCAL_MACHINE_ID}/t/t2`);
 });
+
+it.each([["en-US", "Recommended", ""], ["ru-RU", "Рекомендуется", "fullstack-dev"]])(
+  "marks but does not select the recommended option in an ordinary %s question",
+  async (locale, badge, askedBy) => {
+    vi.spyOn(navigator, "language", "get").mockReturnValue(locale);
+    const question = wire({ runtimeStop: false, headline: undefined, askedBy, prompt: "Which layout?",
+      options: [{ optionId: "o1", label: "Compact" }, { optionId: "o2", label: "Spacious", recommended: true }] });
+    await mount([question]);
+    const options = [...document.querySelectorAll('[role="radio"]')];
+    expect(options).toHaveLength(2);
+    expect(options[0].querySelector(".ws-dc-rec")).toBeNull();
+    expect(options[1].querySelector(".ws-dc-rec")?.textContent).toBe(badge);
+    expect(options.map(o => o.getAttribute("aria-checked"))).toEqual(["false", "false"]);
+  },
+);
 
 // A stop question the runtime replaced says so and shows its one-line reason, never the whole earlier text as a bare line.
 it("reads a replaced runtime question as replaced by the one below, and another withdrawn one by its first line", async () => {

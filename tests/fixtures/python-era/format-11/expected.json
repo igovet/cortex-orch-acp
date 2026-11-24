@@ -1,0 +1,167 @@
+{
+  "tasks": [
+    [
+      "t_08e015c2ed9e",
+      "/tmp/cortex-python-era-fixture-v1/format-11",
+      "2026-11-24T09:55:47.445079+00:00"
+    ],
+    [
+      "t_4455b9ce763f",
+      "/tmp/cortex-python-era-fixture-v1/format-11",
+      "2026-11-24T09:55:47.437863+00:00"
+    ]
+  ],
+  "reports": [
+    [
+      "r_6bb5dc53376f",
+      "t_4455b9ce763f",
+      "pipeline",
+      "pipeline.md"
+    ],
+    [
+      "r_70202a33e1d1",
+      "t_4455b9ce763f",
+      "report",
+      "r_70202a33e1d1.md"
+    ],
+    [
+      "r_c25db2dc4f5b",
+      "t_08e015c2ed9e",
+      "report",
+      "r_c25db2dc4f5b.md"
+    ],
+    [
+      "r_fd271b79a306",
+      "t_4455b9ce763f",
+      "report",
+      "r_fd271b79a306.md"
+    ]
+  ],
+  "editions": [
+    [
+      1,
+      "r_70202a33e1d1",
+      "Original user request",
+      "Original task context.",
+      "user request",
+      "ff10f16e295fb25896cb50e44f12adef929dccae0f1e2ed99dfcfe19c2397d0e",
+      30
+    ],
+    [
+      2,
+      "r_c25db2dc4f5b",
+      "Original user request",
+      "Original task context.",
+      "user request",
+      "03c505fb07133b37c2f1de5679dbc85731620c297df683ddaadb5e771673e409",
+      37
+    ],
+    [
+      3,
+      "r_fd271b79a306",
+      "Fixture report",
+      "Historical fixture content.",
+      "fixture-author",
+      "c4d9506e800a196d10d019df28a9a4f4a1f31423f87603f47c3ec137d46b8199",
+      73
+    ],
+    [
+      4,
+      "r_6bb5dc53376f",
+      "Fixture pipeline",
+      "Historical fixture content.",
+      "fixture-author",
+      "dad60191ae8e7f6c4a85ca0257fd463c15070013570a54a426c83fe5eb42fe88",
+      86
+    ]
+  ],
+  "drafts": [
+    [
+      "d_9be2be30381d",
+      "t_4455b9ce763f",
+      "6f9f5710-f636-4d17-a763-3c17bf9a8df5",
+      "report",
+      "general",
+      "/tmp/cortex-python-era-fixture-v1/format-11/.cortex/draft-reports/d_9be2be30381d.md",
+      "2026-11-24T09:55:47.454736+00:00",
+      "r_fd271b79a306"
+    ],
+    [
+      "d_be79c6dbf091",
+      "t_08e015c2ed9e",
+      "859102d5-390a-41e7-b48e-027245a83db0",
+      "report",
+      "general",
+      "/tmp/cortex-python-era-fixture-v1/format-11/.cortex/draft-reports/d_be79c6dbf091.md",
+      "2026-11-24T09:55:47.486945+00:00",
+      null
+    ],
+    [
+      "d_dca1e72e636d",
+      "t_4455b9ce763f",
+      "6f9f5710-f636-4d17-a763-3c17bf9a8df5",
+      "pipeline",
+      "pipeline",
+      "/tmp/cortex-python-era-fixture-v1/format-11/.cortex/pipeline-drafts/d_dca1e72e636d.md",
+      "2026-11-24T09:55:47.471044+00:00",
+      "r_6bb5dc53376f"
+    ]
+  ],
+  "defaults": [
+    [
+      "/tmp/cortex-python-era-fixture-v1/format-11",
+      {
+        "language": "en"
+      },
+      {
+        "allowed_connections": null,
+        "allowed_data_recipients": null,
+        "allowed_routes": null,
+        "fallback_policy": {
+          "allowed_failure_classes": null,
+          "allowed_target_routes": null,
+          "budget": null,
+          "data_recipient_consent": false
+        },
+        "limits": {},
+        "permission_level": null,
+        "spend_limit": null,
+        "spend_limit_enforceable": false
+      },
+      "2026-11-24T09:55:47.556770+00:00"
+    ]
+  ],
+  "sessions": [
+    [
+      "9b40b9a3-1de9-4a1f-a7ba-444af198d95c",
+      "/tmp/cortex-python-era-fixture-v1/format-11",
+      "t_4455b9ce763f",
+      {
+        "name": "python-era-fixture",
+        "version": "1"
+      },
+      {},
+      [],
+      "2026-11-24T09:55:47.523108+00:00",
+      null
+    ]
+  ],
+  "transcript": [
+    [
+      "9b40b9a3-1de9-4a1f-a7ba-444af198d95c",
+      0,
+      "user_message",
+      "Historical question",
+      [],
+      "2026-11-24T09:55:47.549738+00:00"
+    ],
+    [
+      "9b40b9a3-1de9-4a1f-a7ba-444af198d95c",
+      1,
+      "agent_message",
+      "Historical Python answer",
+      [],
+      "2026-11-24T09:55:47.553576+00:00"
+    ]
+  ]
+}

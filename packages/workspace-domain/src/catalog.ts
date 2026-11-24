@@ -14,6 +14,25 @@ export const TIERS: readonly Tier[] = ["flagship", "deep", "standard", "light"];
 export const TIER_LABELS: Record<Tier, string> = { flagship: "Flagship", deep: "Deep", standard: "Standard", light: "Light" };
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 export const EFFORT_LABELS: Record<string, string> = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
+export const isConcreteEffort = (id: string) => !["", "default", "engine_default"].includes(id.trim().toLowerCase());
+const effortRank = (id: string) => {
+  const rank = EFFORT_LEVELS.findIndex(level => level === id.toLowerCase());
+  return rank < 0 ? id.toLowerCase() === "ultra" ? EFFORT_LEVELS.length : EFFORT_LEVELS.length + 1 : rank;
+};
+export function orderedEfforts(ids: readonly string[]): string[] {
+  return [...new Set(ids.filter(isConcreteEffort))].sort((a, b) => effortRank(a) - effortRank(b) || a.localeCompare(b));
+}
+/** Missing or legacy choices inherit Settings, then medium. Prefer the lower effort on ties. */
+export function resolveEffort(chosen = "", setting = "", offered?: readonly string[]): string {
+  const preferred = isConcreteEffort(chosen) ? chosen : isConcreteEffort(setting) ? setting : "medium";
+  if (!offered) return preferred;
+  const levels = orderedEfforts(offered);
+  if (levels.includes(preferred)) return preferred;
+  const rank = effortRank(preferred);
+  const target = rank > EFFORT_LEVELS.length ? effortRank("medium") : rank;
+  return levels.reduce((best, level) =>
+    !best || Math.abs(effortRank(level) - target) < Math.abs(effortRank(best) - target) ? level : best, "");
+}
 export const effortLabel = (id: string) => EFFORT_LABELS[id] ?? id;
 export const EFFORT_BY_TIER: Record<Tier, string> = { flagship: "high", deep: "high", standard: "medium", light: "low" };
 export const FALLBACK_ORDER: Record<Tier, Tier[]> = {

@@ -20,11 +20,31 @@ import { mapWanted, toolbarTier } from "./sprint-space";
  */
 
 export type GraphMemory = { z: number; x: number; y: number; fit: boolean; collapsed: number[] };
+/**
+ * Editing direct links between tasks: the owner picks the prerequisite, then the task that waits for it, reads the change in
+ * words and confirms. Picking both ends of a direct link offers its removal. Collapsed layers are never edited: their
+ * links are aggregates. The service decides; `problem` is only a hint.
+ */
+export type GraphLinks = {
+  /** Why links cannot be changed now, or null. */
+  readonly why: string | null;
+  readonly busy: boolean;
+  /** What the last save answered, when it did not go through. */
+  readonly notice: string | null;
+  /** Said before a save while a running queue could start the next task by itself. */
+  readonly queueNote: string | null;
+  linked: (prerequisite: string, dependent: string) => boolean;
+  problem: (prerequisite: string, dependent: string) => string | null;
+  words: (prerequisite: string, dependent: string) => string;
+  save: (prerequisite: string, dependent: string, present: boolean) => Promise<boolean>;
+};
 export type GraphApi = { fit: () => void };
 export type GraphViewProps = {
   items: PlanItem[]; rows: PlanRow[]; title: string;
-  /** A past version and a draft carry no task states and no Status filter. */
-  mode: "plan" | "past" | "draft"; created: boolean; manual: boolean;
+  /** A past version and a draft carry no task states and no Status filter. `live` is the sprint's tasks as they are now. */
+  mode: "plan" | "past" | "draft" | "live"; created: boolean; manual: boolean;
+  /** The live graph's Edit links mode. Absent, the graph only shows links. */
+  links?: GraphLinks;
   /** Only an explicit pick highlights and dims; never a default. */
   picked: string | null; onPick: (key: string | null) => void;
   details: string | null; onDetails: (key: string) => void;
@@ -99,7 +119,7 @@ export function GraphView(props: GraphViewProps) {
   const adj = createMemo(() => { topo(); return adjacency(untrack(items)); });
   const byKey = createMemo(() => new Map(items().map(i => [i.key, i])));
   const rowOf = createMemo(() => new Map(props.rows.map(r => [r.item.key, r])));
-  const states = createMemo(() => props.mode === "plan" && props.rows.some(r => r.backed));
+  const states = createMemo(() => (props.mode === "plan" || props.mode === "live") && props.rows.some(r => r.backed));
   const info = createMemo(() => new Map(props.rows.map(r => [r.item.key, { filter: states() ? statusFilterOf(r) : null, state: states() ? nodeState(r) : null, deps: r.deps }] as const)), undefined, { equals: sameInfo });
   const statusOf = createMemo(() => new Map([...info()].map(([k, v]) => [k, v.filter] as const)));
   const stateOf = (key: string) => info().get(key)?.state ?? null;
@@ -220,6 +240,8 @@ export function GraphView(props: GraphViewProps) {
   const [filter, setFilter] = createSignal<ReadonlySet<StatusFilter>>(new Set());
   const [cur, setCur] = createSignal(-1);
   const [focus, setFocus] = createSignal<string | null>(null);
+  const [linking, setLinking] = createSignal(false);
+  const [from, setFrom] = createSignal<string | null>(null), [to, setTo] = createSignal<string | null>(null);
   const chain = () => ws.panels.links() === "chain";
   const matches = createMemo(() => graphMatches(items(), query(), filter(), statusOf()), null, { equals: (a, b) => a === b || (!!a && !!b && sameList(a, b)) });
   const active = () => matches() !== null;
@@ -232,7 +254,8 @@ export function GraphView(props: GraphViewProps) {
     const out = new Map<string, string>(), c = current();
     for (const t of g().tasks) {
       const k = t.key, parts = ["n"];
-      if (k === props.picked) parts.push("picked"); else if (linked().has(k)) parts.push("lk");
+      if (linking()) { if (k === from()) parts.push("picked"); else if (k === to()) parts.push("lk"); }
+      else if (k === props.picked) parts.push("picked"); else if (linked().has(k)) parts.push("lk");
       if (active() && matchSet().has(k)) parts.push("mt");
       if (k === c) parts.push("cur");
       if (!bright(k)) parts.push("dim");
@@ -422,6 +445,51 @@ export function GraphView(props: GraphViewProps) {
     if (key) announce(`${selectionLine(adj().no.get(key) ?? 0, numbers(adj().needs.get(key) ?? []), numbers(adj().unblocks.get(key) ?? []))}.`);
   };
   const toggleMap = () => { ws.panels.setMinimap(!mapWanted(ws.panels.minimap(), canvasW())); setOffscreen(isOff()); guardMap(); };
+
+  // ---------- Edit links: prerequisite, then the task that waits for it, then a confirmation in words ----------
+  let linkButton: HTMLButtonElement | undefined;
+  const noOf = (k: string) => adj().no.get(k) ?? 0;
+  const startLinking = () => {
+    const why = props.links?.why;
+    if (!props.links) return;
+    if (why) { announce(why); return; }
+    props.onPick(null); setFrom(null); setTo(null); setLinking(true);
+    announce("Edit links. Choose the prerequisite: the task that must finish first. Escape cancels.");
+  };
+  const stopLinking = (refocus = false) => {
+    setLinking(false); setFrom(null); setTo(null); announce("Left Edit links.");
+    if (refocus) queueMicrotask(() => linkButton?.focus({ preventScroll: true }));
+  };
+  const choose = (key: string) => {
+    const f = from();
+    if (!f) { setFrom(key); announce(`Prerequisite: task ${noOf(key)}. Now choose the task that waits for it.`); return; }
+    if (key === f) { setFrom(null); setTo(null); announce("Prerequisite cleared."); return; }
+    setTo(key);
+    announce(props.links!.words(f, key));
+  };
+  /** Escape steps back one choice at a time, and the canvas keeps its focus on the task. */
+  const stepBack = () => {
+    if (to()) { const t = to()!; setTo(null); announce("Dependent cleared."); focusId(`t:${t}`); }
+    else if (from()) { const f = from()!; setFrom(null); announce("Prerequisite cleared."); focusId(`t:${f}`); }
+    else stopLinking(true);
+  };
+  const linkPair = () => { const f = from(), t = to(); return f && t && byKey().has(f) && byKey().has(t) ? { f, t, present: !props.links!.linked(f, t) } : null; };
+  const linkWhy = () => { const p = linkPair(); return props.links?.why ?? (p ? props.links!.problem(p.f, p.t) : null); };
+  const confirmLink = async () => {
+    const p = linkPair(); if (!p || linkWhy() || props.links!.busy) return;
+    const done = await props.links!.save(p.f, p.t, p.present);
+    if (done) { setFrom(null); setTo(null); announce(p.present ? `Saved: task ${noOf(p.t)} waits for task ${noOf(p.f)}.` : `Saved: task ${noOf(p.t)} no longer waits for task ${noOf(p.f)}.`); }
+    else announce(props.links!.notice ?? "The change was not made.");
+  };
+  const linkLine = () => {
+    const l = props.links!, f = from(), p = linkPair();
+    if (l.why) return l.why;
+    if (p) return [l.words(p.f, p.t), linkWhy(), l.queueNote].filter(Boolean).join(" ");
+    if (f) return `Prerequisite: task ${noOf(f)}. Now choose the task that will wait for it.`;
+    return [l.notice, "Choose the prerequisite: the task that must finish first. Choose both ends of a link to remove it."].filter(Boolean).join(" ");
+  };
+  // A graph that loses the chosen tasks, or editing that is no longer offered, leaves nothing half chosen.
+  createEffect(() => { if (!props.links && linking()) stopLinking(); const f = from(), t = to(); if (f && !byKey().has(f)) setFrom(null); if (t && !byKey().has(t)) setTo(null); });
   const toggleChain = () => { if (!props.picked) return; ws.panels.setLinks(chain() ? "direct" : "chain"); announce(chain() ? "Whole chain." : "Direct links."); };
   const toggleFull = () => props.onFull(!props.full);
   createEffect(on(() => props.full, on => { announce(on ? "Full view." : "Left full view."); queueMicrotask(() => { if (!document.activeElement || document.activeElement === document.body) focusId(focus()); }); }, { defer: true }));
@@ -458,10 +526,12 @@ export function GraphView(props: GraphViewProps) {
     if (node) {
       const id = node.dataset.id!, key = id.slice(2), at = Date.now();
       focusId(id);
+      if (linking()) { choose(key); return; }
       if (lastClick.id === id && at - lastClick.t < 350) { lastClick = { id: "", t: 0 }; props.onDetails(key); }
       else { select(key); lastClick = { id, t: at }; }
       return;
     }
+    if (linking()) return;
     if (props.picked) select(null);
   };
   const onWheel = (e: WheelEvent) => {
@@ -490,6 +560,8 @@ export function GraphView(props: GraphViewProps) {
     if (k === "Escape") {
       if (t === search || (typing(t) && !root.contains(t as Node))) return;
       const act = (run: () => void) => { e.preventDefault(); e.stopPropagation(); run(); };
+      // Escape cancels the link being made first, a step at a time, before anything else it closes.
+      if (linking()) return act(stepBack);
       if (query().trim()) return act(clearSearch);
       if (props.details) return; // Details closes itself, and its focus returns to the task.
       if (props.picked) return act(() => select(null));
@@ -511,7 +583,8 @@ export function GraphView(props: GraphViewProps) {
     switch (k) {
       case "Home": return act(() => focusId(firstVertex()));
       case "End": return act(() => { const last = items()[items().length - 1]?.key; focusId(last ? g().vertexOf.get(last) ?? null : null); });
-      case " ": return act(() => { if (key) select(key); });
+      case " ": return act(() => { if (key) { if (linking()) choose(key); else select(key); } });
+      case "l": case "L": return act(() => { if (!props.links) return; if (linking()) stopLinking(); else startLinking(); });
       case "Enter": return act(() => { if (id?.startsWith("b:")) expandBand(Number(id.slice(2))); else if (key) props.onDetails(key); });
       case "c": case "C": return act(() => { if (id?.startsWith("b:")) setColl(Number(id.slice(2)), false); else if (key) setColl(g().layerOf.get(key)!, true); });
       case "+": case "=": return act(() => setZoom(VW.z * ZOOM_STEP));
@@ -600,6 +673,8 @@ export function GraphView(props: GraphViewProps) {
         <button class="btn btn-sm gv-fitm" classList={{ off: !matches()?.length }} aria-hidden={matches()?.length ? undefined : "true"} tabindex={matches()?.length ? 0 : -1} onClick={fitMatches}>Fit matches</button>
         <Show when={hasStatus() || hasLayers()}><span class="vr t-tier2" /></Show>
       </Show>
+      <Show when={props.links}>{l => <button ref={linkButton} data-tooltip={l().why ?? "Edit links · L"} class="btn btn-sm" aria-pressed={linking() ? "true" : "false"}
+        aria-disabled={l().why && !linking() ? "true" : undefined} data-why={l().why ?? undefined} onClick={() => linking() ? stopLinking() : startLinking()}>Edit links</button>}</Show>
       <Show when={hasStatus()}><button class="chip t-tier3" popovertarget={ids.status}>{filter().size ? `Status · ${filter().size}` : "Status"}<I n="chevron-down" s={12} /></button></Show>
       <Show when={hasLayers()}><button class="chip t-tier2" popovertarget={ids.layers}>Layers<I n="chevron-down" s={12} /></button></Show>
     </>}
@@ -618,6 +693,13 @@ export function GraphView(props: GraphViewProps) {
   const pickLine = () => { const k = props.picked!; return selectionLine(adj().no.get(k) ?? 0, numbers(adj().needs.get(k) ?? []), numbers(adj().unblocks.get(k) ?? [])); };
   // One bar for each state, kept while its state lasts, so a machine read rebuilds none of it.
   const band = <Switch>
+    <Match when={linking() && props.links}>{l => <ActionBar class="gv-band" label="Edit links" start={<span class="tx" aria-live="polite">{linkLine()}</span>}>
+      <Show when={linkPair()}>{p => <>
+        <button class="btn btn-primary btn-sm" aria-disabled={linkWhy() || l().busy ? "true" : undefined} data-why={linkWhy() ?? (l().busy ? "Saving the last change" : undefined)} onClick={() => void confirmLink()}>{p().present ? "Add link" : "Remove link"}</button>
+        <button class="btn btn-line btn-sm" onClick={() => setTo(null)}>Back</button>
+      </>}</Show>
+      <button class="btn btn-line btn-sm" onClick={() => stopLinking(true)}>Done</button>
+    </ActionBar>}</Match>
     <Match when={kind() === "none"}><ActionBar class="gv-band" label="Graph status" start={<span class="tx">{noMatchText(query(), filter().size > 0)}</span>}>
       <Show when={query().trim()}><button class="btn btn-sm btn-line" onClick={clearSearch}>Clear search</button></Show>
       <Show when={filter().size}><button class="btn btn-sm btn-line" onClick={() => setFilter(new Set())}>Clear status</button></Show>

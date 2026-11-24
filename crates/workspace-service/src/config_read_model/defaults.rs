@@ -1,6 +1,6 @@
 //! User defaults and portable-coordinator display binding, without dispatch authority.
 use super::{management::*, profiles, ConfigurationReader, ENGINES};
-use crate::native_routes::{read_bytes, RouteEnvironment};
+use crate::native_routes::{is_concrete_effort, read_bytes, RouteEnvironment};
 use cortex_core::{CoreError, CoreResult};
 use serde_json::{json, Value};
 use std::{fs, os::unix::fs::MetadataExt, path::Path};
@@ -100,6 +100,20 @@ fn dedup(v: &mut Value) {
 }
 fn portable(defaults: &Value) -> Result<Value, Value> {
     let mut v = defaults["coordinator"].clone();
+    // Ignore the old effort sentinel/empty string for read-only binding,
+    // while keeping every other stored parameter under existing validation.
+    let without_legacy_effort = |v: &mut Value| {
+        if let Some(parameters) = v.get_mut("parameters").and_then(Value::as_object_mut) {
+            if parameters
+                .get("thought_level")
+                .and_then(Value::as_str)
+                .is_some_and(|e| !is_concrete_effort(e))
+            {
+                parameters.remove("thought_level");
+            }
+        }
+    };
+    without_legacy_effort(&mut v);
     let valid = |v: &Value| {
         v.is_object()
             && v.as_object().unwrap().len() == 3
@@ -119,6 +133,7 @@ fn portable(defaults: &Value) -> Result<Value, Value> {
     }
     if let Some(p) = defaults.get("parameters") {
         v["parameters"] = p.clone();
+        without_legacy_effort(&mut v);
     }
     if !valid(&v) {
         return Err(error(
@@ -239,6 +254,24 @@ fn latest(environment: &RouteEnvironment, id: &str) -> CoreResult<Vec<Value>> {
         .map(|v| v["entries"].as_array().unwrap().clone())
         .unwrap_or_default())
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portable_binding_ignores_legacy_effort_but_validates_other_settings() {
+        for effort in ["default", "engine_default", ""] {
+            let mut raw = json!({"coordinator": {"engine":"codex-acp", "model":"m",
+                "parameters":{"thought_level":effort,"mode":"agent"}}});
+            assert_eq!(portable(&raw).unwrap()["parameters"], json!({"mode":"agent"}));
+            assert_eq!(raw["coordinator"]["parameters"]["thought_level"], effort);
+            raw["coordinator"]["parameters"]["mode"] = json!("");
+            assert!(portable(&raw).is_err());
+        }
+        assert!(portable(&json!({"coordinator":"malformed"})).is_err());
+    }
+}
+
 impl ConfigurationReader {
     fn coordinator_resolution(&self, defaults: &Value) -> CoreResult<Value> {
         let resolve = || -> CoreResult<Result<Value, Value>> {

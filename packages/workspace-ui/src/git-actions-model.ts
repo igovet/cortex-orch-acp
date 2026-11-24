@@ -118,7 +118,8 @@ export function gitItems(f: GitFacts): GitItem[] {
   const held = merging ?? (stopped ? STOPPED : undefined);
   const up = c ? hasUpstream(f.repo, c) : false;
   const remote = !!f.repo?.remote.trim();
-  const unknown = c ? undefined : "Git state not read yet";
+  const boundMissing = !c && t?.checkout.kind === "worktree";
+  const unknown = c ? undefined : boundMissing ? "Task worktree unavailable; restore the original checkout and refresh." : "Git state not read yet";
   const diverged = up && !!c && c.ahead > 0 && c.behind > 0;
   const detached = c && !c.branch ? DETACHED : undefined;
   // Bringing remote commits into a branch that has its own: a merge or rebase the owner chooses, never over uncommitted work.
@@ -128,7 +129,7 @@ export function gitItems(f: GitFacts): GitItem[] {
   ];
   // A repository without a remote is local-only: it is offered no network action at all, rather than dead ones.
   if (remote) items.push(
-    { id: "fetch", label: "Fetch", icon: "refresh", why: busy ?? f.gate("git_fetch") },
+    { id: "fetch", label: "Fetch", icon: "refresh", why: busy ?? (boundMissing ? unknown : undefined) ?? f.gate("git_fetch") },
     { id: "pull", label: diverged ? "Pull…" : "Pull", icon: "download", why: busy ?? unknown ?? held ?? (!up ? NO_UPSTREAM : !c!.behind ? NOTHING_TO_PULL : diverged ? reconcile() : detached ?? f.gate("git_pull")) },
     { id: "push", label: "Push", icon: "upload", why: busy ?? unknown ?? held ?? (up && !c!.ahead ? NOTHING_TO_PUSH : diverged ? `${PULL_FIRST} ${DIVERGED}` : f.gate("git_push")) },
     { id: "pull_push", label: "Pull and push", icon: "refresh", why: busy ?? unknown ?? held ?? (!up ? NO_UPSTREAM : !c!.behind ? NOTHING_TO_PULL : !c!.ahead ? NOTHING_TO_PUSH : diverged ? DIVERGED : f.gate("git_pull") ?? f.gate("git_push")) },
@@ -149,10 +150,10 @@ export function gitItems(f: GitFacts): GitItem[] {
     items.push({ id: "update", label: `Update from ${v.target}…`, icon: "compare", why: busy ?? updateBlocked(c, v) ?? f.gate("update_from_target") });
   }
   if (v.project.hasGit !== false && !t.integrationFacts?.alreadyInTarget) {
-    items.push({ id: "merge", label: same ? `Commit to ${v.target}…` : "Merge locally…", icon: "merge", why: busy ?? notReady(v, f.mode) ?? (same && !t.integrationFacts?.commitAvailable ? t.integrationFacts?.reason ?? "Nothing of this task to commit" : finishBlocked(t) ?? f.gate("integrate")) });
+    items.push({ id: "merge", label: same ? `Commit to ${v.target}…` : "Merge locally…", icon: "merge", why: busy ?? (boundMissing ? unknown : undefined) ?? notReady(v, f.mode) ?? (same && !t.integrationFacts?.commitAvailable ? t.integrationFacts?.reason ?? "Nothing of this task to commit" : finishBlocked(t) ?? f.gate("integrate")) });
     if (!same && remote) {
       const pr = t.integration?.method === "pr";
-      items.push({ id: "pr", label: "Create PR…", icon: "pr", why: busy ?? (pr ? "A pull request is already open for this version" : v.machine.ghAvailable === false ? "GitHub CLI not available" : notReady(v, f.mode) ?? finishBlocked(t) ?? f.gate("integrate")) });
+      items.push({ id: "pr", label: "Create PR…", icon: "pr", why: busy ?? (boundMissing ? unknown : undefined) ?? (pr ? "A pull request is already open for this version" : v.machine.ghAvailable === false ? "GitHub CLI not available" : notReady(v, f.mode) ?? finishBlocked(t) ?? f.gate("integrate")) });
     }
   }
   const viewPr = viewPrItem(t, f);
@@ -178,7 +179,7 @@ export function gitPrimary(f: GitFacts, items = gitItems(f)): GitPrimary {
   }
   // The task's own result decides first: in a shared folder its files are what the commit to the target takes.
   if (v && integrationOpen(f)) { const m = of("merge"); return { id: "merge", label: mergeLabel(v), icon: "merge", why: m.why, strong: true }; }
-  if (!c) return { id: null, label: "Git", icon: "branch", why: "Git state not read yet" };
+  if (!c) return { id: null, label: "Git", icon: "branch", why: v?.task.checkout.kind === "worktree" ? "Task worktree unavailable; restore the original checkout and refresh." : "Git state not read yet" };
   if (c.files.length) { const i = of("commit"); return { id: "commit", label: "Commit…", icon: "commit", why: i.why }; }
   const remote = !!f.repo?.remote.trim(), up = remote && hasUpstream(f.repo, c);
   // Diverged: Pull… asks how to bring the remote commits in; a push can follow once the branch has them.

@@ -2295,15 +2295,14 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Always use this structured tool for user questions while planning or reconciling, never prose-only or native engine questions. Supply meaningful selectable options; group related questions with questions, instead of question/options. All batch answers are required; custom free text remains available. Write the details once in your message before this call; the question itself is one short line with short answer options. After the call end the turn without writing anything more. The runtime persists the question before elicitation and resumes only after a real answer. A question asked while reconciling (approve a proposed plan, choose how to continue) keeps the task open, and the answer returns it to planning: submit a plan for the chosen work, or answer_submit a short close when the user chose to finish. With skill_proposal it proposes one reusable project skill backed by retained report evidence. Use exactly one accepted action-matched pair, approval first: create: [Create the skill, Not now], [Создать навык, Не сейчас], [Approve creating the skill, Decline creating the skill], [Одобрить создание навыка, Отклонить создание навыка]; update: [Update the skill, Not now], [Обновить навык, Не сейчас], [Approve updating the skill, Decline updating the skill], [Одобрить обновление навыка, Отклонить обновление навыка]. Only an exact pair is accepted; 1 selects its approval label, 2 its decline label, and any other answer is unclear. An arbitrary first option never approves.",
+      "description": "Always use this structured tool for user questions while planning or reconciling, never prose-only or native engine questions. Supply meaningful selectable options and mark the one you recommend using recommended (1-based) on each question; group related questions with questions, instead of question/options. All batch answers are required; custom free text remains available. Write the details once in your message before this call; the question itself is one short line with short answer options. After the call end the turn without writing anything more. The runtime persists the question before elicitation and resumes only after a real answer. A question asked while reconciling (approve a proposed plan, choose how to continue) keeps the task open, and the answer returns it to planning: submit a plan for the chosen work, or answer_submit a short close when the user chose to finish. With skill_proposal it proposes one reusable project skill backed by retained report evidence. Use exactly one accepted action-matched pair, approval first: create: [Create the skill, Not now], [Создать навык, Не сейчас], [Approve creating the skill, Decline creating the skill], [Одобрить создание навыка, Отклонить создание навыка]; update: [Update the skill, Not now], [Обновить навык, Не сейчас], [Approve updating the skill, Decline updating the skill], [Одобрить обновление навыка, Отклонить обновление навыка]. Only an exact pair is accepted; 1 selects its approval label, 2 its decline label, and any other answer is unclear. An arbitrary first option never approves.",
       "inputSchema": {
         "additionalProperties": false,
         "description": "Structured fields; use the exact advertised properties.",
         "else": {
-          "required": [
-            "question",
-            "options"
-          ]
+          "if": { "required": ["skill_proposal"] },
+          "then": { "required": ["question", "options"] },
+          "else": { "required": ["question", "options", "recommended"] }
         },
         "if": {
           "required": [
@@ -2403,6 +2402,12 @@
                   "minLength": 1,
                   "type": "string"
                 },
+                "recommended": {
+                  "description": "Required. The one option you recommend for this question, as a 1-based position in its options. Do not add a tag to the option label.",
+                  "minimum": 1,
+                  "maximum": 8,
+                  "type": "integer"
+                },
                 "topic": {
                   "description": "Optional short 1-2 word label naming this question's subject (e.g. \"Paid checks\", \"Models\"), shown as this question's tab title in a batch UI instead of its id. Omit to let the client derive a short fallback from the question text; never the raw question id.",
                   "maxLength": 24,
@@ -2412,13 +2417,20 @@
               },
               "required": [
                 "question",
-                "options"
+                "options",
+                "recommended"
               ],
               "type": "object"
             },
             "maxItems": 8,
             "minItems": 2,
             "type": "array"
+          },
+          "recommended": {
+            "description": "The one option you recommend, as a 1-based position in options. Required for a single question, except for an exact skill proposal (approval is recommended if omitted); for a batch use the field on each question instead. Do not add a tag to the option label.",
+            "minimum": 1,
+            "maximum": 8,
+            "type": "integer"
           },
           "request_key": {
             "description": "Unique question delivery key. Exact retries preserve question identity.",
@@ -2505,6 +2517,9 @@
                 "required": [
                   "options"
                 ]
+              },
+              {
+                "required": ["recommended"]
               },
               {
                 "required": [
@@ -6734,14 +6749,15 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Only for a genuine user decision not answerable from assignment/context/runtime tools. Missing project access, permissions and work paths are never a user question: a writing worker uses access_request for a runtime grant/refusal, a read-only role reports the limitation; changed decomposition goes to scope_request/replan_request. Unavailable evidence remains a report limitation. Do not ask by default to confirm a chosen approach or to pick among reasonable implementation options: pick one reasonable option, record the assumption in the report, and reserve this tool for a decision the assignment and tools genuinely cannot resolve. Write each question and all options in the current turn's user_question_language (en = English, ru = Russian); this is the exception to English worker communication. The runtime forwards strings verbatim, without translation. Supply meaningful selectable options or a related-question batch using questions instead of question/options. All batch answers are required; custom free text remains available. Write the details, evidence and each option's consequences in your message before this call; keep each question to one short line naming the decision, with short answer options. The runtime persists an assignment-local wait and returns promptly. End your current turn without publishing an incomplete result. The runtime delivers the answer as the next prompt in this same healthy engine session; siblings continue. A recovered channel without retained session metadata uses task-global question recovery instead.",
+      "description": "Only for a genuine user decision not answerable from assignment/context/runtime tools. Missing project access, permissions and work paths are never a user question: a writing worker uses access_request for a runtime grant/refusal, a read-only role reports the limitation; changed decomposition goes to scope_request/replan_request. Unavailable evidence remains a report limitation. Do not ask by default to confirm a chosen approach or to pick among reasonable implementation options: pick one reasonable option, record the assumption in the report, and reserve this tool for a decision the assignment and tools genuinely cannot resolve. Write each question and all options in the current turn's user_question_language (en = English, ru = Russian); this is the exception to English worker communication. The runtime forwards strings verbatim, without translation. Mark the one option you recommend using recommended (1-based) on each question. Supply meaningful selectable options or a related-question batch using questions instead of question/options. All batch answers are required; custom free text remains available. Write the details, evidence and each option's consequences in your message before this call; keep each question to one short line naming the decision, with short answer options. The runtime persists an assignment-local wait and returns promptly. End your current turn without publishing an incomplete result. The runtime delivers the answer as the next prompt in this same healthy engine session; siblings continue. A recovered channel without retained session metadata uses task-global question recovery instead.",
       "inputSchema": {
         "additionalProperties": false,
         "description": "Structured fields; use the exact advertised properties.",
         "else": {
           "required": [
             "question",
-            "options"
+            "options",
+            "recommended"
           ]
         },
         "if": {
@@ -6842,6 +6858,12 @@
                   "minLength": 1,
                   "type": "string"
                 },
+                "recommended": {
+                  "description": "Required. The one option you recommend for this question, as a 1-based position in its options. Do not add a tag to the option label.",
+                  "minimum": 1,
+                  "maximum": 8,
+                  "type": "integer"
+                },
                 "topic": {
                   "description": "Optional short 1-2 word label naming this question's subject (e.g. \"Paid checks\", \"Models\"), shown as this question's tab title in a batch UI instead of its id. Omit to let the client derive a short fallback from the question text; never the raw question id.",
                   "maxLength": 24,
@@ -6851,13 +6873,20 @@
               },
               "required": [
                 "question",
-                "options"
+                "options",
+                "recommended"
               ],
               "type": "object"
             },
             "maxItems": 8,
             "minItems": 2,
             "type": "array"
+          },
+          "recommended": {
+            "description": "The one option you recommend, as a 1-based position in options. Required for a single question; for a batch use the field on each question instead. Do not add a tag to the option label.",
+            "minimum": 1,
+            "maximum": 8,
+            "type": "integer"
           },
           "request_key": {
             "description": "Unique question delivery key. Exact retries preserve question identity.",
@@ -6881,6 +6910,9 @@
                 "required": [
                   "options"
                 ]
+              },
+              {
+                "required": ["recommended"]
               }
             ]
           }

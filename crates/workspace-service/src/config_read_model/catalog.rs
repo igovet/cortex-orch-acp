@@ -193,7 +193,7 @@ impl ConfigurationReader {
                 entries.push(json!({"route_id":e["route"]["id"],"connection_id":id,
                     "connection_name":r["name"],"model":e["route"]["model"],
                     "efforts": rows(&e["route"]["supported_parameters"])
-                        .filter(|p| p[0] == "thought_level" && p[1] != "engine_default")
+                        .filter(|p| p[0] == "thought_level" && p[1].as_str().is_some_and(crate::native_routes::is_concrete_effort))
                         .map(|p| p[1].clone()).collect::<Vec<_>>()}));
             }
             pairs.extend(presented(raw).into_iter().map(|e| (e, *r)));

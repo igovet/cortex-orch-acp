@@ -38,7 +38,7 @@ it.skipIf(!socket)("real port closes a stopped task externally and restores it a
   const until = async (fn: () => boolean) => { const end = Date.now() + 8000; while (!fn() && Date.now() < end) await new Promise(r => setTimeout(r, 25)); expect(fn()).toBe(true); };
   let root = mountReal();
   await until(() => !!root.querySelector(".card"));
-  drag("done"); await settle();
+  externalAction(`Actions for ${root.querySelector(".card-t")!.textContent}`)!.click(); await settle();
   [...document.querySelectorAll<HTMLButtonElement>("dialog button")].find(b => b.textContent === "Close task")!.click();
   await until(() => root.textContent?.includes("Done outside the app") === true && !root.querySelector("dialog[open]"));
   const saved = (await rpc("machine.call", { op: "product.read", projectId: f.projectId })).result.tasks[f.taskId];
@@ -48,13 +48,9 @@ it.skipIf(!socket)("real port closes a stopped task externally and restores it a
   expect(root.textContent).toContain("Done outside the app");
   expect(root.querySelector('[data-col="done"] .card')?.textContent).not.toMatch(/Accepted|Merged/);
 });
-function drag(column: string) {
-  const data = new Map<string, string>();
-  const transfer = { setData: (k: string, v: string) => data.set(k, v), getData: (k: string) => data.get(k) ?? "", effectAllowed: "", dropEffect: "" };
-  for (const [element, type] of [[document.querySelector(".card")!, "dragstart"], [document.querySelector(`[data-col="${column}"]`)!, "drop"]] as const) {
-    const event = new Event(type, { bubbles: true, cancelable: true });
-    Object.defineProperty(event, "dataTransfer", { value: transfer }); element.dispatchEvent(event);
-  }
+function externalAction(trigger: string) {
+  document.querySelector<HTMLButtonElement>(`button[aria-label="${trigger}"]`)!.click();
+  return [...document.querySelectorAll<HTMLButtonElement>('#m-task [role="menuitem"]')].find(b => b.textContent?.startsWith("Done outside the app…"));
 }
 it("external completion satisfies dependencies without accepted or merged flags", () => {
   const s = withTask(emptyWorkspace(), "External");
@@ -63,29 +59,70 @@ it("external completion satisfies dependencies without accepted or merged flags"
   expect(s.tasks[0].acceptance).toBeNull();
   expect(s.tasks[0].integration).toBeNull();
 });
-it("only Done opens confirmation; no command until the owner confirms", async () => {
+it("cards cannot be dragged or dropped to Done; the menu opens confirmation", async () => {
   const p = await mount(withTask(emptyWorkspace(), "External work"));
-  expect(document.querySelector(".card")?.getAttribute("draggable")).toBe("true");
-  drag("review"); await settle();
-  expect(document.body.textContent).toContain("Only Done");
+  const card = document.querySelector<HTMLElement>(".card")!;
+  expect(card.draggable).toBe(false);
+  expect([...card.querySelectorAll("a")].every(link => !link.draggable)).toBe(true);
+  const drop = new Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(drop, "dataTransfer", { value: { getData: () => "t" } });
+  document.querySelector('[data-col="done"]')!.dispatchEvent(drop);
+  expect(drop.defaultPrevented).toBe(false);
+  expect(document.querySelector("dialog[open]")).toBeNull();
   expect(p.commands).toHaveLength(0);
-  drag("done"); await settle();
+  externalAction("Actions for External work")!.click(); await settle();
   expect(document.querySelector("dialog[open]")?.textContent).toContain("Done outside the app");
   expect(p.commands).toHaveLength(0);
   const confirm = [...document.querySelectorAll<HTMLButtonElement>("dialog button")].find(b => b.textContent === "Close task")!;
   confirm.click(); await settle();
   expect(p.commands.at(-1)?.payload).toMatchObject({ type: "close_task", taskId: "t", choice: "external", confirmed: true });
+  expect(document.querySelector("dialog[open] .ws-request-status")?.textContent).toBe("Requesting closure…");
+  expect(document.querySelector('[data-col="done"] .card')).toBeNull();
+  p.receipt(false, undefined, "unknown_outcome", "Closure could not be confirmed.");
+  await settle();
+  expect(document.querySelector("dialog[open] .ws-request-status")?.textContent).toBe("");
+  expect(document.body.textContent).toContain("Closure could not be confirmed.");
+  expect(p.commands).toHaveLength(1);
 });
-it("running cards explain Stop first instead of closing or pretending to pass checks", async () => {
+it("running cards explain Stop first without opening the dialog or issuing a command", async () => {
   const s = withTask(emptyWorkspace(), "Running"); s.tasks[0].status = "working"; s.tasks[0].process = "live";
-  const p = await mount(s); drag("done"); await settle();
-  expect(document.querySelector("dialog[open]")?.textContent).toContain("Stop the task");
-  // Close task stays a real button, off, with its reason in the dialog's footer; a press does nothing.
-  const close = [...document.querySelectorAll<HTMLButtonElement>("dialog button")].find(b => b.textContent === "Close task")!;
-  expect(close.getAttribute("aria-disabled")).toBe("true");
-  expect(document.querySelector("dialog[open] .l-reason")?.textContent).toContain("Stop the task");
-  close.click(); await settle();
+  const p = await mount(s);
+  const entry = externalAction("Actions for Running")!;
+  expect(entry.getAttribute("aria-disabled")).toBe("true");
+  expect(entry.textContent).toContain("Stop the task");
+  entry.click(); await settle();
+  expect(document.querySelector("dialog[open]")).toBeNull();
   expect(p.commands).toHaveLength(0);
+});
+
+it.each([
+  ["List", `/m/${LOCAL_MACHINE_ID}/p/p/list`, "Actions for External work"],
+  ["task title band", `/m/${LOCAL_MACHINE_ID}/t/t`, "Task actions"],
+])("%s uses the same external closure menu", async (_name, route, trigger) => {
+  const p = await mount(withTask(emptyWorkspace(), "External work"), route);
+  externalAction(trigger)!.click(); await settle();
+  expect(document.querySelector("dialog[open] h2")?.textContent).toBe("Done outside the app");
+  expect(p.commands).toHaveLength(0);
+});
+
+it("the task command palette opens the same confirmation by keyboard", async () => {
+  const p = await mount(withTask(emptyWorkspace(), "External work"), `/m/${LOCAL_MACHINE_ID}/t/t`);
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }));
+  await settle();
+  const field = document.querySelector<HTMLInputElement>("dialog[open] .ws-pal-in")!;
+  field.value = ">done outside";
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+  field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await settle();
+  expect(document.querySelector("dialog[open] h2")?.textContent).toBe("Done outside the app");
+  expect(p.commands).toHaveLength(0);
+});
+
+it("a completed task no longer offers external closure", async () => {
+  const s = withTask(emptyWorkspace(), "Closed");
+  Object.assign(s.tasks[0], { status: "done", closedAs: "external" });
+  await mount(s);
+  expect(externalAction("Actions for Closed")).toBeUndefined();
 });
 for (const remote of [false, true]) it(`content already in the branch offers confirmed closure (remote=${remote})`, async () => {
   const s = withTask(emptyWorkspace(), "Contained"); const t = s.tasks[0];

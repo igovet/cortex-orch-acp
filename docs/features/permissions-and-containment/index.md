@@ -559,8 +559,9 @@ whole project writable regardless of their narrower declared coordination work
 area; reviewers and read-only roles receive no writable project paths. `.cortex` is
 masked, including nested ones; `.codex` and `.claude` are ordinary project paths;
 the project's `.git` is visible
-(see below). A command runs until it exits unless it sets `timeout_seconds`, and
-is killed when authority is revoked. A started or uncertain payload is not
+(see below). A command is bounded by an absolute (not output-idle) deadline of 1800
+seconds unless it sets `timeout_seconds`, and is killed when that deadline passes, on
+an owner stop, or when authority is revoked. A started or uncertain payload is not
 replayed on the host.
 
 Sandbox preparation is bounded but tolerant of a busy host: the service waits up to 60
@@ -680,8 +681,13 @@ new model tool and not task cancellation: the command runner records and handles
 the request, then reports a stopped command as a failed activity with the reason
 while the worker continues. See [stopping one worker command](../steering-and-questions/index.md#stop-one-worker-command-with-a-reason).
 `timeout_seconds` advertises only a minimum of 1 on `command_run` and
-`outside_command`. Ordinary `command_run` is unbounded when timeout is omitted;
-exceptional `outside_command` preserves its 600-second default. An enormous value is not refused on the field —
+`outside_command`. Ordinary `command_run` defaults to 1800 seconds when timeout is
+omitted (`native_command_handles.rs`); exceptional `outside_command` defaults to 600
+seconds, and a `command_run` rerouted to the host keeps its own timeout or 1800. The
+limits are absolute elapsed deadlines, not output-idle timers; a stop sends SIGKILL to
+the owned process group, with two seconds for output drain, and a descendant that left
+that group is not covered. Preparation before launch has a separate 60-second bound per
+supervisor message, and an external MCP exchange a separate 300-second bound. An enormous value is not refused on the field —
 it is clamped internally to a ~68-year ceiling (`gateway.TIMEOUT_CEILING_SECONDS`,
 `2**31-1` seconds) before it reaches the deadline/subprocess-timeout arithmetic,
 so it can never overflow or crash; it behaves as effectively unbounded.

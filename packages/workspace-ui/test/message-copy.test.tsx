@@ -121,7 +121,8 @@ it("copies a worker's note, the owner's message to it and its result from the wo
   state.machines[0].connection = "connected";
   state.workers = [{ id: "w", taskId: "t", executionId: "e", role: "frontend-dev", status: "completed", lane: "execution", goal: "Build the page", now: null, waitsFor: null, scope: [], route: { model: "m", effort: "high" }, attempt: null, elapsedMs: null, runningSince: null, context: null, usage: null,
     activity: [
-      { sequence: 1, kind: "note", text: "[worker message] " + REPLY, at: null },
+      { sequence: 1, kind: "note", text: "[worker message] first line\nsecond line\n\n" + REPLY, at: null },
+      { sequence: 3, kind: "note", text: "[final response] wrapped first\nwrapped second", at: null },
       { sequence: 2, kind: "message", text: "", at: null, messageId: "wm1" },
     ],
     result: { summary: OWNER, checks: [], reportId: null } } as unknown as Worker];
@@ -133,12 +134,16 @@ it("copies a worker's note, the owner's message to it and its result from the wo
   await settle(); p.emit(projection("1", state)); await settle();
   const note = $(".stream-in .ev-note")!;
   expect(note.textContent).not.toContain("[worker message]");
+  expect(note.querySelector("p br")).not.toBeNull();
+  const finalNote = all(".stream-in .ev-note").find(row => row.textContent?.includes("wrapped first"))!;
+  expect(finalNote.querySelector("p")?.textContent).toBe("wrapped first wrapped second");
+  expect(finalNote.querySelector("br")).toBeNull();
   (note.nextElementSibling as HTMLElement).querySelector<HTMLButtonElement>(".ws-copy-btn")!.click(); await settle();
   $<HTMLButtonElement>(".stream-in .me .ms .ws-copy-btn")!.click(); await settle();
   const result = $<HTMLButtonElement>(".ws-worker-result .rcard-h .ws-copy-btn")!;
   expect(result.getAttribute("aria-label")).toBe("Copy the worker result as Markdown");
   result.click(); await settle();
-  expect(written).toEqual([REPLY, STEER, OWNER]);
+  expect(written).toEqual(["first line\nsecond line\n\n" + REPLY, STEER, OWNER]);
   expect($(".ws-worker-result .rcard-h .ws-copy-note")?.textContent).toBe("Copied");
 });
 

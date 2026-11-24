@@ -33,7 +33,89 @@ fn splitlines(text: &str) -> Vec<String> {
     lines
 }
 
-pub(super) async fn build(
+/// NUL-delimited paths read from the unmerged index, independent of file previews.
+async fn unmerged(path: &Path, git: &mut Git) -> Result<Vec<u8>> {
+    git.bytes(path, &["diff", "--name-only", "--diff-filter=U", "-z"])
+        .await
+}
+
+pub(in crate::machine) async fn has_unmerged(path: &Path, git: &mut Git) -> Result<bool> {
+    match unmerged(path, git).await {
+        Ok(names) => Ok(!names.is_empty()),
+        Err(err) if err.code == "git_output_too_large" => Ok(true),
+        Err(err) => Err(err),
+    }
+}
+
+pub(in crate::machine) async fn manifest(
+    path: &Path,
+    merge: &Value,
+    git: &mut Git,
+) -> Result<Value> {
+    let names = match unmerged(path, git).await {
+        Ok(names) => names,
+        Err(error) if error.code == "git_output_too_large" => {
+            return Ok(json!({
+                "sourceRevision":merge["sourceRevision"],"targetRevision":merge["targetRevision"],
+                "paths":[],"complete":false,"truncated":true
+            }));
+        }
+        Err(error) => return Err(error),
+    };
+    let mut paths = Vec::new();
+    let mut complete = true;
+    let mut remaining = 12_000;
+    for name in names.split(|&byte| byte == 0).filter(|name| !name.is_empty()) {
+        // A lossy filename is not a filename the coordinator should act on.
+        let Ok(name) = std::str::from_utf8(name) else {
+            complete = false;
+            continue;
+        };
+        let size = serde_json::to_string(name).map_or(usize::MAX, |s| s.len() + 1);
+        if size > remaining || paths.len() >= 200 {
+            complete = false;
+            break;
+        }
+        remaining -= size;
+        paths.push(name);
+    }
+    Ok(json!({
+        "sourceRevision":merge["sourceRevision"], "targetRevision":merge["targetRevision"],
+        "paths":paths, "complete":complete, "truncated":!complete
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn retain(
+    path: &Path,
+    source: &str,
+    target: &str,
+    record: &Value,
+    source_revision: &str,
+    target_revision: &str,
+    snapshot: Value,
+    git: &mut Git,
+) -> Result<Value> {
+    let mut merge = build(path, source, target, record, git).await?;
+    merge["kind"] = json!("update");
+    merge["gitState"] = json!("stopped");
+    merge["conflictId"] = json!(crate::machine::settings::unique());
+    merge["sourceRevision"] = json!(source_revision);
+    merge["targetRevision"] = json!(target_revision);
+    merge["before"]["requiresFreshResult"] = record["requiresFreshResult"].clone();
+    merge["before"]["abortSnapshot"] = snapshot;
+    if crate::machine::task_merge::observe(path, &merge, git).await?
+        != crate::machine::task_merge::Observed::Stopped
+    {
+        return Err(refuse("integration_unknown", "The stopped merge no longer matches the requested commits. Inspect Git before retrying."));
+    }
+    if merge["files"].as_array().is_some_and(Vec::is_empty) && merge["failure"].is_null() {
+        merge["failure"] = json!("Git stopped the merge without any displayed unmerged paths. Inspect the checkout, then Finish merge or Abort merge.");
+    }
+    Ok(merge)
+}
+
+async fn build(
     path: &Path,
     source: &str,
     target: &str,
@@ -43,10 +125,19 @@ pub(super) async fn build(
     let mut files: Vec<Value> = Vec::new();
     let mut remaining: usize = 30_000;
     let mut failure = Value::Null;
-    let names = git
-        .out(path, &["diff", "--name-only", "--diff-filter=U", "-z"])
-        .await?;
-    for name in names.split('\0').filter(|n| !n.is_empty()) {
+    let names = match unmerged(path, git).await {
+        Ok(names) => names,
+        Err(err) if err.code == "git_output_too_large" => {
+            failure = json!("Conflict display budget reached. Use Git to inspect and stage every path in the task checkout.");
+            Vec::new()
+        }
+        Err(err) => return Err(err),
+    };
+    for name in names.split(|&byte| byte == 0).filter(|name| !name.is_empty()) {
+        let Ok(name) = std::str::from_utf8(name) else {
+            failure = json!("Some paths cannot be displayed. Resolve them with Git in the task checkout.");
+            continue;
+        };
         let literal = format!(":(literal){name}");
         let listing = git.out(path, &["ls-files", "-u", "--", &literal]).await?;
         let stages: Vec<Vec<String>> = listing

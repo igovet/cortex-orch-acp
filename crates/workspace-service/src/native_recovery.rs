@@ -1670,6 +1670,7 @@ impl Runtime {
                 }
                 runtime.driver_ended(&task, &cancelled).await;
                 done.send_replace(true);
+                runtime.reconcile_after_merge_driver(&task).await;
             })
             .await;
         }
