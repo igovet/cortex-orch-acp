@@ -245,6 +245,22 @@ mod cancellation_tests {
         assert_eq!(request.await.unwrap()["outcome"]["optionId"], "answer");
         assert!(p.pending.lock().await.is_empty());
     }
+    #[test]
+    fn language_of_question_fallback_does_not_create_a_selectable_answer() {
+        let decision = json!({"questionId":"exact-id","prompt":"Точный текст?"});
+        let response = json!({"outcome":{"outcome":"selected","optionId":"cortex-question-1"}});
+        for (ru, label) in [
+            (false, "Reply in chat or type an answer under Other…"),
+            (true, "Ответьте в чате или введите ответ в поле «Другое»…"),
+        ] {
+            let card = crate::question_card(&decision, &[], ru);
+            assert_eq!(card["toolCall"]["title"], "Точный текст?");
+            assert_eq!(card["options"][0]["name"], label);
+            assert_eq!(card["options"][0]["optionId"], "cortex-question-1");
+            assert_eq!(crate::card_choice(&response, &[]), None);
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn delayed_engine_permission_response_keeps_its_correlation() {
         let (p, mut client) = permissions();
@@ -595,7 +611,7 @@ impl Agent {
                     let host=self.host(&p).await?;
                     host.validate_mcp_servers(&p["mcpServers"])?;
                     let sid=if method=="session/new"{host.recover().await?;host.new_session(self.info.clone(),self.capabilities.clone()).await?}
-                        else{let s=string(&p,"sessionId")?.to_owned();host.session(&s).await?;s};
+                        else{let s=string(&p,"sessionId")?.to_owned();host.session(&s).await?;host.recover_legacy().await?;s};
                     if self.sessions.get(&sid).is_some_and(|s|s.busy.load(Ordering::Acquire)){return Err(invalid("session_busy"));}
                     let paseo=self.info["name"].as_str().is_some_and(|n|n.to_lowercase()=="paseo");
                     host.bind_client(&sid,paseo,method=="session/load");
@@ -808,8 +824,7 @@ impl Agent {
             }
             Err(e) => {
                 if let Some(id) = id {
-                    let (code, message) = python_protocol::envelope(method, &e.to_string());
-                    self.send(error(id, code, &message)).await?;
+                    self.send(python_protocol::request_error(id, method, &e)).await?;
                 }
                 Ok(())
             }
@@ -1408,6 +1423,7 @@ async fn follow(
                 json!({"stopReason":if matches!(state["state"].as_str(),Some("PAUSED"|"CANCELLED")){"cancelled"}else{"end_turn"}}),
             );
         }
+        let ru = state["language"] == "ru";
         let decisions = session.host.decisions(sid).await?;
         if let Some(items) = decisions["items"].as_array() {
             for d in items {
@@ -1435,7 +1451,7 @@ async fn follow(
                         })
                         .collect();
                     let body = json!({"toolCall":{"toolCallId":format!("cortex-question-batch:{batch}"),"kind":"other",
-                        "title":"Answer related questions","rawInput":{"__cortex_question":true,"batchId":batch,
+                        "title":if ru { "Ответьте на связанные вопросы" } else { "Answer related questions" },"rawInput":{"__cortex_question":true,"batchId":batch,
                         "questionId":d["questionId"],"questions":members}},"options":options,"_meta":{"cortexQuestion":true}});
                     // ACP returns a single option only. A batch needs the complete
                     // typed config submission, not that one-option response.
@@ -1449,7 +1465,7 @@ async fn follow(
                         .iter()
                         .filter_map(|o| o["label"].as_str())
                         .collect();
-                    let body = question_card(d, &labels);
+                    let body = question_card(d, &labels, ru);
                     let answer = permissions.question(sid, body, &cancelled).await;
                     if let Some(label) = answer.ok().and_then(|a| card_choice(&a, &labels)) {
                         session
@@ -1467,9 +1483,13 @@ async fn follow(
 /// question card only by this marker, tool call id and option-id shape. Paseo
 /// needs at least one action, so an option-less question offers Python's
 /// instructional action, which is never an answer.
-fn question_card(d: &Value, labels: &[&str]) -> Value {
+fn question_card(d: &Value, labels: &[&str], ru: bool) -> Value {
     let shown: Vec<&str> = if labels.is_empty() {
-        vec!["Reply in chat or type an answer under Other…"]
+        vec![if ru {
+            "Ответьте в чате или введите ответ в поле «Другое»…"
+        } else {
+            "Reply in chat or type an answer under Other…"
+        }]
     } else {
         labels.to_vec()
     };
@@ -1503,7 +1523,7 @@ fn reply(id: Value, result: Value) -> Value {
 fn respond(id: Value, result: io::Result<Value>) -> Value {
     match result {
         Ok(v) => reply(id, v),
-        Err(e) => python_protocol::prompt_error(id, &e.to_string()),
+        Err(e) => python_protocol::prompt_error(id, &e),
     }
 }
 fn error(id: Value, code: i64, message: &str) -> Value {

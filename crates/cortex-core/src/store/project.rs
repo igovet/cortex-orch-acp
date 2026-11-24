@@ -1,6 +1,8 @@
 use super::locks::regular;
 use crate::{error::refuse, CoreResult};
 use std::{
+    fs,
+    io::ErrorKind,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
@@ -101,6 +103,49 @@ impl ProjectKey {
     }
     pub fn database(&self) -> PathBuf {
         self.directory().join("cortex.sqlite3")
+    }
+    /// Recognize historical storage by its layout only. Never open the old
+    /// database, descend into task trees, or follow symlinked directories.
+    pub(super) fn has_legacy_storage(&self) -> CoreResult<bool> {
+        if self.channel != StoreChannel::Release {
+            return Ok(false);
+        }
+        let mut path = self.root.clone();
+        for component in [".codex", "cortex"] {
+            path.push(component);
+            match path.symlink_metadata() {
+                Ok(m) if m.is_dir() => {}
+                Ok(_) => return Ok(false),
+                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if matches!(
+                name,
+                "cortex.sqlite3"
+                    | "cortex.sqlite3-wal"
+                    | "cortex.sqlite3-shm"
+                    | "cortex.sqlite3-journal"
+            ) && entry.file_type()?.is_file()
+            {
+                return Ok(true);
+            }
+            if let Some(id) = name.strip_prefix("t_") {
+                if id.len() == 12
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    && entry.file_type()?.is_dir()
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
     pub fn validate_sidecars(&self) -> CoreResult<()> {
         regular(&self.database())?;

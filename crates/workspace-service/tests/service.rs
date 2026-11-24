@@ -62,6 +62,165 @@ async fn activated() -> (Fixture, std::sync::Arc<Service>, String) {
     (f, s, id)
 }
 #[tokio::test]
+async fn storage_refusal_keeps_project_registered_and_explains_reads_and_activation() {
+    use cortex_core::{OpenMode, ProjectKey, Store, StoreChannel};
+
+    let f = Fixture::new();
+    let s = Native::bind(f.config()).await.unwrap();
+    let root = f.0.join("projects/one");
+    let registered = s.register(&root, "Saved project").await.unwrap();
+    let project = registered["projectId"].as_str().unwrap();
+    let channel = if workspace_protocol::channel::current().is_dev() {
+        StoreChannel::Dev
+    } else {
+        StoreChannel::Release
+    };
+    let key = ProjectKey::new(&root, channel).unwrap();
+    let store = Store::open(key.clone(), OpenMode::Initialize).unwrap();
+    store
+        .write(|db| Ok(db.pragma_update(None, "user_version", 10)?))
+        .unwrap();
+    drop(store);
+    let original = std::fs::read(key.database()).unwrap();
+
+    assert_eq!(
+        s.activate(project).await.unwrap_err().to_string(),
+        "unsupported_storage"
+    );
+    let status = s.project_status(project).await.unwrap();
+    assert_eq!(status["state"], "failed");
+    assert_eq!(status["reason"], "unsupported_storage");
+    let guidance = status["message"].as_str().unwrap();
+    assert!(guidance.contains("format 10 from the retired Python Cortex runtime"));
+    assert_eq!(s.projects().await[0]["projectId"], project);
+
+    let server = tokio::spawn(s.clone().serve());
+    let mut client = connect(s.socket_path()).await.unwrap();
+    for (id, method, params) in [
+        (
+            1,
+            "native.query",
+            json!({"protocol":{"major":2,"mapping":2},"requestId":"storage-read",
+            "projectId":project,"operation":"tasks.page","payload":{"target":project,"cursor":null,"limit":20}}),
+        ),
+        (2, "projects.activate", json!({"projectId":project})),
+    ] {
+        write_frame(
+            &mut client,
+            &json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
+        )
+        .await
+        .unwrap();
+        let reply = read_frame(&mut client).await.unwrap();
+        assert_eq!(reply["id"], id);
+        assert_eq!(
+            reply["error"]["data"]["reason"], "unsupported_storage",
+            "{reply}"
+        );
+        assert_eq!(reply["error"]["data"]["kind"], "project_store");
+        assert_eq!(reply["error"]["message"], guidance);
+    }
+
+    for (id, op, params) in [
+        (3, "project.config.read", json!({})),
+        (
+            4,
+            "project.config.save",
+            json!({"surface":"project_ceiling","value":{},
+            "tokens":{"project_ceiling":"absent"}}),
+        ),
+    ] {
+        write_frame(
+            &mut client,
+            &json!({"jsonrpc":"2.0","id":id,"method":"machine.call",
+            "params":{"op":op,"projectId":project,"params":params}}),
+        )
+        .await
+        .unwrap();
+        let reply = read_frame(&mut client).await.unwrap();
+        assert_eq!(reply["id"], id);
+        assert_eq!(reply["result"]["code"], "unsupported_storage", "{reply}");
+        assert_eq!(reply["result"]["message"], guidance);
+    }
+    assert_eq!(std::fs::read(key.database()).unwrap(), original);
+    assert!(!key.directory().join(".migration-backups").exists());
+    drop(client);
+    s.stop().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn workspace_activation_upgrades_and_recovers_legacy_work_under_the_same_fences() {
+    use cortex_core::{lifecycle::TaskMachine, OpenMode, ProjectKey, Store, StoreChannel};
+
+    let f = Fixture::new();
+    let s = Native::bind(f.config()).await.unwrap();
+    let root = f.0.join("projects/one");
+    let registered = s.register(&root, "Saved project").await.unwrap();
+    let project = registered["projectId"].as_str().unwrap();
+    let channel = if workspace_protocol::channel::current().is_dev() {
+        StoreChannel::Dev
+    } else {
+        StoreChannel::Release
+    };
+    let key = ProjectKey::new(&root, channel).unwrap();
+    let store = Store::open(key.clone(), OpenMode::Initialize).unwrap();
+    TaskMachine::new(&store)
+        .create("legacy", "Preserve the stopped work", "python-owner")
+        .unwrap();
+    store
+        .write(|db| {
+            db.execute(
+                "UPDATE runtime_tasks SET state='PAUSED' WHERE task_id='legacy'",
+                [],
+            )?;
+            db.execute(
+                "INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at)
+                VALUES ('legacy','CHECK_EXECUTION_STARTED','runtime',?,'0')",
+                [json!({"command_ref":"legacy-check","revision":0}).to_string()],
+            )?;
+            db.pragma_update(None, "user_version", 11)?;
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+
+    assert_eq!(s.activate(project).await.unwrap()["executionHost"], "rust");
+    assert_eq!(s.project_status(project).await.unwrap()["ready"], true);
+    let backup_dir = key.directory().join(".migration-backups");
+    assert_eq!(std::fs::read_dir(backup_dir).unwrap().count(), 1);
+    let store = Store::open(key, OpenMode::LiveReadOnly).unwrap();
+    store
+        .read(|db| {
+            assert_eq!(
+                db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+                12
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT state,blocker FROM runtime_tasks WHERE task_id='legacy'",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                )?,
+                ("PAUSED".into(), "legacy_effect_outcome_unknown".into())
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM runtime_events WHERE task_id='legacy'
+            AND type='NATIVE_TASK_ADOPTED' AND json_extract(payload_json,'$.replayed')=0",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+    s.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn serve_joins_background_owners_before_returning() {
     use std::{future::Future, sync::Arc, task::Poll};
     let f = Fixture::new();

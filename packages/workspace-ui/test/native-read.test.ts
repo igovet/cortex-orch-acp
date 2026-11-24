@@ -152,10 +152,15 @@ describe("native read path", () => {
     const { s, p } = fixture();
     s.answers["projects.list"] = () => ["p", "broken"].map(id => ({projectId:id,displayName:id,canonicalRoot:"/" + id,activation:{}}));
     const original = s.answers["native.query"]!;
+    const message = "This format-11 project needs an upgrade before it can be read here.";
+    const reason = "legacy_storage_migration_required";
+    const refusal = () => { throw new Error(`refused:project_store:${reason}: ${message}`); };
+    s.answers["service.capabilities"] = () => ({methods:["native.query", "projects.activate"]});
+    s.answers["projects.activate"] = refusal;
     let failed = true;
     s.answers["native.query"] = raw => {
       const id = (raw as {projectId:string}).projectId;
-      if (id === "broken" && failed) throw new Error("legacy_storage_migration_required");
+      if (id === "broken" && failed) refusal();
       return { ...(original(raw) as object), projectId:id };
     };
     let dispose!: () => void;
@@ -166,6 +171,15 @@ describe("native read path", () => {
       expect(store.state().projects.map(p => p.id)).toEqual(["p", "broken"]);
       expect(store.state().projects.find(p => p.id === "broken")?.issue).toBeNull(); // One startup failure is retried quietly.
       expect(store.state().tasks.some(t => t.projectId === "p")).toBe(true);
+      expect(await p.command({requestId:"activate-broken",operation:"activate_project",expectedVersion:null,
+        payload:{type:"activate_project",projectId:"broken"}})).toMatchObject({
+        ok:false,outcome:reason,message
+      });
+      await p.query("project.snapshot", {full:true});
+      await p.query("project.snapshot", {full:true});
+      await vi.waitFor(() => expect(store.state().projects.find(p => p.id === "broken")).toMatchObject({
+        issue:message, issueCause:reason
+      }));
       failed = false;
       await vi.waitFor(() => expect(store.state().projects.find(p => p.id === "broken")?.issue).toBeNull(), {timeout:6000});
       expect(store.connection().state).toBe("connected");

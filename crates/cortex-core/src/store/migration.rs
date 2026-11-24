@@ -6,7 +6,7 @@ use super::{
     schema, ProjectKey,
 };
 use crate::{error::refuse, CoreError, CoreResult};
-use rusqlite::{backup::Backup, Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{backup::Backup, config::DbConfig, Connection, OpenFlags, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
@@ -65,6 +65,10 @@ pub(super) fn upgrade11(db: &mut Connection, directory: &Path) -> CoreResult<()>
     if schema::validate_header(db, false)? != 11 {
         return refuse("unsupported_storage");
     }
+    // If the upgrade fails, closing the last connection must not checkpoint
+    // pre-existing WAL rows into the main file. Restore the normal close
+    // behavior only after a successful commit.
+    db.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
     let backups = directory.join(".migration-backups");
     locks::private_directory(&backups, true)?;
     checkpoint("before_backup");
@@ -80,9 +84,8 @@ pub(super) fn upgrade11(db: &mut Connection, directory: &Path) -> CoreResult<()>
     locks::sync_directory(&backups)?;
     let backup_digest = digest(&path)?;
     checkpoint("after_backup");
-    // Every error before commit drops/rolls back the whole schema transaction.
+    let tx = db.transaction_with_behavior(TransactionBehavior::Exclusive)?;
     let result = (|| {
-        let tx = db.transaction_with_behavior(TransactionBehavior::Exclusive)?;
         schema::install(&tx)?;
         for table in [
             "hook_pending_sources",
@@ -93,30 +96,28 @@ pub(super) fn upgrade11(db: &mut Connection, directory: &Path) -> CoreResult<()>
         ] {
             tx.execute_batch(&format!("DROP TABLE IF EXISTS {table};"))?;
         }
-        verify(&tx, 12)?;
+        schema::validate_installed(&tx)?;
         tx.execute(
-            "INSERT INTO format_history VALUES (NULL,'migrate',11,12,?,?,?)",
+            "INSERT INTO format_history(action,from_version,to_version,backup_path,backup_digest,at)
+             VALUES ('migrate',11,12,?,?,?)",
             (
                 path.to_str().ok_or(CoreError::Refused("unsafe_storage"))?,
                 &backup_digest,
                 crate::now(),
             ),
         )?;
-        checkpoint("before_commit");
-        tx.commit()?;
-        checkpoint("after_commit");
-        Ok(())
+        verify(&tx, 12)
     })();
     if let Err(error) = result {
-        // Restore the verified logical snapshot, including committed WAL rows,
-        // even if schema/commit failed. Never silently continue a partial upgrade.
-        if digest(&path)? != backup_digest {
-            return refuse("migration_backup_invalid");
-        }
-        Backup::new(&backup, db)?.run_to_completion(128, Duration::from_millis(5), None)?;
-        verify(db, 11)?;
+        // SQLite rolls back the transaction; copying the logical backup back
+        // would rewrite the original database even when rollback succeeded.
+        tx.finish()?;
         return Err(error);
     }
+    checkpoint("before_commit");
+    tx.commit()?;
+    checkpoint("after_commit");
+    db.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, false)?;
     Ok(())
 }
 /// Explicit offline restore. No Markdown, drafts, accounts or engine state are

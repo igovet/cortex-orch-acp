@@ -160,8 +160,27 @@ pub(crate) fn validate(method: &str, p: &Value) -> io::Result<()> {
 fn repr(s: &str) -> String {
     crate::startup::repr(&json!(s))
 }
+fn storage_error(id: &Value, code: i64, error: &io::Error) -> Option<Value> {
+    let diagnostic = workspace_service::incoming::storage_diagnostic(error)?;
+    Some(json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":diagnostic.message,
+        "data":{"reason":diagnostic.reason,"retryable":diagnostic.retryable}}}))
+}
+
+pub(crate) fn request_error(id: Value, method: &str, error: &io::Error) -> Value {
+    let reason = error.to_string();
+    if reason == "legacy_session_read_only" {
+        return json!({"jsonrpc":"2.0","id":id,"error":{
+            "code":-32602,
+            "message":"This chat was created by an earlier version of Cortex. It is read-only history and no longer supports new work. To continue, open a new chat and create a new task there.",
+            "data":{"reason":reason}
+        }});
+    }
+    let (code, message) = envelope(method, &reason);
+    storage_error(&id, code, error).unwrap_or_else(|| crate::error(id, code, &message))
+}
+
 /// Translate a native synchronous refusal into Python's `(code, message)`.
-pub(crate) fn envelope(method: &str, native: &str) -> (i64, String) {
+fn envelope(method: &str, native: &str) -> (i64, String) {
     match native {
         "method_not_found" => (-32601, format!("Unknown method '{method}'.")),
         "Method 'authenticate' is not supported." => (-32601, native.into()),
@@ -220,7 +239,11 @@ pub(crate) fn config_message(native: &str, set_mode: bool, key: &str, value: &st
 /// `no_configuration_revision`: no route was applied to the task before
 /// orchestration (Python's first prompt and `/cortex-new-task` both reach it
 /// when nothing is selectable). The native refusal code is not on the wire.
-pub(crate) fn prompt_error(id: Value, native: &str) -> Value {
+pub(crate) fn prompt_error(id: Value, error: &io::Error) -> Value {
+    if let Some(error) = storage_error(&id, -32603, error) {
+        return error;
+    }
+    let native = error.to_string();
     let error = if native.starts_with("orchestration_unavailable:") {
         json!({"code":-32001,"message":"orchestration_unavailable","data":{"retryable":false,
             "reason":"no_configuration_revision",

@@ -363,13 +363,29 @@ fn format10_and_unknown_fail_closed_without_backup() {
             OpenMode::Initialize,
             OpenMode::InspectImmutable,
             OpenMode::RuntimeValidate,
+            OpenMode::LiveReadOnly,
         ] {
-            assert_eq!(
-                Store::open(p.key(), mode).err().unwrap().code(),
-                "unsupported_storage"
-            );
+            let error = Store::open(p.key(), mode).err().unwrap();
+            let diagnostic = error.storage_diagnostic().unwrap();
+            assert_eq!(error.code(), "unsupported_storage");
+            assert_eq!(error.to_string(), "unsupported_storage");
+            assert_eq!(diagnostic.reason, "unsupported_storage");
+            assert!(!diagnostic.retryable);
+            if v == 10 {
+                assert!(diagnostic
+                    .message
+                    .contains("format 10 from the retired Python Cortex"));
+                assert!(diagnostic
+                    .message
+                    .contains("historical Cortex archive on a copy"));
+            } else {
+                assert!(!diagnostic.message.contains("format 10"));
+                assert!(diagnostic
+                    .message
+                    .contains("restore a verified compatible backup"));
+            }
+            assert_eq!(before, digest(p.key().database()));
+            assert!(!p.key().directory().join(".migration-backups").exists());
         }
-        assert_eq!(before, digest(p.key().database()));
-        assert!(!p.key().directory().join(".migration-backups").exists());
     }
 }

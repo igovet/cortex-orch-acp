@@ -1,5 +1,5 @@
 //! Reusable Core projections served to owner reads, one reader per logical project/channel.
-use crate::{actor, failure, project_guard, Service};
+use crate::{actor, failure, local::core_failure as err, project_guard, Service};
 use cortex_core::{
     events::StreamFrame, projections::ProjectionReader, OpenMode, ProjectKey, Store, StoreChannel,
 };
@@ -32,9 +32,6 @@ fn consistent_read<T>(
         }
     }
     unreachable!()
-}
-fn err(e: cortex_core::CoreError) -> io::Error {
-    failure(e.code())
 }
 fn key(root: &std::path::Path) -> io::Result<ProjectKey> {
     ProjectKey::new(

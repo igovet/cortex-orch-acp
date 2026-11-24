@@ -4,6 +4,12 @@ The canonical store is `<project>/.cortex/cortex.sqlite3`, with task documents,
 reports, drafts and the newest-first `pipeline.md` beside it. A project never
 uses a home-wide Cortex database. Workspace Dev selects `<project>/.cortex-dev/cortex.sqlite3` instead, with its documents and drafts beside it. Each channel has exactly one store per logical project, shared by linked worktrees. The host selects a fixed channel, not an arbitrary path. Dev never reads or imports the default/release store or legacy `.codex/cortex` storage; an existing release `.cortex` does not prevent opening the folder in Dev. See [channel stores](../cortex-workspace/backlog/CW-S12.md).
 
+The writable format-12 installer maintains `native_worktree_starts` for Start
+intent, provision evidence and cleanup disposition. `task_workspaces` retains
+the execution root; checkout authority is verified against the provision record,
+not a desktop projection. This adds neither a store nor a format change.
+See [worktree recovery](../cortex-workspace/consistency-and-recovery.md#worktree-start-and-cleanup).
+
 Each channel's store directory keeps itself out of the project's `git status`: a
 writable `Initialize` open creates `<store>/.gitignore` containing `*` (which also
 ignores itself) when it is absent. It is written without following a link and
@@ -33,6 +39,13 @@ and format-10/unknown rejection rules. It permits normal SQLite WAL/SHM creation
 and checkpoint housekeeping, so it is not a non-mutating inspection surface.
 Exclusive maintenance still fences these shared opens; it is not bypassed.
 
+Local Code's **Edit** action uses the shared runtime open and an ordinary WAL write
+when the file-lease schema is installed. Live read snapshots can continue during
+lease acquisition. A missing store, a format-11 migration, or a wholly absent
+lease schema group still requires the exclusive initialization path. A partial
+lease schema is refused. A conflicting writer or exclusive storage operation can
+still block an edit, and reading a file never initializes storage.
+
 SQLite records task and requirement revisions, assignments, attempts,
 instruction delivery, candidates, check evidence, resource ownership and
 idempotency keys. Published reports are immutable Markdown files. Bounded cursor
@@ -47,6 +60,17 @@ After a crash, reconcile the existing attempt and owned processes before
 starting another attempt. Old sessions cannot mutate current state. Cleanup
 removes a workspace only after exact publication or an explicit abandonment;
 conflicts, failed reads and missing copies are retained.
+
+Each project store has one writer executor with a 128-entry FIFO. Ordinary
+submissions fail fast with `busy` when it is full. Workspace owner actions that must
+not be lost under sprint load (draft task creation and live model/effort changes)
+use bounded asynchronous admission instead: a request waits up to two seconds for a
+free slot, woken by dequeue notifications rather than polling, and an untouched job
+is never run after that deadline. Once accepted it keeps FIFO order and returns its
+real result; the same request identity replays the original receipt and a changed
+payload on that identity is refused. A live settings change commits its admission
+and finish receipts and event atomically, and does not reconfigure running engine
+sessions. A queue still full after two seconds refuses explicitly with `busy`.
 
 Task state is durable before recovery decisions. In-memory state may accelerate
 reads but cannot be the only record of a mutation or background-task failure.
@@ -81,9 +105,19 @@ is only validated (`create_private_database` in
 
 Writable initialization upgrades only format 11 under the exclusive access
 fence and retains a verified logical SQLite backup (including committed WAL
-rows) in private `.migration-backups/`. Migration failure rolls back and restores
-the verified logical snapshot. Non-initializing format-11 opens report
+rows) in private `.migration-backups/`. A failure before commit rolls back any
+uncommitted changes without copying the backup over the main database. The backup
+may remain; restoring it is a separate, explicit offline operation.
+Non-initializing format-11 opens report
 `legacy_storage_migration_required`; format 10 and unknown formats fail closed.
+The upgrade also accepts the shapes the retired Python runtime wrote for format 11,
+and validates the complete expected format-12 schema inside the migration
+transaction, so an unsupported shape rolls back with the main database bytes
+unchanged. Refusals carry a human-readable message and a stable reason
+(`CoreError::storage_diagnostic()`); when the canonical store holds no project
+records, Release reports `legacy_storage_root_detected` if older storage exists
+under `.codex/cortex` (names and metadata only; nothing is moved, and Dev never
+inspects it). See [format migration](format-migration.md#opening-python-era-projects-through-incoming-acp).
 Explicit offline restore requires stopped access, confirmation, the backup's
 expected SHA-256, compatible application/format and integrity validation. It
 checkpoints the current database before replacing it, fences mutable Rust
@@ -125,6 +159,12 @@ runs below.
 The runtime adds `runtime_events_type` on `runtime_events(type, task_id, id)` and `capacity_by_attempt` on `capacity_reservations(attempt_id)`. The initializing schema also adds `task_events_by_activity_ref` on `task_events(task_id, json_extract(payload_json,'$.activity_ref'), id)` and `runtime_requests_by_operation` on `runtime_requests(task_id, actor, operation)`, and `host_updates_by_call` on `host_updates(session_id, json_extract(update_json,'$.toolCallId'), seq)` for updates whose `update_json` is valid JSON. The conversation history and coordinator pages find a tool call's earlier updates through `host_updates_by_call`; their lookups name the same `json_valid(update_json)` condition so SQLite can use the partial index. A malformed update is still stored and is never evaluated by it. Worker split-tool lookups use unary `+` on assignment and ordering expressions so SQLite chooses the activity index without `ANALYZE`. These are `CREATE INDEX IF NOT EXISTS` statements in the initializing schema. A writable `OpenMode::Initialize` open therefore installs them on an existing format-12 database, without a format change. Inspection and non-initializing opens never install them. The install runs inside that open's exclusive `.access.lock` and its `BEGIN IMMEDIATE` schema transaction, so a missing index is built once, the first time the runtime writer opens the project. Store validation checks the header, table groups and columns, never indexes. A store without one of these indexes is therefore still accepted, and its lookups are only slower. A store that has them is accepted by a binary whose schema predates them.
 
 Worker-panel activity envelopes are redacted before they are persisted. An envelope of 64 KiB or less stays inline in its `progress` event. A larger one is kept whole in the private large-output store under coordinator owner scope, with `tool_result` as its source kind and the event reference as its source reference. The event then keeps bounded 512-byte field previews, `payload_offloaded`, the `large_output_id`, the full SHA-256 and the byte count. The body is read through the coordinator's scoped `read_large_output`, and replaying the same event reuses the stored body. The body is written before the event, so an interruption between the two can leave an unreferenced body, and no cleanup runs for it. Offloading does not rewrite the rows a store already holds.
+
+## Automatic Workspace retention
+
+The Workspace service (`crates/workspace-service/src/storage_retention.rs`) runs one maintenance pass when a local project is activated and then every 60 minutes. It archives Done tasks after `autoArchiveDays` (default 7), purges archives older than `retentionDays` (default 30, from archive time) while `automaticArchivePurge` is true (the default), and removes unreferenced attachment files after `unreferencedAttachmentRetentionDays` (default 1). Settings and ranges: [configuration](../configuration.md#workspace-storage-retention).
+
+Deletion goes through the same exclusive-lock, journaled core path as manual cleanup (`crates/cortex-core/src/store/retention.rs`) and rechecks closure, age and identity there. Only a closed task with a verified linked execution in COMPLETED, FAILED or CANCELLED state qualifies; open questions, unsettled attempts, running nodes, unreleased reservations, possibly live processes, loaded sessions and busy stores protect a task. A scheduled pass never forces. Dirty worktrees are retained, unmerged work needs the existing discard authorization, and only a clean Workspace-created task worktree is removed, without force. Migration backups and qualification evidence are never expired. A scheduled purge frees pages for reuse but does not run a whole-database `VACUUM`, so the database file may not shrink immediately; manual cleanup still reports reclamation.
 
 ## Explicit task retention
 

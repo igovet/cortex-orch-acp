@@ -207,8 +207,15 @@ Rust target as a launch argv of exactly one absolute path named `cortex-acp` and
 runs `cortex-paseo-tools` from that same directory (never `PATH`), with an empty
 environment and working directory `/`. The tool opens the store only through
 cortex-core's non-initializing live read-only mode, so a format-11 store refuses
-(`legacy_storage_migration_required`) instead of being migrated; the Rust entry's
-own initializing open migrates it first. A missing tool refuses each read with an
+(`legacy_storage_migration_required`) instead of being migrated. Incoming ACP
+upgrades a format-11 store only on its writable initializing open (`session/new`,
+or `session/load` of an exact session carrying a persisted Rust-session marker),
+with a verified private backup and validation before commit; these readers do not
+upgrade, and loading an old or unknown session does not either. The project itself
+opens, but continuing Python-era tasks or sessions through incoming ACP is
+intentionally not supported (a product decision): such a session is refused with
+reason `legacy_session_read_only` and a message telling the owner to open a new
+chat and create a new task. A missing tool refuses each read with an
 explicit message; there is no fallback. `cargo test --locked --offline -p
 cortex-paseo-tools` compares 37 cases byte-for-byte with golden outcomes
 (`tests/parity-golden.json`, recorded once from the former Python readers) on real
@@ -389,13 +396,18 @@ recovered refuses with `scheduler_recovery_required`. Two schedulers never
 drive one task, and a process with an unfinished (running, waiting or paused)
 task keeps the lease. Concurrent active tasks in separate processes are not
 supported.
-Writable unadopted legacy projects and linked-worktree ingress still refuse here.
+A canonical project with unadopted Python-era tasks opens for writing through the
+shared fenced recovery/adoption (see
+[format-migration.md](format-migration.md#opening-python-era-projects-through-incoming-acp)),
+unless a busy owner or a linked-worktree `cwd` refuses it.
 Workspace's [separate worktrees](../cortex-workspace/local-task-execution.md#separate-worktrees)
 are provisioned by the desktop service. They do not authorize an external ACP
 client to use a linked checkout as its incoming `cwd`.
-Workspace-service recovery can explicitly adopt legacy tasks under its scheduler fence
-(see [native recovery](../cortex-workspace/local-task-execution.md#legacy-task-adoption));
-loaded legacy sessions remain display-only and reject prompts/configuration.
+Opening the project is separate from continuing its old work: loaded legacy
+sessions remain display-only and reject prompts/configuration with
+`legacy_session_read_only` (see
+[native recovery](../cortex-workspace/local-task-execution.md#legacy-task-adoption)
+for the Workspace-service adoption path).
 A completed task requires a new session. EOF/SIGTERM settles owned native
 processes before releasing the owner.
 
@@ -605,9 +617,9 @@ started. OS-keyring connections explicitly refuse this mode as
 `native_model_efforts_keyring_unavailable`. The native reader's stricter
 snapshot identity, size and ambiguity refusals remain in force.
 
-Ownership is a safety invariant: Rust refuses writable unadopted legacy projects
-at `session/new` with `legacy_project_requires_retained_adapter` and does not
-adopt legacy work through ordinary ingress.
+Ownership is a safety invariant: a writable open of a project with unadopted
+legacy tasks goes through the shared fenced recovery, never an unfenced path, and
+a busy owner refuses with `scheduler_owner_busy`.
 
 Focused no-paid checks (build the binary first):
 
@@ -752,9 +764,10 @@ Busy sessions).
   install-shaped (a test double) starts unchanged; an install-shaped one whose
   bundled Codex cannot be located refuses to start. Other engine state files
   stay writable.
-- Legacy write ownership and adoption, linked-worktree ingress and concurrent
-  daemon ownership refuse at their explicit boundaries (for example
-  `legacy_project_requires_retained_adapter`); nothing falls back silently.
+- Legacy write ownership is fenced (shared recovery/adoption), while
+  linked-worktree ingress and concurrent daemon ownership refuse at their
+  explicit boundaries (for example `scheduler_owner_busy`); nothing falls back
+  silently.
 
 #### Differences in detail
 
@@ -773,9 +786,14 @@ Busy sessions).
   Codex observation can record per-model efforts and it ends with the process.
 - Sessions: task-bound sessions created by the former Python runtime reload
   with options read from their latest live revision. Rust also replays its
-  recorded option updates. Writable legacy ownership/adoption, linked-worktree
-  ingress and concurrent daemon ownership still require the explicit existing
-  boundaries, not fallback.
+  recorded option updates. Supported: a project that contains Python-era tasks
+  opens through the shared fenced recovery/adoption described in
+  [format-migration.md](format-migration.md#opening-python-era-projects-through-incoming-acp),
+  and their terminal results stay readable. Not supported: continuing a
+  Python-era task or session through incoming ACP (refused with
+  `legacy_session_read_only`; the owner opens a new chat and creates a new task).
+  Linked-worktree ingress and concurrent daemon ownership still refuse at their
+  explicit boundaries, not by fallback.
 - Prompts/tools: unconfigured client stdio MCP and the former
   runtime's `read_diagnostics` summary are not implemented. As in the former runtime,
   a steering message (including one sent after a held Paseo cancel, and a

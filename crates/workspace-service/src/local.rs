@@ -17,6 +17,35 @@ pub use workspace_protocol::FRAME_BYTES;
 pub fn failure(code: &'static str) -> io::Error {
     io::Error::other(code)
 }
+
+/// Keep the existing Display reason for internal callers while carrying the
+/// owner text intact through the io::Result boundary.
+#[derive(Debug)]
+struct StorageFailure(cortex_core::store::StorageDiagnostic);
+impl std::fmt::Display for StorageFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.reason)
+    }
+}
+impl std::error::Error for StorageFailure {}
+pub(crate) fn core_failure(error: cortex_core::CoreError) -> io::Error {
+    match error.storage_diagnostic() {
+        Some(diagnostic) => io::Error::other(StorageFailure(diagnostic)),
+        None => failure(error.code()),
+    }
+}
+pub fn storage_diagnostic(error: &io::Error) -> Option<cortex_core::store::StorageDiagnostic> {
+    error
+        .get_ref()?
+        .downcast_ref::<StorageFailure>()
+        .map(|failure| failure.0)
+}
+/// Only genuine absence is an empty project; don't hide a missing lock,
+/// unsafe path or the store's diagnosis of a historical root.
+pub(crate) fn store_missing(key: &cortex_core::ProjectKey, error: &cortex_core::CoreError) -> bool {
+    matches!(error, cortex_core::CoreError::Io(e) if e.kind() == io::ErrorKind::NotFound)
+        && matches!(key.database().symlink_metadata(), Err(e) if e.kind() == io::ErrorKind::NotFound)
+}
 pub fn uid() -> u32 {
     unsafe { libc::geteuid() }
 }

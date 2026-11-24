@@ -27,6 +27,12 @@ pub fn refusal(refused: Refused, field: Option<&str>) -> Value {
 fn store_error(code: &str) -> Value {
     error(code, "The project store refused the request.", None)
 }
+fn from_store(error: cortex_core::CoreError) -> Value {
+    match error.storage_diagnostic() {
+        Some(diagnostic) => self::error(diagnostic.reason, diagnostic.message, None),
+        None => store_error(error.code()),
+    }
+}
 pub fn expected_revision(value: &Value) -> std::result::Result<String, Value> {
     value
         .as_str()
@@ -604,23 +610,30 @@ fn project_store(
         ));
     };
     let channel = channel(store)?;
-    if !root.join(store).join("cortex.sqlite3").is_file() {
-        return Err(error(
+    let missing = || {
+        error(
             "project_store_missing",
             format!(
                 "{} has no Cortex project store yet; open a task there first.",
                 root.display()
             ),
             Some("project"),
-        ));
+        )
+    };
+    let key = ProjectKey::new(&root, channel).map_err(from_store)?;
+    if key.root() != root && !root.join(store).join("cortex.sqlite3").is_file() {
+        return Err(missing());
     }
-    let key = ProjectKey::new(&root, channel).map_err(|e| store_error(e.code()))?;
     let mode = if write {
         OpenMode::RuntimeValidate
     } else {
         OpenMode::LiveReadOnly
     };
-    let opened = Store::open(key, mode).map_err(|e| store_error(e.code()))?;
+    let opened = match Store::open(key.clone(), mode) {
+        Ok(store) => store,
+        Err(e) if crate::local::store_missing(&key, &e) => return Err(missing()),
+        Err(e) => return Err(from_store(e)),
+    };
     Ok((root, opened))
 }
 fn user_ceiling(environment: &RouteEnvironment) -> std::result::Result<Value, Value> {
@@ -658,7 +671,7 @@ pub fn read_project_ceiling(
     let (root, opened) = project_store(project, store, false)?;
     let row = opened
         .read(|db| ceiling::row(db, &root))
-        .map_err(|e| store_error(e.code()))?;
+        .map_err(from_store)?;
     let user = user_ceiling(environment)?;
     project_view(&root, row.as_ref(), &user)
 }
@@ -720,7 +733,7 @@ pub fn update_project_ceiling(
     if let Some(answer) = outcome {
         return answer;
     }
-    let row = written.map_err(|e| store_error(e.code()))?.flatten();
+    let row = written.map_err(from_store)?.flatten();
     let user = user_ceiling(environment)?;
     let mut view = project_view(&root, row.as_ref(), &user)?;
     view["changed"] = json!(true);

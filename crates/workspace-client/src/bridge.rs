@@ -278,7 +278,25 @@ impl Bridge {
             if let Some(refusal) = storage_refusal(&reply) {
                 return Err(refusal);
             }
-            match reply["error"]["message"].as_str() {
+            let error = &reply["error"];
+            if method == "workspace"
+                && reply.get("result").is_none()
+                && error["code"] == -32000
+                && error["data"]["kind"] == "worktree_start"
+                && matches!(
+                    error["data"]["reason"].as_str(),
+                    Some("worktree_git_required" | "worktree_head_unborn" | "worktree_git_unavailable")
+                )
+            {
+                if let Some(message) = error["message"].as_str().filter(|message| {
+                    !message.is_empty()
+                        && message.len() <= 1024
+                        && !message.chars().any(char::is_control)
+                }) {
+                    return Err(format!("{REFUSED}{message}"));
+                }
+            }
+            match error["message"].as_str() {
                 // These two steer the caller, so they stay codes.
                 Some(
                     code @ ("project_folder_missing"

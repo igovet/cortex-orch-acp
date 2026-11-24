@@ -384,8 +384,7 @@ pub(super) fn save(root: &Path, config: &crate::Config, params: &Value) -> Resul
     if let Some(c) = &candidate {
         narrow(c, &user)?;
     }
-    let store = context::open(root, OpenMode::RuntimeValidate)
-        .map_err(|e| refuse(e.code, "The project store refused the request."))?
+    let store = context::open(root, OpenMode::RuntimeValidate)?
         .ok_or_else(|| {
             refuse(
                 "project_store_missing",
@@ -413,5 +412,5 @@ pub(super) fn save(root: &Path, config: &crate::Config, params: &Value) -> Resul
             db.execute("DELETE FROM project_configuration_defaults WHERE project_root=?1",[root.to_string_lossy().as_ref()])?;
         }
         Ok(Ok(reply))
-    }).map_err(|e|if effect{unknown()}else{refuse(e.code(),"The project store refused the request.")})?
+    }).map_err(|e|if effect{unknown()}else{context::core(e)})?
 }

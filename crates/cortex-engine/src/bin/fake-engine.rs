@@ -131,6 +131,87 @@ async fn read_capsule(server: &Value) -> Value {
         .and_then(|t| serde_json::from_str(t).ok())
         .unwrap_or(Value::Null)
 }
+async fn steering_fixture(server: &Value, snapshot: &Value) -> String {
+    let messages = snapshot["owner_messages"].as_array().unwrap();
+    let mut relay = tokio::process::Command::new(server["command"].as_str().unwrap())
+        .args(server["args"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()))
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+        .kill_on_drop(true).spawn().unwrap();
+    let mut input = relay.stdin.take().unwrap();
+    let mut output = BufReader::new(relay.stdout.take().unwrap());
+    let rpc = async |input: &mut tokio::process::ChildStdin,
+                     output: &mut BufReader<tokio::process::ChildStdout>,
+                     id: u64, method: &str, params: Value| {
+        wire::write_frame(input, &json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})).await.unwrap();
+        wire::read_frame(output).await.unwrap().unwrap()
+    };
+    let list = rpc(&mut input, &mut output, 1, "tools/list", json!({})).await;
+    let tools = list["result"]["tools"].as_array().unwrap();
+    assert!(tools.iter().all(|t| matches!(t["name"].as_str(), Some("steer_plan" | "steer_worker"))
+        || cortex_engine::schema::active_steering_read(t["name"].as_str().unwrap())));
+    assert!(tools.iter().any(|t| t["name"] == "steer_plan"));
+    assert!(tools.iter().any(|t| t["name"] == "steer_worker"));
+    assert!(rpc(&mut input, &mut output, 2, "tools/call", json!({"name":"replan_request","arguments":{}})).await["error"].is_object());
+    for msg in messages {
+        let request = msg["request"].clone();
+        let gate = match msg["text"].as_str() {
+            Some("Hold the first steering reply") => Some("first"),
+            Some("Hold the final steering reply") => Some("final"),
+            _ => None,
+        };
+        if let Some(gate) = gate {
+            std::fs::write(format!(".git/steer-{gate}-entered"), "ready").unwrap();
+            let release = format!(".git/steer-{gate}-release");
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !std::path::Path::new(&release).exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+        }
+        if msg["text"] == "Amend pending work and guide one worker" {
+            let target = snapshot["live_attempts"].as_array().unwrap().iter().find(|t| t["node"] == "work").unwrap();
+            let mut plan = snapshot["plan"].clone();
+            plan["tasks"][0]["objective"] = json!("Illegally replace the live work");
+            let invalid = json!({"name":"steer_plan","arguments":{"source_request":request,
+                "request_key":"live-node","expected_plan":snapshot["plan_digest"],"plan":plan}});
+            let refused = rpc(&mut input, &mut output, 3, "tools/call", invalid).await;
+            assert!(refused.to_string().contains("active_plan_node_already_claimed"), "{refused}");
+            let mut plan = snapshot["plan"].clone();
+            let third = plan["tasks"].as_array_mut().unwrap().iter_mut().find(|n| n["id"] == "third").unwrap();
+            third["objective"] = json!("Use the amended pending objective");
+            let routed = json!({"name":"steer_plan","arguments":{"source_request":request,
+                "request_key":"amend","expected_plan":snapshot["plan_digest"],"plan":plan}});
+            let amended = rpc(&mut input, &mut output, 4, "tools/call", routed.clone()).await;
+            assert_eq!(amended["result"]["structuredContent"]["changed"], true, "{amended}");
+            let replay = rpc(&mut input, &mut output, 5, "tools/call", routed).await;
+            assert_eq!(amended["result"], replay["result"]);
+            let guidance = json!({"name":"steer_worker","arguments":{"source_request":request,
+                "request_key":"guide-exact","attempt":target["attempt"],"text":"Use the directed output."}});
+            let mut foreign = guidance.clone();
+            foreign["arguments"]["source_request"] = json!("not-in-this-turn");
+            let refused = rpc(&mut input, &mut output, 6, "tools/call", foreign).await;
+            assert!(refused.to_string().contains("active_steering_source_not_handed"), "{refused}");
+            let accepted = rpc(&mut input, &mut output, 7, "tools/call", guidance.clone()).await;
+            assert_eq!(accepted["result"]["structuredContent"]["delivery"], "queued", "{accepted}");
+            let replay = rpc(&mut input, &mut output, 8, "tools/call", guidance.clone()).await;
+            assert_eq!(accepted["result"], replay["result"]);
+            let mut rekeyed = guidance;
+            rekeyed["arguments"]["request_key"] = json!("guide-after-recovery");
+            let replay = rpc(&mut input, &mut output, 9, "tools/call", rekeyed).await;
+            assert_eq!(accepted["result"], replay["result"]);
+            std::fs::write(".git/steer-target", target["attempt"].as_str().unwrap()).unwrap();
+        }
+        if msg["text"] == "Try the worker that finishes before tool admission" {
+            let attempt = std::fs::read_to_string(".git/steer-target").unwrap();
+            let args = json!({"name":"steer_worker","arguments":{"source_request":request,
+                "request_key":"finished-race","attempt":attempt,"text":"Do not deliver this."}});
+            let refused = rpc(&mut input, &mut output, 8, "tools/call", args).await;
+            assert!(refused.to_string().contains("native_worker_not_live"), "{refused}");
+        }
+    }
+    format!("Steering reply: {}", messages.iter().filter_map(|m| m["text"].as_str()).collect::<Vec<_>>().join(" / "))
+}
+
 fn reconciliation_fixture(mode: &str, scenario: &str, context: &Value) -> Option<Value> {
     if mode != "desktop-coordinator" || !scenario.starts_with("reconcile-") {
         return None;
@@ -696,6 +777,32 @@ pub async fn main() {
                     *n += 1;
                 }
                 let full_scenario = std::fs::read_to_string("scenario.txt").unwrap_or_default();
+                let active_steering = full_scenario.trim() == "active-steering-hold";
+                if let Some((_, snapshot)) = raw.rsplit_once("\n\nLive steering snapshot (runtime facts; targets may settle before tool use):\n") {
+                    let snapshot: Value = serde_json::from_str(snapshot).unwrap();
+                    let text = steering_fixture(&servers[&sid], &snapshot).await;
+                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,
+                        "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}}})).await.unwrap();
+                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}})).await.unwrap();
+                    continue;
+                }
+                if active_steering && mode == "desktop-worker" && is_third {
+                    assert_eq!(assignment["objective"], "Use the amended pending objective");
+                    assert!(!raw.contains("Use the directed output."), "another worker's guidance leaked into the brief");
+                }
+                let guided = active_steering && mode == "desktop-worker"
+                    && raw.contains("Coordinator guidance, oldest first");
+                if guided {
+                    assert_eq!(*n, 2, "guidance must reach the original worker session");
+                    assert!(raw.contains("Use the directed output."));
+                    std::fs::write(".git/steer-guided", "same-session").unwrap();
+                }
+                if active_steering && mode == "desktop-worker" && (is_second || assignment["node"] == "work") && *n == 1 {
+                    std::fs::write(if is_second {".git/steer-second-held"} else {".git/steer-first-worker-held"}, "ready").unwrap();
+                    releasable.insert(sid.clone(), r.clone());
+                    held.insert(sid, id);
+                    continue;
+                }
                 let checkpoint = full_scenario.trim() == CHECKPOINT_SCENARIO;
                 let rolling = checkpoint || full_scenario.trim() == "rolling";
                 let checkpoint_answer = mode.starts_with("desktop-")
@@ -931,6 +1038,10 @@ pub async fn main() {
                     {
                         json!({"name":"user_question_request","arguments":{"question":"The owner stopped verification. How should we continue?",
                             "options":["Keep the stopped result","Plan another check"],"request_key":"stopped-verification"}})
+                    } else if mode == "desktop-coordinator" && full_scenario == "incoming-legacy-open" {
+                        json!({"name":"answer_submit","arguments":{
+                            "text":"The new session can answer without changing the old project.",
+                            "request_key":"legacy-open-answer"}})
                     } else if mode == "desktop-coordinator" && proposal.is_some() {
                         if *n == 1 {
                             json!({"name":"user_question_request","arguments":serde_json::from_str::<Value>(&proposal.unwrap()).unwrap()})
@@ -978,12 +1089,12 @@ pub async fn main() {
                             tasks[0]["scope"] = json!(["work.txt", CHECKPOINT_ANSWER_LOG]);
                         }
                         if full_scenario.trim() == "stop-siblings"
-                            || rolling
+                            || rolling || active_steering
                             || full_scenario == "reconcile-worker-replan"
                         {
                             tasks.as_array_mut().unwrap().push(json!({"id":"second","role":"backend-dev","objective":"Change other.txt","dependencies":[],"scope":["other.txt"],"model":"auto"}));
                         }
-                        if rolling {
+                        if rolling || active_steering {
                             tasks.as_array_mut().unwrap().push(json!({"id":"third","role":"backend-dev","objective":"Change third.txt after work.txt","dependencies":["work"],"scope":["third.txt"],"model":"auto"}));
                         }
                         // Owner messages handed over after verified work: this fixture's
@@ -1087,6 +1198,8 @@ pub async fn main() {
                                     && assignment["node"] == "fix-output"
                                 {
                                     "expected"
+                                } else if guided {
+                                    "directed"
                                 } else {
                                     "after"
                                 },
@@ -1551,6 +1664,13 @@ pub async fn main() {
                     // A refused call (a JSON-RPC refusal or a structured tool error) opened nothing.
                     let accepted =
                         reply.get("error").is_none() && reply["result"]["isError"] != true;
+                    if active_steering && !accepted {
+                        let code = reply.pointer("/error/data/code")
+                            .or_else(|| reply.pointer("/result/structuredContent/code"))
+                            .and_then(Value::as_str).unwrap_or("unclassified");
+                        let field = reply.pointer("/error/data/field").and_then(Value::as_str).unwrap_or("");
+                        std::fs::write(".git/steer-fixture-refused", format!("{}: {code} {field}", params["name"])).unwrap();
+                    }
                     if mode == "native-host"
                         && full_scenario.trim() == "usage-exit-after-result"
                         && params["name"] == "result_submit"

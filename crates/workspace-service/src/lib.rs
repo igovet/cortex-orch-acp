@@ -1152,6 +1152,8 @@ impl Service {
                 _ => return Err(failure("invalid_request")),
             };
             let stopping = request.method == "service.stop" && request.params == json!({});
+            let workspace_start =
+                request.method == "workspace" && request.params["operation"] == "tasks.start";
             let result = match request.method.as_str() {
                 // The remote tunnel allowlists ordinary service.subscribe only.
                 "service.subscribe.code" if request.params == json!({}) => {
@@ -1182,7 +1184,24 @@ impl Service {
                         json!({"code":-32000,"message":d.message,
                             "data":{"kind":"project_store","reason":d.reason,"retryable":d.retryable}})
                     } else {
-                        json!({"code":-32000,"message":error.to_string()})
+                        let reason = error.to_string();
+                        let message = match (workspace_start, reason.as_str()) {
+                            (true, "worktree_git_required") => Some(
+                                "A separate worktree needs a Git repository. Initialize Git or choose Project folder.",
+                            ),
+                            (true, "worktree_head_unborn") => Some(
+                                "A separate worktree needs a commit. Make the first commit or choose Project folder.",
+                            ),
+                            (true, "worktree_git_unavailable") => Some(
+                                "Git is not available. Install Git or choose Project folder.",
+                            ),
+                            _ => None,
+                        };
+                        match message {
+                            Some(message) => json!({"code":-32000,"message":message,
+                                "data":{"kind":"worktree_start","reason":reason}}),
+                            None => json!({"code":-32000,"message":reason}),
+                        }
                     };
                     json!({"jsonrpc":"2.0","id":request.id,"error":error})
                 }

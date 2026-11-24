@@ -226,7 +226,7 @@ impl Client {
     async fn open(&mut self, root: &Path) -> String {
         self.open_as(root, "scripted-client").await
     }
-    async fn open_as(&mut self, root: &Path, client: &str) -> String {
+    async fn initialize(&mut self, client: &str) {
         self.send(
             1,
             "initialize",
@@ -235,6 +235,9 @@ impl Client {
         .await;
         let init = self.response(1).await;
         assert_eq!(init["result"]["protocolVersion"], 1);
+    }
+    async fn open_as(&mut self, root: &Path, client: &str) -> String {
+        self.initialize(client).await;
         self.send(2, "session/new", json!({"cwd":root,"mcpServers":[]}))
             .await;
         let r = self.response(2).await;
@@ -2408,6 +2411,7 @@ async fn shared_project_agents() {
     // The first process is still alive; a second agent opens, runs and completes.
     let mut second = Client::new();
     let second_session = second.open(&f.0).await;
+    assert_eq!(f.query("SELECT count(*) FROM workspace_projects"), 1);
     second
         .send(
             3,
@@ -2453,6 +2457,287 @@ async fn no_routes() {
         .await
         .unwrap();
 }
+fn assert_legacy_refusal(reply: Value) {
+    assert_eq!(reply["error"]["code"], -32602, "{reply}");
+    assert_eq!(
+        reply["error"]["data"]["reason"], "legacy_session_read_only",
+        "{reply}"
+    );
+    assert_eq!(
+        reply["error"]["message"],
+        "This chat was created by an earlier version of Cortex. It is read-only history and no longer supports new work. To continue, open a new chat and create a new task there."
+    );
+}
+
+async fn conflicting_project_registration_is_refused() {
+    use cortex_core::{OpenMode, Store};
+
+    for (label, change) in [
+        (
+            "project-actor-conflict",
+            "UPDATE workspace_projects SET activated_by=
+             CASE activated_by WHEN 'uid:0' THEN 'uid:1' ELSE 'uid:0' END",
+        ),
+        (
+            "project-root-conflict",
+            "UPDATE workspace_projects SET project_root='/'",
+        ),
+    ] {
+        let f = Fixture::new(label);
+        let mut seed = Client::new();
+        seed.open(&f.0).await;
+        seed.close().await;
+        let store = Store::open(f.key(), OpenMode::Initialize).unwrap();
+        store
+            .write(|db| {
+                assert_eq!(db.execute(change, [])?, 1);
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+
+        let mut c = Client::new();
+        c.initialize("scripted-client").await;
+        c.send(2, "session/new", json!({"cwd":f.0,"mcpServers":[]}))
+            .await;
+        let reply = c.response(2).await;
+        assert_eq!(
+            reply["error"]["data"]["reason"], "project_context_conflict",
+            "{reply}"
+        );
+        assert_eq!(reply["error"]["data"]["retryable"], false, "{reply}");
+        c.close().await;
+        assert_eq!(f.query("SELECT count(*) FROM workspace_projects"), 1);
+        assert_eq!(f.query("SELECT count(*) FROM acp_host_sessions"), 1);
+        assert_eq!(f.query("SELECT count(*) FROM runtime_tasks"), 0);
+    }
+}
+
+async fn legacy_project_open() {
+    use cortex_core::{lifecycle::TaskMachine, OpenMode, Store};
+
+    for method in ["session/new", "session/load"] {
+        let f = Fixture::new(if method == "session/new" {
+            "legacy-new"
+        } else {
+            "legacy-load"
+        });
+        let mut seed = Client::new();
+        let rust_sid = seed.open(&f.0).await;
+        seed.close().await;
+        let store = Store::open(f.key(), OpenMode::Initialize).unwrap();
+        for task in ["held", "finished"] {
+            TaskMachine::new(&store)
+                .create(task, "Old project fixture", "python-owner")
+                .unwrap();
+        }
+        store.write(|db| {
+            // Model a Python Workspace registration without changing its archived fixtures.
+            assert_eq!(db.execute(
+                "UPDATE workspace_projects SET project_id='wp_historical', activated_at='historical-registration', version=7",
+                [],
+            )?, 1);
+            // An explicitly paused task keeps its recovery barrier under the
+            // shared policy, rather than entering background continuation.
+            db.execute("UPDATE runtime_tasks SET state='PAUSED' WHERE task_id='held'", [])?;
+            db.execute("UPDATE runtime_tasks SET state='COMPLETED',synthesis='Old result' WHERE task_id='finished'", [])?;
+            db.execute("INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at)
+                VALUES ('held','CHECK_EXECUTION_STARTED','runtime',?,'0')",
+                [json!({"command_ref":"unsettled-old-check","revision":0}).to_string()])?;
+            db.execute("INSERT INTO acp_host_sessions VALUES ('python-saved',?,'finished','{}','{}','[]','0',NULL)", [f.0.to_str()])?;
+            db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,created_at)
+                VALUES ('python-saved',0,'agent_message','Saved Python answer','0')", [])?;
+            db.pragma_update(None, "user_version", 11)?;
+            Ok(())
+        }).unwrap();
+        drop(store);
+        let key = f.key();
+        let backups = key.directory().join(".migration-backups");
+        let before = std::fs::read(key.database()).unwrap();
+        let mut c = Client::new();
+        c.initialize("scripted-client").await;
+        for (id, sid) in [(2, "python-saved"), (3, "unknown")] {
+            c.send(
+                id,
+                "session/load",
+                json!({"cwd":f.0,"sessionId":sid,"mcpServers":[]}),
+            )
+            .await;
+            let error = c.response(id).await["error"].clone();
+            assert_eq!(
+                error["data"]["reason"], "legacy_storage_migration_required",
+                "{error}"
+            );
+            assert!(error["message"]
+                .as_str()
+                .unwrap()
+                .contains("private backup"));
+        }
+        assert!(!backups.exists());
+        assert_eq!(std::fs::read(key.database()).unwrap(), before);
+
+        c.send(
+            4,
+            method,
+            json!({"cwd":f.0,"sessionId":rust_sid,"mcpServers":[],"projectId":"untrusted-client-id"}),
+        )
+        .await;
+        let opened = c.response(4).await;
+        assert!(opened.get("result").is_some(), "{opened}");
+        let sid = opened["result"]["sessionId"].as_str().unwrap_or(&rust_sid);
+        assert_eq!(f.query("PRAGMA user_version"), 12);
+        let history = "SELECT count(*) FROM format_history WHERE from_version=11 AND to_version=12";
+        assert_eq!(f.query(history), 1);
+        assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 1);
+        assert_eq!(
+            f.query(
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_TASK_ADOPTED'
+            AND task_id='held' AND json_extract(payload_json,'$.replayed')=0"
+            ),
+            1
+        );
+        assert_eq!(
+            f.query(
+                "SELECT count(*) FROM runtime_tasks WHERE task_id='held'
+            AND state='PAUSED' AND blocker='legacy_effect_outcome_unknown'"
+            ),
+            1
+        );
+        assert_eq!(
+            f.query(
+                "SELECT count(*) FROM runtime_events WHERE task_id='held'
+            AND type='NATIVE_RECOVERY_REQUIRED' AND json_extract(payload_json,'$.replayed')=0"
+            ),
+            1
+        );
+        assert_eq!(
+            f.query(
+                "SELECT count(*) FROM runtime_tasks WHERE task_id='finished'
+            AND state='COMPLETED' AND synthesis='Old result'"
+            ),
+            1
+        );
+
+        c.send(
+            5,
+            "session/load",
+            json!({"cwd":f.0,"sessionId":"python-saved","mcpServers":[]}),
+        )
+        .await;
+        assert!(c.response(5).await.get("result").is_some());
+        assert!(c
+            .updates
+            .iter()
+            .any(|update| update["params"]["sessionId"] == "python-saved"
+                && update["params"]["update"]["content"]["text"] == "Saved Python answer"));
+        let prompt = json!([{"type":"text","text":"Implement fixture"}]);
+        c.send(
+            6,
+            "session/prompt",
+            json!({"sessionId":"python-saved","prompt":prompt}),
+        )
+        .await;
+        assert_legacy_refusal(c.response(6).await);
+        c.send(
+            7,
+            "session/set_mode",
+            json!({"sessionId":"python-saved","modeId":"auto"}),
+        )
+        .await;
+        assert_legacy_refusal(c.response(7).await);
+        assert_eq!(f.query("SELECT count(*) FROM runtime_tasks"), 2);
+        assert_eq!(f.query("SELECT count(*) FROM workspace_tasks"), 0);
+        assert_eq!(f.query("SELECT count(*) FROM workspace_projects"), 1);
+        assert_eq!(
+            f.query(
+                "SELECT count(*) FROM workspace_projects WHERE project_id='wp_historical'
+                 AND activated_at='historical-registration' AND version=7"
+            ),
+            1
+        );
+        // An informational task must complete through the same real fake-engine
+        // relay as work tasks; it has no new command or workspace effects.
+        std::fs::write(f.0.join("scenario.txt"), "incoming-legacy-open").unwrap();
+        c.send(
+            8,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[
+            {"type":"text","text":"Can this new session answer?"}]}),
+        )
+        .await;
+        let reply = c.response(8).await;
+        assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+        assert_eq!(
+            f.query(
+                "SELECT count(*) FROM runtime_tasks WHERE state='COMPLETED'
+            AND synthesis='The new session can answer without changing the old project.'"
+            ),
+            1
+        );
+        assert_eq!(
+            std::fs::read_to_string(f.0.join("work.txt")).unwrap(),
+            "before"
+        );
+        assert_eq!(f.query("SELECT count(*) FROM runtime_events WHERE task_id='held' AND type='CHECK_EXECUTION_STARTED'"), 1);
+        assert_eq!(f.query("SELECT count(*) FROM workspace_projects"), 1);
+        assert_eq!(
+            f.query(
+                "SELECT count(*) FROM workspace_tasks WHERE project_id='wp_historical'"
+            ),
+            1
+        );
+        c.close().await;
+    }
+}
+
+async fn incompatible_projects_are_explained_without_migration() {
+    use cortex_core::{OpenMode, Store};
+
+    for (version, label, explanation) in [
+        (
+            10,
+            "format-ten",
+            "format 10 from the retired Python Cortex runtime",
+        ),
+        (99, "format-unknown", "does not recognize this database"),
+    ] {
+        let f = Fixture::new(label);
+        let key = f.key();
+        let store = Store::open(key.clone(), OpenMode::Initialize).unwrap();
+        store
+            .write(|db| Ok(db.pragma_update(None, "user_version", version)?))
+            .unwrap();
+        drop(store);
+        let before = std::fs::read(key.database()).unwrap();
+        let mut c = Client::new();
+        c.initialize("scripted-client").await;
+        for (id, method) in [(2, "session/new"), (3, "session/load")] {
+            c.send(
+                id,
+                method,
+                json!({"cwd":f.0,"sessionId":"saved","mcpServers":[]}),
+            )
+            .await;
+            let error = c.response(id).await["error"].clone();
+            assert_eq!(error["code"], -32602);
+            assert_eq!(
+                error["data"],
+                json!({"reason":"unsupported_storage","retryable":false})
+            );
+            assert!(
+                error["message"].as_str().unwrap().contains(explanation),
+                "{error}"
+            );
+        }
+        c.close().await;
+        assert_eq!(std::fs::read(key.database()).unwrap(), before);
+        assert!(!key.directory().join(".migration-backups").exists());
+    }
+}
+
+#[path = "support/python_era.rs"]
+mod python_era;
+
 fn main() {
     if std::env::args().nth(1).as_deref()
         == Some(workspace_service::native_command_supervisor::MODE)
@@ -2490,6 +2775,31 @@ fn main() {
             .unwrap();
         });
         std::process::exit(0);
+    }
+    if arg.is_empty() || matches!(
+        arg.as_str(),
+        "python-era"
+            | "python-era-controls"
+            | "python-era-store-11"
+            | "python-era-store-12"
+            | "python-era-acp-11"
+            | "python-era-acp-12"
+    ) {
+        rt.block_on(python_era::run(&arg));
+        if !arg.is_empty() {
+            return;
+        }
+    }
+    if arg.is_empty() || arg == "legacy-open" {
+        rt.block_on(async {
+            incompatible_projects_are_explained_without_migration().await;
+            conflicting_project_registration_is_refused().await;
+            legacy_project_open().await;
+        });
+        println!("incoming ACP: storage diagnostics, legacy task recovery and format-11 opens passed");
+        if arg == "legacy-open" {
+            return;
+        }
     }
     if namespace_host::assert_unavailable_view() {
         return;

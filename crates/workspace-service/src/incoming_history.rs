@@ -1,12 +1,10 @@
 //! Display-only compatibility reader. Never constructs a scheduler or writable store.
-use cortex_core::{CoreError, OpenMode, Store};
+use crate::local::{core_failure as error, store_missing};
+use cortex_core::{CoreError, Store};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::{collections::HashSet, io, path::Path, sync::Mutex};
 
-fn error(e: CoreError) -> io::Error {
-    io::Error::other(e.code())
-}
 pub struct LegacyHistory {
     store: Store,
     session: String,
@@ -73,10 +71,13 @@ impl ReadFilter {
 impl LegacyHistory {
     pub fn open(root: &Path, session: &str) -> io::Result<Option<Self>> {
         let key = crate::native_runtime::key(root).map_err(error)?;
-        if !key.database().try_exists()? {
-            return Ok(None);
-        }
-        let store = Store::open(key, OpenMode::LiveReadOnly).map_err(error)?;
+        let store = match Store::open_acp_history(key.clone(), session) {
+            Ok(Some(store)) => store,
+            // A known Rust session in format 11 takes the normal writable path.
+            Ok(None) => return Ok(None),
+            Err(e) if store_missing(&key, &e) => return Ok(None),
+            Err(e) => return Err(error(e)),
+        };
         let high = store
             .read(|db| {
                 let info: Option<String> = db.query_row(

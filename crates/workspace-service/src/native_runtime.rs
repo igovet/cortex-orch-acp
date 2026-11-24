@@ -70,6 +70,172 @@ mod refill_tests {
         (runtime, owner, "t".into(), root)
     }
 
+    fn owner_cards(runtime: &Arc<Runtime>, root: &Path) -> crate::native_owner_actions::Place {
+        crate::native_owner_actions::Place {
+            project: "project".into(),
+            name: "Fixture".into(),
+            root: root.to_owned(),
+            executor: runtime.host.executor.clone(),
+            runtime: Some(runtime.clone()),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_obstacle_card_resolution_dispatches_only_the_blocked_node() {
+        use crate::native_owner_actions::{act, list, Act};
+        let (runtime, owner, task, root) = fixture().await;
+        runtime.host.executor.write(|db| {
+            let result = json!({"blocker":{"kind":"missing_access","detail":"HTTP 403 from https://registry.npmjs.org/"}});
+            db.execute("UPDATE runtime_nodes SET status='failed',assignment_ref='old-work',result_json=? WHERE node_id='next'", [result.to_string()])?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'sibling','worker-backend-dev','Done','[]','[]','execution','completed','kept','{}')", [])?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'dependent','worker-backend-dev','Wait','[\"next\"]','[]','execution','pending',NULL,NULL)", [])?;
+            Ok(())
+        }).unwrap().await.unwrap().unwrap();
+        let wait = runtime.host.advance(task.clone(), owner.clone()).await.unwrap();
+        assert_eq!(wait["obstacleWait"], true);
+        assert_eq!(wait["state"], "EXECUTING");
+        let place = owner_cards(&runtime, &root);
+        let cards = list(std::slice::from_ref(&place)).await;
+        let card = &cards["actions"][0];
+        assert_eq!(card["service"], "registry.npmjs.org");
+        let id = card["actionId"].as_str().unwrap();
+        assert_eq!(act(&place, id, Act::Dismiss).await.unwrap()["outcome"], "resolved");
+        assert!(act(&place, id, Act::Dismiss).await.is_err());
+        let retry = runtime.host.advance(task.clone(), owner).await.unwrap();
+        let assignments = retry["assignments"].as_array().unwrap();
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0]["node"], "next");
+        assert_ne!(assignments[0]["assignment_ref"], "old-work");
+        assert_eq!(list(&[place]).await["actions"], json!([]));
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_obstacle_review_retry_gets_a_fresh_binding_on_the_same_node() {
+        use crate::native_owner_actions::{act, list, Act};
+        let (runtime, owner, task, root) = fixture().await;
+        assert!(std::process::Command::new("/usr/bin/git").args(["init", "-q"])
+            .current_dir(&root).status().unwrap().success());
+        runtime.host.executor.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='REVIEWING',review_cycle=1 WHERE task_id='t'", [])?;
+            db.execute("UPDATE runtime_nodes SET status='completed',assignment_ref='old-work',result_json='{}' WHERE node_id='next'", [])?;
+            let result = json!({"verdict":"INCOMPLETE","findings":[],"report_ref":"r_aaaaaaaaaaaa",
+                "not_covered":[{"item":"registry evidence","blocker":"missing_access",
+                    "reason":"HTTP 403 from https://registry.npmjs.org/"}]});
+            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'_review_1','worker-code-reviewer','Review','[\"next\"]','[\"**\"]','review','completed','old-review',?)",
+                [result.to_string()])?;
+            Ok(())
+        }).unwrap().await.unwrap().unwrap();
+        let waiting = runtime.host.advance(task.clone(), owner.clone()).await.unwrap();
+        assert_eq!(waiting["obstacleWait"], true);
+        assert_eq!(waiting["state"], "REVIEWING");
+        runtime.host.executor.publication(|store| {
+            let peer = cortex_core::lifecycle::TaskMachine::new(store).create("peer", "Other work", "peer-owner")?;
+            store.write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='peer'", [])?;
+                db.execute("INSERT INTO runtime_nodes VALUES ('peer',1,'write','worker-backend-dev','Write','[]','[\"src\"]','execution','pending',NULL,NULL)", [])?;
+                let claimed = cortex_core::scheduler::claim_ready_tx(
+                    db, "peer", &peer, "fixture", &cortex_core::scheduler::policy::NativePolicy::default(),
+                )?;
+                assert_eq!(claimed.len(), 1, "a parked review must not retain the checkout");
+                Ok(())
+            })
+        }).unwrap().await.unwrap().unwrap();
+        let place = owner_cards(&runtime, &root);
+        let cards = list(std::slice::from_ref(&place)).await;
+        let card = cards["actions"][0]["actionId"].as_str().unwrap();
+        act(&place, card, Act::Dismiss).await.unwrap();
+        let blocked = runtime.host.advance(task.clone(), owner.clone()).await.unwrap();
+        assert_eq!(blocked["writeConflict"], true, "owner resolution does not bypass the writer");
+        assert_eq!(blocked["assignments"], json!([]));
+        runtime.host.executor.write(|db| {
+            db.execute("UPDATE runtime_nodes SET status='completed' WHERE task_id='peer'", [])?;
+            Ok(())
+        }).unwrap().await.unwrap().unwrap();
+        let retry = runtime.host.advance(task, owner).await.unwrap();
+        assert_eq!(retry["state"], "REVIEWING");
+        assert_eq!(retry["revision"], 1);
+        let item = &retry["assignments"][0];
+        assert_eq!(item["node"], "_review_1");
+        assert_eq!(item["stage"], "review");
+        assert_eq!(item["role"], "worker-code-reviewer");
+        assert_ne!(item["assignment_ref"], "old-review");
+        assert!(item["review_packet"].is_object());
+        let fresh = item["assignment_ref"].as_str().unwrap().to_owned();
+        runtime.host.executor.read(move |db| {
+            let events: Vec<(String, String)> = db.prepare(
+                "SELECT type,json_extract(payload_json,'$.assignment_ref') FROM runtime_events
+                 WHERE task_id='t' AND type IN ('REVIEW_STARTED','REVIEW_PACKET') ORDER BY id",
+            )?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_,_>>()?;
+            assert_eq!(events, [("REVIEW_PACKET".into(), fresh.clone()), ("REVIEW_STARTED".into(), fresh)]);
+            Ok(())
+        }).unwrap().await.unwrap().unwrap();
+        drop(place);
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_obstacle_recheck_observes_a_real_loopback_listener_down_then_up() {
+        use cortex_core::lifecycle::obstacles;
+        let (runtime, _, task, root) = fixture().await;
+        let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let due = runtime.host.executor.write(|db| {
+            let found = obstacles::classify(&obstacles::Signals {
+                blocker_kind: Some("tool_unavailable".into()),
+                blocker_detail: Some("Failed to connect to api.github.com port 443: Connection refused".into()),
+                ..Default::default()
+            });
+            assert_eq!(found.class, obstacles::EXTERNAL_OUTAGE);
+            obstacles::open_obstacle_tx(db, "t", &found, Some("next"), 1)?;
+            Ok(obstacles::open_waits(db, "t")?[0]["next_check_at"].as_i64().unwrap())
+        }).unwrap().await.unwrap().unwrap();
+        let probe = |wait: Value| async move {
+            probe_external_with_tcp(&wait, |host| {
+                assert_eq!(host, "api.github.com");
+                std::future::ready(Ok(["1.1.1.1:443".parse::<std::net::SocketAddr>().unwrap()]))
+            }, |pinned| async move {
+                assert_eq!(pinned, "1.1.1.1:443".parse::<std::net::SocketAddr>().unwrap());
+                // Replace only the fixture's socket dial. Runtime address validation
+                // still runs; production never permits a loopback destination.
+                tokio::net::TcpStream::connect(address).await.map(drop)
+            }).await
+        };
+        runtime.recheck_obstacles_at(&task, due, probe).await.unwrap();
+        runtime.host.executor.read(move |db| {
+            let waits = obstacles::open_waits(db, "t")?;
+            assert_eq!(waits.len(), 1);
+            assert_eq!(waits[0]["attempt"], 1);
+            assert_eq!(waits[0]["next_check_at"], due + 120);
+            Ok(())
+        }).unwrap().await.unwrap().unwrap();
+        let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+        runtime.recheck_obstacles_at(&task, due + 119, |_| async {
+            panic!("the probe is not due yet");
+        }).await.unwrap();
+        runtime.recheck_obstacles_at(&task, due + 120, probe).await.unwrap();
+        let (_, peer) = tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
+            .await.unwrap().unwrap();
+        assert!(peer.ip().is_loopback());
+        runtime.host.executor.read(|db| {
+            assert!(obstacles::open_waits(db, "t")?.is_empty());
+            let events = db.prepare("SELECT json_extract(payload_json,'$.ok') FROM runtime_events
+                WHERE task_id='t' AND type='EXTERNAL_WAIT_RECHECKED' ORDER BY id")?
+                .query_map([], |r| r.get::<_, bool>(0))?.collect::<Result<Vec<_>,_>>()?;
+            assert_eq!(events, [false, true]);
+            Ok(())
+        }).unwrap().await.unwrap().unwrap();
+        drop(listener);
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     struct CapacityPeer;
     impl NativeRoutes for CapacityPeer {
         fn worker_route(
@@ -1204,35 +1370,6 @@ pub fn worker_ending_class(cause: &str, facts: &Value) -> &'static str {
     }
 }
 
-/// Per-task backoff of environment rechecks for open owner actions (in memory: a
-/// restart rechecks once at once, which is harmless).
-static ENVIRONMENT_RECHECKS: std::sync::Mutex<
-    Option<std::collections::HashMap<String, (std::time::Instant, usize)>>,
-> = std::sync::Mutex::new(None);
-
-fn environment_recheck_due(task: &str) -> bool {
-    let mut map = ENVIRONMENT_RECHECKS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let map = map.get_or_insert_with(Default::default);
-    let now = std::time::Instant::now();
-    match map.get(task).copied() {
-        Some((at, n))
-            if now.duration_since(at).as_secs()
-                < cortex_core::lifecycle::obstacles::backoff(n.saturating_sub(1)) as u64 =>
-        {
-            false
-        }
-        Some((_, n)) => {
-            map.insert(task.to_owned(), (now, n + 1));
-            true
-        }
-        None => {
-            map.insert(task.to_owned(), (now, 1));
-            true
-        }
-    }
-}
 
 /// One public address for this attempt, or refuse the entire DNS answer if
 /// it contains a non-public destination. Do not reinterpret mapped/tunnel
@@ -1326,6 +1463,19 @@ where
     L: FnOnce(&'static str) -> F,
     F: std::future::Future<Output = io::Result<A>>,
 {
+    probe_external_with_tcp(wait, lookup, |address| async move {
+        tokio::net::TcpStream::connect(address).await.map(drop)
+    }).await
+}
+
+async fn probe_external_with_tcp<A, L, F, D, C>(wait: &Value, lookup: L, dial: D) -> (bool, String)
+where
+    A: IntoIterator<Item = std::net::SocketAddr>,
+    L: FnOnce(&'static str) -> F,
+    F: std::future::Future<Output = io::Result<A>>,
+    D: FnOnce(std::net::SocketAddr) -> C,
+    C: std::future::Future<Output = io::Result<()>>,
+{
     use cortex_core::lifecycle::obstacles::external_probe_host;
     let host = wait["host"].as_str().unwrap_or("");
     let scheme = wait["scheme"].as_str().unwrap_or("");
@@ -1340,9 +1490,7 @@ where
         let addresses = lookup(host).await.map_err(|_| "outage probe DNS failed")?;
         let address = pinned_external_address(addresses)?;
         if probe == "tcp" {
-            tokio::net::TcpStream::connect(address)
-                .await
-                .map_err(|_| "outage probe connect failed")?;
+            dial(address).await.map_err(|_| "outage probe connect failed")?;
             return Ok((true, format!("{host}:443 accepts connections")));
         }
         // The URL retains the fixed TLS server name; --resolve supplies the
@@ -2798,25 +2946,34 @@ a question to the owner (question text and option labels). Write reports, report
     /// passwordless sudo) is rechecked with the same backoff and resolved
     /// (`OWNER_ACTION_RESOLVED`, `by: environment_recheck`) once the fact is present.
     pub(super) async fn recheck_obstacles(&self, task: &str) -> CoreResult<()> {
-        let now = unix_seconds();
+        self.recheck_obstacles_at(task, unix_seconds(), |wait| async move {
+            probe_external(&wait).await
+        }).await
+    }
+
+    async fn recheck_obstacles_at<P, F>(&self, task: &str, now: i64, probe: P) -> CoreResult<()>
+    where
+        P: Fn(Value) -> F,
+        F: std::future::Future<Output = (bool, String)>,
+    {
         let t = task.to_owned();
-        let (due, services) = self
+        let (due, claimed) = self
             .host
             .executor
-            .read(move |db| {
+            .write(move |db| {
                 Ok((
                     cortex_core::lifecycle::obstacles::due_waits(db, &t, now)?,
-                    cortex_core::lifecycle::obstacles::environment_services(db, &t)?,
+                    cortex_core::lifecycle::obstacles::claim_environment_rechecks_tx(db, &t, now)?,
                 ))
             })?
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))??;
         for wait in due {
-            let (ok, detail) = probe_external(&wait).await;
             let (t, id) = (
                 task.to_owned(),
                 wait["id"].as_str().unwrap_or("").to_owned(),
             );
+            let (ok, detail) = probe(wait).await;
             self.host
                 .executor
                 .write(move |db| {
@@ -2828,7 +2985,7 @@ a question to the owner (question text and option labels). Write reports, report
                 .await
                 .map_err(|_| CoreError::Refused("native_host_closed"))??;
         }
-        if !services.is_empty() && environment_recheck_due(task) {
+        if !claimed.is_empty() {
             let t = task.to_owned();
             let owner = self.host.executor.read(move |db| {
                 Ok(db.query_row("SELECT owner_ref,epoch FROM task_owners WHERE task_id=?", [&t],
@@ -2840,7 +2997,7 @@ a question to the owner (question text and option labels). Write reports, report
             self.host
                 .executor
                 .write(move |db| {
-                    cortex_core::lifecycle::obstacles::resolve_by_environment_tx(db, &t, &facts)
+                    cortex_core::lifecycle::obstacles::resolve_environment_actions_tx(db, &t, &facts, Some(&claimed))
                         .map(|_| ())
                 })?
                 .await
@@ -3146,6 +3303,19 @@ a question to the owner (question text and option labels). Write reports, report
                 if step["recheck"] == true {
                     continue;
                 }
+                if step["obstacleWait"] == true {
+                    let wake = self.wake.notified();
+                    tokio::pin!(wake);
+                    wake.as_mut().enable();
+                    self.recheck_obstacles(task).await?;
+                    let mut cancelled = cancelled.clone();
+                    tokio::select! {
+                        _ = &mut wake => {},
+                        _ = cancelled.changed() => {},
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+                    }
+                    continue;
+                }
                 if !step["assignments"].as_array().is_some_and(|a| a.is_empty()) {
                     break step;
                 }
@@ -3277,6 +3447,9 @@ a question to the owner (question text and option labels). Write reports, report
             let wake = self.wake.notified();
             tokio::pin!(wake);
             wake.as_mut().enable();
+            let mut obstacle_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            obstacle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut rechecking = None;
             while !turns.is_empty() || live_steer.is_some() {
                 if *parent.borrow() || *self.stop.borrow() {
                     batch.send_replace(true);
@@ -3316,7 +3489,20 @@ a question to the owner (question text and option labels). Write reports, report
                         wake.set(self.wake.notified());
                         wake.as_mut().enable();
                         check_steering = true;
+                        Ok(())
+                    },
+                    _ = obstacle_tick.tick(), if execution && !*batch_cancelled.borrow()
+                        && !turns.is_empty() && rechecking.is_none() => {
+                        rechecking = Some(Box::pin(self.recheck_obstacles(task)));
                         continue;
+                    },
+                    result = async { rechecking.as_mut().unwrap().await }, if rechecking.is_some() => {
+                        rechecking = None;
+                        if let Err(error) = result {
+                            // A probe/read failure cannot revoke unrelated worker turns.
+                            eprintln!("workspace-service: obstacle recheck did not settle ({})", error.code());
+                        }
+                        Ok(())
                     },
                     Some(result) = turns.next() => result,
                 };
@@ -3330,7 +3516,7 @@ a question to the owner (question text and option labels). Write reports, report
                     batch.send_replace(true);
                 }
                 // Always settle every launched session, including on a refill error.
-                if turns.is_empty()
+                if !execution || turns.is_empty()
                     || *batch_cancelled.borrow()
                     || *parent.borrow()
                     || *self.stop.borrow()

@@ -346,7 +346,8 @@ pub(super) fn read(root: &Path, config: &crate::Config) -> Result<Value> {
     if let Some(bytes) = read_plain(&owner_folder(config)?.join("connections.json"), true)? {
         super::project_registry::validate(&bytes)?;
     }
-    if !directory.join("cortex.sqlite3").is_file() {
+    let key = context::key(root)?;
+    if key.root() != root && !directory.join("cortex.sqlite3").is_file() {
         return Err(refuse(
             "project_store_missing",
             format!(
@@ -355,14 +356,13 @@ pub(super) fn read(root: &Path, config: &crate::Config) -> Result<Value> {
             ),
         ));
     }
-    if context::key(root)?.root() != root {
+    if key.root() != root {
         return Err(refuse(
             "project_context_conflict",
             "The project store refused the request.",
         ));
     }
-    let store = context::open(root, OpenMode::LiveReadOnly)
-        .map_err(|e| refuse(e.code, "The project store refused the request."))?
+    let store = context::open(root, OpenMode::LiveReadOnly)?
         .ok_or_else(|| {
             refuse(
                 "project_store_missing",
@@ -388,7 +388,7 @@ pub(super) fn read(root: &Path, config: &crate::Config) -> Result<Value> {
             Some(_)=>Err(cortex_core::CoreError::Refused("machine_reply_too_large")),
             None=>Ok(None),
         }
-    }).map_err(|e|refuse(e.code(),"The project store refused the request."))?;
+    }).map_err(context::core)?;
     validate_user(config)?;
     let mut value = json!({});
     if exists {

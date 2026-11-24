@@ -34,6 +34,11 @@ fn assignment_brief(
     {
         item.as_object_mut().unwrap().extend(extra);
     }
+    if let Some(answer) = lifecycle::obstacles::retry_decision_answer(
+        db, task, node, domain::task_tx(db, task)?.1,
+    )? {
+        item["owner_decision_answer"] = json!(answer);
+    }
     Ok(item)
 }
 /// Replace a review packet's predecessor list with the bounded split the result
@@ -76,13 +81,15 @@ impl NativeHost {
         recv(self.executor.write(move |db| {
             ownership::check_tx(db, &t, &o)?;
             let (state, revision) = domain::task_tx(db, &t)?;
-            if state != TaskState::Executing || revision != expected_revision
-                || !lifecycle::steering::pending(db, &t)?.is_empty() {
+            if state != TaskState::Executing || revision != expected_revision {
                 return Ok(Vec::new());
             }
-            // A node parked behind missing access, an outage or an owner decision
-            // does not stop its siblings; a resolved obstacle retries its node here.
+            // Publish localized obstacle state even when owner steering prevents a
+            // refill; only the next claim must wait for that steering boundary.
             lifecycle::obstacles::classify_failed_tx(db, &t)?;
+            if !lifecycle::steering::pending(db, &t)?.is_empty() {
+                return Ok(Vec::new());
+            }
             lifecycle::obstacles::retry_unblocked_tx(db, &t)?;
             if lifecycle::obstacles::unparked_failure(db, &t)? { return Ok(Vec::new()); }
             let claimed = scheduler::claim_ready_tx(
@@ -204,11 +211,22 @@ impl NativeHost {
                                 }
                             },
                             TaskState::Reviewing=>{
+                                if scheduler::policy::review_writer_tx(db,&t)?.is_some() {
+                                    return Ok(json!({"state":state,"assignments":[],"writeConflict":true}));
+                                }
                                 let review_status:String=db.query_row("SELECT coalesce((SELECT n.status FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
                                     WHERE n.task_id=? AND n.revision=t.revision AND n.stage='review' ORDER BY n.rowid DESC LIMIT 1),'missing')",[&t],|r|r.get(0))?;
                                 if !active{
                                     if review_status=="completed"{review::advance_tx(db,&t)?;}
-                                    else if review_status=="failed"{domain::stop_tx(db,&t,"review_blocked")?;}
+                                    else if review_status=="failed"{
+                                        if lifecycle::obstacles::park_failed_review_tx(db,&t)? {
+                                            if !lifecycle::obstacles::retry_unblocked_tx(db,&t)?.is_empty() {
+                                                // A pending review reserves the checkout again. Observe its
+                                                // new manifest only after that reservation is committed.
+                                                return Ok(json!({"continue":true}));
+                                            }
+                                        } else { domain::stop_tx(db,&t,"review_blocked")?; }
+                                    }
                                     // An owner-stopped reviewer is not a dead end either.
                                     else if review_status=="cancelled"&&domain::owner_stop_unhandled_tx(db,&t)?&&!domain::return_to_coordinator_tx(db,&t,"worker_stopped_by_owner")?{domain::stop_tx(db,&t,"worker_stopped_by_owner")?;}
                                 }
@@ -257,12 +275,9 @@ impl NativeHost {
                             }
                             assignments.push(item);
                         }
-                        // Nothing else of the plan can run and only parked work remains: an
-                        // owner decision goes to the coordinator, which asks the owner; access
-                        // or an outage pauses the plan as the runtime's own wait (no model call)
-                        // until the obstacle clears.
-                        if assignments.is_empty() && !active && lifecycle::obstacles::settle_parked_tx(db,&t)? {
-                            return Ok(json!({"continue":true}));
+                        // Keep the stage and graph intact while the driver waits.
+                        if assignments.is_empty() && !active && !lifecycle::obstacles::parked(db,&t)?.is_empty() {
+                            return Ok(json!({"state":current,"assignments":[],"obstacleWait":true}));
                         }
                         let conflict = assignments.is_empty() && scheduler::policy::write_conflict_tx(db,&t)?.is_some();
                         Ok(json!({"state":current,"revision":domain::task_tx(db,&t)?.1,"assignments":assignments,"writeConflict":conflict}))
@@ -1401,7 +1416,7 @@ done
 /// project has no child, so without this nothing ever planned or ran a sprint.
 /// Sprint records are read and changed only through the owner's product calls.
 pub(crate) mod sprints {
-    use crate::{actor, native_runtime::Runtime, Service};
+    use crate::{actor, machine::sprint_live::{self, Snapshot}, native_runtime::Runtime, Service};
     use serde_json::{json, Value};
     use std::{
         collections::{BTreeSet, HashMap},
@@ -2582,6 +2597,58 @@ pub(crate) mod sprints {
             draft
         }
 
+        #[tokio::test(flavor = "multi_thread")]
+        async fn planning_draft_accepts_product_close_as_cancelled() {
+            let (_scratch, service, runtime, project) = planning_fixture("sprint-close").await;
+            let id = task_sprint(
+                &service,
+                &project,
+                json!({"action":"create","description":"Check closure"}),
+            )
+            .await;
+            let task = linked_unstarted(&service, &runtime, &project, &id).await;
+
+            call(
+                &service,
+                "product.task",
+                &project,
+                json!({"action":"close","taskId":task,"choice":"cancel","confirmed":true}),
+            )
+            .await;
+
+            let board = call(&service, "product.board", &project, json!({})).await;
+            assert_eq!(board["tasks"][&task]["status"], "done");
+            assert_eq!(board["tasks"][&task]["closedAs"], "cancel");
+            assert_eq!(draft_text(&runtime, &task).await, "Old draft");
+            service.stop().await.unwrap();
+        }
+
+        async fn assert_retired_planner(
+            service: &Service,
+            project: &str,
+            task: &str,
+            expected_phase: &str,
+        ) {
+            let board = call(service, "product.board", project, json!({})).await;
+            let record = &board["tasks"][task];
+            assert_eq!(record["retiredPlanner"], true, "{record}");
+            assert_eq!(record["closedAs"], "cancel");
+            assert_eq!(record["status"], "done");
+            assert_ne!(record["purged"], true);
+            let native = native_board_task(service, project, task).await;
+            assert_eq!(native["phase"], expected_phase);
+
+            // Even a pending decision from a stale read is not an ordinary task
+            // notification. This exercises the projection that feeds the bus.
+            let decisions = HashMap::from([(
+                task.to_owned(),
+                vec![json!({"status":"pending","decisionId":"pending-fixture"})],
+            )]);
+            assert!(crate::notifier::items(project, &[native], &board, &decisions, &[])
+                .iter()
+                .all(|item| item.place.sprint || item.place.id != task));
+        }
+
         async fn recover_sprint(service: &Service, project: &str, params: Value) -> Value {
             let request = serde_json::from_value(json!({
                 "op":"product.sprint","projectId":project,"params":params
@@ -2638,6 +2705,7 @@ pub(crate) mod sprints {
             assert!(failed["planningTaskId"].is_null());
             assert!(failed["planningRun"].is_null());
             assert_eq!(failed["planningFailure"]["code"], "planning_start_failed");
+            assert_retired_planner(&service, &project, &old, "not_started").await;
             assert_eq!(
                 failed["conversation"][0]["text"],
                 failed["planningFailure"]["text"]
@@ -2736,6 +2804,7 @@ pub(crate) mod sprints {
                 .unwrap();
             let fresh = started_draft(&service, &runtime, &project, &id).await;
             assert_ne!(fresh, old);
+            assert_retired_planner(&service, &project, &old, "not_started").await;
             assert_eq!(draft_text(&runtime, &old).await, "Old draft");
             assert!(planning_fact(&runtime, &old)
                 .await
@@ -2756,18 +2825,25 @@ pub(crate) mod sprints {
                 json!({"action":"create","description":"Keep the original"}),
             )
             .await;
-            let old = linked_unstarted(&service, &runtime, &project, &id).await;
             service
-                .cancel_planning(
-                    &project,
-                    id.as_str().unwrap(),
-                    "start",
-                    "planning_start_refused",
-                    "Legacy failure.",
-                    None,
-                )
+                .sprint_pass(&project, &runtime, &mut jobs, false)
                 .await
                 .unwrap();
+            let old = started_draft(&service, &runtime, &project, &id).await;
+            let runtime_task = settled(&runtime, &old).await;
+            runtime.host.executor.write(move |db| {
+                db.execute("UPDATE pending_questions SET status='cancelled' WHERE task_id=? AND status='open'", [&runtime_task])?;
+                db.execute("UPDATE runtime_tasks SET state='FAILED',blocker='fixture_failure' WHERE task_id=?", [&runtime_task])?;
+                cortex_core::lifecycle::event_tx(db, &runtime_task, "TASK_STATE_CHANGED", json!({"state":"FAILED","blocker":"fixture_failure"}))?;
+                Ok(())
+            }).unwrap().await.unwrap().unwrap();
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let failed = sprint(&service, &project, &id).await;
+            assert_eq!(failed["planningTaskId"], old.as_str());
+            assert_eq!(failed["planning"], "cancelled");
             let params = json!({"action":"recover_planning_message","sprintId":id,
                 "text":"Use the smaller version", "attachments":[]});
             let reply = recover_sprint(&service, &project, params.clone()).await;
@@ -2776,6 +2852,7 @@ pub(crate) mod sprints {
             assert_eq!(accepted["planning"], "planning");
             assert!(accepted["planningTaskId"].is_null());
             assert!(accepted["planningFailure"].is_null());
+            assert_retired_planner(&service, &project, &old, "failed").await;
             let repeated = recover_sprint(&service, &project, params).await;
             assert_eq!(repeated["code"], "planning_recovery_unavailable");
             assert_eq!(sprint(&service, &project, &id).await, accepted);
@@ -2893,6 +2970,9 @@ pub(crate) mod sprints {
                 .unwrap()
                 .contains("limit 32000"));
 
+            // An older failure may still link a draft without a native planner marker.
+            let old = linked_unstarted(&service, &runtime, &project, &id).await;
+            let failed = sprint(&service, &project, &id).await;
             let reply = recover_sprint(
                 &service,
                 &project,
@@ -2911,6 +2991,7 @@ pub(crate) mod sprints {
             let edited = sprint(&service, &project, &id).await;
             assert_eq!(edited["description"], "Short new request");
             assert!(edited["planningFailure"].is_null());
+            assert_retired_planner(&service, &project, &old, "not_started").await;
             for key in ["attachments", "conversation", "plan", "history"] {
                 assert_eq!(edited[key], failed[key], "{key}");
             }
@@ -2964,6 +3045,8 @@ pub(crate) mod sprints {
             assert_eq!(saved["planningTaskId"], draft.as_str());
             assert_eq!(saved["planning"], "planning");
             assert!(saved["planningFailure"].is_null());
+            let board = call(&service, "product.board", &project, json!({})).await;
+            assert!(board["tasks"][&draft]["retiredPlanner"].is_null());
 
             let runtime_task = settled(&runtime, &draft).await;
             complete(&runtime, &runtime_task, Some(two_parts())).await;
@@ -3039,6 +3122,75 @@ pub(crate) mod sprints {
                 .await
                 .unwrap();
             assert_eq!(sprint(&service, &project, &id).await, recovered);
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_failed_planning_warning_write_is_retried_while_the_streak_continues() {
+            let (scratch, service, runtime, project) =
+                planning_fixture("sprint-warning-retry").await;
+            let mut jobs = Jobs::default();
+            let id = task_sprint(
+                &service,
+                &project,
+                json!({"action":"create","description":"Check a stalled sprint"}),
+            )
+            .await;
+            let sprint_id = id.as_str().unwrap();
+            service
+                .sprint_patch(&project, sprint_id, json!({"planning":"question"}))
+                .await
+                .unwrap();
+            let product_path = scratch
+                .0
+                .join("state/product")
+                .join(format!("{project}.json"));
+            for attempt in 1..=6 {
+                let snapshot = sprint(&service, &project, &id).await;
+                // The third pass's warning write meets an unreadable store, which is
+                // restored before the next pass while planning passes keep failing.
+                let saved_bytes = (attempt == 3).then(|| {
+                    let bytes = std::fs::read(&product_path).unwrap();
+                    std::fs::write(&product_path, b"{").unwrap();
+                    bytes
+                });
+                service
+                    .observe_planning_pass(
+                        &project,
+                        &snapshot,
+                        jobs.1.entry(project.clone()).or_default(),
+                        Err(crate::failure("planning_unavailable")),
+                    )
+                    .await;
+                if let Some(bytes) = saved_bytes {
+                    std::fs::write(&product_path, bytes).unwrap();
+                }
+                let saved = sprint(&service, &project, &id).await;
+                assert_eq!(saved["planning"], "question");
+                let events = saved["conversation"].as_array().unwrap();
+                if attempt <= 3 {
+                    assert!(events.is_empty(), "pass {attempt}");
+                    assert!(saved.get("planningWarning").is_none(), "pass {attempt}");
+                } else {
+                    // Written on the next failed pass, once for the whole streak.
+                    assert_eq!(events.len(), 1, "pass {attempt}");
+                    assert_eq!(events[0]["kind"], "event");
+                    assert_eq!(
+                        saved["planningWarning"],
+                        json!({"text":events[0]["text"],"step":"internal",
+                        "code":"planning_pass_failed","at":events[0]["at"],"count":3})
+                    );
+                }
+            }
+            // A successful pass clears the active warning; the event stays.
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let recovered = sprint(&service, &project, &id).await;
+            assert!(recovered.get("planningWarning").is_none());
+            assert_eq!(recovered["conversation"].as_array().unwrap().len(), 1);
+            assert!(!jobs.1[&project].contains_key(sprint_id));
             service.stop().await.unwrap();
         }
 
@@ -3973,6 +4125,113 @@ pub(crate) mod sprints {
             )
             .await;
             (scratch, folder, service, runtime, project, id, tasks)
+        }
+
+        #[tokio::test]
+        async fn sprint_live_priority_fences_stale_queue_claims_and_decisions() {
+            for (mode, checkout) in [("automatic", "main"), ("hybrid", "main"), ("hybrid", "worktree")] {
+                let (scratch, folder, service, runtime, project, sprint_id, ids) =
+                    automatic_fixture("dev", checkout, checkout).await;
+                if checkout == "worktree" {
+                    let reply = service.machine(serde_json::from_value(json!({
+                        "op":"machine.update","params":{"patch":{"worktreeRoot":scratch.0.join("trees")}}
+                    })).unwrap()).await.unwrap();
+                    assert_eq!(reply["ok"], true, "{reply}");
+                }
+                let sprint_id = sprint_id.as_str().unwrap().to_owned();
+                call(&service, "product.sprint", &project, json!({"action":"patch","sprintId":sprint_id,
+                    "patch":{"runMode":mode,"materializedVersion":1}})).await;
+                call(&service, "product.sprint", &project, json!({"action":"patch","sprintId":sprint_id,
+                    "patch":{"queueState":"running"}})).await;
+                let read = || call(&service, "product.sprint", &project,
+                    json!({"action":"live_graph","sprintId":sprint_id}));
+                let initial = read().await;
+                assert_eq!(initial["order"]["notStarted"][0]["taskId"], ids[0]);
+                assert_eq!(initial["order"]["notStarted"][0]["next"], true);
+                let old = runtime.sprint_queue_snapshot(project.clone(), sprint_id.clone()).await.unwrap();
+
+                let moved = call(&service, "product.sprint", &project, json!({
+                    "action":"move_priority","sprintId":sprint_id,"taskId":ids[1],
+                    "direction":"up","expectedGraphRevision":initial["graphRevision"],
+                })).await;
+                assert_eq!(moved["changed"], true);
+                let moved = read().await;
+                assert_eq!(moved["priority"], json!([ids[1], ids[0]]));
+                assert_eq!(moved["members"][0]["taskId"], ids[0]);
+                assert_eq!(moved["order"]["notStarted"][0]["taskId"], ids[0], "priority cannot bypass edges");
+                let removed = call(&service, "product.sprint", &project, json!({
+                    "action":"set_dependency","sprintId":sprint_id,"dependentTaskId":ids[1],
+                    "predecessorTaskId":ids[0],"present":false,"expectedGraphRevision":moved["graphRevision"],
+                })).await;
+                assert_eq!(removed["changed"], true);
+                service.start_queue_task(&project, &runtime, &old, &ids[0], mode == "automatic").await.unwrap();
+                service.observed_pause(&project, &old, automatic_hold(
+                    "settlement_blocked", Some(&ids[0]), "dependencies_blocked", "Old decision", &HoldFacts::default(),
+                )).await.unwrap();
+                service.complete_queue(&project, &old).await.unwrap();
+                let fresh = read().await;
+                assert_eq!(fresh["order"]["queueState"], "running");
+                assert_eq!(fresh["order"]["notStarted"][0]["taskId"], ids[1]);
+                assert_eq!(fresh["order"]["notStarted"][0]["next"], true);
+                assert!(service.native_tasks(&project).await.unwrap()[&ids[0]]["executionId"].is_null());
+
+                let newest = runtime.sprint_queue_snapshot(project.clone(), sprint_id.clone()).await.unwrap();
+                service.start_queue_task(&project, &runtime, &newest, &ids[1], mode == "automatic").await.unwrap();
+                let fact = service.native_tasks(&project).await.unwrap();
+                let execution = fact[&ids[1]]["executionId"].clone();
+                assert!(execution.is_string(), "{fact:?}");
+                if checkout == "worktree" {
+                    let trees = git_fixture(&folder, &["worktree", "list", "--porcelain"]);
+                    assert!(trees.contains(scratch.0.join("trees").to_str().unwrap()), "{trees}");
+                }
+                service.start_queue_task(&project, &runtime, &newest, &ids[1], mode == "automatic").await.unwrap();
+                let fact = service.native_tasks(&project).await.unwrap();
+                assert_eq!(fact[&ids[1]]["executionId"], execution);
+                assert!(fact[&ids[0]]["executionId"].is_null());
+                let after = read().await;
+                assert_eq!(after["order"]["queueState"], "running");
+                assert_eq!(after["members"][1]["editable"], false);
+                assert!(after["order"]["notStarted"].as_array().unwrap().iter().all(|r| r["next"] == false));
+                for (revision, expected) in [(&fresh["graphRevision"], "stale_graph_revision"),
+                    (&after["graphRevision"], "sprint_member_read_only")]
+                {
+                    let reply = service.machine(serde_json::from_value(json!({"op":"product.sprint","projectId":project,
+                        "params":{"action":"set_dependency","sprintId":sprint_id,"dependentTaskId":ids[1],
+                            "predecessorTaskId":ids[0],"present":true,"expectedGraphRevision":revision}})).unwrap()).await.unwrap();
+                    assert_eq!(reply["code"], expected, "{reply}");
+                }
+                service.stop().await.unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn sprint_live_projection_is_suggested_in_manual_and_never_starts_work() {
+            let (_scratch, _folder, service, _runtime, project, id, ids) =
+                automatic_fixture("dev", "main", "main").await;
+            let read = || call(&service, "product.sprint", &project,
+                json!({"action":"live_graph","sprintId":id}));
+            assert_eq!(read().await["order"]["notStarted"][0]["next"], true);
+            let runtime = service.state.lock().await.native.remove(&project).unwrap();
+            let inactive = read().await;
+            assert_eq!(inactive["order"]["notStarted"][0]["next"], false);
+            assert_eq!(inactive["order"]["notStarted"][0]["conditional"], true);
+            service.state.lock().await.native.insert(project.clone(), runtime);
+            call(&service, "product.sprint", &project, json!({"action":"patch","sprintId":id,
+                "patch":{"runMode":"manual","materializedVersion":1}})).await;
+            let graph = call(&service, "product.sprint", &project, json!({"action":"live_graph","sprintId":id})).await;
+            assert_eq!(graph["order"]["mode"], "manual");
+            assert_eq!(graph["order"]["notStarted"][1]["taskId"], ids[1]);
+            assert_eq!(graph["order"]["notStarted"][1]["rank"], 2);
+            assert_eq!(graph["order"]["notStarted"][0]["next"], false);
+            let facts = service.native_tasks(&project).await.unwrap();
+            assert!(facts[&ids[0]]["executionId"].is_null() && facts[&ids[1]]["executionId"].is_null());
+            // Explicit Manual Start is still task-local; the service does not require the suggested order.
+            let reply = service.workspace(json!({"protocol":{"major":1,"minor":8},"requestId":"manual-b",
+                "projectId":project,"actorId":actor(),"operation":"tasks.start","target":ids[1],
+                "expectedVersion":facts[&ids[1]]["version"],"ownerEpoch":null,"payload":{}})).await.unwrap();
+            assert_eq!(reply["outcome"], "recorded", "{reply}");
+            assert!(service.native_tasks(&project).await.unwrap()[&ids[0]]["executionId"].is_null());
+            service.stop().await.unwrap();
         }
 
         async fn settled_peer(runtime: &Runtime, draft: &str) -> String {
@@ -6501,8 +6760,8 @@ pub(crate) mod sprints {
         }
     }
 
-    /// The queue's pause reason, naming a settle that could not finish instead of
-    /// blaming the checks of a result that never reached them.
+    /// Legacy manual-queue pause wording, retained for saved holds.
+    #[cfg(test)]
     pub(super) fn with_settle_failure<'a>(
         pause: Option<&'a str>,
         failed: Option<&'a str>,
@@ -6516,7 +6775,7 @@ pub(crate) mod sprints {
     /// The disposition a sprint member is settled by: its saved one, or, for a task the
     /// owner finished through the runtime alone (Finish on its stop question) with none
     /// saved, the owner's close as is, read from the same projection rule the board uses.
-    pub(super) fn member_disposition(
+    pub(crate) fn member_disposition(
         record: &Value,
         task: Option<&Value>,
     ) -> (String, Option<String>) {
@@ -7300,21 +7559,41 @@ pub(crate) mod sprints {
             && record["reviewActions"]["accept"] != true
     }
 
+    type Disposition = HashMap<String, (String, Option<String>)>;
+
+    fn dependency_settled(id: &str, records: &Value, disposition: &Disposition, hybrid: bool) -> bool {
+        disposition.get(id).is_some_and(|(status, closed)| {
+            (status == "done" || hybrid && status == "ready_to_merge")
+                && !matches!(closed.as_deref(), Some("cancel" | "unconfirmed"))
+                && records[id]["purged"] != true
+        })
+    }
+
+    fn dependencies_ready(record: &Value, done: impl Fn(&str) -> bool) -> bool {
+        match record.get("dependencies") {
+            None => true,
+            Some(Value::Array(deps)) => deps.iter().all(|dep| dep.as_str().is_some_and(&done)),
+            _ => false,
+        }
+    }
+
+    #[cfg(test)]
     fn automatic_queue_step<'a>(
+        members: &'a [String], tasks: &HashMap<String, Value>, records: &Value,
+        disposition: &Disposition, hybrid: bool,
+    ) -> QueueStep<'a> {
+        queue_step_in_order(members, members, tasks, records, disposition, hybrid)
+    }
+
+    fn queue_step_in_order<'a>(
         members: &'a [String],
+        priority: &'a [String],
         tasks: &HashMap<String, Value>,
         records: &Value,
-        disposition: &HashMap<String, (String, Option<String>)>,
+        disposition: &Disposition,
         hybrid: bool,
     ) -> QueueStep<'a> {
-        // In Hybrid an accepted result settles its dependents; merging stays the owner's.
-        let done = |id: &str| {
-            disposition.get(id).is_some_and(|(status, closed)| {
-                (status == "done" || hybrid && status == "ready_to_merge")
-                    && !matches!(closed.as_deref(), Some("cancel" | "unconfirmed"))
-                    && records[id]["purged"] != true
-            })
-        };
+        let done = |id: &str| dependency_settled(id, records, disposition, hybrid);
         let pending: Vec<_> = members
             .iter()
             .map(String::as_str)
@@ -7430,7 +7709,10 @@ pub(crate) mod sprints {
                 .find(|dep| !dep.as_str().is_some_and(done))
                 .map(|dep| dep.as_str().unwrap_or_default().to_owned())
         };
-        if let Some(id) = pending.iter().copied().find(|id| unmet(id).is_none()) {
+        let eligible: BTreeSet<_> = pending.iter().copied().collect();
+        if let Some(id) = priority.iter().map(String::as_str)
+            .find(|id| eligible.contains(id) && dependencies_ready(&records[*id], done))
+        {
             return QueueStep::Start(id);
         }
         // Name the task that is actually stuck: one whose unfinished prerequisite this
@@ -7494,6 +7776,150 @@ pub(crate) mod sprints {
             &facts,
         ))
     }
+    fn queue_disposition(snapshot: &Snapshot) -> Disposition {
+        snapshot.roster.iter().map(|id| {
+            let fact = snapshot.tasks.get(id);
+            let mut disposition = member_disposition(&snapshot.records[id], fact);
+            // Neither a missing binding nor a contradictory Core result proves settlement.
+            if snapshot.projection_member(id).is_some_and(|(_, _, status, _)| status != "confirmed")
+                && !matches!(disposition.1.as_deref(), Some("cancel" | "unconfirmed"))
+            {
+                disposition.0.clear();
+            }
+            (id.clone(), disposition)
+        }).collect()
+    }
+
+    fn automatic_checkout_unavailable(sprint: &Value) -> bool {
+        sprint["checkout"]["kind"].as_str().is_some_and(|kind| kind != "main")
+    }
+
+    fn observed_step<'a>(snapshot: &'a Snapshot, disposition: &Disposition, hybrid: bool) -> QueueStep<'a> {
+        queue_step_in_order(&snapshot.roster, &snapshot.priority, &snapshot.tasks,
+            &snapshot.records, disposition, hybrid)
+    }
+
+    pub(crate) fn selected_now<'a>(snapshot: &'a Snapshot) -> Option<&'a str> {
+        let sprint = &snapshot.sprint;
+        if sprint["queueState"] != "running" || !crate::machine::queue_driven_mode(sprint)
+            || (!sprint["deleting"].is_null() && sprint["deleting"] != false)
+        {
+            return None;
+        }
+        let hybrid = sprint["runMode"] == "hybrid";
+        let disposition = queue_disposition(snapshot);
+        if !hybrid && (automatic_checkout_unavailable(sprint) || snapshot.roster.iter().any(|id| {
+            !automatic_skip(&snapshot.records[id], disposition.get(id))
+                && !dependency_settled(id, &snapshot.records, &disposition, false)
+                && snapshot.tasks.get(id).is_some_and(|t| continuation_hold(id, t).is_some())
+        })) {
+            return None;
+        }
+        match observed_step(snapshot, &disposition, hybrid) {
+            QueueStep::Start(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The first pick uses the queue decision itself. Future picks assume only
+    /// successful settlement and never skip a current hold to promise a launch.
+    pub(crate) fn live_execution_order(snapshot: &Snapshot) -> Value {
+        let sprint = &snapshot.sprint;
+        let mode = sprint["runMode"].as_str().filter(|m| matches!(*m, "hybrid" | "automatic")).unwrap_or("manual");
+        let queue = sprint["queueState"].as_str().filter(|s| matches!(*s, "idle" | "running" | "paused" | "complete")).unwrap_or("idle");
+        let closed = !sprint["archivedAt"].is_null()
+            || (!sprint["deleting"].is_null() && sprint["deleting"] != false);
+        let hybrid_settlement = mode != "automatic";
+        let disposition = queue_disposition(snapshot);
+        let mut working = Vec::new();
+        let mut pending = BTreeSet::new();
+        let mut unranked = HashMap::new();
+        let mut simulated = BTreeSet::new();
+        for id in &snapshot.roster {
+            let (draft, claim, status, _) = snapshot.projection_member(id).unwrap();
+            let record = &snapshot.records[id];
+            let fact = snapshot.tasks.get(id);
+            let phase = fact.and_then(|v| v["phase"].as_str());
+            if dependency_settled(id, &snapshot.records, &disposition, hybrid_settlement) {
+                simulated.insert(id.as_str());
+            }
+            if automatic_skip(record, disposition.get(id)) {
+                continue;
+            }
+            if status != "confirmed" || phase == Some("unknown") {
+                unranked.insert(id.as_str(), if status == "missing" { "task_missing" } else { "task_state_unknown" });
+                continue;
+            }
+            if matches!(phase, Some("planning" | "execution" | "review" | "verification" | "finalizing")) {
+                working.push((claim, id.as_str()));
+            }
+            if draft {
+                pending.insert(id.as_str());
+            } else if fact.is_some_and(|t| t["executionId"].is_string())
+                && matches!(phase, Some("planning" | "execution" | "review" | "verification" | "finalizing" |
+                    "waiting" | "result"))
+            {
+                // The queue might get a successfully settled result before it can
+                // start a draft. A failure, cancellation or hold is not assumed away.
+                simulated.insert(id.as_str());
+            }
+        }
+        working.sort_by_key(|&(claim, id)| (claim.is_none(), claim, id));
+        let working: Vec<_> = working.into_iter().map(|(ordinal, id)| {
+            json!({"taskId":id,"startOrder":ordinal.map(|x| x.to_string())})
+        }).collect();
+        let next_candidate = selected_now(snapshot);
+        let step = observed_step(snapshot, &disposition, hybrid_settlement);
+        let hold_code = if closed {
+            Some("sprint_closed")
+        } else if mode != "manual" && queue == "paused" {
+            Some(if system_hold(sprint) { "queue_held" } else { "queue_paused" })
+        } else if mode == "automatic" && automatic_checkout_unavailable(sprint) {
+            Some("native_worktree_unavailable")
+        } else if mode != "manual" && queue == "complete" {
+            Some("queue_complete")
+        } else if mode != "manual" && matches!(&step, QueueStep::Hold(hold) if hold["code"] != "dependencies_blocked") {
+            Some("queue_blocked")
+        } else {
+            None
+        };
+        let mut not_started = Vec::new();
+        let mut stop = hold_code;
+        while stop.is_none() {
+            // Prefer the exact live pick before simulating future successful
+            // settlements; this avoids treating unsettled prerequisites as done now.
+            let candidate = if not_started.is_empty() && next_candidate.is_some() {
+                next_candidate
+            } else {
+                snapshot.priority.iter().map(String::as_str).find(|id| {
+                    pending.contains(id) && dependencies_ready(&snapshot.records[*id], |d| simulated.contains(d))
+                })
+            };
+            let Some(id) = candidate else { break; };
+            if !pending.contains(id) { break; }
+            if mode == "automatic" && snapshot.projection_member(id).is_some_and(|(_, _, _, checkout)| checkout == Some("worktree")) {
+                unranked.insert(id, "native_worktree_unavailable");
+                pending.remove(id);
+                stop = Some("queue_blocked");
+                break;
+            }
+            pending.remove(id);
+            let is_next = not_started.is_empty() && next_candidate == Some(id);
+            not_started.push(json!({"taskId":id,"rank":not_started.len()+1,
+                "reason":null,"next":is_next,"conditional":mode != "manual" && !is_next}));
+            simulated.insert(id);
+        }
+        for id in &snapshot.priority {
+            let reason = unranked.get(id.as_str()).copied().or_else(|| {
+                pending.contains(id.as_str()).then_some(stop.unwrap_or("dependencies_blocked"))
+            });
+            if let Some(reason) = reason {
+                not_started.push(json!({"taskId":id,"rank":null,"reason":reason,"next":false,"conditional":false}));
+            }
+        }
+        json!({"mode":mode,"queueState":queue,"working":working,"notStarted":not_started})
+    }
+
     fn other(code: String) -> io::Error {
         io::Error::other(code)
     }
@@ -8008,10 +8434,10 @@ pub(crate) mod sprints {
             &self,
             project: &str,
             runtime: &Arc<Runtime>,
-            sprint: &Value,
-            tasks: &HashMap<String, Value>,
+            observed: &Snapshot,
             hold: Value,
         ) -> io::Result<()> {
+            let (sprint, tasks) = (&observed.sprint, &observed.tasks);
             if hold["code"] == "task_failed" {
                 if let Some((id, fact)) = hold["taskId"]
                     .as_str()
@@ -8025,9 +8451,7 @@ pub(crate) mod sprints {
                         Repair::Declined(facts) => {
                             let reason = hold["reason"].as_str().unwrap_or_default().to_owned();
                             return self
-                                .automatic_pause(
-                                    project,
-                                    sprint,
+                                .observed_pause(project, observed,
                                     automatic_hold(
                                         "settlement_blocked",
                                         Some(id),
@@ -8041,7 +8465,7 @@ pub(crate) mod sprints {
                     }
                 }
             }
-            self.automatic_pause(project, sprint, hold).await
+            self.observed_pause(project, observed, hold).await
         }
         async fn product_call(&self, op: &str, project: &str, params: Value) -> io::Result<Value> {
             // An automatic settle that accepted nothing changed nothing; it is retried on
@@ -8171,7 +8595,7 @@ pub(crate) mod sprints {
                     && (sprint["queueState"] == "running" || resumable_automatic_queue(sprint))
                 {
                     // One sprint's unreadable state never stops the others.
-                    let _ = self.queue_pass(project, runtime, sprint, &product).await;
+                    let _ = self.queue_pass(project, runtime, sprint).await;
                 }
             }
             // In motion: a queue running, planning under way, a result waiting for an automatic settle,
@@ -8207,9 +8631,14 @@ pub(crate) mod sprints {
                 let count = failures.entry(id.to_owned()).or_default();
                 if *count < WARNING_THRESHOLD {
                     *count += 1;
-                    if *count == WARNING_THRESHOLD && sprint["planningWarning"].is_null() {
-                        self.update_planning_warning(project, id, Some(*count))
-                            .await;
+                    if *count == WARNING_THRESHOLD
+                        && sprint["planningWarning"].is_null()
+                        && !self.update_planning_warning(project, id, Some(*count)).await
+                    {
+                        // Not saved: stay just below the threshold so the next failed
+                        // pass of this streak tries again. The writer adds its event only
+                        // while no warning is saved, so the streak still gets one event.
+                        *count = WARNING_THRESHOLD - 1;
                     }
                 }
             }
@@ -8378,15 +8807,7 @@ pub(crate) mod sprints {
                         .await
                     }
                     PlanningStep::Replace { retry } => {
-                        if record["status"] != "done" && record["purged"] != true {
-                            let _ = self
-                                .product_call(
-                                    "product.task",
-                                    project,
-                                    json!({"action":"close","taskId":task,"choice":"cancel","confirmed":true}),
-                                )
-                                .await;
-                        }
+                        // Linking the new planner also retires the previous one.
                         self.sprint_note(
                             project, id, "event", "Planning continues in a new planning task.",
                         )
@@ -8574,7 +8995,22 @@ pub(crate) mod sprints {
             self.cancel_unstarted_planning(project, id, task, code, &reason)
                 .await
         }
+        // A concurrent writer (a running task) can advance the outbox between pages or
+        // faster than the per-read retry, which stales the snapshot-bound cursor; the whole
+        // scan then restarts from the first page, a bounded number of times.
         async fn native_tasks(&self, project: &str) -> io::Result<HashMap<String, Value>> {
+            let mut attempt = 0;
+            loop {
+                match self.native_tasks_scan(project).await {
+                    Err(error) if error.to_string() == "snapshot_expired" && attempt < 20 => {
+                        attempt += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    result => return result,
+                }
+            }
+        }
+        async fn native_tasks_scan(&self, project: &str) -> io::Result<HashMap<String, Value>> {
             let mut tasks = HashMap::new();
             let mut cursor = Value::Null;
             for _ in 0..200 {
@@ -8598,11 +9034,27 @@ pub(crate) mod sprints {
             }
             Err(crate::failure("scheduler_task_read_budget"))
         }
+        // Effect outcomes (including uncertain Git effects) retain their existing
+        // durable hold handling; the queue-only decisions use a fresh-facts fence.
         async fn automatic_pause(
             &self,
             project: &str,
             sprint: &Value,
             pause: Value,
+        ) -> io::Result<()> {
+            self.save_pause(project, sprint, pause, None).await
+        }
+
+        async fn observed_pause(&self, project: &str, observed: &Snapshot, pause: Value) -> io::Result<()> {
+            self.save_pause(project, &observed.sprint, pause, Some(&observed.queue_revision)).await
+        }
+
+        async fn save_pause(
+            &self,
+            project: &str,
+            sprint: &Value,
+            pause: Value,
+            revision: Option<&str>,
         ) -> io::Result<()> {
             // Every hold the scheduler persists is checked against the task's unknown
             // effects here, so no hold offers an action its handler would refuse.
@@ -8624,7 +9076,7 @@ pub(crate) mod sprints {
                 .automatic_sprint_action(
                     project,
                     "automatic.queue",
-                    json!({"expected":sprint,"pause":pause}),
+                    json!({"expected":sprint,"queueRevision":revision,"pause":pause}),
                 )
                 .await?;
             if reply["ok"] != true {
@@ -8643,12 +9095,10 @@ pub(crate) mod sprints {
             &self,
             project: &str,
             runtime: &Arc<Runtime>,
-            sprint: &Value,
-            tasks: &HashMap<String, Value>,
-            records: &Value,
-            members: &[String],
-            disposition: &HashMap<String, (String, Option<String>)>,
+            observed: &Snapshot,
+            disposition: &Disposition,
         ) -> io::Result<bool> {
+            let (sprint, tasks, records, members) = (&observed.sprint, &observed.tasks, &observed.records, &observed.roster);
             let settled = |task: &str| {
                 automatic_skip(&records[task], disposition.get(task))
                     || disposition
@@ -8662,7 +9112,7 @@ pub(crate) mod sprints {
                 let task = prior["taskId"].as_str();
                 if task.is_some_and(|id| !members.iter().any(|member| member == id) || settled(id))
                 {
-                    self.automatic_pause(project, sprint, Value::Null).await?;
+                    self.observed_pause(project, observed, Value::Null).await?;
                     return Ok(true);
                 }
                 // A hold saved before decisions were recorded on it is rewritten with
@@ -8684,7 +9134,7 @@ pub(crate) mod sprints {
                         ) | ("continuation", _)
                     );
                 if legacy {
-                    self.automatic_pause(project, sprint, upgrade()).await?;
+                    self.observed_pause(project, observed, upgrade()).await?;
                     return Ok(true);
                 }
                 // A hold waiting on an unknown effect is rechecked first: it stays while
@@ -8702,7 +9152,7 @@ pub(crate) mod sprints {
                     } else {
                         original
                     };
-                    self.automatic_pause(project, sprint, next).await?;
+                    self.observed_pause(project, observed, next).await?;
                     return Ok(true);
                 }
                 match (kind, code, task) {
@@ -8711,9 +9161,7 @@ pub(crate) mod sprints {
                         // Rechecked against the task as read now: a continuation that no
                         // longer pauses (or no longer exists) releases its hold.
                         if let Some(t) = tasks.get(id) {
-                            self.automatic_pause(
-                                project,
-                                sprint,
+                            self.observed_pause(project, observed,
                                 continuation_hold(id, t).unwrap_or(Value::Null),
                             )
                             .await?;
@@ -8757,7 +9205,7 @@ pub(crate) mod sprints {
                             .filter(|id| !settled(id))
                             .find_map(|id| tasks.get(id).and_then(|t| continuation_hold(id, t)));
                         let next = hold.unwrap_or_else(|| {
-                            match automatic_queue_step(members, tasks, records, disposition, false)
+                            match queue_step_in_order(members, &observed.priority, tasks, records, disposition, false)
                             {
                                 QueueStep::Hold(hold) => hold,
                                 _ => Value::Null,
@@ -8768,11 +9216,11 @@ pub(crate) mod sprints {
                             // owner allows a repair or the run changes.
                             let same = next["taskId"] == prior["taskId"] && code == "task_failed";
                             if !same || prior["allowedAt"].is_i64() {
-                                self.hold_or_repair(project, runtime, sprint, tasks, next)
+                                self.hold_or_repair(project, runtime, observed, next)
                                     .await?;
                             }
                         } else {
-                            self.automatic_pause(project, sprint, next).await?;
+                            self.observed_pause(project, observed, next).await?;
                         }
                     }
                     ("settlement_blocked", "automatic_acceptance_blocked", Some(id)) => {
@@ -8796,18 +9244,20 @@ pub(crate) mod sprints {
                                         )
                                         .await?;
                                     } else {
-                                        self.automatic_pause(project, sprint, Value::Null).await?;
+                                        self.observed_pause(project, observed, Value::Null).await?;
                                     }
                                 } else {
                                     match self.settle(project, id, &records[id], true).await {
                                         Settle::Accepted => {
-                                            self.automatic_pause(project, sprint, Value::Null)
-                                                .await?
+                                            // This pass changed the acceptance it just checked.
+                                            // Resume against the unchanged sprint; the next
+                                            // pass must inspect the newly accepted result.
+                                            self.automatic_pause(project, sprint, Value::Null).await?
                                         }
                                         Settle::Deferred => return Ok(true),
                                         Settle::Waiting(reason) | Settle::Failed(reason) => {
                                             self.acceptance_blocked(
-                                                project, runtime, sprint, tasks, id, &reason,
+                                                project, runtime, observed, id, &reason,
                                             )
                                             .await?
                                         }
@@ -8815,7 +9265,7 @@ pub(crate) mod sprints {
                                 }
                             }
                             Some(phase) if !matches!(phase, "result" | "unknown") => {
-                                self.automatic_pause(project, sprint, Value::Null).await?;
+                                self.observed_pause(project, observed, Value::Null).await?;
                             }
                             _ => {}
                         }
@@ -8825,7 +9275,7 @@ pub(crate) mod sprints {
                     {
                         let phase = tasks.get(id).and_then(|t| t["phase"].as_str());
                         if phase.is_some_and(|phase| !matches!(phase, "result" | "unknown")) {
-                            self.automatic_pause(project, sprint, Value::Null).await?;
+                            self.observed_pause(project, observed, Value::Null).await?;
                         } else if phase == Some("result") && code != "integration_failed" {
                             self.automatic_finish(
                                 project,
@@ -8854,9 +9304,7 @@ pub(crate) mod sprints {
                                 )
                                 .await?
                             {
-                                self.automatic_pause(
-                                    project,
-                                    sprint,
+                                self.observed_pause(project, observed,
                                     automatic_hold(kind, Some(id), code, &reason, &facts),
                                 )
                                 .await?;
@@ -8867,13 +9315,8 @@ pub(crate) mod sprints {
                 }
                 return Ok(true);
             }
-            if sprint["checkout"]["kind"]
-                .as_str()
-                .is_some_and(|kind| kind != "main")
-            {
-                self.automatic_pause(
-                    project,
-                    sprint,
+            if automatic_checkout_unavailable(sprint) {
+                self.observed_pause(project, observed,
                     automatic_hold(
                         "start_refused",
                         None,
@@ -8887,7 +9330,7 @@ pub(crate) mod sprints {
             }
             for task in members.iter().filter(|id| !settled(id)) {
                 if let Some(hold) = tasks.get(task).and_then(|t| continuation_hold(task, t)) {
-                    self.automatic_pause(project, sprint, hold).await?;
+                    self.observed_pause(project, observed, hold).await?;
                     return Ok(true);
                 }
             }
@@ -8916,7 +9359,7 @@ pub(crate) mod sprints {
                     Settle::Waiting(reason) | Settle::Failed(reason) => Some(reason),
                 };
                 if let Some(reason) = blocked {
-                    self.acceptance_blocked(project, runtime, sprint, tasks, task, &reason)
+                    self.acceptance_blocked(project, runtime, observed, task, &reason)
                         .await?;
                     return Ok(true);
                 }
@@ -9051,11 +9494,11 @@ pub(crate) mod sprints {
             &self,
             project: &str,
             runtime: &Arc<Runtime>,
-            sprint: &Value,
-            tasks: &HashMap<String, Value>,
+            observed: &Snapshot,
             task: &str,
             reason: &str,
         ) -> io::Result<()> {
+            let (sprint, tasks) = (&observed.sprint, &observed.tasks);
             let code = "automatic_acceptance_blocked";
             match self
                 .automatic_repair(
@@ -9073,9 +9516,7 @@ pub(crate) mod sprints {
             {
                 Repair::Started | Repair::Later => Ok(()),
                 Repair::Declined(facts) => {
-                    self.automatic_pause(
-                        project,
-                        sprint,
+                    self.observed_pause(project, observed,
                         automatic_hold("settlement_blocked", Some(task), code, reason, &facts),
                     )
                     .await
@@ -9090,216 +9531,62 @@ pub(crate) mod sprints {
             project: &str,
             runtime: &Arc<Runtime>,
             sprint: &Value,
-            product: &Value,
         ) -> io::Result<()> {
-            let id = sprint["id"].as_str().unwrap_or("");
-            let tasks = self.native_tasks(project).await?;
-            let records = &product["tasks"];
-            let members: Vec<String> = sprint["taskIds"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|t| t.as_str().map(str::to_owned))
-                .collect();
-            let disposition: HashMap<String, (String, Option<String>)> = members
-                .iter()
-                .map(|t| (t.clone(), member_disposition(&records[t], tasks.get(t))))
-                .collect();
-            let mut status: HashMap<String, String> = disposition
-                .iter()
-                .map(|(t, (s, _))| (t.clone(), s.clone()))
-                .collect();
-            let closed_as = |t: &str| disposition.get(t).and_then(|d| d.1.clone());
-            // Only a real acceptance settles a newly finished result, and only while the
-            // sprint uses a queued mode (a Manual queue pauses below).
-            let queue_driven = crate::machine::queue_driven_mode(sprint);
-            let automatic = sprint["runMode"] == "automatic" && queue_driven;
-            if automatic {
-                if self
-                    .automatic_pass(
-                        project,
-                        runtime,
-                        sprint,
-                        &tasks,
-                        records,
-                        &members,
-                        &disposition,
-                    )
-                    .await?
-                {
-                    return Ok(());
-                }
-                return match automatic_queue_step(&members, &tasks, records, &disposition, false) {
-                    QueueStep::Hold(hold) => {
-                        self.hold_or_repair(project, runtime, sprint, &tasks, hold)
-                            .await
-                    }
-                    QueueStep::Complete => {
-                        self.sprint_patch(
-                            project,
-                            id,
-                            json!({"queueState":"complete","pauseReason":null}),
-                        )
-                        .await
-                    }
-                    QueueStep::Wait => Ok(()),
-                    QueueStep::Start(task) => {
-                        self.start_queue_task(project, runtime, sprint, task, &tasks[task], true)
-                            .await
-                    }
-                };
-            }
-            if queue_driven && sprint["runMode"] == "hybrid" {
-                return self
-                    .hybrid_pass(
-                        project,
-                        runtime,
-                        sprint,
-                        &tasks,
-                        records,
-                        &members,
-                        disposition,
-                    )
-                    .await;
-            }
-            let mut failed: Option<String> = None;
-            for task in &members {
-                let done = matches!(
-                    status.get(task).map(String::as_str),
-                    Some("ready_to_merge" | "done")
-                );
-                if done || records[task]["purged"] == true {
-                    continue;
-                }
-                if queue_driven && tasks.get(task).is_some_and(|t| t["phase"] == "result") {
-                    match self.settle(project, task, &records[task], false).await {
-                        Settle::Accepted => {
-                            status.insert(task.clone(), "ready_to_merge".into());
-                        }
-                        // Machine state is in use right now: settle on the next pass
-                        // instead of pausing the queue for an unsettled result.
-                        Settle::Deferred => return Ok(()),
-                        Settle::Failed(reason) => {
-                            failed.get_or_insert(reason);
-                        }
-                        Settle::Waiting(_) => {}
-                    }
-                }
-            }
-            let phase = |task: &str| -> Option<String> {
-                let t = tasks.get(task)?;
-                let mut phase = t["phase"].as_str().unwrap_or("unknown").to_owned();
-                // Owner completion settles dependencies, not verification.
-                if matches!(
-                    phase.as_str(),
-                    "not_started" | "result" | "stopped" | "failed"
-                ) && matches!(closed_as(task).as_deref(), Some("external" | "as_is"))
-                    && status.get(task).is_some_and(|s| s == "done")
-                {
-                    phase = "result".into();
-                }
-                Some(phase)
-            };
-            let phases: Vec<Option<String>> = members.iter().map(|t| phase(t)).collect();
-            let settled = |task: &str| match status.get(task).map(String::as_str) {
-                Some("done") => true,
-                Some("ready_to_merge") => true,
-                _ => false,
-            };
-            let pause = if !queue_driven {
-                Some("This sprint is in manual mode.")
-            } else if phases.iter().any(Option::is_none) {
-                Some("A sprint task is missing; review the queue.")
-            } else if members
-                .iter()
-                .any(|t| closed_as(t).as_deref() == Some("cancel"))
-            {
-                Some("A task was cancelled. Review the task before continuing the queue.")
-            } else if members.iter().zip(&phases).any(|(task, p)| {
-                matches!(
-                    p.as_deref(),
-                    Some("failed" | "stopped" | "blocked" | "unknown" | "recovery")
-                ) && !(p.as_deref() == Some("recovery")
-                    && tasks[task]["waitReason"] == "automatic_continuation_pending")
-            }) {
-                Some("A task needs attention or has an unknown outcome.")
-            } else if members
-                .iter()
-                .zip(&phases)
-                .any(|(t, p)| p.as_deref() == Some("result") && !settled(t))
-            {
-                Some("A result has missing or unsuccessful checks.")
-            } else if members.iter().any(|t| {
-                matches!(
-                    records[t]["conflict"].as_str(),
-                    Some("conflict" | "failed" | "resolving")
-                )
-            }) {
-                Some("Resolve the task conflict first.")
-            } else {
-                None
-            };
-            // A settle that could not finish says why, instead of blaming the checks.
-            let pause = with_settle_failure(pause, failed.as_deref());
-            if let Some(reason) = pause {
-                return self
-                    .sprint_patch(
-                        project,
-                        id,
-                        json!({"queueState":"paused","pauseReason":reason}),
-                    )
-                    .await;
-            }
-            if members.iter().all(|t| settled(t)) {
-                return self
-                    .sprint_patch(
-                        project,
-                        id,
-                        json!({"queueState":"complete","pauseReason":null}),
-                    )
-                    .await;
-            }
-            // A running or waiting task holds the queue; it never pauses by itself.
-            if phases
-                .iter()
-                .flatten()
-                .any(|p| p != "not_started" && p != "result")
+            let Some(id) = sprint["id"].as_str() else { return Ok(()); };
+            let observed = runtime.sprint_queue_snapshot(project.to_owned(), id.to_owned()).await?;
+            let sprint = &observed.sprint;
+            if !sprint["archivedAt"].is_null()
+                || (!sprint["deleting"].is_null() && sprint["deleting"] != false)
+                || (sprint["queueState"] != "running" && !resumable_automatic_queue(sprint))
             {
                 return Ok(());
             }
-            let next = members.iter().zip(&phases).find(|(t, p)| {
-                p.as_deref() == Some("not_started")
-                    && records[t.as_str()]["dependencies"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .all(|d| d.as_str().is_some_and(|d| settled(d)))
-            });
-            let Some((task, _)) = next else {
-                return self
-                    .sprint_patch(project, id, json!({"queueState":"paused","pauseReason":"No task can run; review dependencies."}))
-                    .await;
-            };
-            self.start_queue_task(project, runtime, sprint, task, &tasks[task], false)
-                .await
+            let disposition = queue_disposition(&observed);
+            match sprint["runMode"].as_str() {
+                Some("automatic") => {
+                    if self.automatic_pass(project, runtime, &observed, &disposition).await? {
+                        return Ok(());
+                    }
+                    match queue_step_in_order(&observed.roster, &observed.priority, &observed.tasks,
+                        &observed.records, &disposition, false)
+                    {
+                        QueueStep::Hold(hold) => self.hold_or_repair(project, runtime, &observed, hold).await,
+                        QueueStep::Complete => self.complete_queue(project, &observed).await,
+                        QueueStep::Wait => Ok(()),
+                        QueueStep::Start(task) =>
+                            self.start_queue_task(project, runtime, &observed, task, true).await,
+                    }
+                }
+                Some("hybrid") => self.hybrid_pass(project, runtime, &observed, disposition).await,
+                _ => self.queue_transition(project, &observed, true).await,
+            }
         }
 
-        /// The Hybrid queue under the same single next-actor decision as Automatic.
-        /// Results are accepted automatically and repaired by the agent when they can
-        /// be; merging stays the owner's. An accepted result settles its dependents.
-        /// The owner's own pause ("Paused by you") is never lifted here.
-        #[allow(clippy::too_many_arguments)]
+        async fn complete_queue(&self, project: &str, observed: &Snapshot) -> io::Result<()> {
+            self.queue_transition(project, observed, false).await
+        }
+
+        async fn queue_transition(&self, project: &str, observed: &Snapshot, pause_manual: bool) -> io::Result<()> {
+            let reply = self.automatic_sprint_action(project, "automatic.queue", json!({
+                "expected":observed.sprint,"queueRevision":observed.queue_revision,
+                "complete":!pause_manual,"pauseManual":pause_manual,
+            })).await?;
+            if reply["ok"] != true {
+                return Err(other(reply["code"].as_str().unwrap_or("automatic_queue_unavailable").to_owned()));
+            }
+            Ok(())
+        }
+
+        /// Hybrid uses the same decision as Automatic, but an accepted result
+        /// settles its dependents and merging stays with the owner.
         async fn hybrid_pass(
             &self,
             project: &str,
             runtime: &Arc<Runtime>,
-            sprint: &Value,
-            tasks: &HashMap<String, Value>,
-            records: &Value,
-            members: &[String],
-            mut disposition: HashMap<String, (String, Option<String>)>,
+            observed: &Snapshot,
+            disposition: Disposition,
         ) -> io::Result<()> {
-            let id = sprint["id"].as_str().unwrap_or("");
+            let (sprint, tasks, records, members) = (&observed.sprint, &observed.tasks, &observed.records, &observed.roster);
             let paused = sprint["queueState"] == "paused";
             if paused && !system_hold(sprint) {
                 return Ok(());
@@ -9317,7 +9604,7 @@ pub(crate) mod sprints {
                         || tasks.get(task).is_some_and(|t| t["phase"] != "not_started")
                 });
                 return if gone {
-                    self.automatic_pause(project, sprint, Value::Null).await
+                    self.observed_pause(project, observed, Value::Null).await
                 } else {
                     Ok(())
                 };
@@ -9338,7 +9625,8 @@ pub(crate) mod sprints {
                 }
                 match self.settle(project, task, &records[task], true).await {
                     Settle::Accepted => {
-                        disposition.insert(task.clone(), ("ready_to_merge".into(), None));
+                        // Acceptance is a write; use fresh Core and overlay facts next pass.
+                        return Ok(());
                     }
                     Settle::Deferred => return Ok(()),
                     Settle::Waiting(reason) | Settle::Failed(reason) => {
@@ -9361,9 +9649,7 @@ pub(crate) mod sprints {
                             Repair::Declined(mut facts) => {
                                 facts.accept_only = true;
                                 return self
-                                    .automatic_pause(
-                                        project,
-                                        sprint,
+                                    .observed_pause(project, observed,
                                         automatic_hold(
                                             "settlement_blocked",
                                             Some(task),
@@ -9378,30 +9664,26 @@ pub(crate) mod sprints {
                     }
                 }
             }
-            match automatic_queue_step(members, tasks, records, &disposition, true) {
+            match queue_step_in_order(members, &observed.priority, tasks, records, &disposition, true) {
                 QueueStep::Hold(hold) => {
                     let same = hold["code"] == prior["code"] && hold["taskId"] == prior["taskId"];
                     if hold["code"] == "task_failed" && same && !prior["allowedAt"].is_i64() {
                         return Ok(());
                     }
-                    self.hold_or_repair(project, runtime, sprint, tasks, hold)
+                    self.hold_or_repair(project, runtime, observed, hold)
                         .await
                 }
                 QueueStep::Complete => {
-                    self.sprint_patch(
-                        project,
-                        id,
-                        json!({"queueState":"complete","pauseReason":null}),
-                    )
+                    self.complete_queue(project, observed)
                     .await
                 }
                 // A cleared system hold resumes the queue by itself.
                 QueueStep::Wait | QueueStep::Start(_) if paused => {
-                    self.automatic_pause(project, sprint, Value::Null).await
+                    self.observed_pause(project, observed, Value::Null).await
                 }
                 QueueStep::Wait => Ok(()),
                 QueueStep::Start(task) => {
-                    self.start_queue_task(project, runtime, sprint, task, &tasks[task], false)
+                    self.start_queue_task(project, runtime, observed, task, false)
                         .await
                 }
             }
@@ -9411,52 +9693,29 @@ pub(crate) mod sprints {
             &self,
             project: &str,
             runtime: &Arc<Runtime>,
-            sprint: &Value,
+            observed: &Snapshot,
             task: &str,
-            fact: &Value,
             automatic: bool,
         ) -> io::Result<()> {
-            let id = sprint["id"].as_str().unwrap_or("");
-            let version = fact["version"].clone();
+            let version = &observed.tasks[task]["version"];
             let request = json!({"protocol":{"major":1,"minor":8},
                 "requestId":format!("sprint-start-{task}-{}",version.as_str().unwrap_or("0")),
                 "projectId":project,"actorId":actor(),"operation":"tasks.start","target":task,
                 "expectedVersion":version,"ownerEpoch":null,"payload":{}});
-            let start = if automatic {
-                runtime.start_automatic(project.to_owned(), request).await
-            } else {
-                runtime.command(project.to_owned(), request).await
+            let start = runtime.start_queued(project.to_owned(), request, automatic, observed.expectation()).await;
+            let code = match &start {
+                Ok(receipt) if receipt["outcome"] == "recorded" => return Ok(()),
+                Ok(receipt) => receipt["outcome"].as_str().unwrap_or("refused").to_owned(),
+                Err(error) => error.to_string(),
             };
-            let refused = match start {
-                Ok(receipt) if receipt["outcome"] == "recorded" => None,
-                Ok(receipt) => Some(receipt["outcome"].as_str().unwrap_or("refused").to_owned()),
-                Err(error) => Some(error.to_string()),
-            };
-            if let Some(code) = refused {
-                if automatic || sprint["runMode"] == "hybrid" {
-                    let reason = start_reason(&code);
-                    return self
-                        .automatic_pause(
-                            project,
-                            sprint,
-                            automatic_hold(
-                                "start_refused",
-                                Some(task),
-                                &code,
-                                &reason,
-                                &HoldFacts::default(),
-                            ),
-                        )
-                        .await;
-                }
-                self.sprint_patch(
-                    project,
-                    id,
-                    json!({"queueState":"paused","pauseReason":format!("Start was refused: {code}")}),
-                )
-                .await?;
+            if code == sprint_live::STALE || code == "stale_version" {
+                self.sprint_wake.project(project);
+                return Ok(());
             }
-            Ok(())
+            let reason = start_reason(&code);
+            self.observed_pause(project, observed, automatic_hold(
+                "start_refused", Some(task), &code, &reason, &HoldFacts::default(),
+            )).await
         }
     }
 }

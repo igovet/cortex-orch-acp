@@ -1,7 +1,7 @@
 //! Trusted incoming-client facade over the same native runtime used by Desktop.
 //! No ACP framing here, no alternative scheduler or legacy mutation fallback.
 use crate::{
-    actor, identity,
+    actor, identity, local::core_failure as err,
     native_runtime::{self, NativeRoutes, Runtime},
 };
 use cortex_core::{CoreError, CoreResult};
@@ -83,9 +83,7 @@ struct ClientView {
     first_prompt: Option<(String, String, String)>,
 }
 
-fn err(e: CoreError) -> io::Error {
-    io::Error::other(e.code())
-}
+pub use crate::local::storage_diagnostic;
 async fn recv<T>(r: tokio::sync::oneshot::Receiver<CoreResult<T>>) -> io::Result<T> {
     r.await
         .map_err(|_| io::Error::other("native_host_closed"))?
@@ -105,15 +103,13 @@ impl IncomingHost {
         if key.root() != root {
             return Err(io::Error::other("incoming_worktree_unavailable"));
         }
-        if native_runtime::legacy(root).map_err(err)? {
-            return Err(io::Error::other("legacy_project_requires_retained_adapter"));
-        }
-        let project = format!(
+        let derived_project = format!(
             "acp-{}",
             &format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()))[..32]
         );
+        let (runtime, project) = Runtime::open_shared(root, &derived_project, routes).map_err(err)?;
         Ok(Self {
-            runtime: Arc::new(Runtime::open_shared(root, &project, routes).map_err(err)?),
+            runtime: Arc::new(runtime),
             project,
             recovered: tokio::sync::OnceCell::new(),
             views: std::sync::Mutex::new(HashMap::new()),
@@ -165,6 +161,21 @@ impl IncomingHost {
         if self.runtime.host.executor.take_orphaned() {
             self.runtime.recover().await.map_err(err)?;
             let _ = self.runtime.continue_owed_tasks().await;
+        }
+        Ok(())
+    }
+    /// Loading a Rust session normally defers ordinary restart recovery to
+    /// its first prompt. A project with unadopted tasks uses the same fenced
+    /// recovery as session/new before publishing a writable session.
+    pub async fn recover_legacy(&self) -> io::Result<()> {
+        let legacy = self
+            .runtime
+            .host
+            .executor
+            .read(native_runtime::has_legacy_tasks)
+            .map_err(err)?;
+        if recv(legacy).await? {
+            self.recover().await?;
         }
         Ok(())
     }
@@ -225,8 +236,10 @@ impl IncomingHost {
                      JOIN runtime_tasks r ON r.task_id=e.runtime_task_id JOIN task_owners o ON o.task_id=r.task_id
                      WHERE e.runtime_task_id=? AND o.epoch=e.owner_epoch", [&task],
                     |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
+                let language = cortex_core::lifecycle::domain::task_language_tx(db, &task)?;
                 Ok(json!({"task":task,"execution":execution,"logicalSession":logical,
-                    "version":version.to_string(),"epoch":epoch.to_string(),"state":state,"synthesis":synthesis}))
+                    "version":version.to_string(),"epoch":epoch.to_string(),"state":state,"synthesis":synthesis,
+                    "language":language}))
             } else { Ok(json!({"task":null})) }
         }).map_err(err)?).await
     }
