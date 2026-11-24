@@ -5,11 +5,11 @@ import { useWs } from "./ctx";
 import { REQUESTING, RequestLabel, RequestStatus } from "./request-feedback";
 import { FieldEdit } from "./field-edit";
 import { onScreen } from "./freshness";
-import { scrollIntoFeed } from "./follow";
+import { revealCard, revealKey } from "./reveal-intent";
 import { A, FactLine, I, Keyed, Modal, Pop } from "./kit";
 import { ActionBar, revealWhenCut } from "./layout";
 import { behindTarget, conflictLine, finishBlocked, mergeControls, taskCheckout } from "./review-model";
-import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, languageLabel, modeLabel, REWORK_LABEL, resumeState, reworkBinding, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
+import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, externalDoneBlocked, languageLabel, modeLabel, REWORK_LABEL, resumeState, reworkBinding, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
 import { CHECK_ICON, VERIFICATION } from "./worker";
 import { archiveBlocked } from "./git-actions-model";
 import { spendRows, StallBadge } from "./task-spend";
@@ -82,7 +82,9 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
   const go = () => {
     const task = props.view.id, tab = ws.router.route();
     if (tab.name === "task" && (tab.tab || tab.live)) ws.go({ name: "task", machine: tab.machine, task });
-    queueMicrotask(() => { const card = onScreen().querySelector(".dc"); if (card) scrollIntoFeed(card); });
+    // A conversation still on its first read has not shown the card yet: it brings it into view once it does.
+    const key = revealKey(props.view.machine.id, task, props.view.task.executionId);
+    queueMicrotask(() => revealCard(key, onScreen(), [".dc"]));
   };
   const mode = () => m()?.mode;
   // Continue and the fallback Resume follow the one rule the card, the menu and the palette use.
@@ -130,7 +132,8 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
     <Show when={seeNeeded()}><button class="btn btn-primary" onClick={() => {
       const tab = ws.router.route();
       if (tab.name === "task" && (tab.tab || tab.live)) ws.go({ name: "task", machine: tab.machine, task: props.view.id });
-      queueMicrotask(() => { const card = onScreen().querySelector(".chat-review-hold") ?? onScreen().querySelector(".dc:not(.dc-done), .dc-panel"); if (card) scrollIntoFeed(card); });
+      const key = revealKey(props.view.machine.id, props.view.id, props.view.task.executionId);
+      queueMicrotask(() => revealCard(key, onScreen(), [".chat-review-hold", ".dc:not(.dc-done), .dc-panel"]));
     }}>See what is needed</button></Show>
     {/* A held task waits for the owner: say what is expected with one concrete action, not only a message box. */}
     <Show when={run()?.action === "retry_task"}><button class="btn btn-primary" {...ws.needs("retry_task")} onClick={() => ws.run({ type: "retry_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Continue</button></Show>
@@ -276,9 +279,7 @@ export function ExternalDoneDialog(props: { taskId: string | null; how: "externa
   const reason = () => {
     const model = m();
     if (!model) return "Refresh the task first.";
-    if (model.view.task.process !== "stopped" || ["working", "needs_you", "stopping"].includes(model.view.task.status))
-      return "Stop the task and wait for every worker to stop first.";
-    return closeBlocked(model);
+    return externalDoneBlocked(model);
   };
   const confirm = () => { if (!reason() && props.taskId) ws.ok({ type: "close_task", taskId: props.taskId, choice: props.how, confirmed: true, now: ws.store.clock() }, props.onClose); };
   return <Modal open={!!props.taskId} onClose={props.onClose} label="Done outside the app">

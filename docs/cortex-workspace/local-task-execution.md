@@ -1518,11 +1518,11 @@ sends an amendment. An `owner_stopped` or `unknown` failure keeps the plain
 Retry. The request, attachments, saved answers and conversation, and any
 previously approved proposal are kept. Parts the stopped task had submitted but
 not completed, and execution-only answers, are not carried into a replacement
-task: the replacement starts its plan from the saved request. If Start is refused or its reply is lost, the service checks for a
-committed execution. A confirmed never-started draft is unlinked in the same
-write as the failure and stays in task history; a committed execution keeps
-its link. If the check cannot be completed, the service does not assume it
-can start a replacement.
+task: the replacement starts its plan from the saved request. If Start is
+refused or its reply is lost, the service checks for a committed execution.
+A confirmed never-started draft is unlinked in the same write as the
+failure; a committed execution keeps its link. If the check cannot be
+completed, the service does not assume it can start a replacement.
 
 **Retry planning** starts a fresh planning task when no execution was ever
 started, including for older failed sprints that still link the draft.
@@ -1533,8 +1533,11 @@ combined request exceeds 32,000 characters (including planning instructions
 and saved conversation), the failure shows its length and limit. The owner
 can replace the original description and restart planning without deleting
 attachments, answers, the proposal or its history. These recovery actions
-clear the active failure, not its conversation event. Recovery requires an
-owner action; a failed start never launches a replacement by itself.
+clear the active failure, not its conversation event. When the service
+detaches a planner, it closes it as cancelled unless it was already closed.
+The old task stays in history without appearing in ordinary Board lists or
+counts, or raising its own notification. Recovery requires an owner action;
+a failed start never launches a replacement by itself.
 
 These are project-scoped `machine.call` operations with `op: "product.sprint"`:
 `patch {sprintId, patch: {planning: "planning"}}` requests a retry,
@@ -1548,8 +1551,10 @@ planning; it does not certify that the subsequent start succeeded.
 
 Separately, if three consecutive service passes fail to check or advance
 planning, the service saves one warning and adds one conversation event
-without stopping planning. The service keeps checking and clears the
-active warning on the next successful pass; the conversation event remains.
+without stopping planning. If saving that warning fails, each later failed
+pass of the same streak tries again until it is saved, still with one event.
+The service keeps checking and clears the active warning on the next
+successful pass; the conversation event remains.
 
 #### Reading relationships and prior results
 
@@ -1665,7 +1670,7 @@ that could not be confirmed. A folder without Git keeps Close as is and Set up G
 
 When a remote exists, a separate line reports pushed/unpushed from the target's last-fetched tracking reference, or unknown if none is available. It never fetches or pushes and never blocks closure. With no remote, no push-status line is shown.
 
-A board card can be dragged only to **Done**. Dropping elsewhere leaves it unchanged with a calm hint. Done opens **Done outside the app**; nothing changes until the owner confirms. Running/stopping/unknown tasks must be stopped and confirmed first; an active merge must be aborted. The service rechecks these conditions, persists `closedAs=external` and Done, clears active acceptance/integration labels, and retains files and historical evidence without inventing checks. A fresh window reads the same closure. Existing smooth card animation remains in use.
+Board cards are not draggable. **Done outside the app…** in the Board or List task menu, the task page menu, or the task's command palette opens confirmation; nothing changes until the owner confirms. Running/stopping/unknown tasks must be stopped and confirmed first; an active merge must be aborted. The service rechecks these conditions, persists `closedAs=external` and Done, clears active acceptance/integration labels, and retains files and historical evidence without inventing checks. A fresh window reads the same closure.
 
 An item the owner closed **as is**, like an externally finished item, settles sprint dependencies and is never started again by the queue. Its Not verified warning remains; closure does not invent successful checks or a merge. An already-paused queue can recover through **Continue queue**, without repairing saved data; the owner decision does not silently undo a pause. Cancellation still blocks the queue. A live or unknown execution must settle before the queue can start a dependent task.
 
@@ -1908,6 +1913,10 @@ filter is not a guarantee against secrets in arbitrary source or commit prose.
 The selected provider receives the resulting excerpt. A matching, previously
 confirmed Push summary is reused as the editable PR description, not the title.
 Without a matching summary the PR draft uses a local Git metadata template.
+A generated Push draft is fitted to 8,000 UTF-8 bytes before the owner sees it.
+The confirmed summary is saved whole: the Push dialog shows the limit, names
+an over-limit byte count and disables Push, and the service refuses a longer
+summary with `push_summary_too_long` before running Git, never shortening it.
 
 - Route: among the routes the owner allows for automatic choice (enabled, not
   denied, listed in `auto`, placed in a tier) on Claude or Codex native
@@ -2120,7 +2129,7 @@ Coverage, all no-paid: the `paused-checkpoint`, `hold` and `command-restart-lost
 
 A started task whose runtime row does not exist yet (its coordinator's engine is
 still opening) projects as `starting`, not unknown, as long as its start, session
-and owner facts agree. Retry recovery may advance the owner epoch beyond the original launch binding while keeping that same task/session; older epochs remain invalid. Stop and Code’s “Stop the task first” cancel this exact launch through retries; prompts and worker controls do not receive an epoch exception. Each automatic engine-launch retry shows the runtime's own
+and owner facts agree. Retry recovery may advance the owner epoch beyond the original launch binding while keeping that same task/session; older epochs remain invalid. Stop and the Commit dialog's “Stop the task first” cancel this exact launch through retries; prompts and worker controls do not receive an epoch exception. Each automatic engine-launch retry shows the runtime's own
 retry notice as the task status; a give-up projects as `blocked` with that notice
 and needs the owner. There is no state to pause yet, so Stop cancels that launch
 through the runtime's ordinary task stop and the task becomes stopped; a stopped

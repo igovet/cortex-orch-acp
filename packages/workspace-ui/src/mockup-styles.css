@@ -73,7 +73,7 @@ input:not([type="checkbox"], [type="radio"]):focus-visible, textarea:focus-visib
 ::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 8px; border: 3px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-corner, ::-webkit-scrollbar-track { background: transparent; }
 /* Nothing shifts: selection is background and colour only (never weight, border or padding), hover actions keep their space, and scrollers reserve their scrollbar so a longer panel cannot move its content. */
-.home, .page, .create, .ready, .set-main, .launch, .d-scroll, .feed, .sp-scroll, .cf-scroll, .sb-scroll, .col-b, .wlist, .flist, .tree, .gscroll { scrollbar-gutter: stable; }
+.home, .page, .create, .ready, .set-main, .launch, .d-scroll, .sp-scroll, .cf-scroll, .sb-scroll, .col-b, .wlist, .flist, .tree, .gscroll { scrollbar-gutter: stable; }
 .sb-scroll, .col-b, .wlist, .flist, .tree, .gscroll { padding-right: 0 !important; }
 .sb-scroll::-webkit-scrollbar, .col-b::-webkit-scrollbar, .wlist::-webkit-scrollbar, .flist::-webkit-scrollbar, .tree::-webkit-scrollbar, .gscroll::-webkit-scrollbar { width: 8px; }
 .sb-scroll::-webkit-scrollbar-thumb, .col-b::-webkit-scrollbar-thumb, .wlist::-webkit-scrollbar-thumb, .flist::-webkit-scrollbar-thumb, .tree::-webkit-scrollbar-thumb, .gscroll::-webkit-scrollbar-thumb { border-width: 2px; }
@@ -376,9 +376,14 @@ body[data-tab="workers"] .detail { display: flex; }
 
 @media (max-width: 1439px) { .branch-chip .mono { max-width: 124px !important; } body[data-stop] .branch-chip .mono { max-width: 92px !important; } }
 
-/* Conversation: the scroller is reverse-flex so it opens at the latest event with no script. */
-.timeline { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column-reverse; scrollbar-gutter: stable both-edges; }
+/* Conversation: a plain block scroller. It opens at its latest event because the follow controller pins the end (follow.ts). */
+.timeline { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable both-edges; }
 .tl-in { width: 100%; max-width: 808px; margin: 0 auto auto; padding: 16px 24px; display: flex; flex-direction: column; gap: 14px; user-select: text; cursor: auto; }
+
+/* Leave any spare height above a conversation that began on a partial tail, so a prepend uses that space instead of
+   pushing the held rows down. Keep the alignment when the final prepend removes the earlier marker. */
+.timeline.ws-history-end { display: flex; flex-direction: column; }
+.ws-history-end > .tl-in { flex: none; margin-block: auto 0; }
 
 .tl-in button, .tl-in a { user-select: none; }
 .brief { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-card); font-size: var(--t-sec); line-height: 19px; color: var(--fg-2); }
@@ -494,7 +499,6 @@ body[data-tab="workers"] .detail { display: flex; }
 .d-goal { font-size: var(--t-sec); line-height: 18px; color: var(--fg-2); }
 .d-grid { display: flex; flex-wrap: wrap; gap: 3px 18px; margin-top: 7px; font-size: var(--t-cap); line-height: 16px; color: var(--fg); }
 .d-grid .l { color: var(--fg-3); margin-right: 5px; }
-.feed { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column-reverse; }
 
 .ev { display: grid; grid-template-columns: 38px 16px minmax(0, 1fr) auto; align-items: start; column-gap: 8px; padding: 4px 0; font-size: var(--t-sec); line-height: 18px; }
 
@@ -621,7 +625,7 @@ body .task-body.live, body[data-tab="workers"] .task-body.live { grid-template-c
 .live .wlist { border-right: 1px solid var(--line); }
 .livepane { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .seg .n { font-weight: 400; color: var(--fg-3); font-variant-numeric: tabular-nums; }
-.stream { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column-reverse; scrollbar-gutter: stable both-edges; }
+.stream { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable both-edges; }
 .stream-in { width: 100%; max-width: 920px; margin: 0 auto auto; padding: 10px 18px 16px; display: flex; flex-direction: column; gap: 3px; user-select: text; cursor: auto; }
 
 .prose { font-size: var(--t-ui); line-height: 21px; color: var(--fg); }
@@ -654,8 +658,6 @@ body .task-body.live, body[data-tab="workers"] .task-body.live { grid-template-c
 @keyframes blink { to { visibility: hidden; } }
 .dock-w { position: relative; flex: none; z-index: 4; width: 100%; max-width: 942px; margin: 0 auto; padding: 0 29px 12px; }
 .new-pill { display: none; align-items: center; gap: 5px; width: max-content; height: 26px; margin: 0 auto 8px; padding: 0 10px; border-radius: 13px; background: var(--primary); color: var(--primary-fg); font-size: var(--t-cap); font-weight: 500; box-shadow: var(--shadow-float); }
-body[data-follow="off"] .new-pill { display: inline-flex; }
-body[data-follow="off"] .dock-w { display: flex; flex-direction: column; }
 body[data-filter="messages"] [data-k]:not([data-k~="messages"]),
 body[data-filter="tools"] [data-k]:not([data-k~="tools"]),
 body[data-filter="commands"] [data-k]:not([data-k~="commands"]),

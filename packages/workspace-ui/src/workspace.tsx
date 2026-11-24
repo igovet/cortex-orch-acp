@@ -27,6 +27,7 @@ import { MachineDialogs } from "./machine-dialogs";
 import { SudoPrompts } from "./sudo-prompt";
 import { OwnerActions } from "./owner-actions";
 import { Inbox, NotFound } from "./pages";
+import { EmptyUntilRead, projectsPending } from "./skeleton";
 import { Help, Palette } from "./palette";
 import { createPanels } from "./prefs";
 import { createPress } from "./press";
@@ -88,7 +89,8 @@ function Content() {
       {/* Opens its sprint instead (TabBody); nothing of it shows as a task page meanwhile. */}
       <Match when={route().name === "task" && planningTaskSprint(ws.store.state(), (route() as Extract<Route, { name: "task" }>).task)}>{null}</Match>
       <Match when={route().name === "task"}>
-        <Show when={task()?.id} keyed fallback={<NotFound message="This task is not on this machine" />}>{id => <TaskPage id={id} />}</Show>
+        {/* A task is not "not on this machine" while a project's tasks are still being read: its conversation is loading. */}
+        <Show when={task()?.id} keyed fallback={<EmptyUntilRead name="task" kind="conversation" pending={() => projectsPending(ws)} label="Loading the conversation…"><NotFound message="This task is not on this machine" /></EmptyUntilRead>}>{id => <TaskPage id={id} />}</Show>
       </Match>
     </Switch>
   </Show></Show>;

@@ -187,7 +187,7 @@ it("keeps the answer line in place when an option is chosen, so the page does no
   expect(css).toMatch(/\.dc-answer > \.mc-effect \{[^}]*white-space: nowrap/);
 });
 
-it("brings the owner's new message into view above the composer even after scrolling up", async () => {
+it("brings the owner's new message into view above the composer even after scrolling up, and nothing from elsewhere moves the reader", async () => {
   const observers: (() => void)[] = [];
   vi.stubGlobal("ResizeObserver", class { constructor(cb: () => void) { observers.push(cb); } observe() {} disconnect() {} });
   const entries: TimelineEntry[] = [{ id: "c1", kind: "cortex", text: "The README now has a Usage section." }];
@@ -198,13 +198,20 @@ it("brings the owner's new message into view above the composer even after scrol
   Object.defineProperties(box, { clientHeight: { get: () => 400 }, scrollHeight: { get: () => 2000 }, scrollTop: { get: () => top, set: (v: number) => { top = v; } } });
   observers.forEach(cb => cb()); await new Promise(r => setTimeout(r, 40)); await settle();
   expect(top).toBe(1600);
-  // The owner scrolls up to read the result, then sends a request for changes from its dialog.
+  // The owner scrolls up to read the result.
   box.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 })); top = 300; box.dispatchEvent(new Event("scroll")); await settle();
-  expect(document.querySelector(".timeline-pill, .ws-pill")).not.toBeNull();
-  const next = structuredClone(state);
-  Object.assign(next.tasks[0], { status: "working", process: "live", result: null });
-  next.sessions[0].timeline = [...entries, { id: "s1", kind: "said", text: "Add one line before the example." }];
-  p.emit(projection("2", next)); await settle();
+  expect(document.querySelector(".ws-pill")).not.toBeNull();
+  // A line the owner said from another window arrives: this reader stays where they are, and it counts as new.
+  const elsewhere = structuredClone(state);
+  elsewhere.sessions[0].timeline = [...entries, { id: "s0", kind: "said", text: "Sent from the phone." }];
+  p.emit(projection("2", elsewhere)); await settle();
+  expect(top).toBe(300);
+  expect(document.querySelector(".ws-pill")?.textContent).toBe("1 new");
+  // The owner requests changes from the composer here: the end comes back and following turns on.
+  const field = document.querySelector<HTMLTextAreaElement>('.dock [aria-label="Message"]')!;
+  field.value = "Add one line before the example."; field.dispatchEvent(new Event("input", { bubbles: true })); await settle();
+  document.querySelector<HTMLButtonElement>(".dock .c-send")!.click(); await settle();
+  expect(p.commands.at(-1)!.payload.type).toBe("request_changes");
   expect(top).toBe(1600);
   expect(document.querySelector(".ws-pill")).toBeNull();
 });

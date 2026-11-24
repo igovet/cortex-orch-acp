@@ -4,6 +4,7 @@ import { useWs, WsContext } from "./ctx";
 import { ScreenActive } from "./freshness";
 import { hrefOf, type Route } from "./router";
 import type { Fact } from "./selectors";
+import { Skeleton } from "./skeleton";
 
 export const I = (props: { n: string; s?: 12 | 14; class?: string }) =>
   <i class={`i ${props.s ? `s${props.s} ` : ""}i-${props.n}${props.class ? ` ${props.class}` : ""}`} aria-hidden="true" />;
@@ -17,8 +18,11 @@ export const Loading = (props: { text: string; class?: string }) =>
  * arrive this says so, or why they could not be read yet, never a stand-in value such as a default or zero.
  */
 export function OverviewShown(props: { children: JSX.Element; inline?: boolean }) {
+  const ws = useWs();
   const wait = useOverviewWait();
-  return <Show when={!wait()} fallback={props.inline ? <span class="cap muted" role="status">{wait()}</span> : <Loading text={wait()!} />}>{props.children}</Show>;
+  // A whole panel still waiting for its first read shows the panel skeleton; one whose read failed says why, in words.
+  const panel = () => ws.store.overviewIssue() ? <Loading text={wait()!} /> : <div aria-busy="true"><Skeleton kind="panel" label={wait()!} /></div>;
+  return <Show when={!wait()} fallback={props.inline ? <span class="cap muted" role="status">{wait()}</span> : panel()}>{props.children}</Show>;
 }
 /**
  * Asks for the machine's overview (`wantOverview`) while the screen that shows its fields is on view and `visible` holds:

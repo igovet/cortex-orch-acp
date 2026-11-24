@@ -15,16 +15,18 @@ await main(async () => {
     await sleep(.4);
   };
   const capture = async name => { await sleep(.15); await host.capture(join(evidence, name + ".png")); };
-  const measure = selector => js("const b=document.querySelector(" + JSON.stringify(selector) + ");return {top:b.scrollTop,height:b.scrollHeight,client:b.clientHeight,bottom:(getComputedStyle(b).display==='flex'&&getComputedStyle(b).flexDirection==='column-reverse')?Math.abs(b.scrollTop):Math.abs(b.scrollHeight-b.clientHeight-b.scrollTop),following:document.body.dataset.follow};");
+  const measure = selector => js("const b=document.querySelector(" + JSON.stringify(selector) + ");return {top:b.scrollTop,height:b.scrollHeight,client:b.clientHeight,bottom:(getComputedStyle(b).display==='flex'&&getComputedStyle(b).flexDirection==='column-reverse')?Math.abs(b.scrollTop):Math.abs(b.scrollHeight-b.clientHeight-b.scrollTop),following:!b.parentElement.querySelector('.new-pill')};");
   const p95 = values => values[Math.floor(values.length * .95)];
   // The feed's box ends at the dock's top edge, so its scrollbar does too: nothing of it lies beside or under the dock. Probed
   // at the scrollbar's own column, below the dock's top nothing is the feed; above it, under a shown Latest band, the feed's
-  // scrollbar is still what is there.
+  // scrollbar is still what is there. The band itself has no surface and takes no pointer: beside the pill, the feed is what
+  // a press or the pointer reaches.
   const geometry = (feed, dock) => js("const b=document.querySelector(" + JSON.stringify(feed) + "),d=document.querySelector(" + JSON.stringify(dock) + "),B=b.getBoundingClientRect(),D=d.getBoundingClientRect(),x=B.right-4,band=d.querySelector('.pill-band');" +
     "const hit=y=>{const e=document.elementFromPoint(x,y);return !!e&&b.contains(e);};const ys=[D.top+1,D.top+8,(D.top+D.bottom)/2,D.bottom-2].filter(y=>y>D.top&&y<Math.min(D.bottom,innerHeight));" +
     "const P=band&&band.getClientRects().length?band.getBoundingClientRect():null;" +
-    "return {feedBottom:Math.round(B.bottom*10)/10,dockTop:Math.round(D.top*10)/10,gap:Math.round((D.top-B.bottom)*10)/10,scrollbar:b.offsetWidth-b.clientWidth,belowPoints:ys.length,feedBelow:ys.filter(hit).length,band:P?{top:Math.round(P.top),bottom:Math.round(P.bottom),scrollbarClear:hit((P.top+P.bottom)/2)}:null,bottom:Math.round((b.scrollHeight-b.clientHeight-b.scrollTop)*10)/10,pill:!!d.querySelector('.new-pill')?.getClientRects().length};");
-  const geometryOk = (g, scrollbar = true) => Math.abs(g.gap) <= 1 && g.feedBottom <= g.dockTop + .05 && g.belowPoints >= 2 && g.feedBelow === 0 && (!scrollbar || g.scrollbar > 0) && (!g.band || g.band.scrollbarClear || !scrollbar);
+    "return {feedBottom:Math.round(B.bottom*10)/10,dockTop:Math.round(D.top*10)/10,gap:Math.round((D.top-B.bottom)*10)/10,scrollbar:b.offsetWidth-b.clientWidth,belowPoints:ys.length,feedBelow:ys.filter(hit).length,band:P?{top:Math.round(P.top),bottom:Math.round(P.bottom),scrollbarClear:hit((P.top+P.bottom)/2),background:getComputedStyle(band).backgroundColor,through:(()=>{const e=document.elementFromPoint(P.left+8,(P.top+P.bottom)/2);return !!e&&b.contains(e);})()}:null,bottom:Math.round((b.scrollHeight-b.clientHeight-b.scrollTop)*10)/10,pill:!!d.querySelector('.new-pill')?.getClientRects().length};");
+  const geometryOk = (g, scrollbar = true) => Math.abs(g.gap) <= 1 && g.feedBottom <= g.dockTop + .05 && g.belowPoints >= 2 && g.feedBelow === 0 && (!scrollbar || g.scrollbar > 0) && (!g.band || g.band.scrollbarClear || !scrollbar) &&
+    (!g.band || (g.band.through && /^(transparent|rgba\(0, 0, 0, 0\))$/.test(g.band.background)));
 
   async function streamTest(name) {
     await load(name);
@@ -57,6 +59,19 @@ await main(async () => {
     await js("fixture.stream();");
     await sleep(.2);
     results.resumed = await measure(selector);
+    // A press in the text (a click, the start of a selection) is not a scroll: the end stays pinned while content streams, and
+    // letting go moves nothing.
+    const text = await js("const B=b.getBoundingClientRect(),e=[...b.querySelectorAll('.ai, .ev-note')].filter(n=>{const r=n.getBoundingClientRect();return r.top>B.top+20&&r.bottom<B.bottom-60;}).at(-1);if(!e)return null;const r=e.getBoundingClientRect();return [Math.round(r.left+Math.min(20,r.width/2)),Math.round(r.top+r.height/2)];");
+    if (text) {
+      xdotool("mousemove", "--sync", ox + text[0], oy + text[1], "mousedown", "1");
+      await sleep(.1);
+      await js("fixture.stream();fixture.append();");
+      await sleep(.2);
+      results.pressPinned = await measure(selector);
+      xdotool("mouseup", "1");
+      await sleep(.3);
+      results.pressReleased = await measure(selector);
+    }
     // Real XTEST input grabs the scrollbar, rather than calling its handlers.
     assert.ok(have("xdotool"), "XTEST pointer driver unavailable");
     const xy = await js("const r=b.getBoundingClientRect();return [Math.round(r.right-5),Math.round(r.bottom-80)];");
@@ -84,6 +99,7 @@ await main(async () => {
       assert.ok(Math.abs(results.expand.anchorDelta) <= 1, text);
       assert.ok(results.resumed.bottom <= 1, text);
       assert.ok(Math.abs(results.dragAppendDelta) <= 1 && results.dragMoved > 5, text);
+      assert.ok(results.pressPinned && results.pressPinned.bottom <= 1 && results.pressReleased.bottom <= 1 && results.pressReleased.following, "press in the text: " + text);
       assert.ok(geometryOk(results.geometryEnd) && geometryOk(results.geometryReading) && results.geometryEnd.bottom <= 1 && !results.geometryEnd.pill && results.geometryReading.pill, "feed and dock: " + text);
     }
     return results;
@@ -289,9 +305,10 @@ await main(async () => {
       await sleep(.2);
       await capture(name + "-open-1440");
       const rows = await js("return [...document.querySelectorAll('.step-row')].map(e=>e.textContent);");
-      // Every one of the six calls is work the reader may want to see (timeline-visibility.ts hides only bookkeeping), Read
-      // skill and Submit result included, and each reads by its person-facing name, never the engine's raw tool name.
-      assert.ok(rows.length === 6 && !rows.some(r => r.includes("mcp__")) && rows.some(r => r.includes("Read skill")) && rows.some(r => r.includes("Submit result")), JSON.stringify(rows));
+      // Of the six calls, the runtime's own bookkeeping (Read skill, Submit result) is hidden unless "Show every tool call" is on
+      // (timeline-visibility.ts, test/all-tools-setting.test.tsx); the four that are work each read by their person-facing name,
+      // never the engine's raw tool name.
+      assert.ok(rows.length === 4 && !rows.some(r => r.includes("mcp__")) && !rows.some(r => r.includes("Read skill") || r.includes("Submit result")) && rows.some(r => r.startsWith("Shell")), JSON.stringify(rows));
       results[name] = {rows};
     }
     await load("conversation", 1440, 1000, 2400);

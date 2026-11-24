@@ -3,7 +3,8 @@ import { previewPurge } from "@cortex/workspace-domain";
 import { archiveRow, archiveView, daysLeft, nextCleanup, NO_FILTER, OUTCOME_FILTERS, sizeText, type ArchiveFilter, type ArchiveRow } from "./archive-model";
 import { useWs } from "./ctx";
 import { createRequestFeedback, RequestStatus } from "./request-feedback";
-import { A, I, Keyed, Loading, MenuItem, Modal, OverviewShown, Pop, useOverviewWait, useWantOverview } from "./kit";
+import { A, I, Keyed, MenuItem, Modal, OverviewShown, Pop, useOverviewWait, useWantOverview } from "./kit";
+import { EmptyUntilRead, projectsPending, Skeleton } from "./skeleton";
 import { ActionBar, SectionHead, Toolbar } from "./layout";
 import { sprintTitle } from "./selectors";
 import { same } from "./stable";
@@ -149,13 +150,15 @@ export function Archive() {
         <A class="btn btn-line btn-sm" to={{name:"sprint",machine:ws.store.state().projects.find(p => p.id === s.projectId)!.machineId,project:s.projectId,sprint:s.id,tab:"summary"}}>Open summary</A>
       </div>}</For></div>
     </section></Show>
-    <Show when={!wait() || view().rows.length === 0} fallback={<Loading text={wait()!} />}>
+    <Show when={!wait() || view().rows.length === 0} fallback={<div aria-busy="true"><Skeleton kind="list" label={wait()!} /></div>}>
     {section("ar-soon", "Cleanup within 3 days", () => view().soon)}
     {section("ar-later", "Later", () => view().later, () => <Show when={view().later.length > LATER_LIMIT && !more()}><button class="gr ws-more" onClick={() => setMore(true)}><span class="cap muted">Show {view().later.length - LATER_LIMIT} more</span></button></Show>)}
     {section("ar-block", "Cleanup blocked", () => view().blocked)}
     </Show>
     <Show when={view().rows.length === 0 && closedSprints().length === 0}>
-      <div class="surface ws-empty">{filtered() ? "No archived task matches this filter." : wait() ? "Nothing archived." : `Nothing archived. Tasks move here after ${ws.machine().autoArchiveDays} days in Done.`}</div>
+      <EmptyUntilRead name="archive" pending={() => !filtered() && projectsPending(ws)} label="Loading the Archive…">
+        <div class="surface ws-empty">{filtered() ? "No archived task matches this filter." : wait() ? "Nothing archived." : `Nothing archived. Tasks move here after ${ws.machine().autoArchiveDays} days in Done.`}</div>
+      </EmptyUntilRead>
     </Show>
     <Pop id="m-arrow" class="pop-right" label="Archived task" ref={el => { menuEl = el; }}>
       <Show when={menuRow()}>{r => <>

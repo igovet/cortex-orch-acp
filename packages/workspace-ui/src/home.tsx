@@ -5,6 +5,7 @@ import { Tile } from "./frame";
 import { A, I, Keyed } from "./kit";
 import { SectionHead } from "./layout";
 import { age, attentionOf, homeView, sprintView, type Decision, type ProjectSummary, type TaskView } from "./selectors";
+import { EmptyUntilRead, projectsPending } from "./skeleton";
 
 const NEEDS_LIMIT = 12;
 const taskRoute = (v: TaskView) => ({ name: "task" as const, machine: v.machine.id, task: v.id });
@@ -49,7 +50,7 @@ export function Home() {
     <div class="home"><div class="home-in">
       <section class="full" aria-labelledby="h-need">
         <SectionHead id="h-need" title="Needs you" count={view().attention.length}><A class="more" to={inbox()}>Inbox</A></SectionHead>
-        <Show when={view().attention.length > 0} fallback={<div class="surface ws-empty">Nothing needs you on this machine.</div>}>
+        <Show when={view().attention.length > 0} fallback={<EmptyUntilRead name={`home|${ws.machine().id}`} pending={() => projectsPending(ws, p => p.machineId === ws.machine().id)} label="Loading what waits on you…"><div class="surface ws-empty">Nothing needs you on this machine.</div></EmptyUntilRead>}>
           <div class="surface"><Keyed each={view().attention.slice(0, NEEDS_LIMIT)} by={v => v.id}>{v =>
             <NeedRow decision={attentionOf(v())} waiting={v().at === null ? "" : v().column === "needs" ? `waiting ${age(v().at, ws.store.clock())}` : `${age(v().at, ws.store.clock())} ago`.replace("now ago", "just now")} to={taskRoute(v())} selected={ws.selected() === v().id} onPreview={() => ws.select(v().id)} />
           }</Keyed></div>

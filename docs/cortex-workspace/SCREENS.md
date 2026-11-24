@@ -76,9 +76,12 @@ A created sprint has **New task** and **Close sprint…** in its title band; a n
   list skeleton instead of "nothing here" while a project's tasks are still being read, and panels that wait
   for the machine's details show a panel skeleton.
 - Long conversations open on their latest part. The Conversation opens at its end with about one screen of
-  its newest rows (as many as fill the window: the first request asks for only that many rows, later
-  ones for more when steps fold together, in at most four requests however long the task ran), and new
-  rows keep arriving below as before.
+  its newest rows (as many as fill the window: each request asks for one screen's worth of rows, at most
+  100, and when steps fold together into fewer entries further requests of the same size follow until
+  the window is full or about 150 rows are held, however long the task ran), and new rows keep arriving
+  below as before. The machine ties each position in a conversation to the request size it was read with,
+  so every later read of that conversation, earlier parts as the reader scrolls up and new rows below,
+  asks for the same size; a new size is used only when the conversation is read afresh.
   If the boundary below the task description is on screen or within one screen above it, earlier
   content loads automatically, even while following. This repeats as needed on opening, resizing or
   scrolling up. **Show earlier** remains a fallback. "Loading earlier…" stays until there is more

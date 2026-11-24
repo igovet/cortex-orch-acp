@@ -9,7 +9,7 @@ Feature behavior is documented one page per feature in the [feature index](../fe
 
 ## Workspace feed following
 
-Task conversations, sprint planning conversations and worker activity follow the latest content by default, including streamed text and layout growth. Scrolling up pauses following and preserves the reading position. Returning to the bottom, pressing Latest, or enabling Follow resumes it. The shared Latest control counts new entries while paused; growth of an existing entry does not increase the count. Sending a message brings the conversation back to the latest content; expanding an activity row keeps that row in view.
+Task conversations, sprint planning conversations and worker activity follow the latest content by default, including streamed text and layout growth. Scrolling up pauses following and preserves the reading position. Returning to the bottom or pressing Latest resumes it; Latest ("N new" while new entries arrived) is the only follow control, in every feed. The shared Latest control counts new entries while paused; growth of an existing entry does not increase the count. Sending a message or answering a question from that screen brings the conversation back to the latest content and resumes following; expanding an activity row keeps that row in view.
 
 ## Project pages
 

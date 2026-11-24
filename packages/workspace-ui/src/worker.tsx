@@ -16,6 +16,12 @@ import { CopySource, MessageTools } from "./message-copy";
 import { SentMessages } from "./sent";
 import { useTaskRoutes } from "./task-place";
 import type { FollowPosition } from "./follow";
+import { createFirstView, firstWindowEntries } from "./first-view";
+import { FirstViewNotice, Skeleton, unreachable } from "./skeleton";
+
+/** A worker feed's place, kept by its pane while another worker is on view: where the reader was, the older activity already
+ *  read and how much of it was shown. Coming back shows the same rows at the same place, with nothing read again. */
+export type StreamMemory = FollowPosition & { identity?: string; older?: Activity[]; olderMessages?: Message[]; cursor?: string | null; from?: string | null };
 
 export const CORTEX = "cortex", VERIFICATION = "verification";
 
@@ -302,21 +308,28 @@ function joinStreamedText(list: Activity[], showPlumbing: boolean): Activity[] {
 }
 
 /** Everything a worker did, newest at the bottom. New events never move a reader away from the end; scrolling back to the
- *  end follows again, and Latest brings it back. */
-function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: boolean; onAsk?: () => void; onStop?: () => void; position?: FollowPosition }) {
+ *  end follows again, and Latest brings it back. It opens on about one screen of its newest rows; earlier rows show as the
+ *  reader scrolls up to them (or presses Show earlier), and only then are older pages read from the machine. */
+function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: boolean; onAsk?: () => void; onStop?: () => void; position?: StreamMemory }) {
   const ws = useWs();
   const [command, setCommand] = createSignal<{ worker: Worker; item: Activity } | null>(null);
   let scroller: HTMLDivElement | undefined;
-  const [older, setOlder] = createSignal<Activity[]>([]);
-  const [olderMessages, setOlderMessages] = createSignal<Message[]>([]);
-  const [cursor, setCursor] = createSignal<string | null | undefined>();
-  const [historyError, setHistoryError] = createSignal(""), [loadingOlder, setLoadingOlder] = createSignal(false);
   const identity = createMemo(() => props.w.id + "/" + (props.w.attempt?.n ?? ""));
+  const memory = props.position, kept = memory?.identity === untrack(identity) ? memory : undefined;
+  const [older, setOlder] = createSignal<Activity[]>(kept?.older ?? []);
+  const [olderMessages, setOlderMessages] = createSignal<Message[]>(kept?.olderMessages ?? []);
+  const [cursor, setCursor] = createSignal<string | null | undefined>(kept?.cursor);
+  // The first row shown: rows before it are held but not drawn until the reader comes near them. Null until rows arrive.
+  const [from, setFrom] = createSignal<string | null>(kept?.from ?? null);
+  const [historyError, setHistoryError] = createSignal(""), [loadingOlder, setLoadingOlder] = createSignal(false);
   let generation = 0, observedIdentity = "", arrivals = 0;
   const seenItems = new Set<number>(), runIds = new Map<number, string>(), loadedCursors = new Set<string>();
   const opened = createOpenState();
-  createEffect(on(identity, () => { generation++; loadedCursors.clear(); setOlder([]); setOlderMessages([]); setCursor(undefined); setHistoryError(""); setLoadingOlder(false); opened.clear(); }));
-  onCleanup(() => { generation++; });
+  createEffect(on(identity, () => { generation++; loadedCursors.clear(); setOlder([]); setOlderMessages([]); setCursor(undefined); setFrom(null); setHistoryError(""); setLoadingOlder(false); opened.clear(); }, { defer: true }));
+  onCleanup(() => {
+    generation++;
+    if (memory) Object.assign(memory, { identity: identity(), older: older(), olderMessages: olderMessages(), cursor: cursor(), from: from() });
+  });
   // Keep live rows when a refreshed service snapshot advances its bounded tail.
   createEffect(() => {
     const activity = props.w.activity.map(a => ({ ...a }));
@@ -344,9 +357,9 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
   const sentHere = () => ({ kind: "worker" as const, taskId: props.model().view.id, workerId: props.w.id });
   const nextCursor = () => cursor() === undefined ? props.w.activityCursor : cursor();
   const position = props.position;
-  // A failed page leaves its cursor available for Retry; the partial feed still cannot restore the saved offset.
+  // The rows read before are back from the pane's memory, so the saved offset lands on them at once.
   const follow = createFollow(() => scroller, () => observed() + ws.store.sends.shown(sentHere()).length,
-    position && { position, ready: () => !loadingOlder() && !nextCursor() });
+    position && { position, ready: () => !loadingOlder() }, () => nearStart());
   // What the owner just sent here comes into view above the composer and following turns on, even for a reader who had
   // scrolled up. A row the reader opens stays in view: the follow controller watches the feed's own toggles.
   let pressedSeen = ws.store.sends.pressed(sentHere());
@@ -364,13 +377,11 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
       if (page.activityCursor && (page.activityCursor === next || loadedCursors.has(page.activityCursor))) throw new Error("Activity paging did not advance. Retry to load the remaining history.");
       loadedCursors.add(next);
       setCursor(page.activityCursor ?? null);
-      // The shared follow controller preserves the visible row as older activity is prepended.
+      // The shared follow controller preserves the visible row as older activity is prepended; what was read shows its newest part.
+      queueMicrotask(() => { if (own === generation) showEarlier(); });
     } catch (e) { if (own === generation) setHistoryError(e instanceof Error ? e.message : "Activity could not be loaded. Retry."); }
     finally { if (own === generation) setLoadingOlder(false); }
   };
-  createEffect(() => {
-    if (nextCursor() && !loadingOlder() && !historyError()) untrack(() => void loadOlder());
-  });
   let runIdsOf = "", lastShown = new Map<string, FeedItem<Activity>>();
   const shown = createMemo(() => {
     if (runIdsOf !== identity()) { runIdsOf = identity(); runIds.clear(); lastShown = new Map(); }
@@ -379,7 +390,33 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
     return out;
   });
   // Rows keep their keys through a streaming update, so a new event only appends.
-  const keys = createMemo(() => shown().map(x => x.key), undefined, { equals: (a, b) => a.length === b.length && a.every((k, i) => k === b[i]) });
+  const sameKeys = (a: string[], b: string[]) => a.length === b.length && a.every((k, i) => k === b[i]);
+  const allKeys = createMemo(() => shown().map(x => x.key), undefined, { equals: sameKeys });
+  // About one screen of the newest rows first. Rows after the first one shown are always drawn, so arrivals only append.
+  const screen = firstWindowEntries();
+  createComputed(() => { const k = allKeys(); if (from() === null && k.length) setFrom(k[Math.max(0, k.length - screen)]); });
+  const keys = createMemo(() => {
+    const k = allKeys(), f = from(), at = f === null ? -1 : k.indexOf(f);
+    return at >= 0 ? k.slice(at) : k.slice(Math.max(0, k.length - screen));
+  }, undefined, { equals: sameKeys });
+  const held = () => allKeys().length - keys().length;
+  /** The next screen of earlier rows: those already held first, then the machine's next older page. */
+  const showEarlier = () => {
+    const k = allKeys(), hidden = held();
+    if (hidden > 0) { setFrom(k[Math.max(0, hidden - screen)]); return; }
+    if (nextCursor() && !loadingOlder() && !historyError()) void loadOlder();
+  };
+  /** Earlier rows show by themselves while the feed does not fill its box yet, and when the reader is within half a screen of
+   *  its top; never while following the end of a full feed. One step per layout pass. */
+  let stepping = false;
+  const nearStart = () => {
+    const box = scroller;
+    if (stepping || !box?.clientHeight || (!held() && !nextCursor()) || loadingOlder() || historyError()) return;
+    const short = box.scrollHeight <= box.clientHeight + 1, near = !follow.following() && box.scrollTop < box.clientHeight / 2;
+    if (!short && !near) return;
+    stepping = true;
+    queueMicrotask(() => { stepping = false; showEarlier(); });
+  };
   // Each row reads its own entry, which is told only when that entry changed: an update to one row of a long feed wakes
   // that row, not every row (test/scroll-perf.driver.mjs, `-live`).
   const slots = new Map<string, { get: Accessor<FeedItem<Activity> | undefined>; set: Setter<FeedItem<Activity> | undefined> }>();
@@ -393,8 +430,12 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
   const running = () => props.w.status === "working";
   const typing = () => <Show when={running()}><WorkingIndicator activity={all()} showAllTools={ws.panels.showAllTools()} /></Show>;
   const rows = () => <>
-    <Show when={loadingOlder()}><Loading class="cap faint" text="Loading recorded activity…" /></Show>
-    <Show when={historyError()}><div class="cap st-warn" role="alert">{historyError()} <button class="lnk" onClick={() => void loadOlder()}>Retry</button></div></Show>
+    <Show when={loadingOlder()}><Loading class="cap faint ws-earlier" text="Loading recorded activity…" /></Show>
+    <Show when={historyError()}><div class="cap st-warn ws-earlier" role="alert" data-follow-skip="">{historyError()} <button class="lnk" onClick={() => void loadOlder()}>Retry</button></div></Show>
+    <Show when={!loadingOlder() && !historyError() && (held() > 0 || !!nextCursor())}>
+      <div class="answered ws-earlier" role="note" data-follow-skip=""><I n="clock" s={14} /><span>Earlier activity is not shown.</span>
+        <button type="button" class="lnk" onClick={showEarlier}>Show earlier</button></div>
+    </Show>
     <Show when={ws.t("activityNote")}><div class="cap faint">{ws.t("activityNote")}</div></Show>
     <For each={keys()}>{key => {
       const entry = slot(key).get;
@@ -408,7 +449,7 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
     {typing()}
   </>;
   return <>
-    <div class="stream" ref={scroller} onScroll={follow.onScroll}><div class="stream-in">
+    <div class="stream" ref={scroller} onScroll={() => { follow.onScroll(); nearStart(); }}><div class="stream-in">
       {rows()}
       <Show when={isFinished(props.w) && !props.readOnly}><Finished w={props.w} onAsk={props.onAsk} /></Show>
     </div></div>
@@ -530,29 +571,47 @@ function Finished(props: { w: Worker; onAsk?: () => void }) {
 function CoordinatorFeed(props: { model: Accessor<SessionModel> }) {
   const ws = useWs();
   const m = () => props.model();
-  const [feed, setFeed] = createSignal<Worker | null>(null), [error, setError] = createSignal(""), [loaded, setLoaded] = createSignal(false);
-  const id = () => `coordinator:${m().view.id}`;
+  // The exact feed on view (machine, project, task, execution): another one never shows this one's activity, nor its late reply.
+  const key = () => `${m().view.machine.id}|${m().view.project.id}|${m().view.id}|${m().view.task.executionId ?? ""}`;
+  const [feed, setFeed] = createSignal<{ key: string; worker: Worker } | null>(null), [failure, setFailure] = createSignal<{ key: string; text: string } | null>(null);
+  const shown = () => { const f = feed(); return f && f.key === key() ? f.worker : null; };
+  const error = () => { const f = failure(); return f && f.key === key() ? f.text : ""; };
   const running = () => m().mode === "live" || m().mode === "stopping";
-  let busy = false;
-  const load = async () => {
-    if (busy) return;
-    busy = true;
-    const taskId = m().view.id;
+  // One read in flight per feed; Retry starts another even while an earlier one hangs. A reply older than one already
+  // applied changes nothing.
+  let inFlight: string | null = null, asked = 0, applied = 0;
+  const load = async (again = false) => {
+    const at = key();
+    if (inFlight === at && !again) return;
+    inFlight = at;
+    const n = ++asked, taskId = m().view.id;
+    if (again) setFailure(null);
     try {
       const page = await ws.store.readWorkerActivity(taskId, `coordinator:${taskId}`);
-      if (taskId !== m().view.id) return;
-      setFeed({ id: `coordinator:${taskId}`, taskId, executionId: "", role: "Coordinator", status: running() ? "working" : "completed", lane: "execution", goal: "", now: null, waitsFor: null, scope: [], route: null, attempt: null, elapsedMs: null, runningSince: null, context: null, usage: null, result: null, activity: page.activity, activityCursor: page.activityCursor ?? null, messages: page.messages });
-      setError("");
-    } catch (e) { setError(e instanceof Error ? e.message : "Activity could not be loaded. Retry."); }
-    finally { busy = false; setLoaded(true); }
+      if (at !== key() || n < applied) return;
+      applied = n;
+      setFeed({ key: at, worker: { id: `coordinator:${taskId}`, taskId, executionId: "", role: "Coordinator", status: running() ? "working" : "completed", lane: "execution", goal: "", now: null, waitsFor: null, scope: [], route: null, attempt: null, elapsedMs: null, runningSince: null, context: null, usage: null, result: null, activity: page.activity, activityCursor: page.activityCursor ?? null, messages: page.messages } });
+      setFailure(null);
+    } catch (e) {
+      if (at !== key() || n < applied) return;
+      applied = n;
+      setFailure({ key: at, text: e instanceof Error ? e.message : "Activity could not be loaded. Retry." });
+    } finally { if (n === asked) inFlight = null; }
   };
+  // Its first reveal waits for its own first read, for at most the first-view budget (at once offline): then one notice
+  // names it with Retry. A feed already shown stays through a refresh that fails, with that failure above it.
+  const first = createFirstView({ scope: ws.store, identity: () => `coordinator-activity|${key()}`, offline: () => unreachable(ws),
+    reads: () => [{ section: "activity", state: shown() ? "settled" : error() ? "failed" : "pending" }], retry: () => void load(true) });
   // Every change the machine reports may be new coordinator activity, and the timer covers the time between reports.
   createEffect(on(() => props.model(), () => void load()));
   createTicker(() => void load(), 2500, running);
-  const noFeed = () => ws.store.mode !== "real" && error() !== "" && !feed();
+  const noFeed = () => ws.store.mode !== "real" && error() !== "" && !shown();
   return <Show when={!noFeed()} fallback={<div class="d-scroll"><div class="res-sec"><div class="res-h">Now</div>{m().session.coordinator.note || ws.t("nothingToReport")}</div></div>}>
-    <Show when={error()}><div class="cap st-warn ws-cf-err" role="alert">{error()} <button class="lnk" onClick={() => void load()}>Retry</button></div></Show>
-    <Show when={feed()} fallback={<Show when={!error()}><div class="d-scroll"><Show when={loaded()} fallback={<Loading class="res-sec cap faint" text="Loading activity…" />}><div class="res-sec cap faint">No activity recorded yet.</div></Show></div></Show>}>
+    <Show when={error() && shown()}><div class="cap st-warn ws-cf-err" role="alert">{error()} <button class="lnk" onClick={() => void load(true)}>Retry</button></div></Show>
+    <Show when={shown()} fallback={<div class="d-scroll" aria-busy={first.loading() ? "true" : undefined}>
+      <Show when={first.loading()}><Skeleton kind="activity" label="Loading activity…" /></Show>
+      <FirstViewNotice view={first} />
+    </div>}>
       {w => <Stream model={props.model} w={w()} readOnly />}
     </Show>
   </Show>;
@@ -563,7 +622,7 @@ export function WorkerPane(props: { model: Accessor<SessionModel>; pick: string;
   const ws = useWs();
   const m = () => props.model();
   const [stopping, setStopping] = createSignal<Worker | null>(null);
-  const positions = new Map<string, FollowPosition>();
+  const positions = new Map<string, StreamMemory>();
   const worker = () => m().workers.find(w => w.id === props.pick) ?? null;
   // The coordinator is messaged from its conversation: the task's page, or the sprint's for the task planning a sprint.
   const routes = useTaskRoutes(() => ({ machine: m().view.machine.id, id: m().view.id }));
@@ -594,7 +653,9 @@ export function WorkerPane(props: { model: Accessor<SessionModel>; pick: string;
         </Show>
       </div>
     </>;
-    if (!worker()) return <div class="note-panel"><span>This worker is not part of the task.</span></div>;
+    // Until the task's first facts read is in, a worker missing from them is not yet known, not absent.
+    if (!worker()) return <div class="note-panel"><span>{m().view.task.executionId !== null && ws.store.factsShown(m().view.project.id, m().view.id) === false
+      ? "This worker's record has not arrived yet." : "This worker is not part of the task."}</span></div>;
 
     if (w().status === "pending" || w().status === "not_started") return <>
       <Head w={w()} now={props.now} />

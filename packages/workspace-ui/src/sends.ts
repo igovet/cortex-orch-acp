@@ -37,6 +37,13 @@ export function placeOf(command: WorkspaceCommand): SendPlace | null {
   }
 }
 
+/** The conversation an answer to a question or permission is given in. */
+function answerPlace(command: WorkspaceCommand): SendPlace | null {
+  if (command.type === "answer_decision") return { kind: "task", taskId: command.taskId };
+  if (command.type === "answer_planning") return { kind: "sprint", sprintId: command.sprintId };
+  return null;
+}
+
 type Candidate = { id: string; text: string; ref?: string; index?: number };
 /** The task whose conversation a place reads in: the task itself, or the runtime task planning a sprint. A sprint that plans
  *  without one (an earlier version's planning chat) reads in its own conversation. */
@@ -107,10 +114,14 @@ export function createSends(state: Accessor<WorkspaceState>, dispatch: (command:
   });
 
   const update = (key: string, patch: Partial<Sending>) => setEntries(list => list.map(e => e.key === key ? { ...e, ...patch } : e));
+  // How many times the owner sent or answered from this window, by place: a feed that sees it grow brings its end into view.
+  const [presses, setPresses] = createSignal<ReadonlyMap<string, number>>(new Map());
   return {
-    /** Records a send as it is pressed. Nothing is recorded for a command that is not a message. */
+    /** Records a send as it is pressed. Nothing is recorded for a command that is not a message, except that an answer counts
+     *  as pressed in the conversation it answers. */
     begin(requestId: string, command: WorkspaceCommand) {
-      const place = placeOf(command);
+      const place = placeOf(command), at = place ?? answerPlace(command);
+      if (at) { const k = placeKey(at); setPresses(m => new Map(m).set(k, (m.get(k) ?? 0) + 1)); }
       if (!place) return;
       const text = "text" in command ? command.text : "", attachments = "attachments" in command ? command.attachments : undefined;
       const known = candidates(place, state()).map(c => c.id);
@@ -131,6 +142,12 @@ export function createSends(state: Accessor<WorkspaceState>, dispatch: (command:
       update(entry.key, { state: "sent" });
       const key = entry.key;
       timers.set(key, setTimeout(() => { timers.delete(key); setEntries(list => list.filter(e => e.key !== key)); }, SENT_HOLD_MS));
+    },
+    /** How many messages and answers the owner sent from this window to these places, retries included. It only grows: a
+     *  message that arrives from elsewhere, or a record taking a send's place, never changes it. */
+    pressed(...places: SendPlace[]): number {
+      const m = presses();
+      return places.reduce((n, p) => n + (m.get(placeKey(p)) ?? 0), 0);
     },
     /** The sends of one place whose record does not read there yet, in the order they were sent. */
     shown(place: SendPlace): Sending[] {

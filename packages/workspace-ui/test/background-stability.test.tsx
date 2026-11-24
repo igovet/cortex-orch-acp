@@ -233,7 +233,8 @@ describe("a background update keeps every screen as the owner left it", () => {
     try {
       await mount("/m/<M>/t/c-work/workers/w-be2");
       const stream = () => $(".stream")!;
-      const following = () => $<HTMLInputElement>('[aria-label="Follow new activity"]')!;
+      // Latest stands in the worker's dock exactly while the feed does not follow.
+      const latest = () => $<HTMLButtonElement>(".dock-w .new-pill");
       const pick = async (id: string) => {
         const select = $<HTMLSelectElement>(".ws-worker-picker select")!;
         select.value = id;
@@ -250,14 +251,14 @@ describe("a background update keeps every screen as the owner left it", () => {
       expect(stream()).toBeNull(); // The other fixture worker has not started yet.
       await pick("w-be2");
       expect(stream().scrollTop).toBe(250);
-      expect(following().checked).toBe(false);
+      expect(latest()).not.toBeNull();
 
-      following().click();
+      latest()!.click();
       expect(stream().scrollTop).toBe(3800);
       await pick(other);
       height = 4700;
       await pick("w-be2");
-      expect(following().checked).toBe(true);
+      expect(latest()).toBeNull();
       expect(stream().scrollTop).toBe(4500);
     } finally {
       content.mockRestore(); viewport.mockRestore();

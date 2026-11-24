@@ -188,6 +188,8 @@ if (query.get("world") === "review") {
   render(() => <Workspace port={port.port} chrome={phone ? undefined : chrome} shell={phone} />, document.getElementById("root")!);
   const sprintState = query.get("sprint");
   const world = query.get("world") === "settings" ? settingsWorld() : query.get("world") === "pages" ? pagesWorld(sprintState === "running" || sprintState === "closed" ? sprintState : "planning") : scroll ? longConversation(conversationWorld()) : query.has("stopq") ? stopQuestion(conversationWorld()) : query.has("planningSprint") ? planningSprint(conversationWorld()) : conversationWorld();
+  // `loading`: every conversation's transcript is still being read, for the first-view skeleton and, after its budget, its notice.
+  if (query.has("loading")) for (const session of world.sessions) session.historyRead = { state: "loading" };
   setTimeout(() => port.emit(projection("1", world)), 0);
   // `scroll` only: one streamed update, as a working task sends them, for the scroll gate to send while it scrolls.
   let version = 1;
@@ -254,6 +256,25 @@ function planningSprint(s: ReturnType<typeof conversationWorld>) {
   s.sprints = [{ id: "ps", projectId: "p", title: "Спринт: поля ввода, растущие вместе с текстом, во всех формах создания задач и сообщений",
     description: OWNER, runMode: "automatic", targetBranch: null, planning: "question", planningTaskId: "c-ask", conversation: [], plan: null, materializedVersion: null,
     taskIds: [], queueState: "idle", pauseReason: null, checkout: { kind: "main" } }];
+  if (query.has("planningFailure")) {
+    const sprint = s.sprints[0];
+    sprint.planning = "cancelled";
+    sprint.planningFailure = { text: "The planning task could not be started. Check the model settings and try again.", step: "start", code: "planning_start_refused", at: Date.now() };
+    sprint.planningTaskId = undefined;
+  }
+  if (query.has("planningOverlong")) {
+    const sprint = s.sprints[0];
+    sprint.planning = "cancelled";
+    sprint.planningFailure = { text: "The planning request is too long (34510 characters; limit 32000, including instructions and saved conversation). Shorten the sprint description before retrying.", step: "request", code: "planning_request_invalid", at: Date.now() };
+    sprint.planningTaskId = undefined;
+    sprint.description = `${OWNER}\n\n`.repeat(245).trimEnd();
+  }
+  if (query.has("planningWarning")) {
+    const sprint = s.sprints[0];
+    sprint.planning = "planning";
+    sprint.planningTaskId = undefined;
+    sprint.planningWarning = { text: "The service could not check or advance sprint planning. It will keep retrying.", step: "internal", code: "planning_pass_failed", at: Date.now(), count: 3 };
+  }
   return s;
 }
 // The working task after a long day: 300 turns of replies with Markdown, folded tool steps and owner messages, and its

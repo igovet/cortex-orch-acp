@@ -11,7 +11,7 @@ import { Answered, QuestionForm, type Ask, type AskAnswer } from "./questions";
 import { AcceptBlocker, ChangesPanel, ResultCard, type ChangesViewState } from "./review";
 import { ActionBar, Page, StatusLane, Toolbar, Whole, type StripItem } from "./layout";
 import { taskWhyId, titleBlock } from "./task-chrome";
-import { inConflict, repoOf, sentence, taskCheckout } from "./review-model";
+import { inConflict, mergeControls, repoOf, sentence, taskCheckout } from "./review-model";
 import type { Route, TaskTab } from "./router";
 import { age, attemptsSpentOn, clock, humanStatus, ownerHold, replanStopping, reviewDeadEnd, sprintRoute, stopReason, type OwnerHold } from "./selectors";
 import { inTask } from "./status-text";
@@ -21,11 +21,17 @@ import { SpendLine } from "./task-spend";
 import { createOpenState, Fold, TextSteps } from "./feed";
 
 import { ResultText, resultPreview } from "./result-text";
+import { ResultScope } from "./result-links";
 import { CopySource, MessageTools } from "./message-copy";
 import { SentMessages } from "./sent";
 import { viewOfText } from "./tool-names";
 import { shownFold } from "./port/history";
 import { usePlanningSprint, useTaskRoutes } from "./task-place";
+import { createFirstView, decisionsReadOf, type FirstRead } from "./first-view";
+import { FirstViewNotice, Skeleton, unreachable } from "./skeleton";
+import { firstCard, revealIntent, revealKey, settleReveal } from "./reveal-intent";
+import { scrollIntoFeed } from "./follow";
+import type { Ws } from "./ctx";
 
 type TaskRoute = Extract<Route, { name: "task" }>;
 const useTicker = () => {
@@ -67,10 +73,21 @@ function TaskBar(props: { m: SessionModel; tab: TaskTab | undefined; route: Task
       || (t.id === "changes" ? ws.can(capabilityOf("accept_result")) || ws.can(capabilityOf("request_changes"))
         : t.id === "terminal" ? ws.can(FEATURES.terminal) : ws.can(capabilityOf("git_fetch")) || ws.can(FEATURES.editFiles)));
   const menu = `m-task-details-${props.route.task}`;
+  const progress = () => {
+    const task = props.m.view.task, a = mergeControls(task);
+    if (ws.store.mode === "real") {
+      if (a.uncertain && inConflict(task)) return "Merge outcome unconfirmed";
+      if (a.active) return "App handoff recorded";
+      if (inConflict(task)) return "Task merge needs attention";
+      if (task.merge?.freshChecks?.state === "not_requested") return "Fresh checks not requested";
+      if (task.merge?.freshChecks?.state === "request_unknown") return "Fresh-check request unconfirmed";
+    }
+    return progressLine(props.m);
+  };
   return <Toolbar small class="taskbar" label="Task progress and details"
     start={<Show when={props.tab}><A class="btn td-back" to={at()}><I n="arrow-left" />Conversation</A></Show>}
     mid={<>
-      <Whole class="td-progress" text={progressLine(props.m)} />
+      <Whole class="td-progress" text={progress()} />
       <Show when={ws.store.mode === "real"}><Confirmed at={props.m.view.task.lastConfirmedAt} /></Show>
     </>}
     end={<>
@@ -344,7 +361,7 @@ function Waiting(props: { m: SessionModel }) {
       ? "Decision details are not available yet. Use Answer in the task header to open the decision; if details are still loading, try again after the conversation refreshes."
       : "The question for this step is not available. Continue lets the agent decide the next step from the recorded state; nothing is repeated. Or close the task as is."}</p></Show>
     <ActionBar place="card">
-      <Show when={t().conflict === "none"} fallback={<><A class="btn btn-line btn-sm" to={conflict()}>Open the conflict</A><button class="btn btn-primary btn-sm" {...ws.needs("resolve_with_cortex")} onClick={() => ws.open({ kind: "cortex", taskId: t().id })}>Resolve automatically…</button></>}>
+      <Show when={t().conflict === "none"} fallback={<><A class="btn btn-line btn-sm" to={conflict()}>Open the conflict</A><Show when={ws.store.mode !== "real"}><button class="btn btn-primary btn-sm" {...ws.needs("resolve_with_cortex")} onClick={() => ws.open({ kind: "cortex", taskId: t().id })}>Resolve automatically…</button></Show></>}>
         {/* A way out this machine does not offer is not presented as one. */}
         <Show when={ws.store.can(capabilityOf("clear_issue"))} fallback={<>
           <button class="btn btn-primary btn-sm" {...ws.needs("retry_task")} onClick={e => void ws.busy(ws.run({ type: "retry_task", taskId: t().id, now: ws.store.clock() }), e.currentTarget)}>Continue</button>
@@ -380,7 +397,6 @@ export function OwnerHoldCard(props: { m: SessionModel; route: TaskRoute }) {
   const holdKey = (h: OwnerHold | null) => h ? `${h.holdId ?? ""}|${h.code}|${h.reason}|${h.allowed}|${h.actions.join(",")}` : "";
   const [sentFor, setSentFor] = createSignal<{ action: string; key: string } | null>(null);
   const sent = () => { const s = sentFor(); return s && s.key === holdKey(hold()) ? s.action : null; };
-  const setSent = (action: string) => setSentFor({ action, key: holdKey(hold()) });
   // A refusal is the answer to this hold: it stays in the card in plain words, and the refused action is not offered
   // again until the hold changes (a new hold offers its actions again).
   const [refusedFor, setRefusedFor] = createSignal<{ action: string; key: string; message: string } | null>(null);
@@ -400,7 +416,7 @@ export function OwnerHoldCard(props: { m: SessionModel; route: TaskRoute }) {
     const id = view().id, now = ws.store.clock();
     const key = holdKey(h);
     const send = (command: Parameters<typeof ws.run>[0]) => {
-      void ws.busy(ws.run(command), control).then(receipt => receipt.ok ? setSent(a) : refuse(a, key, receipt.message))
+      void ws.busy(ws.run(command), control).then(receipt => receipt.ok ? setSentFor({ action: a, key }) : refuse(a, key, receipt.message))
         .catch(e => refuse(a, key, e instanceof Error ? e.message : "The request could not be sent."));
     };
     switch (a) {
@@ -573,6 +589,33 @@ export function createPrepended(ids: Accessor<string[]>) {
   }, 0);
 }
 
+/** The workers, results and messages of a started task on screen: not in yet until a facts read for it has arrived. */
+const factsRead = (ws: Ws, m: SessionModel): FirstRead => ({ section: "workers and results",
+  state: m.view.task.executionId !== null && ws.store.factsShown(m.view.project.id, m.view.id) === false ? "pending" : "settled" });
+/**
+ * What a conversation's first reveal waits for: the latest window of its transcript (or that it is empty), the questions of
+ * its execution, and the first facts read for its team, messages and result. A transcript read that failed says so in its own
+ * line, so it does not hold the conversation back; questions that could not be read are named.
+ */
+export function conversationReads(ws: Ws, m: SessionModel): FirstRead[] {
+  const questions = decisionsReadOf(m.session);
+  return [
+    { section: "the conversation", state: m.session.historyRead?.state === "loading" ? "pending" : "settled" },
+    { section: "questions", state: !questions ? "settled" : questions.state === "loading" ? "pending" : "failed", ...(questions?.state === "failed" ? { reason: questions.reason } : {}) },
+    factsRead(ws, m),
+  ];
+}
+/** One task's first-reveal gate, for one of its screens (`part`): the same machine, project, task and execution. */
+function createTaskFirstView(ws: Ws, m: Accessor<SessionModel>, part: string, reads: () => FirstRead[]) {
+  return createFirstView({
+    scope: ws.store,
+    identity: () => `${part}|${m().view.machine.id}|${m().view.project.id}|${m().view.id}|${m().view.task.executionId ?? ""}`,
+    keep: () => `${part}|${m().view.machine.id}|${m().view.id}`,
+    reads, offline: () => unreachable(ws),
+    retry: () => ws.store.retryFirstView(m().view.project.id, m().view.id),
+  });
+}
+
 /**
  * A task's conversation: its brief, timeline, questions, result and composer. The task that plans a sprint reads it on its
  * sprint's page (PlanningPlace): `brief` is then the sprint's own description, `tail` the proposed plan's line, and its
@@ -604,7 +647,9 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
       if (disposed || props.hidden || !scroller?.clientHeight || m().session.historyEarlier?.state !== "available") return;
       const marker = scroller.querySelector(".ws-earlier");
       // The brief can be tall: measure the boundary, not the distance from scrollTop to zero.
-      if (marker && marker.getBoundingClientRect().bottom > scroller.getBoundingClientRect().top - scroller.clientHeight) {
+      const box = scroller.getBoundingClientRect(), at = marker?.getBoundingClientRect();
+      // Bounded on both sides: a boundary entirely below the viewport (a tall brief fills it) is not read until it comes near.
+      if (at && at.bottom > box.top - scroller.clientHeight && at.top < box.bottom) {
         ws.store.loadEarlierHistory(m().view.id, ws.panels.showAllTools);
       }
     });
@@ -628,6 +673,25 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
   };
   let pressedSeen = pressed();
   createEffect(() => { const n = pressed(); if (n > pressedSeen) follow.jump(); pressedSeen = n; });
+  // Nothing of the conversation shows before all of its first reads are in: then all of it at once, at its end, following.
+  const first = createTaskFirstView(ws, m, "conversation", () => conversationReads(ws, m()));
+  createEffect((was: boolean) => { const loading = first.loading(); if (was && !loading) queueMicrotask(() => { if (!disposed) follow.jump(); }); return loading; }, first.loading());
+  // Answer or See what is needed pressed before this conversation showed the card it brings into view: applied once the card
+  // is on the page, after the pin to the end above, and dropped once every first read is in and the card is still not there.
+  const asked = () => revealIntent(revealKey(m().view.machine.id, m().view.id, m().view.task.executionId));
+  createEffect(() => {
+    const intent = asked();
+    if (!intent || first.loading() || props.hidden) return;
+    const settled = first.pending().length === 0;
+    // Tried again as the conversation changes: the card may come with the next update.
+    void m().open; void m().session.timeline;
+    queueMicrotask(() => {
+      if (disposed || !scroller || asked() !== intent) return;
+      const card = firstCard(scroller.closest(".task-panel") ?? scroller, intent.selectors);
+      if (card) { settleReveal(intent); scrollIntoFeed(card); }
+      else if (settled) settleReveal(intent);
+    });
+  });
   const decision = (id: string) => m().session.decisions.find(d => d.id === id)!;
   const message = (id: string) => m().messages.find(x => x.id === id)!;
   const stranded = () => m().view.column === "needs" && !m().view.unknown && m().open.length === 0;
@@ -637,10 +701,10 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
   // While a decision waits or work runs, no completed result and no Accept stand beside it: the last one stays as history.
   const held = () => m().view.task.result ? resultHeld(m(), asks().length > 0) : null;
   const changesAt = (): Route => ({ name: "task", machine: m().view.machine.id, task: m().view.id, tab: "changes" });
-  const team = () => <TeamBar m={m()} now={props.now} pick={props.pick} onPick={props.onPick} />;
+  const team = () => <Show when={!first.loading()}><TeamBar m={m()} now={props.now} pick={props.pick} onPick={props.onPick} /></Show>;
   return <section class="task-panel" aria-label="Conversation" hidden={props.hidden}>
-    <div class="timeline" classList={{ "ws-history-end": partialTail() !== undefined }} ref={scroller} onScroll={() => { follow.onScroll(); checkEarlier(); }}>
-      <div class="tl-in">
+    <div class="timeline" classList={{ "ws-history-end": partialTail() !== undefined }} ref={scroller} aria-busy={first.loading() ? "true" : undefined} onScroll={() => { follow.onScroll(); checkEarlier(); }}>
+      <div class="tl-in"><Show when={!first.loading()} fallback={<Skeleton kind="conversation" label="Loading the conversation…" />}>
         <Show when={props.brief} fallback={<Brief m={m()} />}>{props.brief}</Show>
         <HistoryState m={m()} />
         <Earlier m={m()} />
@@ -701,11 +765,12 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
         <Show when={m().mode === "live" && m().view.task.observedPhase !== "recovery"}>
           <Show when={workingNow(m())} fallback={<Show when={!stranded()}><WaitingIndicator /></Show>}><WorkingIndicator text={coordinatorLine(m())} /></Show>
         </Show>
-      </div>
+      </Show></div>
     </div>
     {/* Everything pinned below the feed is in the dock. Latest hangs over the feed, not over a decision card. */}
     <div class="dock">
       <Pill follow={follow} />
+      <FirstViewNotice view={first} />
       <Show when={props.route && !planning()}><OwnerHoldCard m={m()} route={props.route!} /><UnconfirmedCard m={m()} route={props.route!} /><DeadEndCard m={m()} /></Show>
       <Show when={ws.can(capabilityOf("send_message"))} fallback={team()}><Composer model={props.model} team={team()} folded={m().open.some(d => d.kind === "question")} /></Show>
     </div>
@@ -794,13 +859,21 @@ function WriteDenials(props: { m: SessionModel }) {
   </Show>;
 }
 
+function WorktreeRecovery() {
+  const ws = useWs();
+  return <div class="note-panel task-panel" role="status"><span class="w500">Worktree unavailable</span><span>{ws.t("worktreeUnavailable")}</span>
+    <button class="btn btn-line btn-sm" onClick={() => void ws.store.reload()}>Refresh</button></div>;
+}
+
 /** The same Changes tab carries the diff review, Ready to merge and the conflict, so a task's state decides what it opens on. */
 function ChangesTab(props: { m: SessionModel; route: TaskRoute; viewState: ChangesViewState }) {
   const t = () => props.m.view.task;
   const merging = () => !props.m.view.automaticFact && (inConflict(t()) || t().status === "ready_to_merge" || t().integration?.method === "squash" || t().integration?.method === "commit");
+  const unavailable = () => { const c = t().checkout; return c.kind === "worktree" && c.unavailable; };
   return <Switch fallback={<ChangesPanel m={props.m} route={props.route} viewState={props.viewState} />}>
-    <Match when={!props.m.view.automaticFact && props.route.sub === "conflict"}><ConflictPanel m={props.m} route={props.route} /></Match>
-    <Match when={props.route.sub === undefined && merging()}><ReadyPanel m={props.m} route={props.route} /></Match>
+    <Match when={unavailable()}><WorktreeRecovery /><ChangesPanel m={props.m} route={props.route} viewState={props.viewState} /></Match>
+    <Match when={props.route.sub === "conflict" && (!!t().merge?.conflictId || !props.m.view.automaticFact)}><ConflictPanel m={props.m} route={props.route} /></Match>
+    <Match when={props.route.sub === undefined && (inConflict(t()) || !!t().merge?.freshChecks || merging())}><ReadyPanel m={props.m} route={props.route} /></Match>
   </Switch>;
 }
 
@@ -809,7 +882,8 @@ function CodeTab(props: { m: SessionModel; route: TaskRoute }) {
   const repo = () => repoOf(ws.store.state(), props.m.view.project.id);
   const checkout = () => taskCheckout(ws.store.state(), props.m.view.task);
   const at = (file: string, line?: number): Route => ({ name: "task", machine: props.route.machine, task: props.route.task, tab: "code", file, line });
-  return <Show when={repo() && checkout()} fallback={<div class="note-panel task-panel"><span class="w500">No files for this task</span><span>{ws.t(props.m.view.project.hasGit === false ? "noCodeWithoutGit" : "noCode")}</span></div>}>
+  const lost = () => { const c = props.m.view.task.checkout; return c.kind === "worktree" && c.unavailable; };
+  return <Show when={repo() && checkout()} fallback={lost() ? <WorktreeRecovery /> : <div class="note-panel task-panel"><span class="w500">No files for this task</span><span>{ws.t(props.m.view.project.hasGit === false ? "noCodeWithoutGit" : "noCode")}</span></div>}>
     <section class="task-panel" aria-label="Code"><CodeView repo={repo()!} checkout={checkout()!} file={props.route.file} line={props.route.line} at={at} /></section>
   </Show>;
 }
@@ -881,7 +955,12 @@ export function TaskPage(props: { id: string }) {
   const final: StripItem = { id: "final", tone: "info", icon: <I n="x-circle" s={14} class="faint" />, get text() { return run()?.why ?? ""; } };
   const unverified: StripItem = { id: "unverified", tone: "warn", icon: <I n="alert" s={14} class="st-warn" />, text: "Not verified. This task was closed as is, and the warning stays with its result." };
   const titleWhy: StripItem = { id: "title-why", tone: "info", icon: <I n="alert" s={14} class="st-warn" />, domId: taskWhyId(props.id), get text() { return titleBlock(m()) ?? ""; } };
+  const filesWait: StripItem = { id: "files-wait", tone: "warn", readable: true, icon: <I n="hourglass" s={14} class="st-warn" />,
+    get text() { return <Show when={m().view.filesWait?.link} fallback={m().view.filesWait?.text}>{link => <>
+      {link().before}<A class="lnk" to={{ name: "task", machine: m().view.machine.id, task: link().taskId }}>{link().title}</A>{link().after}
+    </>}</Show>; } };
   const status = createMemo<StripItem[]>(() => [
+    ...(m().view.filesWait ? [filesWait] : []),
     ...(m().mode === "stopping" ? [stoppingItem] : []),
     ...(m().mode === "archived" ? [archived] : []),
     ...(["offline", "unconfirmed"].includes(m().mode) ? [offline] : []),
@@ -896,7 +975,7 @@ export function TaskPage(props: { id: string }) {
     }] : []),
     ...(m().mode !== "stopping" && titleBlock(m()) ? [titleWhy] : []),
   ]);
-  return <Page class="l-work l-task" scroll="none" head={<TaskBar m={m()} tab={tab()} route={route()} />} status={<StatusLane items={status()} />}>
+  return <ResultScope.Provider value={() => ({ projectId: m().view.project.id, taskId: props.id })}><Page class="l-work l-task" scroll="none" head={<TaskBar m={m()} tab={tab()} route={route()} />} status={<StatusLane items={status()} />}>
     <div class="main-body">
       <Show when={live()} fallback={
         <div class="task-body">
@@ -911,15 +990,24 @@ export function TaskPage(props: { id: string }) {
         <TaskWorkers model={model} now={now()} pick={pick()} onPick={onPick} />
       </Show>
     </div>
-  </Page>;
+  </Page></ResultScope.Provider>;
 }
 
 /** A task's Work details: the list of who works on it, and the picked one's activity beside it. */
 export function TaskWorkers(props: { model: Accessor<SessionModel>; now: number; pick: string; onPick: (key: string) => void }) {
+  const ws = useWs();
   const m = () => props.model();
+  // Its own first-reveal gate: the worker list and a picked worker's activity wait for the task's first facts read, so a
+  // worker never reads as not part of the task, and the list never as empty, before they are in.
+  const first = createTaskFirstView(ws, m, "workers", () => [factsRead(ws, m())]);
+  const waitsForWorker = () => first.loading() && props.pick !== CORTEX && props.pick !== VERIFICATION;
   return <div class="task-body live">
-    <section class="task-panel" aria-label="Workers"><WorkersList m={m()} now={props.now} pick={props.pick} /></section>
-    <section class="livepane" aria-label={`${props.pick === CORTEX ? "Coordinator" : props.pick === VERIFICATION ? "Runtime verification" : m().workers.find(w => w.id === props.pick)?.role ?? "Worker"} activity`}><label class="ws-worker-picker">Worker <select class="inp" value={props.pick} onChange={e => props.onPick(e.currentTarget.value)}><option value={CORTEX}>Coordinator</option><Keyed each={m().workers} by={w => w.id}>{w => <option value={w().id}>{w().role}</option>}</Keyed><option value={VERIFICATION}>Runtime verification</option></select></label><WorkerPane model={props.model} pick={props.pick} now={props.now} /></section>
+    <section class="task-panel" aria-label="Workers" aria-busy={first.loading() ? "true" : undefined}>
+      <Show when={!first.loading()} fallback={<Skeleton kind="list" label="Loading the workers…" class="ws-skel-pane" />}><WorkersList m={m()} now={props.now} pick={props.pick} /></Show>
+      <FirstViewNotice view={first} class="ws-skel-pane" />
+    </section>
+    <section class="livepane" aria-label={`${props.pick === CORTEX ? "Coordinator" : props.pick === VERIFICATION ? "Runtime verification" : m().workers.find(w => w.id === props.pick)?.role ?? "Worker"} activity`} aria-busy={waitsForWorker() ? "true" : undefined}><label class="ws-worker-picker">Worker <select class="inp" value={props.pick} onChange={e => props.onPick(e.currentTarget.value)}><option value={CORTEX}>Coordinator</option><Keyed each={m().workers} by={w => w.id}>{w => <option value={w().id}>{w().role}</option>}</Keyed><option value={VERIFICATION}>Runtime verification</option></select></label>
+      <Show when={!waitsForWorker()} fallback={<Skeleton kind="activity" label="Loading activity…" />}><WorkerPane model={props.model} pick={props.pick} now={props.now} /></Show></section>
   </div>;
 }
 /** The worker a Work details view opens on when none is named. */

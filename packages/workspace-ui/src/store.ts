@@ -8,6 +8,7 @@ import { COPY, REQUESTING } from "./copy";
 import { buildIndex, stableIndex, type WorkspaceIndex } from "./selectors";
 import { share } from "./stable";
 import { createSends } from "./sends";
+import type { FirstViewPort, ScopedFacts } from "./port/real";
 
 /** Not a machine capability: whether this shell may save an attachment where the owner picks. Only a shell withholds it. */
 export const SAVE_ATTACHMENT = "workspace.save_attachment";
@@ -157,8 +158,30 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
     if (registered && !registered.has(update.projectId)) return;
     const order = update.readOrder;
     if (order !== undefined) { if (order < (factsOrder.get(update.projectId) ?? -Infinity)) return; factsOrder.set(update.projectId, order); }
-    const held = withSources(update); facts.set(update.projectId, held); setProjected(current => applyFacts(current, held));
+    const scoped = update as ScopedFacts, scope = scoped.workerScope;
+    let next: ProjectFacts = update;
+    if (scope) {
+      // A read scoped to the tasks on view carries no worker rows for the others. A task whose workers an earlier read
+      // confirmed for its current execution keeps them (the last confirmed view, until a read for it replaces them):
+      // replaced by another task's rows, a task opened again read as ready with its workers gone. Another execution keeps
+      // nothing and is not ready until a read for it arrives.
+      const executionOf = (taskId: string) => projected().tasks.find(t => t.id === taskId)?.executionId ?? null;
+      const inScope = new Set(scope), kept = new Map<string, string>();
+      for (const [taskId, execution] of factsScoped().get(update.projectId) ?? []) if (!inScope.has(taskId) && execution !== null && execution === executionOf(taskId)) kept.set(taskId, execution);
+      const retained = facts.get(update.projectId)?.workers.filter(w => kept.has(w.taskId) && !update.workers.some(x => x.id === w.id)) ?? [];
+      if (retained.length) {
+        const said = new Set((update.messages ?? []).map(x => x.id));
+        next = { ...update, workers: [...update.workers, ...retained], messages: [...(update.messages ?? []), ...retained.flatMap(w => w.messages ?? []).filter(x => !said.has(x.id))] };
+      }
+      // The tasks whose workers, results and messages are now known, with the execution they were read for.
+      const confirmed = new Map<string, string | null>([...kept, ...scope.map(taskId => [taskId, scoped.workerExecutions?.[taskId] ?? executionOf(taskId)] as const)]);
+      setFactsScoped(all => new Map(all).set(update.projectId, confirmed));
+    }
+    const held = withSources(next); facts.set(update.projectId, held); setProjected(current => applyFacts(current, held));
   };
+  /** Per project, the tasks a facts read confirmed the workers of, and the execution each was read for. */
+  const [factsScoped, setFactsScoped] = createSignal<ReadonlyMap<string, ReadonlyMap<string, string | null>>>(new Map());
+  const firstViewPort = port as Partial<FirstViewPort>;
   const installMachine = (update: MachineFacts) => setProjected(current => applyMachineFacts(current, update));
   let machineTimer: ReturnType<typeof setTimeout> | undefined, machineRetry: ReturnType<typeof setTimeout> | undefined;
   let modelsTimer: ReturnType<typeof setTimeout> | undefined, modelsPoll: ReturnType<typeof setTimeout> | undefined, modelsGaveUp = false;
@@ -523,6 +546,18 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
     readCommandOutput: port.readCommandOutput?.bind(port),
     /** Reads a task's conversation again after a read that did not complete. */
     retryHistory: (taskId: string) => port.retryHistory?.(taskId),
+    /**
+     * Whether a facts read for this task's screen has arrived: its workers, result and messages are then what the machine
+     * says, and an empty list means none. Null when this port does not say which tasks a facts read was for, so nothing waits.
+     */
+    factsShown: (projectId: string, taskId: string): boolean | null => {
+      if (!firstViewPort.scopesFacts?.()) return null;
+      const read = factsScoped().get(projectId);
+      // Read for this execution: readiness never carries over into a new one.
+      return !!read?.has(taskId) && read.get(taskId) === (projected().tasks.find(t => t.id === taskId)?.executionId ?? null);
+    },
+    /** Reads again what a task's screen first waits for (its conversation, questions and facts), after that did not finish. */
+    retryFirstView: (projectId: string, taskId: string) => { firstViewPort.retryFirstView?.(taskId); void self.refreshProjectFacts(projectId, false); },
     /** Reads the next older part of a conversation of which only the latest part is held. */
     loadEarlierHistory: (taskId: string, showAllTools?: () => boolean) => port.loadEarlierHistory?.(taskId, showAllTools),
     readReport: (taskId: string, reportId: string, cursor?: string) => {

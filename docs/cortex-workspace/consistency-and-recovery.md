@@ -8,6 +8,17 @@ After service crash, reconnect and reconcile actual child and external state; do
 
 The service supervises each activated project's child beside its socket, so startup and a slow handshake never delay `service.status`. A child that exits or breaks the protocol is replaced with backoff; a registered folder that is away (a disk not mounted yet, a deleted folder) leaves that project waiting with its reason and comes back when the folder does, and it never stops the service. A child that answers late is not abandoned: that one request stays unknown, the late reply is dropped, and the journal poller resnapshots when the child answers. Nothing here replays a command or a prompt.
 
+## Worktree Start and cleanup
+
+Start records an intent before creating the checkout. Exact retries use the
+recorded outcome; a changed payload conflicts. Once Git creation is verified,
+Core commits the checkout binding with execution admission and the public event.
+If Git may have run but the service cannot prove what it created, recovery keeps
+the outcome uncertain; it does not recreate, adopt by name or remove a folder on
+a guess. If a bound checkout later vanishes or no longer matches, execution and
+checkout operations refuse rather than using main. Close, merge and purge record
+cleanup separately: an unsafe or unconfirmed removal does not undo their outcome.
+
 ## Startup and project read isolation
 
 The native bridge reloads the fixed channel unit, requests a nonblocking start
@@ -147,17 +158,28 @@ continues from them when it is opened again.
 A conversation read afresh (opened for the first time in this window, another
 execution, or after `history_reset`) starts at its end. The window reads it
 backwards with `history.earlier` (see the
-[protocol](protocol.md#native-desktop-read-api)): at most four pages, stopping
-once 150 rows are held or the first row is reached. The newest page's
-`tailCursor` continues it forward exactly as after a complete read. A 22,000-row
-conversation therefore shows its latest part after two requests instead of 220.
-While earlier rows remain, the top of the Conversation reads "Earlier conversation
-is not shown." with **Show earlier**. Scrolling up to within one screen of the top
-does the same. An earlier read is at most three pages or 150 rows, shows
-"Loading earlier…", and puts its rows before the ones held, which keep their
-identities and their place on screen. One such read runs per conversation. A
-failed read says so with **Retry** and is not repeated by scrolling. A refused
-position (`history_reset`) has the conversation read afresh. Nothing derived from
+[protocol](protocol.md#native-desktop-read-api)) until it holds about one screen
+of the conversation: the entries the feed would show for the rows read, against
+the number a screen of the window's height holds (an estimate of 40 px per entry,
+between 12 and 60 entries). It stops there, once 150 rows are held, after four
+pages, or at the first row. The newest page's `tailCursor` continues it forward
+exactly as after a complete read. A 22,000-row conversation therefore shows its
+latest part after one or two requests instead of 220; the rest is read as the
+owner scrolls up to it.
+While earlier rows remain, the boundary below the brief says "Earlier conversation
+is not shown." with **Show earlier** as a fallback. The visible feed automatically
+reads earlier parts on opening, resizing or scrolling if the boundary has not
+passed at least one viewport height above the visible area. It does this even
+while following the latest messages, one earlier read at a time, and checks the
+boundary again after each prepend. Already held rows keep their identities and
+reading position; a short partial feed aligns its tail at the bottom so a
+prepend can use the spare space above it.
+"Loading earlier…" remains until bounded pages yield visible conversation
+content or reach the beginning. Empty pages, hidden tool folds and incomplete
+leading messages do not end the load while an older cursor remains. A failed
+read retains the current rows and offers **Retry**, without automatically
+repeating the request. A refused position (`history_reset` or `invalid_cursor`)
+refreshes the latest slice; the same unusable position still waits for **Retry**. Nothing derived from
 a conversation read only in part speaks for the part not read. Its first message
 or turn of steps may have begun before the rows held, so it is left out until
 they are read; a cut message or a "Worked …" line counting only part of a turn is
@@ -174,8 +196,25 @@ tools, the wire-1 `history.page` query and a window without `native.query`)
 read forward as before.
 The display is the same in every execution state (running, paused, recovering,
 waiting or ended) and does not need a live engine session: the service serves it
-from the retained store rows. Until the first read finishes, the conversation
-says it is loading. A read that fails, or a page with no answer within a minute,
+from the retained store rows. A conversation opened cold in a window (its first
+read for that machine, project, task and execution) shows its skeleton until
+every read its first screen needs has settled: that latest window of the
+transcript (or that it is empty), the questions of its execution, and the first
+facts read naming the task (its workers, messages and result). Then all of it
+appears in one change, at its end, following. A question that arrives before
+the transcript, or the reverse, is never shown on its own, and an empty list
+before its read is not taken for "none". The questions of the task on view are
+read on their own as soon as its identity is confirmed; the board's read of
+every task's questions waits for that read (at most the same budget) and takes
+the task on view first. After 5 s (`FIRST_VIEW_MS`), or at once when the machine
+is offline, the skeleton stops: what was confirmed is shown with one notice
+naming what is not ("Couldn’t finish loading the conversation.") and
+**Retry**, and a later arrival clears it. New events do not restart the budget.
+A view already shown in this window (a parked tab, a reconnect, a reread of the
+same execution, a task the owner just started from its page) keeps what it
+shows, its draft, focus and position, with no skeleton. Git settlement, older
+history, report bodies and other tasks are never waited for. Until the first
+transcript read finishes, the conversation says it is loading. A read that fails, or a page with no answer within a minute,
 shows its reason on that task with **Retry now**. Earlier confirmed rows stay
 shown, and the read is retried automatically after 3 s, doubling up to 30 s. A
 conversation failure is not a project read issue. The Working line comes from
@@ -224,8 +263,17 @@ view and focused is also refreshed every 30 s, because files change outside the
 app without any event, and its **Refresh Git status** control reads it at once.
 Worker rows are read only for the task on view. A project no screen shows is
 never read in the background: its board, sidebar row, badges, Inbox and question
-notifications follow its runtime events. Nothing is read while the window is
-hidden; coming back reads only what is on view and older than 10 s.
+notifications follow its runtime events. Scoped streaming facts and periodic Git
+refreshes pause while the window is hidden. Valid native deltas can still apply,
+and generic refresh notifications can still trigger a read, with a 15 s
+coalescing gap while hidden. Returning to the window refreshes visible data
+according to the 10 s freshness cutoff.
+
+A display-only board restored from storage is labeled **Saved view; checking
+live state** until the matching live project presentation replaces it. If live
+state cannot be reached, the notice identifies the view as saved and the
+existing failure notice still applies. A saved view does not confirm an action
+or supply a command version.
 
 Questions and results read by a details read are kept even when a newer
 snapshot supersedes that read: they are at least as new as the snapshot they

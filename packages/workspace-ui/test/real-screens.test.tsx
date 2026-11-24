@@ -640,10 +640,14 @@ describe("task session on real data", () => {
     };
     await open(s, `${TASK}/workers/w1/live`);
     await settled();
+    // Older activity is read as the reader comes to it (or asks), never just because the worker opened.
+    expect(document.body.textContent).not.toContain("Older guidance");
+    button("Show earlier")!.click();
+    await settled();
     expect(document.body.textContent).toContain("Older guidance");
     expect(document.body.textContent).toContain("old-note.txt");
     expect(document.body.textContent).toContain("Delivered does not mean read");
-    expect(button("Load older activity")).toBeUndefined();
+    expect(button("Show earlier")).toBeUndefined();
   });
 
   it("shows the current project branch, not the Git default", async () => {

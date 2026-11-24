@@ -107,7 +107,8 @@ it("leaves a short worker goal as it is", async () => {
 it("stops following when the reader opens a block on a worker's page, so the end does not pull it out of view", async () => {
   const read = { sequence: 1, kind: "tool" as const, text: "Read", at: null, args: JSON.stringify({ title: "Read", kind: "read", path: "src/format.js", output: "module.exports = {}" }) };
   await mount(world({}, [worker({ activity: [read] })], []), `/m/${LOCAL_MACHINE_ID}/t/t/workers/w`);
-  const following = () => document.querySelector<HTMLInputElement>('.livepane input[aria-label="Follow new activity"]')!.checked;
+  // Latest stands in the dock whenever the feed does not follow.
+  const following = () => !document.querySelector(".livepane .dock-w .new-pill");
   expect(following()).toBe(true);
   document.querySelector<HTMLButtonElement>(".livepane .stream button.fold")!.click(); await settle();
   expect(following()).toBe(false);

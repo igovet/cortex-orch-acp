@@ -1,6 +1,7 @@
 import type { WorkspaceState } from "@cortex/workspace-domain";
 import { hrefOf, type Route, type Router } from "./router";
 import { planningPlace, sprintRoute } from "./selectors";
+import { scrollIntoFeed } from "./follow";
 
 /**
  * Where a desktop notification leads. It names things, never an address: the place is worked out from what the window knows
@@ -125,7 +126,8 @@ export function openPlace(tabs: TabsLike, go: (route: Route) => void, route: Rou
 export function reveal(selector: string, root: () => ParentNode, tries = 40, every = 50) {
   const look = (left: number) => {
     const card = [...root().querySelectorAll<HTMLElement>(selector)].at(-1);
-    if (card) { card.scrollIntoView?.({ block: "center" }); return; }
+    // Through the feed's controller: a following feed would otherwise take its end back and undo the move.
+    if (card) { scrollIntoFeed(card, "center"); return; }
     if (left > 0) setTimeout(() => look(left - 1), every);
   };
   look(tries);

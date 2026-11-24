@@ -20,17 +20,25 @@ const mount = (view: () => any, ws?: Ws) => {
   return root;
 };
 
-// Live run: the floating "2 new" and "Latest" pills lay over a question's options and a result's footer.
-it("stands the follow pill in its own opaque band, so it never lies over the timeline's controls", () => {
+// Live run: the floating "2 new" and "Latest" pills lay over a question's options and a result's footer, so they moved into an
+// opaque band. The owner then asked for the pill to float in the air with no full-width plate: the band keeps its place and box
+// over the feed's bottom edge, out of the dock's flow, but has no surface and takes no pointer; only the pill is opaque.
+it("floats the follow pill in a band with no background that takes no pointer, while the folded composer row keeps its surface", () => {
   const jump = vi.fn();
   const root = mount(() => <Pill follow={{ following: () => false, missed: () => 2, jump } as any} />);
   const pill = root.querySelector<HTMLButtonElement>(".pill-band > .new-pill")!;
   expect(pill.textContent).toBe("2 new");
   pill.click(); expect(jump).toHaveBeenCalledOnce();
   const css = readFileSync(join(src, "workspace.css"), "utf8");
-  // The band and the folded composer row take the timeline's own surface: content scrolls behind them, as behind the composer.
-  expect(css).toMatch(/\.pill-band, \.mc-fold \{[^}]*background: var\(--bg-canvas\)/);
-  expect(css).toMatch(/\.pill-band \{[^}]*display: flex/);
+  const mockup = readFileSync(join(src, "mockup-styles.css"), "utf8");
+  // No rule gives the band a surface of its own; the folded composer row in the dock keeps the timeline's surface.
+  for (const sheet of [css, mockup]) for (const rule of sheet.match(/[^{}]*\.pill-band[^{}]*\{[^}]*\}/g) ?? []) expect(rule).not.toMatch(/background/);
+  expect(css).toMatch(/\n\.mc-fold \{[^}]*background: var\(--bg-canvas\)/);
+  expect(css).toMatch(/\n\.pill-band \{[^}]*display: flex[^}]*pointer-events: none/);
+  expect(css).toMatch(/\.pill-band > \.new-pill \{[^}]*pointer-events: auto/);
+  // The pill itself stays opaque in both themes.
+  expect(mockup).toMatch(/\n\.new-pill \{[^}]*background: var\(--primary\)/);
+  expect(css).toMatch(/:root:not\(\[data-theme="light"\]\) \.new-pill \{ background: var\(--bg-input\)/);
 });
 
 it("shows all three modes and dispatches the exact selected mode", () => {
