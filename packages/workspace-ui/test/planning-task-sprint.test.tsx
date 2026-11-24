@@ -1,6 +1,6 @@
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { emptySession, emptyWorkspace, LOCAL_MACHINE_ID, type Decision, type Sprint, type Task, type Worker, type WorkspaceState } from "@cortex/workspace-domain";
+import { emptySession, emptyWorkspace, LOCAL_MACHINE_ID, overlayTask, type Decision, type Sprint, type Task, type Worker, type WorkspaceState } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { targetPlace } from "../src/notification-target";
 import { buildIndex, inboxItems } from "../src/selectors";
@@ -132,9 +132,82 @@ describe("a sprint planned by a runtime task", () => {
     expect(items.find(i => i.sprintId === "sp")?.ask).toBe("Who is the landing page for?");
   });
 
+  it.each(["draft", "failed"] as const)("keeps a retired %s planner out of Board lists, counts and Inbox", async status => {
+    const state = world({ task: { status, process: "stopped", executionId: status === "draft" ? null : "e-plan" } });
+    const before = buildIndex(state, Date.now());
+    state.tasks[0] = overlayTask(state.tasks[0], { status: "done", closedAs: "cancel", retiredPlanner: true }, "main");
+    state.sprints[0] = sprint({ planningTaskId: undefined, planning: status === "draft" ? "cancelled" : "planning" });
+    const after = buildIndex(state, Date.now());
+    expect(after.views.map(v => v.id)).toEqual(["t-other"]);
+    expect(after.summaries.get("p")?.counts).toEqual(before.summaries.get("p")?.counts);
+    expect(after.summaries.get("p")?.archived).toBe(0);
+    expect(inboxItems(after).some(item => item.view?.id === "plan-1")).toBe(false);
+    expect(after.byId.get("plan-1")?.task.closedAs).toBe("cancel");
+    await mount(`/m/${M}/p/p/board`, state);
+    expect(document.body.textContent).not.toContain("Sprint planning task");
+    expect(all(".card").map(c => c.textContent).join(" ")).toContain("Standalone fix");
+  });
+
   it("says the sprint needs the owner as soon as its planning task asks, before the sprint's own state follows", async () => {
     const items = inboxItems(buildIndex(world({ sprint: { planning: "planning" } }), Date.now()));
     expect(items.filter(i => i.sprintId === "sp").map(i => i.kind)).toEqual(["Planning"]);
+  });
+
+  it.each([false, true])("keeps the draft, answers and plan after failure (legacy: %s)", async legacy => {
+    const path = `/m/${M}/p/p/s/sp/planning`;
+    const state = world({ legacy, asking: false, sprint: {
+      planning: "planning",
+      conversation: [{ kind: "question", text: "Who for?" }, { kind: "answer", text: "Home buyers" }],
+      plan: { version: 4, items: [{ key: "first", description: "Plan the new landing page", dependsOn: [] }] },
+    } });
+    if (!legacy) {
+      state.sessions[0].decisions = [{ ...question, answer: { text: "Home buyers", at: 22 } }];
+      state.sessions[0].timeline.push({ id: "answered", kind: "decision", decisionId: question.id });
+    }
+    const p = await mount(path, state);
+    const field = $(".dock textarea") as HTMLTextAreaElement;
+    field.value = "Include a pricing page";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    const failed = { ...state.sprints[0], planning: "cancelled" as const, planningFailure: { text: "Planning stopped.", step: "run" as const, code: "planning_task_stopped", at: 123 } };
+    p.emit(projection("2", { ...state, sprints: [failed] })); await settle();
+    expect($(".l-lane [role=alert]")?.textContent).toContain("Planning stopped.");
+    expect($(legacy ? ".sp-conv" : "section.task-panel")?.textContent).toContain("Home buyers");
+    expect($(legacy ? ".sp-conv" : "section.task-panel")?.textContent).toContain("Plan v4 proposed");
+    expect(field.value).toBe("Include a pricing page");
+    all("button").find(b => b.textContent?.trim() === "Change request")!.click(); await settle();
+    expect(document.activeElement).toBe(field);
+    expect(field.readOnly || field.disabled).toBe(false);
+    expect(field.value).toBe("Include a pricing page");
+    expect(p.commands).toEqual([]);
+    $('.dock [aria-label="Send and resume planning"]')!.click(); await settle();
+    expect(p.commands.at(-1)?.payload).toMatchObject({ type: "plan_message", sprintId: "sp", text: "Include a pricing page" });
+  });
+
+  it("lists one connected, unarchived sprint diagnostic in Inbox and removes it on recovery", async () => {
+    const failure = { text: "Planning stopped.", step: "run", code: "planning_task_stopped", at: 123 } as const;
+    const warning = { text: "The service will keep retrying.", step: "internal", code: "planning_pass_failed", at: 456, count: 3 } as const;
+    const source = world({ asking: false, sprint: { planning: "cancelled", planningFailure: failure } });
+    source.sprints.push(sprint({ id: "warn", planning: "planning", planningWarning: warning, planningTaskId: undefined }));
+    source.sprints.push(sprint({ id: "archived", archivedAt: 1, planning: "cancelled", planningFailure: "Old failure" }));
+    const rows = () => inboxItems(buildIndex(source, Date.now())).filter(d => d.sprintId);
+    expect(rows()).toMatchObject([
+      { sprintId: "sp", kind: "Planning failed", tone: "st-bad", ask: failure.text, at: failure.at },
+      { sprintId: "warn", kind: "Planning problem", tone: "st-warn", ask: warning.text, at: warning.at },
+    ]);
+    source.machines[0].connection = "disconnected";
+    expect(rows()).toEqual([]);
+    source.machines[0].connection = "connected";
+    const p = await mount(`/m/${M}/p/p/s/warn/planning`, source);
+    expect($(".l-lane [role=status]")?.textContent).toContain(warning.text);
+    const recovered = { ...source, sprints: source.sprints.map(s => ({ ...s, planning: "planning" as const, planningWarning: undefined, planningFailure: undefined })) };
+    p.emit(projection("2", recovered)); await settle();
+    expect($(".l-lane [role=status]")).toBeNull();
+    expect(inboxItems(buildIndex(recovered, Date.now())).filter(d => d.sprintId)).toEqual([]);
+  });
+
+  it("keeps a question ahead of a warning in the sprint's single Inbox row", () => {
+    const state = world({ sprint: { planningWarning: { text: "Retrying", step: "internal", code: "planning_pass_failed", at: 2, count: 3 } } });
+    expect(inboxItems(buildIndex(state, Date.now())).filter(d => d.sprintId === "sp")).toMatchObject([{ kind: "Planning", ask: question.text }]);
   });
 
   it("opens an address of the planning task on its sprint", async () => {

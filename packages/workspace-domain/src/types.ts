@@ -135,6 +135,8 @@ export type Task = {
   id: string; projectId: string; sprintId: string | null; description: string;
   /** Service-created sprint planner, even before planningTaskId is linked. Not sprint membership. */
   planningSprintId?: string;
+  /** A detached planner stays in history, not in the project's ordinary task lists. */
+  retiredPlanner?: boolean;
   sourceVersion?: string;
   reworkAvailable?: boolean;
   reworkUnavailableReason?: string | null;
@@ -522,6 +524,7 @@ export type WorkspaceCommand =
   | { type: "create_sprint"; projectId: string; description: string; attachments?: AttachmentInput[]; runMode: Sprint["runMode"]; checkout?: Sprint["checkout"]; settings?: TaskSettings; targetBranch?: string | null }
   | { type: "answer_planning"; sprintId: string; answer: string; attachments?: AttachmentInput[]; now?: number; decisionId?: string; optionId?: string | null; answers?: DecisionAnswer[] }
   | { type: "plan_message"; sprintId: string; text: string; attachments?: AttachmentInput[]; now?: number }
+  | { type: "replace_planning_request"; sprintId: string; description: string }
   | { type: "edit_plan"; sprintId: string; items: PlanItem[]; now?: number }
   | { type: "materialize_plan"; sprintId: string; version: number; now?: number }
   | { type: "cancel_planning" | "resume_planning"; sprintId: string }

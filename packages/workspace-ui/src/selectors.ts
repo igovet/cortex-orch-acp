@@ -215,6 +215,7 @@ export type TaskView = {
   id: string; task: Task; project: Project; machine: Machine; sprint: Sprint | null;
   column: ColumnId | "archive"; unknown: boolean; fact: Fact; at: number | null;
   target: string; workers: Worker[]; running: number;
+  filesWait?: { text: string; link?: { taskId: string; title: string; before: string; after: string } };
   automaticFact?: Fact; ownerDecision?: TaskDecision; ownerIntegration?: NonNullable<Sprint["automaticQueue"]>;
 };
 export type ProjectSummary = {
@@ -232,7 +233,10 @@ export type WorkspaceIndex = {
  * The tasks that plan a sprint. Each is an ordinary runtime task, but it belongs to its sprint: it has no row, card, count or
  * page of its own, and its conversation and workers read on the sprint's page. Every list is built without these, here.
  */
-export const planningTaskIds = (state: Pick<WorkspaceState, "sprints">) => new Set(state.sprints.flatMap(s => s.planningTaskId ? [s.planningTaskId] : []));
+export const planningTaskIds = (state: Pick<WorkspaceState, "sprints" | "tasks">) => new Set([
+  ...state.sprints.flatMap(s => s.planningTaskId ? [s.planningTaskId] : []),
+  ...state.tasks.filter(t => t.retiredPlanner === true).map(t => t.id),
+]);
 /** The sprint a planning task plans, or null for any other task. */
 export const planningSprintOf = (state: Pick<WorkspaceState, "sprints">, taskId: string) => state.sprints.find(s => s.planningTaskId === taskId) ?? null;
 /** The task planning this sprint, when the runtime has it as a task. A sprint saved by an earlier version plans without one
@@ -256,10 +260,14 @@ const planningStep: Record<PlanningFailure["step"], string> = {
   restart: "During a service restart",
   internal: "While checking or advancing planning",
 };
+export function planningRequestInvalid(sprint: Sprint) {
+  const failure = sprint.planningFailure;
+  return !!failure && typeof failure === "object" && failure.code === "planning_request_invalid";
+}
 /** Older saves and nonterminal diagnostics do not carry a classified kind or recommendation. */
 export function planningChangeRequired(sprint: Sprint) {
   const failure = sprint.planningFailure;
-  return !!failure && typeof failure === "object" && "recommendedAction" in failure && failure.recommendedAction === "change_request";
+  return planningRequestInvalid(sprint) || (!!failure && typeof failure === "object" && "recommendedAction" in failure && failure.recommendedAction === "change_request");
 }
 export function classifiedPlanningFailure(sprint: Sprint) {
   const failure = sprint.planningFailure;
@@ -316,7 +324,7 @@ function automaticStatusFact(task: Task, sprint: Sprint | null): Fact | undefine
   }
 }
 
-function statusFact(task: Task, ctx: { target: string; running: number; title: (id: string) => string; sprint: Sprint | null; ready: (id: string) => boolean; next: boolean }): Fact {
+function statusFact(task: Task, filesWait: TaskView["filesWait"], ctx: { target: string; running: number; title: (id: string) => string; sprint: Sprint | null; ready: (id: string) => boolean; next: boolean }): Fact {
   if (task.status === "closed_unverified") return { text: "Closed by you · Not verified", tone: "st-idle", icon: "alert" };
   const handoff = task.merge?.handoff?.state;
   if (task.conflict !== "none" && (task.merge?.gitState === "unknown" || handoff === "unknown" || handoff === "dispatch_unknown"))
@@ -330,7 +338,7 @@ function statusFact(task: Task, ctx: { target: string; running: number; title: (
   if (task.warnings?.includes("engine_launch_failed")) return { text: humanStatus(task.issue, "The engine could not start"), tone: "st-bad", icon: "alert" };
   if (task.warnings?.includes("engine_launch_retrying")) return { text: humanStatus(task.issue, "Starting the engine again"), tone: "st-warn", icon: "hourglass" };
   // A step queued behind another task's files waits for that task and starts on its own once they are released.
-  if (task.warnings?.includes("waiting_for_files") && task.status === "working") return { text: humanStatus(task.issue, "Waiting for another task to release files"), tone: "st-warn", icon: "hourglass" };
+  if (filesWait && task.status === "working") return { text: filesWait.text, tone: "st-warn", icon: "hourglass" };
   if (task.observedPhase === "recovery" && task.process === "live") return { text: interruptedTurn(task.issue) ? "Turn interrupted; waiting for your message" : "Stopped; waiting for your message", tone: "st-warn", icon: "pause" };
   if (task.observedPhase && task.observedPhase !== "not_started") return {text:plainPhase(task.observedPhase),tone:"st-idle"};
   if (task.conflict === "conflict") return { text: `Conflict with ${ctx.target}`, tone: "st-bad", icon: "alert" };
@@ -420,6 +428,19 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
     // The machine lists workers oldest first; every screen shows the newest one on top, so the order is turned once, here.
     const running = own.filter(w => w.status === "working").length, target = targetBranch(state, task);
     const unknown = phase === "unknown";
+    let filesWait: TaskView["filesWait"];
+    if (!unknown && phase !== "archive" && task.process === "live"
+      && (task.status === "working" || task.status === "needs_you") && task.warnings?.includes("waiting_for_files")) {
+      const context = task.filesWait?.holder;
+      const holder = context && tasks.get(context.holderTaskId);
+      if (context && holder && holder.id !== task.id && holder.projectId === task.projectId) {
+        const before = "Waiting for the task “", after = `” to release ${context.releaseTarget}`;
+        filesWait = { text: before + holder.title + after,
+          ...(!holder.planningSprintId ? { link: { taskId: holder.id, title: holder.title, before, after } } : {}) };
+      } else {
+        filesWait = { text: humanStatus(task.filesWait ? task.filesWait.message : task.issue, "Waiting for another task to release files") };
+      }
+    }
     const queue = automaticQueueOf(sprint);
     const ownerIntegration = !unknown && phase !== "archive" && task.status === "ready_to_merge" && queue?.kind === "owner_integration" && queue.taskId === task.id ? queue : undefined;
     // Only a real pending question or permission is actionable, not a recovery's text or coarse native "waiting" phase.
@@ -432,13 +453,13 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
       : STATUS_COLUMN[phase === "unknown" ? task.status : phase];
     const fact: Fact = !unknown ? ownerDecision ? { text: ownerDecision.text, tone: "st-warn", icon: ownerDecision.kind === "permission" ? "shield" : "question" }
       : ownerIntegration ? { text: humanStatus(ownerIntegration.reason), tone: "st-warn", icon: "merge" }
-      : automaticFact ?? statusFact(task, { target, running, title, sprint, ready: id => ready(id, sprint?.runMode), next: nextInSprint.has(task.id) })
+      : automaticFact ?? statusFact(task, filesWait, { target, running, title, sprint, ready: id => ready(id, sprint?.runMode), next: nextInSprint.has(task.id) })
       : machine.connection !== "connected" ? { text: `Last known: ${STATUS_WORD[task.status]}`, tone: "st-idle", icon: "help" }
       : task.status === "stopping" ? { text: "Stop not confirmed", tone: "st-warn", icon: "hourglass" }
       : replanStopping(task) ? { text: replanStopping(task)!.replace(/\..*$/, ""), tone: "st-warn", icon: "hourglass" }
       : { text: "Process state unknown", tone: "st-idle", icon: "help" };
     const seen = last.get(task.id);
-    return { id: task.id, task, project, machine, sprint, column, unknown, fact, automaticFact, ownerDecision, ownerIntegration, at: task.doneAt ?? (seen ? Date.parse(seen) : task.lastConfirmedAt ?? null), target, workers: own, running };
+    return { id: task.id, task, project, machine, sprint, column, unknown, fact, filesWait, automaticFact, ownerDecision, ownerIntegration, at: task.doneAt ?? (seen ? Date.parse(seen) : task.lastConfirmedAt ?? null), target, workers: own, running };
   });
 
   // A sprint's planning task reads only on its sprint: no list, count, badge or search below sees it.

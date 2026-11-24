@@ -295,8 +295,8 @@ describe("real port", () => {
     const repo = { projectId: "p", remote: "", tree: ["a.txt"], sources: {}, commits: [], branches: [], fetchedAt: null, openBranch: "dev", defaultBranch: "main",
       checkouts: [{ id: "p:main", projectId: "p", kind: "main", branch: "dev", path: "/p", taskId: null, label: null, base: "main", ahead: 0, behind: 0, behindOf: {}, draft: "", sources: {}, updateConflict: null,
         files: [{ path: "a.txt", status: "M", add: 1, del: 0, hunks: [], stage: "unstaged" }, { path: "a.txt", status: "M", add: 1, del: 1, hunks: [], stage: "staged" }] }] };
-    const helper = (product: Record<string, unknown> = {}, refuse?: string) => {
-      const s = service([wireTask({ executionId: "e", phase: "result", runtimeState: "COMPLETED", executionState: "result" })]);
+    const helper = (product: Record<string, unknown> = {}, refuse?: string, draftId?: string) => {
+      const s = service([wireTask({ executionId: "e", phase: "result", runtimeState: "COMPLETED", executionState: "result" }), ...(draftId ? [wireTask({taskId:draftId})] : [])]);
       const asked: { op: string; projectId?: string; params?: Record<string, unknown> }[] = [];
       s.answers["service.capabilities"] = () => ({ methods: ["machine.call"], machine: true });
       s.answers["projects.list"] = () => [{ projectId: "p", displayName: "Project", canonicalRoot: "/p", activation: {} }];
@@ -950,6 +950,50 @@ describe("real port", () => {
       expect(await p.command(envelope({type:"resume_planning",sprintId:"sp"},"refused-resume"))).toMatchObject({ok:false,outcome:"refused"});
       expect(s.calls.filter(c => c.operation === "executions.control").at(-1)?.message).toMatchObject({action:"resume"});
       expect(asked.some(c => c.op === "product.sprint" && c.params?.action === "patch")).toBe(false);
+    });
+
+    it.each([undefined, "old-draft"])("recovers a failed Start with no execution (link: %s)", async planningTaskId => {
+      const failure = {code:"planning_start_refused",text:"Start was refused.",step:"start",at:1};
+      const sprint = {id:"sp",projectId:"p",planningTaskId,planning:"cancelled",conversation:[],planningFailure:failure};
+      const {s,p,asked,ready} = helper({sprints:[sprint]}, undefined, planningTaskId);
+      await ready();
+      expect(await p.command(envelope({type:"resume_planning",sprintId:"sp"},"retry"))).toMatchObject({ok:true});
+      expect(await p.command(envelope({type:"plan_message",sprintId:"sp",text:"Use the shorter brief"},"amend"))).toMatchObject({ok:true});
+      expect(asked.filter(c => c.op === "product.sprint")).toMatchObject([
+        {projectId:"p",params:{action:"patch",sprintId:"sp",patch:{planning:"planning"}}},
+        {projectId:"p",params:{action:"recover_planning_message",sprintId:"sp",text:"Use the shorter brief"}},
+      ]);
+      expect(s.calls.filter(c => ["executions.control", "executions.prompt", "tasks.start", "tasks.create"].includes(c.operation))).toEqual([]);
+    });
+
+    it("uses recovery for a terminal linked execution even without a classified failure and does not replay a refusal", async () => {
+      const sprint = {id:"sp",projectId:"p",planningTaskId:"task-1",planning:"cancelled",planningFailure:{code:"planning_pass_failed",text:"Check failed",step:"internal",at:1}};
+      const {s,p,asked,ready} = helper({sprints:[sprint]});
+      await ready();
+      const respond = s.answers["machine.call"]!;
+      s.answers["machine.call"] = message => {
+        const reply = respond(message);
+        return (message as {params?:{action?:string}}).params?.action === "recover_planning_message"
+          ? {ok:false,code:"planning_execution_live",message:"The linked execution is still live."} : reply;
+      };
+      expect(await p.command(envelope({type:"plan_message",sprintId:"sp",text:"Revise it"}))).toMatchObject({ok:false});
+      expect(asked.filter(c => c.op === "product.sprint")).toEqual([
+        {op:"product.sprint",projectId:"p",params:{action:"recover_planning_message",sprintId:"sp",text:"Revise it",attachments:[]}},
+      ]);
+      expect(s.calls.some(c => c.operation === "executions.prompt")).toBe(false);
+    });
+
+    it("replaces only the original request and requires positive service acknowledgement", async () => {
+      const sprint = {id:"sp",projectId:"p",planning:"cancelled",planningFailure:{code:"planning_request_invalid",text:"Too long",step:"request",at:1}};
+      const {s,p,asked,ready} = helper({sprints:[sprint]});
+      await ready();
+      const payload = {type:"replace_planning_request",sprintId:"sp",description:"Phase one only"} as const;
+      expect(await p.command(envelope(payload))).toMatchObject({ok:true});
+      expect(asked.filter(c => c.op === "product.sprint")).toEqual([
+        {op:"product.sprint",projectId:"p",params:{action:"replace_planning_request",sprintId:"sp",description:"Phase one only"}},
+      ]);
+      s.answers["machine.call"] = () => ({ok:true,result:{}});
+      expect(await p.command(envelope(payload,"unconfirmed"))).toMatchObject({ok:false,outcome:"unknown_outcome"});
     });
 
     it("routes terminal Retry and amendments through the sprint service, not the ended execution", async () => {

@@ -5,7 +5,7 @@
 //! short settle, it reads that one project once (its runtime tasks, its owner board and the
 //! pending questions of tasks that have one) and works out the moments that need the owner:
 //! a question or permission in a task, the runtime's own stop question, a result to review, a
-//! task that failed, a sprint planning question, and a sprint that paused itself. Each item
+//! task that failed, an access card, a sprint planning question, and a sprint that paused itself. Each item
 //! has one notification: a newer state of the same task or sprint replaces it, and an item
 //! that is gone (answered, accepted, closed, archived) withdraws it. Nothing is read on a timer.
 //!
@@ -130,6 +130,21 @@ impl Item {
             _ => json!({"kind":"task","project":p.project,"task":p.id}),
         }
     }
+    /// Access cards have their own slots: neither a question nor another
+    /// access card for the same task may replace or hide one.
+    fn slot(&self) -> (Place, Option<String>) {
+        (
+            self.place.clone(),
+            self.state.strip_prefix("oa:").map(str::to_owned),
+        )
+    }
+    fn summary(&self) -> &'static str {
+        if self.state.starts_with("oa:") {
+            "Task needs access"
+        } else {
+            self.kind.summary()
+        }
+    }
     fn fingerprint(&self) -> String {
         format!(
             "{}|{}|{}|{}",
@@ -226,6 +241,7 @@ pub(crate) fn items(
     tasks: &[Value],
     product: &Value,
     decisions: &HashMap<String, Vec<Value>>,
+    cards: &[crate::native_owner_actions::Open],
 ) -> Vec<Item> {
     let records = &product["tasks"];
     let sprints: Vec<&Value> = product["sprints"]
@@ -276,7 +292,11 @@ pub(crate) fn items(
             continue;
         };
         let record = &records[id];
-        if !record["archive"].is_null() || record["purged"] == true || planning.contains(id) {
+        if !record["archive"].is_null()
+            || record["purged"] == true
+            || record["retiredPlanner"] == true
+            || planning.contains(id)
+        {
             continue;
         }
         let place = Place {
@@ -292,6 +312,23 @@ pub(crate) fn items(
             .unwrap_or_else(|| "A task".into());
         let settled = matches!(record["status"].as_str(), Some("ready_to_merge" | "done"))
             || !record["closedAs"].is_null();
+        let mut has_access_card = false;
+        for card in cards.iter().filter(|c| c.task.as_deref() == Some(id) && id_ok(&c.id)) {
+            let Some(task_execution) = t["executionId"].as_str() else { continue };
+            // The card's task id alone cannot distinguish a superseded execution.
+            if settled || card.execution.as_deref() != Some(task_execution) {
+                continue;
+            }
+            has_access_card = true;
+            out.push(Item {
+                kind: Kind::Stop,
+                state: format!("oa:{}", card.id),
+                decision: None,
+                detail: Some(crate::native_owner_actions::access(&card.service).title.into()),
+                place: place.clone(),
+                label: label.clone(),
+            });
+        }
         let pending = decisions.get(id).into_iter().flatten().find(|d| {
             d["status"] == "pending"
                 && d["decisionId"].as_str().is_some_and(id_ok)
@@ -322,7 +359,8 @@ pub(crate) fn items(
                     place,
                     label,
                 }),
-                Some("failed" | "blocked") if !settled && !unattended.contains(id) => Some(Item {
+                Some("failed" | "blocked")
+                    if !settled && !has_access_card && !unattended.contains(id) => Some(Item {
                     kind: Kind::Failed,
                     state: format!("f:{execution}:{at}"),
                     decision: None,
@@ -558,7 +596,7 @@ pub(crate) enum Action {
 /// This service's notifications that can still be clicked, and the item states already announced.
 #[derive(Debug, Default)]
 pub(crate) struct Book {
-    shown: BTreeMap<Place, Shown>,
+    shown: BTreeMap<(Place, Option<String>), Shown>,
     seen: VecDeque<String>,
     seen_set: HashSet<String>,
 }
@@ -583,16 +621,16 @@ impl Book {
         enabled: &BTreeSet<Kind>,
         prime: bool,
     ) -> Vec<Action> {
-        let current: BTreeMap<Place, Item> = items
+        let current: BTreeMap<_, Item> = items
             .into_iter()
             .filter(|i| i.place.project == project)
-            .map(|i| (i.place.clone(), i))
+            .map(|i| (i.slot(), i))
             .collect();
         let mut actions = Vec::new();
-        let gone: Vec<Place> = self
+        let gone: Vec<_> = self
             .shown
             .keys()
-            .filter(|p| p.project == project && !current.contains_key(*p))
+            .filter(|p| p.0.project == project && !current.contains_key(*p))
             .cloned()
             .collect();
         for place in gone {
@@ -602,7 +640,7 @@ impl Book {
         }
         for (place, item) in current {
             let fingerprint = item.fingerprint();
-            let looked_at = focus == Some(&place);
+            let looked_at = focus == Some(&place.0);
             if looked_at || prime || !enabled.contains(&item.kind) {
                 // Looking at it is seeing it; so is a kind the owner turned off.
                 self.see(fingerprint);
@@ -638,7 +676,7 @@ impl Book {
         }
         self.shown.retain(|_, s| s.id != id);
         self.shown.insert(
-            item.place.clone(),
+            item.slot(),
             Shown {
                 id,
                 state: item.state.clone(),
@@ -907,7 +945,7 @@ fn notify_body(item: &Item, replaces: u32) -> Vec<u8> {
     body.str(&channel.title)
         .u32(replaces)
         .str("dialog-question")
-        .str(item.kind.summary())
+        .str(item.summary())
         .str(&item.body())
         .strings(&["default", "Open"])
         .string_hints(&[("desktop-entry", &channel.package)])
@@ -1057,6 +1095,7 @@ impl crate::Service {
         let runtime = self.state.lock().await.native.get(project).cloned();
         let mut tasks = Vec::new();
         let mut decisions = HashMap::new();
+        let mut cards = Vec::new();
         let (stalled_on, hours) = {
             let inner = self
                 .notifier
@@ -1071,6 +1110,10 @@ impl crate::Service {
         let now = progress::now_ms();
         let mut working = Vec::new();
         let product = if let Some(runtime) = &runtime {
+            cards = runtime.host.executor.read(crate::native_owner_actions::open_actions)
+                .map_err(|_| crate::failure("storage_unavailable"))?
+                .await.map_err(|_| crate::failure("storage_unavailable"))?
+                .map_err(|_| crate::failure("storage_unavailable"))?;
             if stalled_on {
                 // A store that cannot be read for this skips only the no-progress moments.
                 if let Ok(read) = runtime
@@ -1134,7 +1177,7 @@ impl crate::Service {
             // An inactive or removed project has nothing to announce.
             json!({})
         };
-        let mut found = items(project, &tasks, &product, &decisions);
+        let mut found = items(project, &tasks, &product, &decisions, &cards);
         let taken: BTreeSet<Place> = found.iter().map(|i| i.place.clone()).collect();
         let stalled = stalls(project, &tasks, &product, &working, &taken, now, hours);
         let (actions, bus) = {

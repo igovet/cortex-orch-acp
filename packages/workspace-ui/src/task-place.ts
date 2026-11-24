@@ -7,7 +7,7 @@ import type { Route } from "./router";
  * no page of its own: the same conversation and workers read on its sprint's page, so every link inside them leads there,
  * and its messages, answers, Stop and Resume go to the sprint's planning, which continues that task.
  */
-export type TaskPlace = { sprint: () => Sprint };
+export type TaskPlace = { sprint: () => Sprint; changingRequest?: () => boolean };
 export const PlanningPlace = createContext<TaskPlace | null>(null);
 
 /** The sprint whose planning task is on view, or null on an ordinary task's page. */

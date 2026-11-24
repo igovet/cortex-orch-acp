@@ -26,6 +26,7 @@ function board(raw: unknown, legacy = false): CachedBoard {
     if (ids(value.dependencies)) overlay.dependencies=value.dependencies;
     if (typeof value.planning === "boolean") overlay.planning=value.planning;
     if (typeof value.purged === "boolean") overlay.purged=value.purged;
+    if (value.retiredPlanner === true) overlay.retiredPlanner=true;
     if (text(value.sprintId)) overlay.sprintId=value.sprintId;
     if (object(value.archive) && typeof value.archive.at === "number" && Number.isFinite(value.archive.at)) {
       const {at, previousStatus, retentionAt} = value.archive;

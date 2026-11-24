@@ -619,18 +619,43 @@ pub(super) fn with_hold_id(prior: &Value, mut pause: Value) -> Value {
 
 /// Compare the scheduler's observed sprint against the saved one so a
 /// background pause/resume cannot overwrite a concurrent owner action.
-pub(super) fn automatic_queue(state: &Path, project: &str, p: &Value) -> Result<Value> {
+pub(super) fn automatic_queue(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Result<Value> {
     let _lock = Lock::new(state, "machine.lock")?;
     let mut product = product(state, project)?;
     let expected = &p["expected"];
-    let Some(sprint) = product["sprints"]
-        .as_array_mut()
-        .and_then(|sprints| sprints.iter_mut().find(|s| s["id"] == expected["id"]))
+    let Some(index) = product["sprints"]
+        .as_array()
+        .and_then(|sprints| sprints.iter().position(|s| s["id"] == expected["id"]))
     else {
         return Ok(json!({"changed":false}));
     };
-    if sprint != expected || !queue_sprint(sprint) {
+    let saved = &product["sprints"][index];
+    let pause_manual = p["pauseManual"] == true && !queue_driven_mode(saved)
+        && saved["queueState"] == "running" && saved["archivedAt"].is_null()
+        && (saved["deleting"].is_null() || saved["deleting"] == false);
+    if saved != expected || !(queue_sprint(saved) || pause_manual) {
         return Ok(json!({"changed":false}));
+    }
+    if let Some(revision) = p["queueRevision"].as_str() {
+        let root = root.ok_or_else(|| refuse("project_required", "Unknown project."))?;
+        if !super::sprint_live::matches_queue(root, &product, project, index, revision)? {
+            return Ok(json!({"changed":false,"stale":true}));
+        }
+    }
+    let sprint = &mut product["sprints"][index];
+    if p["complete"] == true || pause_manual {
+        if pause_manual {
+            sprint["queueState"] = json!("paused");
+            sprint["pauseReason"] = json!("This sprint is in manual mode.");
+        } else {
+            sprint["queueState"] = json!("complete");
+            sprint["pauseReason"] = Value::Null;
+        }
+        for key in ["automaticQueue", "pauseKind", "questionExecutions"] {
+            sprint.as_object_mut().unwrap().remove(key);
+        }
+        settings::write_json(&product_path(state, project)?, &product)?;
+        return Ok(json!({"changed":true}));
     }
     let pause = &p["pause"];
     sprint["queueState"] = json!(if pause.is_null() { "running" } else { "paused" });
@@ -681,8 +706,12 @@ impl crate::Service {
             let Some(sprint) = sprints.iter_mut().find(|s| s["id"] == id) else {
                 return Ok(false); // Deleted since the driver's board read.
             };
+            let previous = sprint["planningTaskId"].as_str().map(str::to_owned);
             if !update(sprint)? {
                 return Ok(false);
+            }
+            if let Some(task) = previous.filter(|task| sprint["planningTaskId"] != *task) {
+                retire_planner(&mut product, &task)?;
             }
             settings::write_json(&product_path(&state, &project_id)?, &product)?;
             Ok(true)
@@ -817,7 +846,15 @@ impl crate::Service {
         Ok(())
     }
 
-    pub(crate) async fn update_planning_warning(&self, project: &str, id: &str, count: Option<u8>) {
+    /// Saves (`Some`) or clears (`None`) the repeated-pass warning. Returns whether
+    /// the saved state now reflects the request; `false` means the write failed
+    /// and the caller should try again on a later pass.
+    pub(crate) async fn update_planning_warning(
+        &self,
+        project: &str,
+        id: &str,
+        count: Option<u8>,
+    ) -> bool {
         let written = self
             .write_planning_state(project, id, move |sprint| {
                 let Some(count) = count else {
@@ -841,6 +878,7 @@ impl crate::Service {
             })
             .await;
         }
+        written.is_ok()
     }
 }
 
@@ -1044,6 +1082,25 @@ fn invalid_sprint_members() -> Refused {
     refuse("state_unreadable", "Saved sprint membership is unreadable.")
 }
 
+// Keep the task and its history, but never expose a detached planner as
+// ordinary work. The flag also covers legacy planners without planningSprintId.
+fn retire_planner(product: &mut Value, task: &str) -> Result<()> {
+    let tasks = product["tasks"]
+        .as_object_mut()
+        .ok_or_else(|| refuse("state_unreadable", "Saved task state is unreadable."))?;
+    let record = tasks.entry(task).or_insert_with(|| json!({}));
+    if !record.is_object() {
+        return Err(refuse("state_unreadable", "Saved task state is unreadable."));
+    }
+    if record["purged"] != true {
+        if record["status"] != "done" {
+            super::task_lifecycle::close_cancelled(record, now_ms());
+        }
+        record["retiredPlanner"] = json!(true);
+    }
+    Ok(())
+}
+
 pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Result<Value> {
     let _lock = Lock::new(state, "machine.lock")?;
     let mut product = product(state, project)?;
@@ -1116,6 +1173,7 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
         ));
     }
     let mut target = None;
+    let mut retired = None;
     if action == "allow" {
         // The owner's consent to the one decision the queue hold asks for. The
         // scheduler acts on it in its next pass, through its own bounded route.
@@ -1258,8 +1316,8 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
                 .ok_or_else(|| refuse("state_unreadable", "Invalid conversation state."))?
                 .push(json!({"kind":"message","text":text,"at":now_ms(),"attachments":items}));
         }
-        // The request/note and the restart intent commit together; the next pass
-        // can now create a fresh draft, without deleting the previous task.
+        // The request/note, retirement and restart intent commit together.
+        retired = sprint["planningTaskId"].as_str().map(str::to_owned);
         for key in ["planningAttempt", "planningFailure", "planningRetry", "planningLimitRetry"] {
             sprint.as_object_mut().unwrap().remove(key);
         }
@@ -1306,6 +1364,9 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
         combined.extend(note["attachments"].as_array().cloned().unwrap_or_default());
     }
     saved_total(&combined)?;
+    if let Some(task) = retired {
+        retire_planner(&mut product, &task)?;
+    }
     if action == "patch" && p["patch"]["runMode"] == "automatic" {
         product["sprintRunModeVersion"] = json!(1);
     }

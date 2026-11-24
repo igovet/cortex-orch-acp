@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
 import { createRealPort } from "../src/port/real";
 import { createWorkspaceStore } from "../src/store";
+import { buildIndex } from "../src/selectors";
 import { readBoards, writeBoards, type CachedBoard } from "../src/port/board-cache";
 import { capabilitiesWire, scriptedTransport, wireTask } from "./support";
 const project = {projectId:"p",name:"Saved project",repository:"/p",openBranch:"main",defaultBranch:"main",activated:true};
@@ -70,6 +71,23 @@ describe("confirmed board cache",()=>{
       expect(store.state().projects[0]?.issue).toBeNull();
       expect(store.can("tasks.start")).toBe(false);
       expect(store.connection().state).toBe("connecting");
+    } finally {dispose();}
+  });
+  it("does not revive a retired legacy planner on the cold board",()=>{
+    const storage=memory(), board=structuredClone(saved), id=items[0].taskId;
+    board.product.sprints[0].taskIds = board.product.sprints[0].taskIds.filter(task => task !== id);
+    board.product.tasks[id] = {retiredPlanner:true,status:"done",closedAs:"cancel"};
+    writeBoards(storage,"owner",[board]);
+    expect(readBoards(storage,"owner")[0].product.tasks[id]).toEqual({retiredPlanner:true});
+    const s=scriptedTransport({"service.capabilities":()=>new Promise(()=>{})});
+    const p=createRealPort({transport:s.transport,registry:true,actorId:"owner",boardStorage:storage});
+    let dispose!:()=>void;
+    const store=createRoot(d=>{dispose=d;return createWorkspaceStore(p);});
+    try {
+      const index=buildIndex(store.state(),Date.now());
+      expect(index.byId.has(id)).toBe(true);
+      expect(index.views.map(v=>v.id)).not.toContain(id);
+      expect(index.summaries.get("p")?.views).toHaveLength(30);
     } finally {dispose();}
   });
   it("retains the last complete board through bounded failed refreshes and only then reports a real failure",async()=>{

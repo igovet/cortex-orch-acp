@@ -1288,7 +1288,7 @@ The Settings machine catalogue retains every connection-selectable route identit
 efforts for the chosen model. Unsupported or withdrawn routes are not silently
 replaced. A failed dispatch remains unknown and is not replayed automatically.
 
-A plain project folder opens and runs in place even when Git is not installed. Git-only actions such as initializing a repository still require Git. The **Separate worktree** choice is disabled with an explanation in a non-Git project. Start refuses a saved worktree choice without a Git repository (`worktree_git_required`) or committed HEAD (`worktree_head_unborn`). It neither initializes Git nor falls back to **Project folder**. Tasks, results, review and acceptance do not depend on Git. Code can read/save project files, while Changes explains that a Git diff is unavailable. Accepted work reaches Ready to merge; the owner can close it as-is without Git, or explicitly initialize Git before using Git integration. Closing as-is a result that already reached Ready to merge through acceptance (manual or automatic) keeps it checked, and so does a result that an earlier build marked `automaticReady` (`notVerifiedByCortex` stays false); closing any other result as-is still records the lasting Not verified warning.
+A plain project folder opens and runs in place even when Git is not installed. Git-only actions such as initializing a repository still require Git. The **Separate worktree** choice is disabled with an explanation in a non-Git project. The service refuses Start for a saved worktree choice without a Git repository, without a first commit, or when Git is unavailable. It explains the problem and how to fix it or switch the saved task to **Project folder**. The socket reply carries the stable reason in `error.data.reason` (`worktree_git_required`, `worktree_head_unborn`, or `worktree_git_unavailable`). It neither initializes Git nor falls back to **Project folder**. Tasks, results, review and acceptance do not depend on Git. Code can read/save project files, while Changes explains that a Git diff is unavailable. Accepted work reaches Ready to merge; the owner can close it as-is without Git, or explicitly initialize Git before using Git integration. Closing as-is a result that already reached Ready to merge through acceptance (manual or automatic) keeps it checked, and so does a result that an earlier build marked `automaticReady` (`notVerifiedByCortex` stays false); closing any other result as-is still records the lasting Not verified warning.
 
 ### Separate worktrees
 
@@ -1340,8 +1340,11 @@ closure still work.
 On the local desktop, a Markdown video or subtitle file link opens a path popup.
 Select **Open in default app** to hand the file to the operating system, or
 **Copy path** to open it yourself. Relative paths use the task's checkout, not
-the app's working directory. The opener does not load the file into Code or
-change the task's route. Missing files, refused targets and immediate opener
+the app's working directory. If the checkout path has not arrived, the popup
+shows the relative path while it waits and updates in place when the checkout
+is confirmed. If it cannot confirm the checkout promptly, it offers **Retry**.
+A worktree task never falls back to the main project folder. The opener does
+not load the file into Code or change the task's route. Missing files, refused targets and immediate opener
 failures are shown in the popup; the task stays usable. The operating system
 chooses the app, and a successful handoff does not confirm playback. A worktree
 under an external `.cortex/worktrees` folder is not refused just because of

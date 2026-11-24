@@ -11,13 +11,13 @@ export const capabilityOf = (type: WorkspaceCommand["type"]) => ON_THE_WIRE[type
 
 /** What a machine with its helper offers, past the three commands of the wire. */
 export const MACHINE_COMMANDS: readonly WorkspaceCommand["type"][] = [
-  "resolve_block", "finish_merge", "abort_merge", "resolve_with_cortex", "stop_resolution", "set_task_settings", "rerun_check", "add_comment", "edit_comment", "remove_comment", "send_comments", "stop_worker", "stop_command", "allow_write",
-  "stop_task", "continue_task", "retry_task", "send_message", "remove_queued", "move_queued", "send_queued", "request_changes", "rename_task", "generate_title", "archive_task", "confirm_discard", "restore_task", "purge_task", "purge_many", "close_task", "accept_result", "integrate", "set_target",
+  "resolve_block", "finish_merge", "abort_merge", "resolve_with_cortex", "inspect_merge", "request_merge_checks", "stop_resolution", "set_task_settings", "rerun_check", "add_comment", "edit_comment", "remove_comment", "send_comments", "stop_worker", "stop_command", "allow_write",
+  "stop_task", "continue_task", "retry_task", "send_message", "remove_queued", "move_queued", "send_queued", "request_changes", "rework_task", "rename_task", "generate_title", "archive_task", "confirm_discard", "restore_task", "purge_task", "purge_many", "close_task", "accept_result", "integrate", "set_target",
   "git_stage", "git_revert", "git_draft", "git_commit", "git_fetch", "git_init", "git_pull", "git_pull_continue", "git_pull_abort", "git_push", "update_from_target", "create_branch", "revert_commit", "delete_worktree",
   "clear_old", "rename_machine", "set_retention", "save_storage", "set_worktree_root", "run_diagnostics", "run_cleanup",
   "save_surface", "activate_profile", "save_profile", "revert_profile", "deactivate_profile", "create_profile", "rename_profile", "describe_profile", "delete_profile", "apply_preset", "reset_preset",
   "add_connection", "rename_connection", "check_connection", "refresh_models", "remove_connection", "set_sessions", "download_engine", "enable_opencode",
-  "edit_task", "close_sprint", "delete_sprint", "create_sprint", "set_sprint_settings", "rename_sprint", "set_run_mode", "edit_plan", "materialize_plan", "cancel_planning", "resume_planning", "run_sprint", "pause_sprint", "allow_queue_repair", "answer_planning", "plan_message",
+  "edit_task", "close_sprint", "delete_sprint", "create_sprint", "set_sprint_settings", "rename_sprint", "set_run_mode", "edit_plan", "materialize_plan", "cancel_planning", "resume_planning", "run_sprint", "pause_sprint", "allow_queue_repair", "answer_planning", "plan_message", "replace_planning_request",
 ];
 
 /** Surfaces that are not one command. */

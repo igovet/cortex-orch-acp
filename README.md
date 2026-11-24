@@ -39,6 +39,8 @@ In Workspace, you can add a comment to a route choice without changing the selec
 
 Workspace result checks list recorded skips with their reasons, including checks that required authorization and did not run.
 
+For MCP result submissions, unknown fields such as `artifacts` are rejected with the offending field path. Copy `tool_call_ref` exactly from the completed command response. See [Markdown reports](docs/features/markdown-reports/index.md#result-submission-arguments).
+
 For materialized sprints, a coordinator receives the current task's direct
 dependency context and can page through the authenticated sprint graph with
 `sprint_graph`. It can read a predecessor's durable outcome and immutable
@@ -384,7 +386,7 @@ Projects whose stores contain tasks written by the former Python runtime are not
 Missing, untrusted, ambiguous or unsupported routes fail visibly without a Python
 mutation fallback. A built-binary socket test covers native create/start through
 completion with PATH fake engines and private HOME/XDG state; it does not qualify
-real engine accounts or a released application. In Workspace, choose **Separate worktree** to start from committed HEAD in a dedicated checkout. Execution, review, verification, Changes, Code and Git use that checkout; the terminal still opens in the registered project folder. Without Git the choice is disabled, and Start never falls back to the project folder. See [separate worktrees](docs/cortex-workspace/local-task-execution.md#separate-worktrees). Owner attachments (new task, follow-up and Request-changes messages, and question answers) are retained as private source bodies and delivered to the engine; the native service advertises `attachments: true` in its capabilities, and worker guidance carries no files.
+real engine accounts or a released application. In Workspace, choose **Separate worktree** to start from committed HEAD in a dedicated checkout. Execution, review, verification, Changes, Code and Git use that checkout; the terminal still opens in the registered project folder. Without Git the choice is disabled. If a saved worktree task cannot start because Git or a first commit is missing, the service explains how to proceed instead of falling back to the project folder. See [separate worktrees](docs/cortex-workspace/local-task-execution.md#separate-worktrees). Owner attachments (new task, follow-up and Request-changes messages, and question answers) are retained as private source bodies and delivered to the engine; the native service advertises `attachments: true` in its capabilities, and worker guidance carries no files.
 
 The runtime normally continues work on its own. Work failures use a strategy
 ladder (repair, escalated routes, the senior consultant, another role and
@@ -646,7 +648,7 @@ existing checkouts keep their saved paths when the default root changes. Work wa
 for merge confirmation keeps its owner-action highlight. Result cards separate headings,
 paragraphs, quotes and code, and omit empty outcome counters. On the local desktop,
 video and subtitle file links offer **Open in default app** without leaving the result.
-If the handoff fails, the file popup shows why and lets you copy the path or retry.
+A relative link can wait for the task’s checkout in the popup and offers **Retry** if the path cannot be confirmed. If the handoff fails, the popup shows why and lets you copy the path or try opening it again.
 See [Result links](docs/cortex-workspace/local-task-execution.md#result-links).
 Plain project folders support tasks and result acceptance without Git: a folder in no repository is observed by walking it (same hashing, exclusions and bounds as a repository; nothing is ignored), so baseline, review change lists, verification and completion work there, while a repository Git cannot read still stops the task with a stop question naming that cause. Opening plain folders and reading files or snapshots does not require an installed Git executable. Git initialization is explicit and requires Git;
 local Commit, squash merge and task closure need no remote. Local-only repositories omit network controls and push/PR wording; generated commit messages are English independently of conversation language. Task actions open the actual checkout in the detected editor, with a visible reason when unavailable. Worktree settings allow writable external `.cortex/worktrees` folders, retain refused drafts with a persistent reason, and never move existing checkouts. Diagnostics list each failing check and its recovery steps, including in Copy report. Accept binds the reviewed runtime-evidence version while displaying its result number; late progress/transcript updates do not invalidate unchanged work. Refused or unconfirmed acceptance stays beside the result with a Refresh action, even after its toast closes;
@@ -1167,6 +1169,10 @@ review-comment controls return requests to Cortex, not synthetic passing evidenc
 [local conversation contract](docs/cortex-workspace/protocol.md).
 
 The task execution slice adds per-task route/access/language choices, linked task worktrees sharing one project store, task-owned diffs, guarded squash/PR actions, real runtime-row purge with space reclamation, project overrides and window-independent automatic queues. Automatic LLM titles remain unavailable. Pre-save MCP listing now uses the existing sandbox with a bounded deadline, and Open logs opens private rotating status events (never raw stderr). Sprint-created tasks inherit their route and target; partial composer-setting failures name what was acknowledged. These additions still require fresh installed-package and native-rendered qualification. See [local task execution](docs/cortex-workspace/local-task-execution.md) for safety refusals, evidence limits and focused checks.
+
+In local Code, opening a file is read-only. On an initialized project, **Edit** can acquire
+its file lease while Cortex reads the project store. A conflicting file writer or exclusive
+storage maintenance can still block editing. See [storage and recovery](docs/project/storage.md).
 
 Sprints have three run modes. **Manual** starts each ready task yourself. **Hybrid** runs the queue one
 task at a time and stops each passing result at Ready to merge, so you confirm each merge. **Automatic**

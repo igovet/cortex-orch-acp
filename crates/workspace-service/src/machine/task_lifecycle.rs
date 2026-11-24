@@ -216,6 +216,10 @@ pub async fn apply(
         "close" => {
             let choice = p["choice"].as_str().unwrap_or("");
             close_precondition(record, p)?;
+            if choice == "cancel" {
+                close_cancelled(record, at);
+                return Ok(());
+            }
             if external(p) {
                 if let Some(store) = context::open(root, OpenMode::LiveReadOnly)? {
                     store
@@ -288,6 +292,14 @@ pub async fn apply(
         }
     }
     Ok(())
+}
+
+/// Cancellation closes the presentation only, without accepting a result or deleting history.
+pub(super) fn close_cancelled(record: &mut Value, at: u64) {
+    record["notVerifiedByCortex"] = json!(false);
+    record["closedAs"] = json!("cancel");
+    record["status"] = json!("done");
+    record["doneAt"] = json!(at);
 }
 
 /// Archiving never asks or discards: work, checkout and result stay as they are.

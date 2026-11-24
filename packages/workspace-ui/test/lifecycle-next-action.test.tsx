@@ -97,6 +97,48 @@ it("a repeated limit failure offers Change request instead of Retry", async () =
   expect(p.commands.at(-1)?.payload).toMatchObject({type:"plan_message", text:"Cover phase one only"});
 });
 
+it("edits an overlong original request without replacing the message draft or saved work", async () => {
+  const original = "Plan everything. ".repeat(2000);
+  const state = world({}, {}, [sprint({
+    planning:"planning", materializedVersion:null, description:original,
+    conversation:[{kind:"question",text:"Which market?"},{kind:"answer",text:"Home buyers"}],
+    plan:{version:4,items:[{key:"first",description:"Build the page",dependsOn:[]}]},
+  })]);
+  const p = await mount(state, planningPath);
+  const message = document.querySelector<HTMLTextAreaElement>("#ws-plan-input")!;
+  message.value = "Unsent follow-up";
+  message.dispatchEvent(new Event("input", {bubbles:true}));
+  const failed = { ...state.sprints[0], planning:"cancelled" as const,
+    planningFailure:{code:"planning_request_invalid",step:"request" as const,at:123,text:"Combined request: 34,510 characters; limit 32,000."} };
+  p.emit(projection("2", {...state,sprints:[failed]})); await settle();
+  expect(control("Retry planning")).toBeUndefined();
+  control("Change request")!.click(); await settle();
+  const dialog = document.querySelector<HTMLDialogElement>("dialog[open]")!;
+  const input = dialog.querySelector<HTMLTextAreaElement>("textarea")!;
+  expect(document.activeElement).toBe(input);
+  expect(input.value).toBe(original);
+  expect(dialog.textContent).toContain("34,510 characters; limit 32,000");
+  const save = control("Save and retry") as HTMLButtonElement;
+  expect(save.disabled).toBe(true);
+  input.value = "Plan the landing page only.";
+  input.dispatchEvent(new Event("input", {bubbles:true}));
+  save.click(); await settle();
+  expect(p.commands.map(c => c.payload)).toEqual([{type:"replace_planning_request",sprintId:"sp",description:"Plan the landing page only."}]);
+  expect(input.readOnly).toBe(true);
+  p.receipt(false, undefined, "refused", "The service did not save the request."); await settle();
+  expect(dialog.open).toBe(true);
+  expect(dialog.textContent).toContain("The service did not save the request.");
+  expect(input.value).toBe("Plan the landing page only.");
+  expect(input.readOnly).toBe(false);
+  save.click(); await settle();
+  p.receipt(); await settle();
+  expect(dialog.open).toBe(false);
+  p.emit(projection("3", {...state,sprints:[{...state.sprints[0],description:"Plan the landing page only."}]})); await settle();
+  expect(message.value).toBe("Unsent follow-up");
+  expect(text()).toContain("Home buyers");
+  expect(text()).toContain("Plan v4 proposed");
+});
+
 it("owner Stop stays neutral and does not promise unsaved parts", async () => {
   const sp = sprint({ planning:"cancelled", materializedVersion:null });
   const p = await mount(world({}, {}, [sp]), planningPath);

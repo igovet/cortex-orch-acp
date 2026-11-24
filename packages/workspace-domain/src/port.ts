@@ -1,5 +1,5 @@
 import type { McpServer, ConnectResult } from "./index";
-import type { Decision, EngineWeeklyUsage, Machine, Message, Project, ProjectRepo, SessionOptions, Sprint, Task, TaskChanges, TaskSession, TimelineEntry, Worker, WorkspaceCommand, WorkspaceState } from "./types";
+import type { CommandOutput, CommandOutputRead, Decision, EngineWeeklyUsage, Machine, Message, Project, ProjectRepo, SessionOptions, Sprint, Task, TaskChanges, TaskSession, TimelineEntry, Worker, WorkspaceCommand, WorkspaceState } from "./types";
 
 /**
  * The one seam between the presentation and any backend. A screen sends intents and reads projections; it never changes
@@ -15,8 +15,10 @@ export type ProjectSlice = { project: Project; tasks: Task[]; sessions: TaskSess
 /** A confirmed snapshot. `version` is a decimal string, and a store installs only a newer one. */
 export type ProjectionUpdate = { kind: "projection"; version: string } & ({ scope: "workspace"; state: WorkspaceState } | { scope: "project"; slice: ProjectSlice });
 /** What the owner decided about a task. The runtime knows nothing of these, so they come from the machine and sit over its facts. */
-export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptance" | "reviewActions" | "integrationFacts" | "closedAs" | "doneAt" | "archive" | "targetBranch" | "sprintId" | "dependencies" | "integration" | "notVerifiedByCortex" | "purgeBlocker" | "work" | "checkout" | "settings" | "result" | "conflict" | "merge" | "resolvedBy" | "writeDenials" | "spend">> & {
-  status?: "ready_to_merge" | "done"; automaticReady?: boolean; planning?: boolean; purged?: boolean;
+export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptance" | "reviewActions" | "integrationFacts" | "closedAs" | "doneAt" | "archive" | "targetBranch" | "sprintId" | "dependencies" | "integration" | "notVerifiedByCortex" | "purgeBlocker" | "work" | "checkout" | "settings" | "result" | "conflict" | "merge" | "resolvedBy" | "writeDenials" | "spend" | "reworkAvailable" | "reworkUnavailableReason" | "reworkWarnings" | "reworkVersion" | "reworkOwnerEpoch" | "reworkExecutionId">> & {
+  status?: "ready_to_merge" | "done"; automaticReady?: boolean; planning?: boolean; purged?: boolean; retiredPlanner?: boolean;
+  /** Owner reopen generation. An older result's presentation facts cannot cross it. */
+  reworkEvent?: string;
 };
 /**
  * One project's facts from the machine itself: Git, workers and owner decisions. They move on their own, without the
@@ -57,7 +59,7 @@ export type CommandEnvelope = {
  * on events, on return to the window and after the owner's own action, never on a timer).
  */
 export type GitInterest = "facts" | "git" | "status";
-export type CommandReceipt = { requestId: string; ok: boolean; outcome: string; message: string; entityId?: string; entityVersion?: string; deletedTaskIds?: string[]; keptPaths?: string[] };
+export type CommandReceipt = { requestId: string; ok: boolean; outcome: string; message: string; entityId?: string; entityVersion?: string; deletedTaskIds?: string[]; keptPaths?: string[]; worktreeCleanupNotice?: boolean };
 
 /** One folder the machine found. `git` says a `.git` is there. */
 export type DirectoryEntry = { path: string; git: boolean };
@@ -79,6 +81,8 @@ export interface WorkspacePort {
   query<O extends QueryOperation>(operation: O, parameters: QueryParameters[O]): Promise<QueryResults[O]>;
   command(envelope: CommandEnvelope): Promise<CommandReceipt>;
   subscribe(listener: (update: PortUpdate) => void): () => void;
+  /** Desktop owner only. Omit offset for a preview, otherwise read retained bytes from that offset. */
+  readCommandOutput?(request: CommandOutputRead): Promise<CommandOutput>;
   /** One file of a checkout, read when it is opened. A port with no files has none. */
   discoverMcp?(server: McpServer): Promise<ConnectResult>;
   takeDroppedFiles?(): Promise<import("./types").Attachment[]>;
