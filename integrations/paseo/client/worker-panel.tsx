@@ -1,4 +1,6 @@
-import { readableToolText, toolArguments, toolDetailText } from "./tool-details.ts";
+import { readableToolText, toolDetailPreview, toolDetailText } from "./tool-details.ts";
+import { codeModePresentation } from "../shared/gateway-presentation.ts";
+import * as PaseoNative from "@getpaseo/plugin/client/react-native";
 import { useRpc, type PluginAgentPanelProps } from "@getpaseo/plugin/client";
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { Pressable, Text, View } from "react-native";
@@ -88,14 +90,57 @@ function DiffView({ rows, theme }: { rows: DiffRow[]; theme: Theme }) {
   </ScrollView>;
 }
 
-/** The chat's Input/Output section of an unknown tool: a muted title, then
- * the value in monospace, scrolling sideways instead of wrapping. */
-function DetailSection({ title, text, theme }: { title: string; text: string; theme: Theme }) {
-  return <View>
-    <Text style={{ paddingHorizontal: 12, paddingTop: 8, paddingBottom: 4, color: theme.colors.foregroundMuted, fontSize: 12, fontWeight: "600" }}>{title}</Text>
-    <ScrollView horizontal nestedScrollEnabled showsHorizontalScrollIndicator contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 8 }}>
-      <Text selectable style={[DIFF_TEXT as object, { color: theme.colors.foreground }]}>{text}</Text>
+const PRIVATE_TOOL_BODIES = new Set(["create_draft", "draft_write", "read_draft", "write_report", "read_report", "result_submit", "task_result", "sprint_task_result"]);
+
+function privateToolDetail(event: WorkerEvent): boolean {
+  const input = event.raw_input ?? event.input;
+  const output = event.raw_output ?? event.output;
+  const envelope = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  const title = event.title ?? "";
+  const codeMode = codeModePresentation(title, input, output, event.tool_kind);
+  return [title, event.tool_kind, codeMode?.name, envelope.server === "cortex" ? envelope.tool : null].some(name =>
+    typeof name === "string" && PRIVATE_TOOL_BODIES.has(name.trim().replace(/^(?:mcp\.cortex\.|mcp__cortex__|cortex\.)/i, "").toLowerCase()));
+}
+
+function DetailSection({ title, value, unavailable, theme }: { title: string; value: unknown; unavailable: string; theme: Theme }) {
+  const [readable, setReadable] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [copyFeedback, setCopyFeedback] = useState<{ text: string; message: string } | null>(null);
+  const full = toolDetailText(value);
+  const extracted = full === null ? null : readableToolText(value);
+  const alternate = extracted === full ? null : extracted;
+  const text = (readable ? alternate : null) ?? full;
+  const preview = text === null ? null : toolDetailPreview(text, expanded);
+  const display = text === "" ? '""' : preview?.text ?? unavailable;
+  const actionStyle = [styles.button, { borderWidth: 1, borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }];
+  return <View style={{ paddingHorizontal: 12, paddingTop: 8, paddingBottom: 8, minWidth: 0, gap: 4 }}>
+    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, fontWeight: "600" }}>{title}</Text>
+    <ScrollView horizontal nestedScrollEnabled showsHorizontalScrollIndicator>
+      <Text selectable style={[DIFF_TEXT as object, { color: theme.colors.foreground }]}>{display}</Text>
     </ScrollView>
+    {preview?.canExpand && !expanded && <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>Preview only</Text>}
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 4 }}>
+      {preview?.canExpand && <Pressable accessibilityRole="button" accessibilityLabel={`${expanded ? "Show less" : "Show all"} ${title}`}
+        accessibilityState={{ expanded }} style={actionStyle} onPress={() => setExpanded(!expanded)}>
+        <Text style={[styles.muted, { color: theme.colors.foreground }]}>{expanded ? "Show less" : "Show all"}</Text>
+      </Pressable>}
+      {alternate !== null && <Pressable accessibilityRole="button" accessibilityLabel={`${readable ? "Show full value" : "Show readable text"} for ${title}`}
+        style={actionStyle} onPress={() => { setReadable(!readable); setExpanded(false); setCopyFeedback(null); }}>
+        <Text style={[styles.muted, { color: theme.colors.foreground }]}>{readable ? "Show full value" : "Show readable text"}</Text>
+      </Pressable>}
+      {text !== null && typeof PaseoNative.copyText === "function" && <Pressable accessibilityRole="button"
+        accessibilityLabel={`Copy ${title}`} style={actionStyle} onPress={async () => {
+          try {
+            await PaseoNative.copyText(text);
+            setCopyFeedback({ text, message: "Copied" });
+          } catch {
+            setCopyFeedback({ text, message: "Could not copy. Select the text to copy it manually." });
+          }
+        }}>
+        <Text style={[styles.muted, { color: theme.colors.foreground }]}>Copy</Text>
+      </Pressable>}
+    </View>
+    {copyFeedback?.text === text && <Text accessibilityLiveRegion="polite" style={[styles.muted, { color: theme.colors.foreground }]}>{copyFeedback.message}</Text>}
   </View>;
 }
 
@@ -145,7 +190,7 @@ function Badge({ theme, icon, label, summary, expanded, onToggle, onOpenFile, lo
   </View>;
 }
 
-export function TranscriptEvent({ event, expanded, onToggle, onOpenFile, theme }: { event: WorkerEvent; updates: WorkerEvent[]; expanded: boolean; onToggle: () => void; onOpenFile?: (path: string) => void; theme: Theme }) {
+export function TranscriptEvent({ event, expanded, onToggle, onOpenFile, theme, active = true }: { event: WorkerEvent; updates: WorkerEvent[]; active?: boolean; expanded: boolean; onToggle: () => void; onOpenFile?: (path: string) => void; theme: Theme }) {
   const tool = isToolEvent(event);
   const failure = event.status === "failed" || (event.status !== "completed" && event.type.toLowerCase().includes("failed"));
   const final = /result|final|complete/.test(event.type.toLowerCase());
@@ -157,21 +202,16 @@ export function TranscriptEvent({ event, expanded, onToggle, onOpenFile, theme }
   const presentation = presentTool(event);
   const semantics = toolSemantics(event);
   const row = nativeRow(event);
-  const diffs = diffBlocks(event.content ?? (event.input && typeof event.input === "object" ? (event.input as Record<string, unknown>).content : null));
-  const output = readableToolText(presentation.kind === "shell" ? presentation.output : event.raw_output ?? event.output ?? event.content);
-  const error = failure ? readableToolText(event.error) : null;
-  const hasEdit = presentation.kind === "edit" && (diffs.length > 0 || presentation.newText !== null);
-  // Any other tool shows the chat's Input/Output sections, whatever shape
-  // its server gives the result, so a row never hides what it returned.
-  const generic = presentation.kind === "generic";
-  const inputText = generic ? toolDetailText(toolArguments(event.raw_input ?? event.input)) : null;
-  const outputText = generic ? toolDetailText(event.raw_output ?? event.output ?? event.content) : null;
+  const privateDetail = privateToolDetail(event);
+  const diffs = privateDetail ? [] : diffBlocks(event.content ?? (event.input && typeof event.input === "object" ? (event.input as Record<string, unknown>).content : null));
+  const output = event.raw_output ?? event.output ?? event.content;
+  const hasEdit = !privateDetail && presentation.kind === "edit" && (diffs.length > 0 || presentation.newText !== null);
+  const showDetails = presentation.kind === "generic" || presentation.kind === "shell";
   const shellCommand = presentation.kind === "shell" ? presentation.command : null;
-  const shownError = error && error !== output ? error : null;
-  // As in the chat, a shell row always opens to its full command, even when
-  // it printed nothing; the row label shows only a clipped command.
-  const canExpand = semantics.expandable && Boolean(shellCommand || output || error || hasEdit || diffs.length || inputText || outputText);
-  const running = event.status === "in_progress" || event.status === "pending" || event.status === "running";
+  const shownError = failure && !privateDetail && event.error !== output ? event.error : null;
+  const running = active && (event.status === "in_progress" || event.status === "pending" || event.status === "running");
+  const canExpand = semantics.action !== "" && (showDetails ? semantics.expandable : hasEdit);
+  const unavailable = privateDetail ? "Private tool detail withheld" : preview ? "Full activity unavailable here" : "Not recorded";
   // A command the user stopped: Cortex's own status/title say so, set
   // only once the server has confirmed a genuine stop for this exact row
   // (see command_control.confirmed_stop). The reason always comes from
@@ -191,13 +231,12 @@ export function TranscriptEvent({ event, expanded, onToggle, onOpenFile, theme }
       <DiffView rows={diffLines(diff.oldText, diff.newText)} theme={theme} />
     </View>)}
     {hasEdit && diffs.length === 0 && <DiffView rows={diffLines(presentation.oldText, presentation.newText)} theme={theme} />}
-    {generic && inputText && <DetailSection title="Input" text={inputText} theme={theme} />}
-    {generic && outputText && <DetailSection title="Output" text={outputText} theme={theme} />}
-    {((!generic && output && !hasEdit) || shellCommand || shownError) && <View style={{ paddingHorizontal: 10, paddingVertical: 9, gap: 8 }}>
-      {shellCommand && <Text selectable style={[styles.mono, { color: theme.colors.foreground }]}>{`$ ${shellCommand}`}</Text>}
-      {!generic && output && !hasEdit && <Text selectable style={[styles.mono, { color: theme.colors.foreground }]}>{output}</Text>}
-      {shownError && <Text selectable style={[styles.muted, { color: theme.colors.statusDanger }]}>{shownError}</Text>}
-    </View>}
+    {showDetails && <>
+      <DetailSection title="Input" value={privateDetail ? null : event.raw_input ?? event.input} unavailable={unavailable} theme={theme} />
+      <DetailSection title="Output" value={privateDetail ? null : output}
+        unavailable={running && !privateDetail && !preview ? "Pending" : unavailable} theme={theme} />
+    </>}
+    {shownError != null && <DetailSection title="Error" value={shownError} unavailable="Not recorded" theme={theme} />}
   </Badge>;
   const annotatedBadge = preview ? <View>
     {badge}
@@ -236,14 +275,14 @@ function useKeptScroll(offsets: ScrollOffsets, key: string, horizontal = false) 
 }
 
 /** One run of tool rows, collapsed to Paseo's summary badge. */
-function ToolGroup({ group, expanded, onToggle, expandedEvent, onToggleEvent, onOpenFile, offsets, theme }: {
-  group: Extract<TranscriptItem, { kind: "group" }>; expanded: boolean; onToggle: () => void;
+function ToolGroup({ group, expanded, onToggle, expandedEvent, onToggleEvent, onOpenFile, offsets, theme, active }: {
+  group: Extract<TranscriptItem, { kind: "group" }>; active: boolean; expanded: boolean; onToggle: () => void;
   expandedEvent: number | null; onToggleEvent: (id: number) => void; onOpenFile?: (path: string) => void; offsets: ScrollOffsets; theme: Theme;
 }) {
   const scroll = useKeptScroll(offsets, `group:${group.id}`);
   return <Badge theme={theme} icon="Wrench" label={group.summary} expanded={expanded} onToggle={onToggle} loading={group.loading} borderless>
     <ScrollView {...scroll} style={{ maxHeight: 400 }} contentContainerStyle={{ paddingTop: 4, paddingHorizontal: 13 }} nestedScrollEnabled>
-      {group.entries.map(({ event, updates }) => <TranscriptEvent key={event.id} event={event} updates={updates}
+      {group.entries.map(({ event, updates }) => <TranscriptEvent key={event.id} event={event} updates={updates} active={active}
         expanded={expandedEvent === event.id} onToggle={() => onToggleEvent(event.id)} onOpenFile={onOpenFile} theme={theme} />)}
     </ScrollView>
   </Badge>;
@@ -542,12 +581,12 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
         <WorkerAttemptResult attempt={selectedAttempt} theme={theme} />
         <View style={{ gap: 2 }}>
           {selectedAttempt.failureReason && <Text selectable style={[styles.body, { color: selectedAttempt.status === "interrupted" ? theme.colors.statusWarning : theme.colors.statusDanger }]}>{selectedAttempt.failureReason}</Text>}
-          {groupToolRuns(transcript).map((item) => item.kind === "group"
-            ? <ToolGroup key={`group-${item.id}`} group={item} theme={theme}
+          {groupToolRuns(transcript, workerSection(selectedAttempt.status, selectedAttempt.events.length) !== "completed").map((item) => item.kind === "group"
+            ? <ToolGroup key={`group-${item.id}`} group={item} theme={theme} active={workerSection(selectedAttempt.status, selectedAttempt.events.length) !== "completed"}
                 expanded={expandedGroups.has(item.id)}
                 onToggle={() => setExpandedGroups((current) => { const next = new Set(current); next.has(item.id) ? next.delete(item.id) : next.add(item.id); return next; })}
                 expandedEvent={expandedEvent} onToggleEvent={(id) => setExpandedEvent(expandedEvent === id ? null : id)} onOpenFile={openFile} offsets={scrollOffsets} />
-            : <TranscriptEvent key={item.entry.event.id} event={item.entry.event} updates={item.entry.updates} expanded={expandedEvent === item.entry.event.id} onToggle={() => setExpandedEvent(expandedEvent === item.entry.event.id ? null : item.entry.event.id)} onOpenFile={openFile} theme={theme} />)}
+            : <TranscriptEvent key={item.entry.event.id} event={item.entry.event} updates={item.entry.updates} active={workerSection(selectedAttempt.status, selectedAttempt.events.length) !== "completed"} expanded={expandedEvent === item.entry.event.id} onToggle={() => setExpandedEvent(expandedEvent === item.entry.event.id ? null : item.entry.event.id)} onOpenFile={openFile} theme={theme} />)}
           {selectedAttempt.events.length === 0 && <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>No durable events are available for this attempt.</Text>}
           {nextCursor && <Pressable accessibilityRole="button" onPress={() => void loadMore()} style={[styles.button, { marginTop: 12, borderWidth: 1, borderColor: theme.colors.border, backgroundColor: theme.colors.surface1 }]}><Text style={[styles.muted, { color: theme.colors.accent }]}>Load more history</Text></Pressable>}
           {currentHistory?.truncated && !nextCursor && <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>Some earlier history is unavailable.</Text>}

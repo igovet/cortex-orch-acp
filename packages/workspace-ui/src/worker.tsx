@@ -130,7 +130,7 @@ function StepExtra(props: { a: Activity; w: Worker; onStopCommand: (a: Activity)
     {/* By place, not by object: a refreshed record of the step rebuilds its rows, and they must not redraw under a reader selecting text. */}
     <Show when={a().rows}>{rows => <div class="card2"><div class="toolrows"><Index each={rows()}>{r => <div><I n={r().icon} s={12} class="faint" /><code>{r().code}</code><span class="r">{r().note}</span></div>}</Index></div></div>}</Show>
     <Show when={!detail() && a().diff}>{d => <DiffBox label="Diff" lines={d().lines} />}</Show>
-    <Show when={!props.recorded && !detail() && (a().command?.tail || a().command?.state === "running")}>
+    <Show when={!props.recorded && !detail() && (a().command?.tail || (!isFinished(props.w) && a().command?.state === "running"))}>
       <OutputBox label="Command output" class="tail">{a().command!.tail || "Waiting for output…"}</OutputBox>
     </Show>
     <Show when={canStop()}><div class="ws-step-acts"><button class="btn btn-sm" {...ws.needs("stop_command")} onClick={() => { if (!ws.gate("stop_command")) props.onStopCommand(a()); }}>Stop command…</button></div></Show>
@@ -144,9 +144,9 @@ function ActivityStep(props: { a: Activity; w: Worker; state: OpenState; onStopC
   const failed = () => stepFailed(a());
   // An edit with no recorded lines is its path and counts on one plain row: it opens on nothing.
   const hasExtra = () => !!a().rows || a().command?.state === "running" || (!displayStep(a().args) && !!(hasInput(a().args) || a().output || a().diff?.lines.length || a().command?.tail));
-  const status = () => a().command ? commandStatus(a()) : null;
-  return <StepRow view={view()} taskId={props.w.taskId} tone={failed() ? "st-bad" : a().command?.state === "running" ? "st-run" : undefined} icon={failed() ? "alert" : undefined} hasExtra={hasExtra()} state={props.state} stateKey={`step:${a().sequence}`} args={a().args} output={a().output}
-    tail={a().command?.tail || undefined} pending={a().command?.state === "running" || a().command?.state === "stopping"}
+  const status = () => a().command && !(isFinished(props.w) && (a().command?.state === "running" || a().command?.state === "stopping")) ? commandStatus(a()) : null;
+  return <StepRow view={view()} taskId={props.w.taskId} tone={failed() ? "st-bad" : !isFinished(props.w) && a().command?.state === "running" ? "st-run" : undefined} icon={failed() ? "alert" : undefined} hasExtra={hasExtra()} state={props.state} stateKey={`step:${a().sequence}`} args={a().args} output={a().output}
+    tail={a().command?.tail || undefined} active={!isFinished(props.w)} pending={a().command?.state === "running" || a().command?.state === "stopping"}
     commandRef={a().commandOutputRef} fallbackCommand={a().command ? view().target || undefined : undefined}
     extra={<StepExtra a={a()} w={props.w} onStopCommand={props.onStopCommand} recorded={hasRecordedDetail(view())} />}
     status={<>
@@ -162,7 +162,7 @@ function Run(props: { run: FeedRun<Activity>; runKey: string; state: OpenState; 
   const ws = useWs();
   const items = createMemo(() => new Map(props.run.items.map(a => [a.sequence, a])));
   const running = () => props.w.status === "working" ? props.run.items.find(a => a.command?.state === "running") : undefined;
-  return <Fold text={props.run.text} open={props.state.is(props.runKey)} loading={props.run.loading} onToggle={() => props.state.toggle(props.runKey)}
+  return <Fold text={props.run.text} open={props.state.is(props.runKey)} loading={!isFinished(props.w) && props.run.loading} onToggle={() => props.state.toggle(props.runKey)}
     right={<Show when={running()}>{c => <button class="btn btn-sm" {...ws.needs("stop_command")} onClick={() => { if (!ws.gate("stop_command")) props.onStopCommand(c()); }}>Stop command…</button>}</Show>}>
     {() => <For each={props.run.items.map(a => a.sequence)}>{sequence => <ActivityStep a={items().get(sequence)!} w={props.w} state={props.state} onStopCommand={props.onStopCommand} />}</For>}
   </Fold>;

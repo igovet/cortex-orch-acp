@@ -24,22 +24,24 @@ export function toolSemantics(event: WorkerEvent) {
     name: event.title ?? event.tool_kind, title: event.title, toolKind: externalMcp(event) ? undefined : event.tool_kind,
     input: { ...(event.input && typeof event.input === "object" ? event.input as Record<string, unknown> : {}), content: event.content, locations: event.locations },
     rawInput: event.raw_input,
+    rawOutput: event.raw_output ?? event.output,
   });
 }
 
-/** The main chat's classification: Cortex tools get native read/edit/shell
- * detail only through gatewayPresentation; engine-native Read/Edit/Shell keep
- * theirs; everything else counts as another tool. */
-function nativeKind(event: WorkerEvent): "read" | "edit" | "shell" | "search" | "other" {
+/** Classify once for the detail renderer, row and group counts. Only
+ * file-oriented gateway operations get native Read/Edit treatment. */
+export function nativeKind(event: WorkerEvent): "read" | "edit" | "shell" | "search" | "other" {
   const title = event.title ?? "";
-  const envelope = event.raw_input && typeof event.raw_input === "object" ? event.raw_input as Record<string, unknown> : {};
-  const cortex = envelope.server === "cortex" || /^(?:mcp\.cortex\.|mcp__cortex__)/.test(title);
-  if (cortex) return gatewayPresentation(title, event.raw_input, event.raw_output)?.kind ?? "other";
-  // The chat has no read/edit/shell/search detail for them: an "other tool".
-  if (externalMcp(event)) return "other";
-  if (/search|grep|glob|web_search/i.test(`${title} ${event.tool_kind ?? ""}`)) return "search";
+  const input = event.raw_input ?? event.input;
+  const envelope = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  const gateway = gatewayPresentation(title, input, event.raw_output ?? event.output);
+  if (gateway) return gateway.kind;
+  if (envelope.server === "cortex" || /^(?:mcp\.cortex\.|mcp__cortex__)/i.test(title)) return "other";
+  if (externalMcp(event) || typeof envelope.server === "string") return "other";
   const kind = toolSemantics(event).kind;
-  return kind === "read" || kind === "edit" || kind === "shell" ? kind : "other";
+  if (kind === "read" || kind === "edit") return kind;
+  if (/search|grep|glob|web_search/i.test(`${title} ${event.tool_kind ?? ""}`)) return "search";
+  return kind === "shell" ? kind : "other";
 }
 
 /** Paseo's resolveToolCallIconName, keyed by the same classification the
@@ -78,7 +80,7 @@ export function summarizeToolRun(events: WorkerEvent[]): string {
 
 /** Every run of consecutive tool rows becomes one expandable group, as in
  * Paseo's main chat; prose rows stay between groups. */
-export function groupToolRuns(entries: TranscriptEntry[]): TranscriptItem[] {
+export function groupToolRuns(entries: TranscriptEntry[], active = true): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   let run: TranscriptEntry[] = [];
   const flush = () => {
@@ -86,7 +88,7 @@ export function groupToolRuns(entries: TranscriptEntry[]): TranscriptItem[] {
     const events = run.map((entry) => entry.event);
     items.push({
       kind: "group", id: events[0].id, entries: run, summary: summarizeToolRun(events),
-      loading: events.some((event) => event.status === "in_progress" || event.status === "pending" || event.status === "running"),
+      loading: active && events.some((event) => event.status === "in_progress" || event.status === "pending" || event.status === "running"),
     });
     run = [];
   };
@@ -112,7 +114,7 @@ function stringField(value: unknown, keys: readonly string[]): string | undefine
 export function nativeRow(event: WorkerEvent): { label: string; summary?: string } {
   const kind = nativeKind(event);
   const semantics = toolSemantics(event);
-  const gateway = gatewayPresentation(event.title ?? "", event.raw_input, event.raw_output);
+  const gateway = gatewayPresentation(event.title ?? "", event.raw_input ?? event.input, event.raw_output ?? event.output);
   const input = gateway?.input ?? event.raw_input ?? event.input;
   if (kind === "read" || kind === "edit") {
     const path = stringField(input, ["filePath", "file_path", "path", "absolutePath"]) ?? semantics.target ?? undefined;

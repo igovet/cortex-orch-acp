@@ -1,6 +1,6 @@
 import { render } from "solid-js/web";
-import { afterEach, expect, it } from "vitest";
-import { emptySession, emptyWorkspace, LOCAL_MACHINE_ID, type Activity, type Worker } from "@cortex/workspace-domain";
+import { afterEach, expect, it, vi } from "vitest";
+import { emptySession, emptyWorkspace, LOCAL_MACHINE_ID, type Activity, type CommandOutput, type CommandOutputRead, type Worker, type WorkspacePort } from "@cortex/workspace-domain";
 import { KNOWN_CORTEX_TOOL_NAMES } from "@cortex/workspace-domain/tool-presentation";
 import { isHiddenWorkerEvent } from "@cortex/workspace-domain/timeline-visibility";
 import { Workspace } from "../src";
@@ -10,9 +10,11 @@ import { flush, projection, scriptedPort, withTask } from "./support";
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ""; localStorage.clear(); });
 const settle = async () => { for (let i = 0; i < 8; i++) await flush(); };
-async function mount(path: string, state: ReturnType<typeof emptyWorkspace>) {
+async function mount(path: string, state: ReturnType<typeof emptyWorkspace>, readCommandOutput?: WorkspacePort["readCommandOutput"]) {
   state.machines[0].connection = "connected";
   const p = scriptedPort({ capabilities: { everything: true, operations: [] } });
+  p.port.readCommandOutput = readCommandOutput;
+  if (path.endsWith("/workers/cortex")) p.port.readWorkerActivity = async () => ({ activity: state.workers[0].activity });
   history.replaceState(null, "", path);
   const root = document.createElement("div"); document.body.append(root);
   dispose = render(() => <Workspace port={p.port} />, root);
@@ -30,6 +32,44 @@ function readingAt(box: HTMLElement, position: number) {
   return () => top;
 }
 const working = (title: string) => { const s = withTask(emptyWorkspace(), title); s.tasks[0].status = "working"; s.tasks[0].process = "live"; return s; };
+
+it("only animates an unfinished tool run while its worker is not terminal", async () => {
+  const state = working("Live");
+  state.workers = [live([{ sequence: 1, kind: "tool", text: "Search", at: null,
+    args: JSON.stringify({ kind: "search", title: "Search", status: "in_progress" }) }])];
+  const p = await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/w`, structuredClone(state));
+  const fold = document.querySelector<HTMLButtonElement>("button.fold")!;
+  expect(fold.querySelector(".spin")).not.toBeNull();
+  state.workers[0].status = "cancelled";
+  p.emit(projection("2", structuredClone(state))); await settle();
+  expect(fold.querySelector(".spin")).toBeNull();
+});
+
+it("stops stale tool and command indicators when the worker becomes terminal", async () => {
+  const state = working("Live");
+  const running: Activity = { sequence: 1, kind: "command", text: "npm test", at: null,
+    command: { state: "running", exit: null, took: null, tail: "", reason: null } };
+  const pending: Activity = { sequence: 2, kind: "tool", text: "Search", at: null,
+    args: JSON.stringify({ kind: "search", title: "Search", status: "in_progress" }) };
+  state.workers = [live([running, pending])];
+  const p = await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/w`, structuredClone(state));
+  const fold = document.querySelector<HTMLButtonElement>("button.fold")!;
+  expect(fold.querySelector(".spin")).not.toBeNull();
+  fold.click(); await settle();
+  expect(document.querySelector(".steps .spin")).not.toBeNull();
+  const row = document.querySelector<HTMLButtonElement>("button.step-row")!;
+  row.click(); await settle();
+  expect(document.querySelector(".steps")?.textContent).toContain("Waiting for output…");
+  let version = 1;
+  for (const status of ["cancelled", "failed", "completed"] as const) {
+    state.workers[0].status = status;
+    p.emit(projection(String(++version), structuredClone(state))); await settle();
+    expect(fold.querySelector(".spin")).toBeNull();
+    expect(document.querySelector(".steps .spin")).toBeNull();
+    expect(document.querySelector(".steps")?.textContent).not.toContain("Waiting for output…");
+    expect(document.querySelector(".steps")?.textContent).not.toContain("Running");
+  }
+});
 
 it("keeps a worker's block and step open, and the reader in place, while the block grows, rolls out of the window and finishes", async () => {
   const state = working("Live");
@@ -49,7 +89,7 @@ it("keeps a worker's block and step open, and the reader in place, while the blo
     expect(fold.getAttribute("aria-expanded")).toBe("true");
     expect(step.isConnected).toBe(true);
     expect(step.getAttribute("aria-expanded")).toBe("true");
-    expect(document.querySelector(".ws-step-detail .args")?.textContent).toBe("ok");
+    expect(document.querySelector('[aria-label="Command output"]')?.textContent).toBe("ok");
     expect(top()).toBe(300);
   }
   state.workers[0].status = "completed";
@@ -78,7 +118,7 @@ it("keeps a Conversation fold and step open while the step's recorded status cha
   expect(fold.getAttribute("aria-expanded")).toBe("true");
   expect(document.querySelector("button.step-row")).toBe(row);
   expect(row.getAttribute("aria-expanded")).toBe("true");
-  expect(document.querySelector(".ws-step-detail .args")?.textContent).toBe("ok");
+  expect(document.querySelector('[aria-label="Command output"]')?.textContent).toBe("ok");
   expect(top()).toBe(300);
 });
 
@@ -99,7 +139,7 @@ it("merges one call's updates into one row at the first update's place", () => {
   expect(oneRowPerCall([{ sequence: 1, kind: "tool", text: "Read", at: 1 }, { sequence: 2, kind: "tool", text: "Read", at: 2 }])).toHaveLength(2);
 });
 
-it("opens only rows that have something to show, as plain lines otherwise", async () => {
+it("opens non-file calls even when no data was retained and preserves file detail", async () => {
   const state = working("Rows");
   state.workers = [live([
     { sequence: 1, kind: "tool", text: "Read", at: null, args: JSON.stringify({ kind: "read", title: "Read", path: "src/a.py" }) },
@@ -113,8 +153,8 @@ it("opens only rows that have something to show, as plain lines otherwise", asyn
   document.querySelector<HTMLButtonElement>("button.fold")!.click(); await settle();
   const rows = [...document.querySelectorAll<HTMLElement>(".stream .step-row")];
   expect(rows.map(r => r.querySelector(".step-l")?.textContent)).toEqual(["Read", "Get Code Snippet", "Custom Unknown Tool", "Tool activity", "Shell", "Edit"]);
-  expect(rows.map(r => r.tagName)).toEqual(["DIV", "DIV", "DIV", "DIV", "BUTTON", "BUTTON"]);
-  for (const plain of rows.slice(0, 4)) { expect(plain.hasAttribute("aria-expanded")).toBe(false); expect(plain.getAttribute("tabindex")).toBeNull(); }
+  expect(rows.map(r => r.tagName)).toEqual(["DIV", "BUTTON", "BUTTON", "BUTTON", "BUTTON", "BUTTON"]);
+  for (const plain of rows.slice(0, 1)) { expect(plain.hasAttribute("aria-expanded")).toBe(false); expect(plain.getAttribute("tabindex")).toBeNull(); }
   expect(document.querySelector(".stream")!.textContent).not.toMatch(/mcp[._]|[a-z]+_[a-z]+_[a-z]+/);
 });
 
@@ -136,4 +176,100 @@ it("shows and hides exactly what Paseo does", () => {
     expect(isHiddenActivity({ text: "Considering the plan", args: JSON.stringify({ title: "Tool activity", kind: tool_kind }) })).toBe(true);
   }
   expect(isHiddenActivity({ text: "Read", args: JSON.stringify({ title: "Read", kind: "read" }) })).toBe(false);
+});
+
+it.each(["Conversation", "worker", "coordinator activity"])("shows recorded details in %s", async surface => {
+  const state = working("Tool details");
+  localStorage.setItem("cw.ws.allTools", "true");
+  const steps = [
+    { title: "mcp__cortex__project_git", status: "completed", path: "." },
+    { title: "Bash", kind: "execute", status: "pending", command: "npm test" },
+    { title: "grep", kind: "search", query: "TODO", output: "", notice: "Only a clipped preview was retained." },
+    { title: "web_fetch", status: "completed" },
+    { title: "mcp__external__fetch", status: "completed" },
+    { title: "mcp__cortex__result_submit", kind: "edit", output: "PRIVATE OUTPUT", newText: "PRIVATE DIFF" },
+  ].map((d, i) => ({ ...d, callId: `tool:${i}` }));
+  const session = emptySession("t");
+  session.timeline = [{ id: "h", kind: "fold", text: "Worked", steps: steps.map(d => STEP_PREFIX + JSON.stringify(d)) }];
+  state.sessions = [session];
+  state.workers = [live(steps.map((d, i) => ({ sequence: i, kind: "tool", text: d.title, args: JSON.stringify(d), at: null })))];
+  if (surface === "coordinator activity") {
+    state.workers[0].id = "cortex";
+    state.workers[0].role = "orchestrator";
+  }
+  const suffix = surface === "Conversation" ? "" : `/workers/${state.workers[0].id}`;
+  await mount(`/m/${LOCAL_MACHINE_ID}/t/t${suffix}`, state);
+  document.querySelector<HTMLButtonElement>("button.fold")!.click(); await settle();
+  const rows = [...document.querySelectorAll<HTMLButtonElement>("button.step-row")];
+  expect(rows).toHaveLength(6);
+  for (const row of rows) row.click();
+  await settle();
+  const details = rows.map(row => row.parentElement!.textContent);
+  expect(details[0]).toContain("No output was recorded.");
+  expect(details[1]).toContain("Waiting for output");
+  expect(details[2]).toContain("Recorded empty.");
+  expect(details[2]).toContain("Only a clipped preview");
+  expect(details[3]).toContain("No input was recorded.");
+  expect(details[4]).toContain("No output was recorded.");
+  expect(details[5]).toContain("Private or redacted.");
+  expect(document.body.textContent).not.toMatch(/PRIVATE OUTPUT|PRIVATE DIFF/);
+  for (const row of rows) {
+    expect(row.parentElement!.querySelector('section[aria-label="Input"]')).not.toBeNull();
+    expect(row.parentElement!.querySelector('section[aria-label="Output"]')).not.toBeNull();
+  }
+});
+
+it.each([false, true])("reads command bytes only after expansion (worker: %s)", async worker => {
+  const state = working("Command output"), session = emptySession("t");
+  const ref = { attemptId: "xa_a", toolCallRef: "native-command:abc" };
+  const call = { title: "mcp__cortex__outside_command", kind: "execute", callId: `cortex-broker:${ref.attemptId}:${ref.toolCallRef}`, commandOutputRef: ref };
+  const apply = (done: boolean) => {
+    const step = { ...call, status: done ? "failed" : "in_progress" };
+    session.timeline = [{ id: "h", kind: "fold", text: "Worked", steps: [STEP_PREFIX + JSON.stringify(step)] }];
+    state.sessions = [session];
+    state.workers = [live([{ sequence: 1, kind: "command", text: step.title, at: null, args: JSON.stringify(step), commandOutputRef: ref }])];
+  };
+  apply(false);
+  let settled = false;
+  let unavailable = false;
+  let failPage = true;
+  const read = vi.fn(async ({ offset }: CommandOutputRead): Promise<CommandOutput> => {
+    if (offset === 2 && failPage) { failPage = false; throw new Error("Disconnected"); }
+    const later = offset === 2;
+    return {
+      operation: "outside_command", status: settled ? "failed" : "running", argv: ["tool", "two words"], cwd: "/fixture", exitCode: settled ? 7 : null, signal: null, failure: null,
+      output: unavailable ? { state: "unavailable" } : !settled ? { state: "pending" } : { state: "available", encoding: "base64", chunk: later ? "n5iA" : "YfA=",
+        offset: offset ?? 0, byteLength: later ? 3 : 2, totalBytes: 5, nextOffset: later ? null : 2,
+        truncated: true, captureComplete: false, complete: false },
+    };
+  });
+  const p = await mount(`/m/${LOCAL_MACHINE_ID}/t/t${worker ? "/workers/w" : ""}`, structuredClone(state), read);
+  document.querySelector<HTMLButtonElement>("button.fold")!.click(); await settle();
+  expect(read).not.toHaveBeenCalled();
+  const row = document.querySelector<HTMLButtonElement>("button.step-row")!;
+  row.click(); await settle();
+  expect(read).toHaveBeenCalledExactlyOnceWith({ ...ref, taskId: "t", projectId: "p" });
+  expect(row.parentElement?.textContent).toContain("Waiting for output");
+  settled = true; apply(true);
+  p.emit(projection("2", structuredClone(state))); await settle();
+  expect(document.querySelector("button.step-row")).toBe(row);
+  expect(read).toHaveBeenCalledTimes(2);
+  const output = () => row.parentElement!.querySelector('[role=region][aria-label="Command output"]')?.textContent;
+  const press = async (label: string) => { [...row.parentElement!.querySelectorAll("button")].find(b => b.textContent?.trim() === label)!.click(); await settle(); };
+  expect(output()).toBe("a");
+  expect(row.parentElement?.textContent).toContain("exit 7");
+  await press("Load more output");
+  expect(output()).toBe("a");
+  expect(row.parentElement?.textContent).toContain("Only previously loaded text is shown.");
+  await press("Retry output read");
+  expect(read).toHaveBeenLastCalledWith({ ...ref, taskId: "t", projectId: "p", offset: 2 });
+  expect(output()).toBe("a😀");
+  expect(row.parentElement?.textContent).toContain("Output capture was truncated.");
+  // A new open after cleanup must not reuse bytes from the previous open.
+  row.click(); await settle();
+  unavailable = true;
+  row.click(); await settle();
+  expect(row.parentElement?.textContent).toContain("Command output is unavailable.");
+  expect(output()).toBeUndefined();
+  expect(row.parentElement?.querySelector('[aria-label="Copy output (retained text)"]')).toBeNull();
 });

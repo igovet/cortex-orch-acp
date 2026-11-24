@@ -19,6 +19,8 @@ assert.equal(items[0].summary, "Ran 1 command and read 2 files");
 assert.equal(items[0].loading, false);
 assert.equal(items[2].summary, "Read 1 file");
 assert.equal(items[2].loading, true);
+const stopped = groupToolRuns([entry(read(7, "pending.md", "in_progress"))], false)[0];
+assert.equal(stopped.kind === "group" && stopped.loading, false);
 
 assert.equal(summarizeToolRun([
   event(1, { title: "mcp.cortex.project_write", raw_input: { server: "cortex", tool: "project_write", arguments: { path: "x" } } }),
