@@ -79,7 +79,14 @@ export function pagesWorld(sprintState: "planning" | "running" | "closed" = "pla
   if (sprintState !== "planning") {
     Object.assign(sprint, { planning: "created", materializedVersion: 1, taskIds: ["c-draft", "c-work"], queueState: sprintState === "closed" ? "idle" : "running", runMode: "automatic" });
     for (const t of s.tasks) if (t.id === "c-draft" || t.id === "c-work") t.sprintId = "sp";
-    if (sprintState === "closed") sprint.archivedAt = Date.UTC(2026, 10, 10, 12, 0);
+    if (sprintState === "closed") {
+      sprint.archivedAt = Date.UTC(2026, 10, 10, 12, 0);
+      sprint.queueState = "paused";
+      for (const t of s.tasks.filter(t => t.sprintId === sprint.id)) {
+        const previousStatus = t.id === "c-draft" ? "draft" : "done";
+        Object.assign(t, { status: previousStatus, process: "stopped", archive: { at: sprint.archivedAt, previousStatus } });
+      }
+    }
   }
   s.sprints = [sprint];
   return s;

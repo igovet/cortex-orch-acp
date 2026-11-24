@@ -206,9 +206,4 @@ export function queueStall(index: WorkspaceIndex, sprint: Sprint): { reason: str
   const first = drafts[0], dep = first.task.dependencies.map(id => index.byId.get(id)).find(d => !d || !dependencyReady(d.task));
   return dep ? { reason: `${first.task.title} waits for ${dep.task.title} to reach ${readyStep(dep.task, dep.target, dep.project.hasGit)}`, taskId: dep.id } : { reason: `${first.task.title} waits for a task that is not loaded`, taskId: null };
 }
-/** Why the sprint cannot go to the Archive yet, or null. Every recorded task must be loaded and done, not only the visible ones. */
-export function sprintArchiveBlocked(index: WorkspaceIndex, sprint: Sprint): string | null {
-  if (!sprint.taskIds.length) return "This sprint has no tasks to archive";
-  if (sprint.taskIds.some(id => !index.byId.has(id))) return "Some of this sprint's tasks are not loaded yet. Retry, then archive";
-  return sprint.taskIds.every(id => index.byId.get(id)!.task.status === "done") ? null : "Available when every task is done";
-}
+export const SPRINT_CLOSE_NOTE = "The sprint and its tasks move to the Archive, including tasks that haven’t started. The automatic queue stops. Nothing is discarded: worktrees, branches and unmerged work are kept.";

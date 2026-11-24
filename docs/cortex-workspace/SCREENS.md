@@ -18,7 +18,7 @@ Each screen needs loading, empty, offline/stale, permission denied, conflict and
 
 Built: a never-started task has **Edit task…** in its task menu ("…" in the title band) and its board/list menu. The dialog uses the shared composer (Attach, Voice, model/effort/settings and the plane labelled Save changes), plus title and checkout. Saved attachments must load first; a failed read has Retry. A stale save retains the draft and explains the refusal. Starting, pausing or failing a task never makes its original request editable again.
 
-A created sprint has **New task** and **Close sprint…** in its title band; a narrow title band moves both into the sprint's actions menu, so the queue control and the window's own controls stay in view. New task adds to the current sprint without starting work. Closing confirms that the sprint moves to Archive and its queue stops, while unfinished tasks stay in the project and running tasks continue; nothing is accepted, merged, cancelled or deleted. Close sprint refuses while a member returned for rework is still open. Archive has a Closed sprints section with retained summaries. Until it is closed, a sprint stays in the sidebar under its project; once its queue is complete it reads Done there, while its tasks may still wait to be finished. Running and paused queues also appear in Active work, with their Working, Review and Ready to merge tasks indented under the sprint. The project list also indents tasks under their sprint and shows at most five task and sprint rows combined, before the All link. See [the behavior and error contract](local-task-execution.md#editing-saved-tasks-and-closing-sprints).
+A created sprint has **New task** and **Close sprint…** in its title band; a narrow title band moves both into the sprint's actions menu, so the queue control and the window's own controls stay in view. New task adds to the current sprint without starting work. Closing confirms that the sprint and its tasks move to Archive, including drafts, and that the queue stops without discarding anything. The Close control names started members that are not Done, members with disputed completion and open rework. Archive has a Closed sprints section with retained summaries; archived drafts are labelled Not started and can be restored without a sprint. Until it is closed, a sprint stays in the sidebar under its project; once its queue is complete it reads Done there, while its tasks may still wait to be finished. Running and paused queues also appear in Active work, with their Working, Review and Ready to merge tasks indented under the sprint. The project list also indents tasks under their sprint and shows at most five task and sprint rows combined, before the All link. See [the behavior and error contract](local-task-execution.md#editing-saved-tasks-and-closing-sprints).
 
 ### Task Conversation
 
@@ -679,8 +679,9 @@ Several cards stack, oldest first. They are read every 5 seconds while the machi
   names: Open review findings (the reviewer's page with its report), Open task “<title>” (the task holding
   the files), and the denied path as text. A question it replaced reads "Replaced by the question below:
   <reason>"; another withdrawn one reads "Withdrawn: <first line>". A working task whose next step waits
-  for another task's files reads "Waiting for the task “<title>” to release <files>" and starts that step
-  by itself. A paused task waits in Needs you (Paused, with Resume), never in Working; a failed or
+  for another task's files reads "Waiting for the task “<title>” to release <files>" on its Working card
+  and in a visible status strip on its opened page. The title matches the holder's card and links to that
+  task from the strip when available. The waiting step starts by itself. A paused task waits in Needs you (Paused, with Resume), never in Working; a failed or
   cancelled run there reads as its outcome. Its title band offers Close task…, whose dialog closes it as
   is or cancels it and offers no Stop; its composer says so. A closed task can be archived without a
   question. A runtime result that can never be accepted (its evidence is unavailable,

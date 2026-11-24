@@ -64,6 +64,15 @@ describe("archiving follows the machine's own rule", () => {
     const v = index.archive[0] ?? index.byId.get(s.tasks[0].id)!;
     expect(archiveRow(index, v).left).toBe(30);
   });
+
+  it("uses the completion-based cleanup clock for a Done sprint archive", () => {
+    const s = world(checkout()), day = 86400000;
+    s.machines[0].retentionDays = 30;
+    s.tasks = [{ ...draftTask(), status: "done", work: "merged", doneAt: day,
+      archive: { at: 20 * day, previousStatus: "done", retentionAt: 8 * day } }];
+    const index = buildIndex(s, 20 * day);
+    expect(archiveRow(index, index.archive[0]).left).toBe(18);
+  });
 });
 
 describe("a sprint's dependency note", () => {

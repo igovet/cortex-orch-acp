@@ -99,17 +99,45 @@ it("closes a sprint only after clear confirmation, hides it in active lists and 
   button("Close sprint…").click();
   const confirmation = (f.ws.open as ReturnType<typeof vi.fn>).mock.calls[0][0];
   expect(f.commands).toEqual([]);
-  expect(confirmation.note).toContain("tasks already running continue");
-  expect(confirmation.note).toContain("No task is cancelled");
+  expect(confirmation.note).toContain("sprint and its tasks move to the Archive");
+  expect(confirmation.note).toContain("including tasks that haven’t started");
+  expect(confirmation.note).toContain("Nothing is discarded");
+  expect(confirmation.note).toContain("unmerged work are kept");
   f.succeed(); await confirmation.go();
   expect(f.commands[0]).toEqual({type:"close_sprint",sprintId:"s",confirmed:true});
   dispose!(); dispose=undefined; document.body.innerHTML="";
-  f.set({...f.state,sprints:[{...sprint,archivedAt:10,queueState:"paused"}]});
+  f.set({...f.state,sprints:[{...sprint,archivedAt:10,queueState:"paused"}],
+    tasks:[{...f.state.tasks[0],archive:{at:10,previousStatus:"draft"}}]});
   const index = buildIndex(f.held(),1);
   expect(index.summaries.get("p")!.sprints).toEqual([]);
   expect(index.byId.get("t")!.sprint).toBeNull();
   f.mount(() => <Archive />);
   expect(document.body.textContent).toContain("Closed sprints");
   expect(document.body.textContent).toContain("Delivery");
-  expect(document.body.textContent).toContain("Unfinished tasks remain in the project");
+  expect(index.archive[0].task.status).toBe("draft");
+  expect(document.body.textContent).toContain("Not started");
+  expect(document.body.textContent).toContain("No automatic cleanup");
+  expect(document.body.textContent).toContain("without a sprint");
+  button("Restore").click();
+  expect(f.commands[1]).toEqual({type:"restore_task",taskId:"t",now:1});
+});
+
+it("disables both Close sprint entry points and names each blocking member", () => {
+  const f = fixture();
+  const sprint: Sprint = {id:"s",projectId:"p",title:"Delivery",description:"Scope",runMode:"manual",planning:"created",
+    conversation:[],plan:null,materializedVersion:1,taskIds:["t"],queueState:"paused",pauseReason:null,targetBranch:null};
+  f.state.sprints = [sprint];
+  f.state.tasks = [{...f.state.tasks[0],title:"Running member",status:"working"},
+    {...draftTask(),id:"reverse",sprintId:"s",title:"Disputed member",status:"done",warnings:["contradictory_evidence"]}];
+  f.mount(() => <SprintActions sprint={sprint} tab="summary" />);
+  const primary = button("Close sprint…");
+  const menu = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(b => b.textContent?.includes("Close sprint…"))!;
+  for (const close of [primary, menu]) {
+    expect(close.getAttribute("aria-disabled")).toBe("true");
+    expect(close.getAttribute("data-why")).toContain("Running member: started but not done");
+    expect(close.getAttribute("data-why")).toContain("Disputed member: task records disagree");
+    close.click();
+  }
+  expect(f.ws.open).not.toHaveBeenCalled();
+  expect(f.commands).toEqual([]);
 });

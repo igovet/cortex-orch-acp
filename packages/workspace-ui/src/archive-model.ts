@@ -5,15 +5,16 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 export const shortDate = (at: number) => { const d = new Date(at); return `${d.getDate()} ${MONTHS[d.getMonth()]}`; };
 export const sizeText = (mb: number) => mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
 
-export type Outcome = "committed" | "merged" | "as_is" | "cancel" | "external" | "unconfirmed" | "done";
+export type Outcome = "committed" | "merged" | "as_is" | "cancel" | "external" | "unconfirmed" | "done" | "draft";
 const OUTCOMES: Record<Outcome, { text: string; tone: string }> = {
   committed: { text: "Committed", tone: "st-idle" },
+  draft: { text: "Not started", tone: "st-idle" },
   external: { text: "Done outside the app", tone: "st-idle" },
   unconfirmed: { text: "Closed by you · Not verified", tone: "st-idle" },
   merged: { text: "Merged", tone: "st-merge" }, as_is: { text: "Closed as is", tone: "st-idle" }, cancel: { text: "Cancelled", tone: "st-idle" }, done: { text: "Done", tone: "st-idle" },
 };
 export const OUTCOME_FILTERS: { id: Outcome; label: string }[] = [{ id: "committed", label: "Committed" }, { id: "merged", label: "Merged" }, { id: "as_is", label: "Closed as is" }, { id: "cancel", label: "Cancelled" }];
-const outcomeOf = (v: TaskView): Outcome => v.task.closedAs === "unconfirmed" ? "unconfirmed" : v.task.integration?.method === "commit" ? "committed" : v.task.work === "merged" ? "merged" : v.task.closedAs ?? "done";
+const outcomeOf = (v: TaskView): Outcome => v.task.archive?.previousStatus === "draft" ? "draft" : v.task.closedAs === "unconfirmed" ? "unconfirmed" : v.task.integration?.method === "commit" ? "committed" : v.task.work === "merged" ? "merged" : v.task.closedAs ?? "done";
 
 export type ArchiveRow = {
   view: TaskView; group: "soon" | "later" | "blocked"; left: number; percent: number; outcome: Outcome; outcomeText: string; outcomeTone: string;
@@ -30,12 +31,15 @@ function subline(v: TaskView, outcome: Outcome, blocker: string | null) {
   if (outcome === "as_is") return closedAsIs(v.task);
   if (outcome === "cancel") return `Cancelled${when}`;
   if (outcome === "unconfirmed") return "The saved records still disagree";
+  if (outcome === "draft") return "Archived as a draft; restore it to start work";
   return "Done";
 }
 export function archiveRow(index: WorkspaceIndex, v: TaskView): ArchiveRow {
-  const retention = v.machine.retentionDays, archivedAt = v.task.archive?.at ?? index.now;
-  // A task archived after this view's clock last moved has not lost any day yet: never more days than the retention.
-  const left = Math.ceil(retention - Math.max(0, index.now - archivedAt) / DAY), outcome = outcomeOf(v);
+  const retention = v.machine.retentionDays, archive = v.task.archive, outcome = outcomeOf(v);
+  // Sprint archives may include the ordinary auto-archive delay after completion.
+  const left = outcome === "draft" || archive?.retentionAt === null ? Infinity
+    : Math.ceil(retention - (archive?.retentionAt === undefined
+      ? Math.max(0, index.now - (archive?.at ?? index.now)) : index.now - archive.retentionAt) / DAY);
   const stated = v.task.purgeBlocker;
   const live = v.task.unexpectedChanges || v.task.process !== "stopped" || left <= 0 ? purgeBlocker(index.state, v.task) : null;
   const blocker = stated ?? live;
@@ -47,7 +51,7 @@ export function archiveRow(index: WorkspaceIndex, v: TaskView): ArchiveRow {
     status: blocker ? { text: offline ? "Overdue" : "Needs you", icon: "alert" } : null,
   };
 }
-export const daysLeft = (n: number) => n <= 0 ? "Due now" : `${n} day${n === 1 ? "" : "s"} left`;
+export const daysLeft = (n: number) => n === Infinity ? "No automatic cleanup" : n <= 0 ? "Due now" : `${n} day${n === 1 ? "" : "s"} left`;
 
 export type ArchiveFilter = { text: string; machine: string | null; project: string | null; outcome: Outcome | null };
 export const NO_FILTER: ArchiveFilter = { text: "", machine: null, project: null, outcome: null };

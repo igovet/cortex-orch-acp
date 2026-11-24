@@ -1,4 +1,4 @@
-//! Explicit owner retention, fenced across journal commits and filesystem teardown.
+//! Workspace retention, fenced across journal commits and filesystem teardown.
 use super::{
     locks::{self, AccessLock},
     outbox, schema, OpenMode, Store,
@@ -105,7 +105,7 @@ fn safe_id(id: &str) -> CoreResult<()> {
     }
     Ok(())
 }
-fn quiet(db: &Connection, task: &str) -> CoreResult<()> {
+pub(crate) fn quiet(db: &Connection, task: &str) -> CoreResult<()> {
     let row: Option<String> = db
         .query_row(
             "SELECT state FROM runtime_tasks WHERE task_id=?",
@@ -272,6 +272,86 @@ fn adapter(db: &rusqlite::Transaction<'_>, project: &str, task: &str) -> CoreRes
     }
     Ok(())
 }
+/// Check the Workspace disposition and archive clock. The scheduler holds the
+/// machine lock from reading this record until recording the purge outcome.
+pub fn expired_closed_archive(record: &Value, now_ms: u64, retention_days: u64) -> bool {
+    (1..=3650).contains(&retention_days)
+        && record["purged"] != true
+        && record["status"] == "done"
+        && record["archive"]["previousStatus"] == "done"
+        && (matches!(record["closedAs"].as_str(), Some("as_is" | "cancel" | "external"))
+            || record["closedAs"].is_null() && record["work"] == "merged")
+        && record["doneAt"].as_u64().zip(record["archive"]["at"].as_u64())
+            .is_some_and(|(done, archived)| {
+                if done > archived {
+                    return false;
+                }
+                let clock = match record["archive"].get("retentionAt") {
+                    None => Some(archived),
+                    // Sprint close stores the completion plus the ordinary
+                    // auto-archive delay, independently of the close time.
+                    Some(clock) => clock.as_u64().filter(|clock| *clock >= done),
+                };
+                clock.is_some_and(|clock| {
+                    now_ms.saturating_sub(clock) >= retention_days * 86_400_000
+                })
+            })
+}
+
+fn scheduled_binding(
+    db: &Connection,
+    root: &str,
+    project: &str,
+    task: &str,
+    runtime: &str,
+) -> CoreResult<()> {
+    let projected = crate::projections::task_records(db, project, root, task)?
+        .ok_or(CoreError::Refused("not_found"))?;
+    let Some(execution) = projected.execution_id.as_deref() else {
+        return refuse("active_execution");
+    };
+    if projected.warnings.iter().any(|w| w == crate::projections::CONTRADICTORY_EVIDENCE)
+        || matches!(projected.phase.as_str(), "unknown" | "paused")
+    {
+        return refuse("active_execution");
+    }
+    let linked: bool = db.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM workspace_executions e JOIN workspace_tasks t USING(task_id)
+           JOIN workspace_projects p USING(project_id)
+           WHERE p.project_id=?1 AND p.project_root=?2 AND t.task_id=?3
+           AND e.execution_id=t.execution_id AND e.execution_id=?4 AND e.runtime_task_id=?5
+           AND (SELECT count(*) FROM workspace_executions x WHERE x.task_id=t.task_id)=1
+           AND NOT EXISTS(SELECT 1 FROM workspace_starts s WHERE s.task_id=t.task_id
+               AND (s.state!='dispatched' OR s.execution_id!=e.execution_id
+                    OR s.project_id!=p.project_id))
+         )",
+        (project, root, task, execution, runtime),
+        |r| r.get(0),
+    )?;
+    if !linked {
+        return refuse("active_execution");
+    }
+    // The bound Workspace display journal is a logical, replayable ID,
+    // not a loadable ACP session. We cannot establish whether another
+    // retained host session is loaded (even an old one can be loaded).
+    let protected: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM acp_host_sessions h WHERE h.task_id=?1
+            AND NOT (h.session_id=(
+                SELECT acp_session_id FROM workspace_executions WHERE execution_id=?2
+            ) AND h.client_info='{\"name\":\"cortex-native\"}'))
+         OR EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=?1 AND status!='terminated')
+         OR EXISTS(SELECT 1 FROM work_assignment_attempts WHERE task_id=?1 AND status IN ('planned','running'))
+         OR EXISTS(SELECT 1 FROM pending_questions WHERE task_id=?1 AND status='open')",
+        (runtime, execution),
+        |r| r.get(0),
+    )?;
+    if protected {
+        return refuse("active_execution");
+    }
+    Ok(())
+}
+
 impl Store {
     /// Fails closed on active, missing or ambiguous execution evidence. Retry finishes only
     /// this task's committed deletion intent. It never age-selects or adopts another owner.
@@ -280,6 +360,29 @@ impl Store {
         project: &str,
         task: &str,
         reclaim: bool,
+    ) -> CoreResult<Value> {
+        self.purge_workspace_task_inner(project, task, reclaim, None)
+    }
+
+    /// Background callers have no adapter-only fallback and do not VACUUM
+    /// the whole project database for each expired task.
+    pub fn purge_expired_workspace_archive(
+        &self,
+        project: &str,
+        task: &str,
+        locked_record: &Value,
+        now_ms: u64,
+        retention_days: u64,
+    ) -> CoreResult<Value> {
+        self.purge_workspace_task_inner(project, task, false, Some((locked_record, now_ms, retention_days)))
+    }
+
+    fn purge_workspace_task_inner(
+        &self,
+        project: &str,
+        task: &str,
+        reclaim: bool,
+        scheduled: Option<(&Value, u64, u64)>,
     ) -> CoreResult<Value> {
         if matches!(
             self.mode,
@@ -328,6 +431,20 @@ impl Store {
         if start.as_deref() == Some("unknown") || start.is_some() && runtime.is_none() {
             return refuse("active_execution");
         }
+        if let Some((record, now_ms, retention_days)) = scheduled {
+            if !expired_closed_archive(record, now_ms, retention_days) {
+                return refuse("archive_not_expired");
+            }
+            let runtime = runtime.as_deref().ok_or(CoreError::Refused("active_execution"))?;
+            // Native Workspace task directories use the t_<simple UUID>
+            // namespace. An arbitrary ID must never name a private store area.
+            if !runtime.strip_prefix("t_").is_some_and(|id| {
+                id.len() == 32 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            }) {
+                return refuse("unsafe_storage");
+            }
+            scheduled_binding(&tx, self.key.root().to_str().ok_or(CoreError::Refused("invalid_project"))?, project, task, runtime)?;
+        }
         if let Some(runtime) = &runtime {
             safe_id(runtime)?;
             let root: Option<String> = tx
@@ -355,17 +472,28 @@ impl Store {
         // Intent is durable before the first file removal. The exclusive access fence stays
         // held over both transactions; other cooperative stores cannot resume this task.
         let sources = db
-            .prepare("SELECT path,device,inode,published_digest FROM drafts WHERE task_id=?")?
+            .prepare("SELECT path,device,inode,published_digest,id,kind FROM drafts WHERE task_id=?")?
             .query_map([&runtime], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, i64>(1)?,
                     r.get::<_, i64>(2)?,
                     r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        for (path, device, inode, sha) in sources {
+        if scheduled.is_some() {
+            for (path, _, _, _, id, kind) in &sources {
+                safe_id(id)?;
+                let leaf = if kind == "pipeline" { "pipeline-drafts" } else { "draft-reports" };
+                if Path::new(path) != self.key.directory().join(leaf).join(format!("{id}.md")) {
+                    return refuse("unsafe_storage");
+                }
+            }
+        }
+        for (path, device, inode, sha, _, _) in sources {
             remove_source(
                 self.key.root(),
                 Path::new(&path),
@@ -403,6 +531,7 @@ impl Store {
         }
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         quiet(&tx, &runtime)?;
+        crate::workspace::worktrees::queue_purge_tx(&tx, project, task, &runtime)?;
         adapter(&tx, project, task)?;
         let tables = schema::tables(&tx)?;
         for sql in DELETIONS {

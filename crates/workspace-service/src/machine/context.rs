@@ -22,6 +22,27 @@ pub(super) fn open(root: &Path, mode: OpenMode) -> Result<Option<Store>> {
         Ok(_) => Store::open(key, mode).map(Some).map_err(core),
     }
 }
+pub(super) fn checkout_unavailable(error: CoreError) -> Refused {
+    refuse(error.code(), "The task's worktree is unavailable. Restore the original checkout or use task history; the project folder is not a replacement.")
+}
+
+pub(super) fn owned_checkout(
+    root: &Path, project: &str, task: &str,
+) -> Result<Option<cortex_core::workspace::worktrees::Worktree>> {
+    use cortex_core::workspace::worktrees;
+    let Some(store) = open(root, OpenMode::LiveReadOnly)? else { return Ok(None); };
+    store.read(|db| {
+        let Some(_) = worktrees::owned_on(db, project, task)? else { return Ok(None); };
+        let checkout = worktrees::desktop_checkout_on(db, store.key(), project, Some(task), None)?;
+        checkout.and_then(|c| c.worktree).map(Some).ok_or(CoreError::Refused("worktree_binding_invalid"))
+    }).map_err(checkout_unavailable)
+}
+
+pub(super) fn set_worktree(record: &mut Value, w: &cortex_core::workspace::worktrees::Worktree) {
+    record["checkout"] = json!({"id":w.id,"kind":"worktree","path":w.path,"branch":w.branch});
+    record["baseRevision"] = json!(w.base_sha);
+}
+
 pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) -> Result<Value> {
     let mut value = super::native::product(state, project)?;
     if !value["tasks"].is_object() {
@@ -36,8 +57,15 @@ pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) ->
             let rows = query.query_map([project], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
                 .collect::<std::result::Result<Vec<_>,_>>()?;
             if rows.len() > 10000 { return Err(CoreError::Refused("machine_reply_too_large")); }
-            Ok(rows)
+            rows.into_iter().map(|(task, options)| {
+                let owned = cortex_core::workspace::worktrees::owned_on(db, project, &task)?;
+                let missing = owned.is_some() && cortex_core::workspace::worktrees::desktop_checkout_on(
+                    db, store.key(), project, Some(&task), None
+                ).is_err();
+                Ok((task,options,owned,missing))
+            }).collect::<CoreResult<Vec<_>>>()
         }).map_err(core)?;
+            super::task_rework::project(&store, project, &mut value, false)?;
             owner_closed(&store, project, &mut value)?;
             // Files attached to answers are kept like message files. An answer recorded
             // before this was kept becomes referenced here; the save happens now when the
@@ -60,7 +88,7 @@ pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) ->
     let mut branch = None;
     let mut base = None;
     let mut trees = None;
-    for (task, raw) in options {
+    for (task, raw, owned, missing) in options {
         let options: Value = serde_json::from_str(&raw)
             .map_err(|_| refuse("state_unreadable", "Task options are unreadable."))?;
         let record = &mut value["tasks"][&task];
@@ -76,7 +104,10 @@ pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) ->
             record["title"] = title.clone();
             record["titleState"] = json!("user");
         }
-        if record["checkout"]["kind"] == "main" {
+        if let Some(w) = owned {
+            set_worktree(record, &w);
+            if missing { record["checkout"]["unavailable"] = json!(true); }
+        } else if record["checkout"]["kind"] == "main" {
             if branch.is_none() {
                 branch = Some(if has_git {
                     git.out(root, &["branch", "--show-current"])
@@ -142,7 +173,7 @@ pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) ->
 /// Close task whose saved disposition was never written) is the owner's close as is: it
 /// reads, archives, settles its sprint and is cleaned up like one. A saved status or
 /// archive always wins; nothing here certifies the work.
-fn owner_closed(store: &Store, project: &str, value: &mut Value) -> Result<()> {
+pub(super) fn owner_closed(store: &Store, project: &str, value: &mut Value) -> Result<()> {
     let key = store.key().root().to_string_lossy().into_owned();
     let closed = store
         .read(|db| cortex_core::projections::owner_closed(db, project, &key))
@@ -217,6 +248,10 @@ fn writer(
         return Err(CoreError::Refused("writer_unconfirmed"));
     }
     for (task, raw) in rows {
+        if let Some(binding) = cortex_core::workspace::worktrees::owned_on(db, project, &task)? {
+            if binding.path == checkout { return Ok(Some(task)); }
+            continue;
+        }
         let raw = raw.ok_or(CoreError::Refused("writer_unconfirmed"))?;
         let options: Value = serde_json::from_str(&raw)?;
         if !options.is_object()
@@ -248,74 +283,33 @@ fn writer(
     }
     Ok(None)
 }
-pub async fn file(
+pub(super) fn require_idle_checkout(root: &Path, project: &str, checkout: &Path) -> Result<()> {
+    let Some(store) = open(root, OpenMode::LiveReadOnly)? else { return Ok(()); };
+    if store.read(|db| writer(db, project, root, checkout, None)).map_err(core)?.is_some() {
+        return Err(refuse("checkout_busy", "A task is still using this checkout. Wait for it to stop before changing it."));
+    }
+    Ok(())
+}
+
+pub(super) async fn file_checkout(
     root: &Path,
-    state: &Path,
     project: &str,
     params: &Value,
-    save: bool,
     git: &mut Git,
-) -> Result<Value> {
+) -> Result<(String, PathBuf)> {
     let wanted = params["checkoutId"]
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| format!("{project}:main"));
     let checkout = git.resolve(root, project, &wanted).await?;
-    let name = string(params, "file")?;
-    relative(name)?;
-    if git.is_repo(&checkout).await? {
-        if let Some(driver) = git.filters(&checkout, &[name.to_owned()]).await?.get(name) {
-            if save {
-                return Err(refuse(
-                    "filtered_file",
-                    "Filtered files cannot be edited here.",
-                ));
+    if let Some(task) = params["taskId"].as_str() {
+        if let Some(binding) = owned_checkout(root, project, task)? {
+            if binding.id != wanted || binding.path != checkout {
+                return Err(refuse("worktree_binding_invalid", "Select the task's original checkout for this file."));
             }
-            return Ok(json!({"file":name,"text":null,"revision":null,
-                "reason":format!("Git filter '{driver}'-managed file. Editing is unavailable; no filter is run.")}));
         }
     }
-    let Some(store) = open(
-        root,
-        if save {
-            OpenMode::RuntimeValidate
-        } else {
-            OpenMode::LiveReadOnly
-        },
-    )?
-    else {
-        return if save {
-            files::save(&checkout, state, params)
-        } else {
-            files::read(&checkout, params)
-        };
-    };
-    let base = if git.is_repo(root).await? {
-        Some(worktree_base(root, state, git).await?)
-    } else {
-        None
-    };
-    if save {
-        store
-            .write(|db| {
-                if writer(db, project, root, &checkout, base.as_deref())?.is_some() {
-                    return Err(CoreError::Refused("checkout_busy"));
-                }
-                files::save(&checkout, state, params).map_err(|e| CoreError::Refused(e.code))
-            })
-            .map_err(core)
-    } else {
-        let held = store
-            .read(|db| writer(db, project, root, &checkout, base.as_deref()))
-            .map_err(core)?;
-        let mut reply = files::read(&checkout, params)?;
-        if held.is_some() {
-            reply["writer"] = json!(held);
-            reply["readOnly"] =
-                json!("Cortex is still writing in this checkout. Stop it before editing.");
-        }
-        Ok(reply)
-    }
+    Ok((wanted, checkout))
 }
 /// A saved task's files as references: each body is stored privately here first.
 pub fn attachments(root: &Path, state: &Path, project: &str, task: &str) -> Result<Value> {

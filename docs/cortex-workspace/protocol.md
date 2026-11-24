@@ -39,7 +39,7 @@ with `history_reset` when the session's rows at or before the position were
 removed or written again, and with `invalid_cursor` for another project, task,
 session or page size; the reader then reads the history from the start. This
 is a response field added under the rule below (responses may add fields): the
-wire version stays 1.8, the native envelope stays major 2 / mapping 2, a peer
+wire version is unchanged, the native envelope stays major 2 / mapping 2, a peer
 that ignores the field rereads whole histories as before, and the field's
 absence tells a window that the service cannot read forward.
 `history.earlier` reads the same history from its end backwards, with the same
@@ -93,9 +93,15 @@ launching any controller the service claims a cooperative logical-project/channe
 lease; a competing participating service is refused. Standalone legacy ACP
 processes do not participate in that fence.
 
+## Remote transport and version refusals (built, not qualified)
+
+The remote endpoint (`crates/workspace-remote`) serves three ALPNs. `cortex-workspace/pair/1` carries pairing and `cortex-workspace/rpc/1` carries the workspace wire (currently 1.11, the generated `WIRE_MAJOR`.`WIRE_MINOR`; the major must match and the minor is the intersection of both sides). `cortex-workspace/version/1` is a probe that needs no authorization: the client sends one byte (`0x01`) and the host answers one length-prefixed JSON frame of constants only, `{"supported":["cortex-workspace/pair/1","cortex-workspace/rpc/1"],"wire":"1.11"}`, then closes. The reply carries no machine name, identity-derived data, device list or pairing state. After a failed pairing or rpc dial a client may probe once; a well-formed reply (at most 256 bytes) that lacks the requested ALPN is the stable refusal `remote_incompatible_version`; a failed probe, a malformed reply or a reply still listing the ALPN leaves the machine `machine_unreachable`. `service.status` reports the actual wire major and minor.
+
+Stable refusal codes on this path: `remote_incompatible_version` (probe-confirmed mismatch), `unsupported_pairing_link_version` (pairing link in an unknown format, refused before dialing), `invalid_pairing_link`, `device_rejected` (not or no longer paired), `machine_unreachable`, `pairing_cancelled`, `remote_operation_refused` (allowlist), `remote_state_corrupt` (damaged saved state keeps remote access off) and `remote_state_unavailable` (an owner decision or revoke could not be saved). Desktop bridge refusals `version_mismatch`, `service_protocol_mismatch`, `bridge_invalid_capabilities` and `unsupported_protocol` are shown with reinstall guidance. See [security](security.md#remote-access-built-not-qualified).
+
 ## Local desktop slice (built)
 
-The first implementation covers only the subset below. It is the contract of [CW-S02](backlog/CW-S02.md) to [CW-S12](backlog/CW-S12.md) and is described in [ADR 0014](adr/0014-local-service-transport.md). The wire version is 1.8 and the mapping version is 1.
+The first implementation covers only the subset below. It is the contract of [CW-S02](backlog/CW-S02.md) to [CW-S12](backlog/CW-S12.md) and is described in [ADR 0014](adr/0014-local-service-transport.md). The wire version is 1.11 and the mapping version is 1. A task waiting for files may include `filesWait` with the same-project holder’s Workspace task ID and the release target text. Clients use the holder’s current display title when available and otherwise show `waitReason`.
 
 **Transport.** The desktop shell reaches the service through a native bridge. The service listens on a Unix domain socket in a private runtime directory. Frames are length-prefixed UTF-8 JSON with a 4-byte big-endian length and an 8 MiB maximum, carrying JSON-RPC 2.0 requests and bounded subscription notifications. ACP keeps its own newline-delimited framing. No TCP, loopback HTTP or WebSocket listener is used. The service serves at most 64 connections at once; a later caller waits in the listen backlog until one ends and is never accepted and dropped. The desktop bridge keeps at most 48 ordinary requests in flight, so `service.status` and the subscription's own `projects.list` resync always find a connection (see [consistency and recovery](consistency-and-recovery.md)).
 
@@ -130,7 +136,11 @@ with a leading paragraph break, so two messages never read as one. Unknown or ov
 explicit, not silently clipped. The shell exposes a closed allowlist; it cannot forward arbitrary methods
 or paths.
 
-**Saved task editor and sprint archive.** These extend the existing local `machine.call` helper, not the public adapter wire operation list: `product.task` action `edit` delegates to the adapter's host-only, version-checked draft write; `product.sprint` action `close` records a confirmed archived timestamp. The generated wire schema remains 1.8. Title, description, attachment bytes and options commit in the draft's SQLite transaction; the helper projects the saved title over auxiliary naming. A stale version or any execution identity refuses editing. Sprint closure is idempotent, keeps member state and files, and disables further sprint mutations. Closing and scheduler starts serialize through the existing owner-record lock; the scheduler rereads the current task version before claiming a start. See [editing and closure](local-task-execution.md#editing-saved-tasks-and-closing-sprints).
+**Saved task editor and sprint archive.** These use the local `machine.call` helper; the generated public adapter wire schema is unchanged. `product.task` action `edit` delegates to the adapter's host-only, version-checked draft write. Title, description, attachment bytes and options commit in the draft's SQLite transaction; the helper projects the saved title over auxiliary naming. A stale version or any execution identity refuses editing.
+
+Send `product.sprint` with `action: "close"`, `sprintId` and `confirmed: true`. Closure serializes with start admission under the existing machine lock and saves the sprint and its member archives together. A blocked reply names the members in its message (`sprint_close_blocked`, or `rework_pending` if any member has open rework). Reread the board after success: archived drafts remain drafts and carry `previousStatus: "draft"`. A repeat close does not rearchive restored tasks. See [editing and closure](local-task-execution.md#editing-saved-tasks-and-closing-sprints).
+
+**Git text drafts.** The local machine helper accepts `product.task` actions `draft_checkout_commit {checkoutId}` and `draft_push_summary {checkoutId, remote, branch}`. Both return `{jobId}`; poll via `short_text_poll {jobId}` (no `taskId`). As with the task-bound `draft_integration_text`, the terminal reply has `source`, `reason`, `text` and `route`. Commit and squash return `message` (subject, blank line and body on model success); Push returns `body` only, and PR text has `title` and `body`. Model drafts report `source: "model"` or `source: "fallback"` with a reason. A fallback with no draft may omit all text fields. Local checkout drafts and their polls are not exposed to paired devices. A confirmed `git` action `push` accepts optional `summary` (visible text, up to 8,000 UTF-8 bytes); the summary is not part of Git's arguments or the push witness. A subsequent successful push to the same destination with no summary clears it. A task PR draft may return `source: "saved"` when its body comes from the confirmed Push summary. No generated wire schema change is required.
 
 **Action acknowledgement and refresh.** The window settles receipts before projection synchronization.
 Task/sprint actions reread only their project and show Updating confirmed state separately; registry
@@ -149,7 +159,7 @@ fields and leaves engine usage and the composer's options unchanged. It is not a
 across the product file and worker database, and does not change the generated wire version or mutation
 checks.
 
-**Permanent sprint deletion.** The owner command `delete_sprint {projectId, sprintId, confirmed}` maps to `machine.call` operation `product.sprint` action `delete`. The service owns preparation, task-wide cancellation and bounded completion; internal `delete_prepare`/`delete_finish` helper phases persist a start fence and retry state. The response is `{done, taskIds?, keptPaths?, reason?}`: `done: false` is explicitly incomplete, not successful deletion. Completed results replay idempotently by sprint identity. This extends the machine-helper contract, not the generated ACP adapter operation list; the wire schema stays 1.8. See [deletion and file preservation](local-task-execution.md#editing-saved-tasks-and-closing-sprints).
+**Permanent sprint deletion.** The owner command `delete_sprint {projectId, sprintId, confirmed}` maps to `machine.call` operation `product.sprint` action `delete`. The service owns preparation, task-wide cancellation and bounded completion; internal `delete_prepare`/`delete_finish` helper phases persist a start fence and retry state. The response is `{done, taskIds?, keptPaths?, reason?}`: `done: false` is explicitly incomplete, not successful deletion. Completed results replay idempotently by sprint identity. This extends the machine-helper contract, not the generated ACP adapter operation list; the wire schema is unchanged. See [deletion and file preservation](local-task-execution.md#editing-saved-tasks-and-closing-sprints).
 
 **Creating a plan's tasks.** The owner command `materialize_plan {sprintId, version}` maps to one
 `machine.call` operation `product.sprint` action `materialize {sprintId, planVersion, requestId}`; the
@@ -162,7 +172,7 @@ The reply also lists `strayTaskIds`: tasks an interrupted earlier client-side cr
 sprint without being its members; they are never adopted. Refusals: `stale_plan`, `plan_not_ready`,
 `sprint_started` (another version already created), `sprint_closed`, `invalid_plan`,
 `project_store_unavailable`. This extends the machine-helper contract, not the generated ACP adapter
-operation list; the wire schema stays 1.8. See
+operation list; the wire schema is unchanged. See
 [creating a plan's tasks](local-task-execution.md#creating-a-plans-tasks).
 
 **Coordinator activity and observed routes.** `history.page` rows optionally include
@@ -269,11 +279,25 @@ to act on a disputed binding. The task action boundary refuses ordinary mutation
 while records disagree. The Workspace Board and List show the disposition as
 **Closed, not verified**, separate from Done.
 
+**Return for rework.** Use `product.task` with `action: "rework"`, `taskId`, a
+`requestId`, nonblank `text`, and optional uploaded attachment references in
+`attachments`. Read eligibility and identity from the task in `product.board`,
+`product.read` or `product.facts`: use `reworkVersion`, `reworkExecutionId` and
+`reworkOwnerEpoch` as `expectedVersion`, `executionId` and `ownerEpoch`.
+The last two are null for a closed task that never ran. Check `reworkAvailable`
+and warn before sending if `reworkWarnings` contains `dependents_started`.
+On a recorded reply (`done: true`, `state: "PLANNING"`, `reworkEvent`), reread
+authoritative task facts; the reply is not a new result. Do not send a follow-up
+ordinary prompt or a private `reopen` overlay action. See
+[rework eligibility and behavior](local-task-execution.md#return-for-rework).
+
 **Local dictation.** The owner-only native/socket surface additionally offers closed voice.start/read/stop/cancel controls, separate from the ACP/project wire schema. Start binds a request identity; further calls bind a random local session identity. Replies contain bounded phase, percentage, seconds, transcript and fixed error code, never audio. One read-refreshed capture lease is allowed; ten seconds without reads or service stop cancels it. Stop finalizes a preview, never a prompt. No path, URL, executable, environment or send parameter is accepted. See [voice input](local-task-execution.md#local-voice-input).
 
 For native-owned executions, worker guidance/stops, host-verifier stops/reruns and next-use task settings use the same `executions.control` actions without Python mutation fallback. Guarded-only settings and exact stored check identities are described in [native task controls](local-task-execution.md#native-desktop-task-controls); these controls do not certify work or grant broader permissions.
 
-**Task options.** `tasks.create` may carry saved per-task settings and main/worktree checkout kind. Settings apply only to that task; the owning session accepts idle composer changes through `executions.control` with action `task_settings`. Worktree creation uses the configured machine root and the shared logical project store. Automatic queues advance in the activated service child, never from a screen read. `projects.remove` removes the locator and stops its child without deleting the repository/store; native `native.open_editor` resolves a registered project before invoking the installed editor. See [task execution](local-task-execution.md) for unavailable features and safety limits.
+**Task options.** `tasks.create` may carry saved per-task settings and main/worktree checkout kind. Settings apply only to that task; the owning session accepts idle composer changes through `executions.control` with action `task_settings`. `service.capabilities` must explicitly advertise `taskWorktrees: true` for the desktop to offer the choice. `tasks.start` creates the worktree under the configured machine root and records the binding in the shared logical project store. Task views use `checkout.id`; `checkout.unavailable` marks history and recovery, not main. Confirmed `product.task` action `close_remove_worktree` is separate from ordinary close. A new confirmed request can retry a cleanup retained as `worktree_dirty` or `worktree_occupied`, including on a closed task. The service revalidates the original checkout and its eligibility; it does not requeue uncertain or completed removal. Finish previews `integrationFacts.deleteWorktree`; `product.integrate` supports `deleteWorktree: false` to opt out of default cleanup after an owned-worktree squash. Where cleanup runs, `worktreeCleanup` reports its separate outcome. Automatic queues advance in the activated service child, never from a screen read. `projects.remove` removes the locator and stops its child without deleting the repository/store; native `native.open_editor` resolves a registered project before invoking the installed editor. See [task execution](local-task-execution.md) for unavailable features and safety limits.
+
+**Local file manager.** The native desktop bridge adds `native.reveal_file` to `service.capabilities.methods` when the session bus has an active or activatable `org.freedesktop.FileManager1` provider reachable via `gdbus`, or a system folder opener is installed. The closed request is `{projectId, checkoutId, file}`; the bridge resolves the checkout-relative file via `repo.locate`. It calls `ShowItems` with one encoded local file URI and an empty startup ID, or falls back to opening the containing directory. `{"outcome":"opened"}` acknowledges handoff, not a confirmed selection. Resolution or launch can be refused. Neither the phone nor the remote service tunnel accepts this method.
 
 **Start.** Saving a draft never starts an execution. An explicit start is idempotent by request identity. `busy` means the target task already has an execution, not that another project task is active. Other Workspace executions, unbound/unknown starts and ordinary ACP tasks never refuse a different task's start. Conversely, pending, unknown or running Workspace starts do not block a new ordinary ACP first prompt; source-event replay still returns its original task. Version, owner-epoch and host readiness checks still apply. A start is recorded and claimed before it is dispatched into a fresh ACP session; a crash leaves that task's execution unknown, and the operation is never replayed automatically. Sprint queue dependency selection and pausing belong to the service scheduler; manual `tasks.start` has no sprint-order check. An `end_turn` stop is not completion.
 
@@ -312,7 +336,7 @@ fallback-to-next-prompt claim is made. Native engine actions have no Cortex comm
 
 Capability replies to a version-1 client at minor 6 or earlier retain its original 1-MiB advertised frame bound; new peers advertise 8 MiB. Limit negotiation intersects only fields both peers supplied. Existing small requests without attachment fields remain valid. Large screenshots require updated transport components; an older peer is never promised the larger budget.
 
-**Sprint checkout.** The owner-only `product.sprint` create command also accepts optional `checkout: {kind: "main" | "worktree"}` and retains it with the sprint. Only those two kinds are accepted; paths and branch overrides are refused there. The service copies that kind into each materialized task’s saved `tasks.create` options, so `tasks.start` and the automatic scheduler use the same per-task preparation. Planning itself creates no checkout. This is an optional owner-product field, not a change to the generated runtime wire schema (1.8); older sprints without it keep their per-item/default behavior.
+**Sprint checkout.** The owner-only `product.sprint` create command also accepts optional `checkout: {kind: "main" | "worktree"}` and retains it with the sprint. Only those two kinds are accepted; paths and branch overrides are refused there. The service copies that kind into each materialized task’s saved `tasks.create` options, so `tasks.start` prepares a separate checkout for each worktree task in Manual and Hybrid. The Automatic queue refuses worktrees. Planning itself creates no checkout. This is an optional owner-product field, not a change to the generated runtime wire schema; older sprints without it keep their per-item/default behavior.
 
 **Sprint and review resources.** The owner-only `product.sprint` create/note commands accept optional
 `attachments` with the same validation as task creation. Saved sprint and conversation projections retain
@@ -329,4 +353,4 @@ the frame budget.
 
 **Limits, version 1.** 50 task summaries per page; 100 events or history rows per page; 64 KiB of content per response page; 8 MiB per local JSON frame; 32,000 characters per description or answer; request identities of at most 128 characters. Oversized content is marked unavailable or delivered through bounded text pages; it is never silently truncated.
 
-**Version.** The public wire version is 1.8 (prior fingerprints remain in the lock), independent of the product version and of ACP protocol version 1. The schema is canonical JSON Schema 2020-12 with a committed fingerprint. Commands are strict; responses may add fields.
+**Version.** The public wire version is 1.11 (prior fingerprints remain in the lock), independent of the product version and of ACP protocol version 1. The schema is canonical JSON Schema 2020-12 with a committed fingerprint. Commands are strict; responses may add fields.

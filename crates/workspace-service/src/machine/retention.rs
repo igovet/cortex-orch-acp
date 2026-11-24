@@ -5,10 +5,16 @@ use super::{
     native::*,
     settings::{self, Lock},
 };
-use cortex_core::{CoreError, OpenMode};
+use cortex_core::{
+    workspace::worktrees::{self, Cleanup},
+    CoreError, OpenMode,
+};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime},
+};
 const DAY: u64 = 86_400_000;
 fn invalid() -> Refused {
     refuse(
@@ -124,22 +130,22 @@ async fn observation(root: &Path) -> Result<String> {
 pub(super) async fn purge(
     root: &Path,
     project: &str,
-    state: &Path,
+    _state: &Path,
     product: &mut Value,
     task: &str,
     git: &mut Git,
 ) -> Result<u64> {
-    purge_impl(root, project, state, product, task, git, false).await
+    purge_impl(root, project, product, task, git, Purge::Manual).await
 }
 pub(super) async fn purge_owner(
     root: &Path,
     project: &str,
-    state: &Path,
+    _state: &Path,
     product: &mut Value,
     task: &str,
     git: &mut Git,
 ) -> Result<u64> {
-    purge_impl(root, project, state, product, task, git, true).await
+    purge_impl(root, project, product, task, git, Purge::Owner).await
 }
 fn owner_purge_error(error: cortex_core::CoreError) -> Refused {
     if matches!(
@@ -154,48 +160,117 @@ fn owner_purge_error(error: cortex_core::CoreError) -> Refused {
         context::core(error)
     }
 }
+enum Purge {
+    Manual,
+    Owner,
+    Scheduled { at: u64, days: u64 },
+}
+
 async fn purge_impl(
     root: &Path,
     project: &str,
-    _state: &Path,
     product: &mut Value,
     task: &str,
     git: &mut Git,
-    owner: bool,
+    mode: Purge,
 ) -> Result<u64> {
-    let record = product["tasks"][task].clone();
+    let owner = matches!(mode, Purge::Owner);
+    let mut record = product["tasks"][task].clone();
     if !super::workers::truthy(&record["archive"]) {
         return Err(refuse(
             "not_archived",
             "Only archived tasks can be deleted.",
         ));
     }
-    let discarded = if record["work"] == "discard_confirmed" {
-        let path = task_path(root, &record, git).await?;
-        if owner {
-            // Retained owner decisions bind to the legacy manifest, not the
-            // distinct native Core verification digest. Unobservable is no consent.
-            super::legacy_source::capture(&path)
-                .ok()
-                .flatten()
-                .is_some_and(|sha| record["discardRevision"] == sha)
-        } else {
-            observation(&path)
-                .await
-                .ok()
-                .is_some_and(|sha| record["discardRevision"] == sha)
-        }
-    } else {
-        false
-    };
-    if unmerged(root, &record, git).await? && !discarded {
-        // The task stays in the Archive with its work; nothing is changed or deleted.
-        return Err(refuse(
-            "unmerged_work",
-            "This task has unmerged work. Decide whether it may be discarded first.",
-        ));
+    // Resolve removable checkout and validate the bookkeeping before Core
+    // deletion. Post-commit Git failure only retains the checkout.
+    if !product["messages"].is_array() || !product["comments"].is_object()
+        || !product["sprints"].as_array().is_some_and(|s| s.iter().all(|s| s["taskIds"].is_array()))
+    {
+        return Err(invalid());
     }
-    let result = if let Some(store) = context::open(root, OpenMode::RuntimeValidate)? {
+    let store = if matches!(mode, Purge::Scheduled { .. }) {
+        Some(cortex_core::Store::open_for_workspace_retention(context::key(root)?)
+            .map_err(context::core)?)
+    } else {
+        context::open(root, OpenMode::RuntimeValidate)?
+    };
+    let (owned, committed_purge) = if let Some(store) = &store {
+        let owned = worktrees::owned(store, project, task).map_err(context::core)?;
+        let prior = worktrees::cleanup_outcome(store, project, task, Cleanup::Purge)
+            .map_err(context::core)?;
+        if let Some(binding) = &owned {
+            record["checkout"] = json!({"kind":"worktree","path":binding.path,"branch":binding.branch});
+            if worktrees::cleanup_outcome(store, project, task, Cleanup::Close)
+                .map_err(context::core)?.is_some_and(|r| r["status"] == "removed")
+            {
+                record["integration"]["worktreeCleanup"] = json!("removed");
+            }
+        }
+        (owned, prior)
+    } else {
+        (None, None)
+    };
+    let preflight = async {
+        let removed = record["integration"]["worktreeCleanup"] == "removed";
+        let scheduled = matches!(mode, Purge::Scheduled { .. });
+        // A lost owned checkout cannot authorize discarding work. If the
+        // disposition was already merged, however, an absent checkout must not
+        // silently redirect retention to main or block reporting it as retained.
+        if record["work"] == "merged" && owned.as_ref().is_some_and(|w| !w.path.exists()) {
+            return Ok(());
+        }
+        if record["checkout"]["kind"] == "worktree"
+            && (!removed || scheduled && record["checkout"]["path"].as_str()
+                .is_none_or(|path| Path::new(path).try_exists().unwrap_or(true)))
+        {
+            let path = task_path(root, &record, git).await?;
+            if scheduled && !git.clean(&path).await? {
+                return Err(refuse("dirty_checkout", "A dirty task worktree was retained."));
+            }
+        }
+        let discarded = if record["work"] == "discard_confirmed" {
+            let path = task_path(root, &record, git).await?;
+            if owner {
+                // Retained owner decisions bind to the legacy manifest, not the
+                // distinct native Core verification digest. Unobservable is no consent.
+                super::legacy_source::capture(&path)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|sha| record["discardRevision"] == sha)
+            } else {
+                observation(&path)
+                    .await
+                    .ok()
+                    .is_some_and(|sha| record["discardRevision"] == sha)
+            }
+        } else {
+            false
+        };
+        if unmerged(root, &record, git).await? && !discarded {
+            // The task stays in the Archive with its work; nothing is changed or deleted.
+            return Err(refuse(
+                "unmerged_work",
+                "This task has unmerged work. Decide whether it may be discarded first.",
+            ));
+        }
+        Ok(())
+    };
+    if committed_purge.is_none() {
+        if matches!(mode, Purge::Scheduled { .. }) {
+            tokio::time::timeout(Duration::from_secs(2), preflight).await
+                .map_err(|_| refuse("retention_busy", "The checkout could not be confirmed in time."))??;
+        } else {
+            preflight.await?;
+        }
+    }
+    let result = if committed_purge.is_some() {
+        json!({"deleted":true,"vacuum_status":"not_needed","reclaimed_bytes":0})
+    } else if let Purge::Scheduled { at, days } = mode {
+        store.as_ref().ok_or_else(invalid)?
+            .purge_expired_workspace_archive(project, task, &record, at, days)
+            .map_err(context::core)?
+    } else if let Some(store) = &store {
         let exists = store
             .read(|db| {
                 Ok(db.query_row(
@@ -221,35 +296,21 @@ async fn purge_impl(
     } else {
         json!({"vacuum_status":"not_needed","reclaimed_bytes":0})
     };
-    let mut retained = Value::Null;
-    if record["checkout"]["kind"] == "worktree"
-        && record["integration"]["worktreeCleanup"] != "removed"
-    {
-        let path = task_path(root, &record, git).await?;
-        if path.exists() {
-            retained = json!(path);
-            if record["checkout"]["createdByWorkspace"] == true
-                && path != root
-                && git.clean(&path).await?
-            {
-                if git
-                    .out(
-                        root,
-                        &[
-                            "worktree",
-                            "remove",
-                            "--",
-                            path.to_str().ok_or_else(invalid)?,
-                        ],
-                    )
-                    .await
-                    .is_ok()
-                {
-                    retained = Value::Null;
-                }
-            }
+    // A record's path/createdByWorkspace fields never authorize destruction.
+    // The pending disposition in Core survived deletion of the task row.
+    let cleanup = if let Some(store) = &store {
+        match worktrees::finish_cleanup(store, project, task, Cleanup::Purge) {
+            Ok(result) => result,
+            Err(_) => Some(json!({"status":"pending","reason":"worktree_cleanup_unconfirmed"})),
         }
-    }
+    } else {
+        None
+    }.or_else(|| {
+        if record["checkout"]["kind"] != "worktree" || record["integration"]["worktreeCleanup"] == "removed" {
+            return None;
+        }
+        Some(json!({"status":"retained","path":record["checkout"]["path"],"reason":"worktree_not_owned"}))
+    });
     let reclamation = if owner {
         result
             .as_object()
@@ -265,8 +326,11 @@ async fn purge_impl(
         result.clone()
     };
     product["tasks"][task] = json!({"purged":true,"reclamation":reclamation});
-    if !retained.is_null() {
-        product["tasks"][task]["retainedWorktree"] = retained;
+    if let Some(cleanup) = cleanup {
+        if cleanup["status"] == "retained" && !cleanup["path"].is_null() {
+            product["tasks"][task]["retainedWorktree"] = cleanup["path"].clone();
+        }
+        product["tasks"][task]["worktreeCleanup"] = cleanup;
     }
     product["messages"]
         .as_array_mut()
@@ -298,6 +362,7 @@ async fn cleanup_at(state: &Path, projects: &Value, git: &mut Git, at: u64) -> R
         crate::project_guard::check(root)?;
         // One project at a time: owner actions of the other projects never wait for
         // this pass. Each purge stays one journaled deletion under this lock.
+        let _repo = Lock::new(state, &super::git::repo_lock(root))?;
         let _lock = Lock::new(state, "machine.lock")?;
         let mut product = context::product(root, state, id, git).await?;
         let ids = product["tasks"]
@@ -312,10 +377,18 @@ async fn cleanup_at(state: &Path, projects: &Value, git: &mut Git, at: u64) -> R
                 continue;
             }
             let record = product["tasks"][&task].clone();
-            let archive = record["archive"]["at"].as_u64();
-            if archive.is_some_and(|a| {
-                at.saturating_sub(a) >= settings["retentionDays"].as_u64().unwrap_or(30) * DAY
-            }) && record["purgeBlocker"].is_null()
+            let days = settings["retentionDays"].as_u64().unwrap_or(30);
+            let archive = &record["archive"];
+            let expired = if archive["previousStatus"] == "draft" {
+                // Not-started tasks have no completion clock. Only an explicit
+                // task deletion can attempt to purge an archived draft.
+                false
+            } else if archive.get("retentionAt").is_some() {
+                cortex_core::store::expired_closed_archive(&record, at, days)
+            } else {
+                archive["at"].as_u64().is_some_and(|a| at.saturating_sub(a) >= days * DAY)
+            };
+            if expired && record["purgeBlocker"].is_null()
             {
                 match purge(root, id, state, &mut product, &task, git).await {
                     Ok(n) => {
@@ -332,18 +405,8 @@ async fn cleanup_at(state: &Path, projects: &Value, git: &mut Git, at: u64) -> R
                         asked += u64::from(e.code == "unmerged_work");
                     }
                 }
-            } else if record["status"] == "done"
-                && record["archive"].is_null()
-                && record["doneAt"].as_u64().is_some_and(|a| {
-                    at.saturating_sub(a) >= settings["autoArchiveDays"].as_u64().unwrap_or(7) * DAY
-                })
-            {
-                // Never asks and never discards: the task moves to the Archive with its work.
-                product["tasks"][&task]["archive"] = json!({"at":at,"previousStatus":"done"});
-                product["tasks"][&task]["archiveQuestion"] = json!(false);
-                if let Some(fields) = product["tasks"][&task].as_object_mut() {
-                    fields.remove("archiveAskAfter");
-                }
+            } else {
+                archive_done(&mut product["tasks"][&task], at, &settings);
             }
         }
         settings::write_json(&product_path(state, id)?, &product)?;
@@ -354,9 +417,91 @@ async fn cleanup_at(state: &Path, projects: &Value, git: &mut Git, at: u64) -> R
     runs["cleanup"] = run.clone();
     settings::write_json(&state.join("machine-runs.json"), &runs)?;
     // Cleanup also removes attachment bodies nothing references any more.
-    let _ = super::attachment_files::sweep_locked(state, super::attachment_files::UNSENT_GRACE);
+    let _ = super::attachment_files::sweep_locked(state, SystemTime::now());
     Ok(run)
 }
+fn archive_done(record: &mut Value, at: u64, settings: &Value) -> bool {
+    if record["status"] != "done" || !record["archive"].is_null()
+        || !settings["autoArchiveDays"].as_u64().filter(|d| (1..=3650).contains(d))
+            .zip(record["doneAt"].as_u64())
+            .is_some_and(|(days, done)| at.saturating_sub(done) >= days * DAY)
+    {
+        return false;
+    }
+    super::task_lifecycle::archive(record, at, "done");
+    true
+}
+
+/// A rotating cursor ensures repeatedly busy/refused archives cannot starve
+/// other records. An attempted deletion is always settled before advancing.
+const PURGES_PER_VISIT: usize = 4;
+
+pub(crate) async fn scheduled_project(
+    config: &crate::Config,
+    root: &Path,
+    id: &str,
+    at: u64,
+    cursor: &mut Option<String>,
+    stopping: impl Fn() -> bool,
+) -> Result<bool> {
+    let state = &config.state_dir;
+    crate::project_guard::check(root)?;
+    let Some(_repo) = Lock::try_new(state, &super::git::repo_lock(root))? else { return Ok(false) };
+    let Some(lock) = Lock::try_new(state, "machine.lock")? else { return Ok(false) };
+    let settings = settings::machine(state)?;
+    let mut git = Git::for_service(config);
+    let mut product = tokio::time::timeout(Duration::from_secs(2), context::product(root, state, id, &mut git))
+        .await.map_err(|_| refuse("retention_busy", "Project facts were not available for retention."))??;
+    if stopping() {
+        return Ok(false);
+    }
+    let path = product_path(state, id)?;
+    let mut ids = product["tasks"].as_object().ok_or_else(invalid)?.keys().cloned().collect::<Vec<_>>();
+    ids.sort_unstable();
+    let mut changed = false;
+    for task in &ids {
+        if settings::idle(state, id, task, &lock).is_ok() {
+            changed |= archive_done(&mut product["tasks"][task], at, &settings);
+        }
+    }
+    if changed {
+        settings::write_json(&path, &product)?;
+    }
+    if settings["automaticArchivePurge"] == true {
+        if let Some(days) = settings["retentionDays"].as_u64() {
+            let start = ids.partition_point(|id| cursor.as_ref().is_some_and(|c| id <= c));
+            let mut attempted = 0;
+            for task in ids[start..].iter().chain(&ids[..start]) {
+                if stopping() {
+                    break;
+                }
+                if !cortex_core::store::expired_closed_archive(&product["tasks"][task], at, days)
+                    || settings::idle(state, id, task, &lock).is_err()
+                {
+                    continue;
+                }
+                *cursor = Some(task.clone());
+                attempted += 1;
+                let result = purge_impl(root, id, &mut product, task, &mut git, Purge::Scheduled { at, days }).await;
+                if result.is_ok() {
+                    settings::write_json(&path, &product)?;
+                    changed = true;
+                }
+                if attempted == PURGES_PER_VISIT {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(changed)
+}
+
+pub(crate) fn scheduled_attachments(state: &Path, at: SystemTime) {
+    if let Ok(Some(_lock)) = Lock::try_new(state, "machine.lock") {
+        let _ = super::attachment_files::sweep_locked(state, at);
+    }
+}
+
 pub async fn delete_sprint(
     root: &Path,
     project: &str,
@@ -370,6 +515,7 @@ pub async fn delete_sprint(
             "Confirm before deleting the sprint and its tasks.",
         ));
     }
+    let _repo = Lock::new(state, &super::git::repo_lock(root))?;
     let _lock = Lock::new(state, "machine.lock")?;
     let mut product = context::product(root, state, project, git).await?;
     let id = string(p, "sprintId")?;
@@ -493,31 +639,22 @@ pub async fn delete_sprint(
                 }
             }
         }
+        let cleanup = store.as_ref().and_then(|store| {
+            worktrees::finish_cleanup(store, project, task, Cleanup::Purge)
+                .unwrap_or_else(|_| Some(json!({"status":"pending","reason":"worktree_cleanup_unconfirmed"})))
+        });
         if let Some(path) = &path {
-            if !path.exists() {
+            if !path.exists() || cleanup.as_ref().is_some_and(|outcome| {
+                outcome["status"] == "removed" && outcome["path"] == json!(path)
+            }) {
                 kept.retain(|p| p != &json!(path));
-            } else if record["checkout"]["createdByWorkspace"] == true && path != root {
-                if let Ok(verified) = task_path(root, &record, git).await {
-                    if git.clean(&verified).await?
-                        && git
-                            .out(
-                                root,
-                                &[
-                                    "worktree",
-                                    "remove",
-                                    "--",
-                                    verified.to_str().ok_or_else(invalid)?,
-                                ],
-                            )
-                            .await
-                            .is_ok()
-                    {
-                        kept.retain(|p| p != &json!(path));
-                    }
-                }
             }
         }
-        tasks_mut(&mut product)?.insert(task.clone(), json!({"purged":true}));
+        let mut tombstone = json!({"purged":true});
+        if let Some(cleanup) = cleanup {
+            tombstone["worktreeCleanup"] = cleanup;
+        }
+        tasks_mut(&mut product)?.insert(task.clone(), tombstone);
         product["messages"]
             .as_array_mut()
             .ok_or_else(invalid)?
@@ -548,6 +685,6 @@ pub async fn delete_sprint(
     product["deletedSprints"][id] = result.clone();
     settings::write_json(&product_path(state, project)?, &product)?;
     // The deleted sprint's files go with it, once nothing else references them.
-    let _ = super::attachment_files::sweep_locked(state, super::attachment_files::UNSENT_GRACE);
+    let _ = super::attachment_files::sweep_locked(state, SystemTime::now());
     Ok(result)
 }

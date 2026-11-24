@@ -89,6 +89,8 @@ pub async fn run(
             "integration_in_progress",
             super::integration::REPO_BUSY,
         )?)
+    } else if matches!(p["action"].as_str(), Some("close_remove_worktree" | "purge" | "clear_old")) {
+        Some(Lock::new(state, &super::git::repo_lock(root))?)
     } else {
         None
     };
@@ -388,11 +390,41 @@ pub async fn run(
             record["targetInherited"] = json!(false);
         }
         "reopen" => {
+            // This private disposition cleanup is not authority to reopen Done.
+            if matches!(record["status"].as_str(), Some("done" | "closed_unverified"))
+                || truth(&record["archive"])
+            {
+                if let Some(store) = context::open(root, OpenMode::LiveReadOnly)? {
+                    let exists = store.read(|db| Ok(db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM workspace_tasks WHERE project_id=? AND task_id=?)",
+                        (project, task), |r| r.get::<_, bool>(0),
+                    )?)).map_err(context::core)?;
+                    if exists {
+                        return Err(refuse("task_not_resumable", "Use Return for rework to reopen a closed task."));
+                    }
+                }
+            }
             for key in ["status", "acceptance", "automaticReady"] {
                 record.as_object_mut().unwrap().remove(key);
             }
         }
         "restore" => {
+            if record["archive"].is_object() {
+                // Return to the project, not to an irrevocably closed sprint.
+                // Remove both membership links so a subsequent sprint delete
+                // cannot delete a task the owner already restored.
+                for sprint in product["sprints"].as_array_mut().into_iter().flatten() {
+                    if sprint["archivedAt"].is_null() || sprint["deleting"] == true {
+                        continue;
+                    }
+                    if sprint["id"] == record["sprintId"] {
+                        record["sprintId"] = Value::Null;
+                    }
+                    if let Some(ids) = sprint["taskIds"].as_array_mut() {
+                        ids.retain(|id| id != task);
+                    }
+                }
+            }
             record["archive"] = Value::Null;
             record["purgeBlocker"] = Value::Null;
         }
@@ -538,6 +570,9 @@ pub async fn run(
             return super::task_review::accept(root, project, task, state, &mut product, p, git)
                 .await;
         }
+        "close_remove_worktree" => {
+            return super::task_lifecycle::close_with_cleanup(root, project, state, task, &mut product, p, git).await;
+        }
         "clear_old" | "purge" => {
             let at = now_ms();
             if action == "clear_old" {
@@ -563,7 +598,11 @@ pub async fn run(
             // deletion intent and teardown. Never fall back after this boundary.
             super::retention::purge_owner(root, project, state, &mut product, task, git).await?;
             settings::write_json(&product_path(state, project)?, &product)?;
-            return Ok(json!({"done":true,"reclamation":product["tasks"][task]["reclamation"]}));
+            let mut result = json!({"done":true,"reclamation":product["tasks"][task]["reclamation"]});
+            if let Some(cleanup) = product["tasks"][task].get("worktreeCleanup") {
+                result["worktreeCleanup"] = cleanup.clone();
+            }
+            return Ok(result);
         }
         action if super::task_lifecycle::supported(action) => {
             super::task_lifecycle::apply(root, project, task, &mut record, p, git).await?;

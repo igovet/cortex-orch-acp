@@ -73,7 +73,7 @@ export type Machine = {
   /** Absolute default resolved by the service in its channel-private data directory. */
   defaultWorktreeRoot?: string;
   id: string; name: string; kind: "local" | "remote"; connection: Connection;
-  lastConfirmedAt: string | null; retentionDays: number; autoArchiveDays: number; worktreeRoot: string;
+  lastConfirmedAt: string | null; retentionDays: number; autoArchiveDays: number; automaticArchivePurge?: boolean; unreferencedAttachmentRetentionDays?: number; worktreeRoot: string;
   version: string | null; latencyMs: number | null; historyGap: boolean; diskMb: number | null;
   remoteAccess: { allowed: boolean; devices: PairedDevice[] };
   cleanup: CleanupRun | null; diagnostics: DiagnosticsRun | null; storage: { label: string; mb: number }[];
@@ -90,7 +90,7 @@ export type Project = {
   hasGit?: boolean;
 };
 export type CheckoutChoice = { kind: "main" } | { kind: "worktree"; branch?: string; path?: string };
-export type Checkout = { kind: "main"; branch: string } | { kind: "worktree"; branch: string; path: string };
+export type Checkout = { kind: "main"; branch: string } | { kind: "worktree"; branch: string; path: string; id?: string; unavailable?: boolean };
 export type CheckOutcome = "passed" | "failed" | "not_run" | "unverified";
 export type Check = { name: string; outcome: CheckOutcome; detail: string; source?: "runtime" | "worker"; technicalReason?: string; kind?: "automated" | "manual" | "policy"; command?: string[]; cwd?: string; rerunnable?: boolean; output?: string; exitCode?: number; running?: boolean };
 export type Result = { kind?: "answer" | "work" | "unknown"; acceptanceAvailable?: boolean; sourceVersion?: string; evidence?: {reference: string; digest: string}[]; warnings?: string[]; version: number; digest: string; checks: Check[]; summary: string; at?: number | null; automaticReady?: boolean; mock?: true };
@@ -111,6 +111,14 @@ export type ConflictFile = { path: string; blocks: ConflictBlock[] };
 export type MergeSeed = { files: ConflictFile[]; clean: { path: string; status: GitStatus }[]; checks: Check[] };
 /** A merge of the target into the task branch. It keeps what came before, so Abort merge restores it exactly. */
 export type MergeState = MergeSeed & {
+  conflictId?: string | null;
+  gitState?: "stopped" | "completed" | "unknown" | null;
+  handoff?: {
+    state: "dispatch_unknown" | "active" | "unknown" | "stopped" | "refused" | "returned" | "completed";
+    requestId: string; executionId: string; sourceRevision: string; targetRevision: string;
+    manifest: { sourceRevision: string; targetRevision: string; paths: string[]; complete: boolean; truncated: boolean };
+  } | null;
+  freshChecks?: { state: "not_requested" | "request_unknown" | "requested"; revision: string; requestId?: string } | null;
   source: string; into: string; startedAt: number | null; handedAt: number | null; finishedAt: number | null;
   guidance: string | null; step: number; failure: string | null; finished: boolean;
   before: { status: TaskStatus; acceptance: Acceptance | null; result: Result | null; digest: string | null }; mock?: true;
@@ -125,7 +133,15 @@ export type AutomaticContinuation = {
 };
 export type Task = {
   id: string; projectId: string; sprintId: string | null; description: string;
+  /** Service-created sprint planner, even before planningTaskId is linked. Not sprint membership. */
+  planningSprintId?: string;
   sourceVersion?: string;
+  reworkAvailable?: boolean;
+  reworkUnavailableReason?: string | null;
+  reworkWarnings?: string[];
+  reworkVersion?: string;
+  reworkOwnerEpoch?: string | null;
+  reworkExecutionId?: string | null;
   title: string; titleState: "pending" | "generated" | "user" | "failed";
   checkout: Checkout; targetBranch: string | null; dependencies: string[];
   status: TaskStatus; resumeStatus: "working" | "needs_you"; issue: string | null;
@@ -141,9 +157,12 @@ export type Task = {
   merge: MergeState | null; resolvedBy: "cortex" | "you" | null;
   integration: Integration | null;
   /** `noChanges`: the machine found an answer-only result that changed no files, so there is nothing to commit. `pending`: its files are still being checked (no facts yet); `refreshing`: these are the last facts, being checked again. */
-  integrationFacts?: { targetBranch: string; alreadyInTarget: boolean; sameBranch?: boolean; commitAvailable?: boolean; noChanges?: boolean; pendingPaths?: string[]; otherUncommitted?: boolean; reason?: string | null; pushStatus: "pushed" | "not_pushed" | "unknown" | null; pending?: boolean; refreshing?: boolean };
+  integrationFacts?: { targetBranch: string; alreadyInTarget: boolean; sameBranch?: boolean; commitAvailable?: boolean; noChanges?: boolean; pendingPaths?: string[]; otherUncommitted?: boolean; deleteWorktree?: { available: boolean; default: boolean; reason?: string }; reason?: string | null; pushStatus: "pushed" | "not_pushed" | "unknown" | null; pending?: boolean; refreshing?: boolean };
   closedAs: "as_is" | "cancel" | "external" | "unconfirmed" | null; notVerifiedByCortex: boolean;
-  doneAt: number | null; archive: { at: number; previousStatus: "done"; sizeMb?: number | null } | null;
+  doneAt: number | null;
+  /** A sprint archive may preserve a draft or carry a separate completion-based cleanup clock. */
+  archive: { at: number; previousStatus: "draft" | "done"; retentionAt?: number | null; sizeMb?: number | null } | null;
+  reworkEvent?: string;
   /** What unmerged work there is, when the worktree was read. Absent facts stay absent. */
   workFacts?: { commits: number; files: number; sizeMb: number } | null;
   work: "unmerged" | "merged" | "discard_confirmed"; process: "live" | "stopped" | "unknown";
@@ -151,6 +170,8 @@ export type Task = {
   /** When the machine last confirmed this record. Absent on a record the machine has not reported. */
   lastConfirmedAt?: number | null;
   observedPhase?: string; warnings?: string[]; automaticContinuation?: AutomaticContinuation;
+  /** Display-only file wait; separate from issue, which can be replaced by a pending decision. */
+  filesWait?: { message: string | null; holder?: { holderTaskId: string; releaseTarget: string } };
   /** Confirmed runtime route, separate from editable task settings. */
   coordinatorRoute?: { model: string; effort: string } | null;
   /** The owner's `deny-write` paths in force for this task (runtime facts), with when each was set; Remove lifts one. */
@@ -195,6 +216,8 @@ export type AutomaticQueue = {
   /** The hold's identity: kept while the service rewrites the same condition, new for any other hold. */
   holdId?: string;
 };
+export type PlanningFailure = { text: string; step: "request" | "create" | "start" | "continue" | "run" | "restart" | "internal"; code: string; at: number };
+export type PlanningWarning = PlanningFailure & { step: "internal"; code: "planning_pass_failed"; count: number };
 export type Sprint = {
   automaticQueue?: AutomaticQueue;
   id: string; projectId: string; description: string; attachments?: AttachmentInput[]; title?: string | null; runMode: SprintRunMode;
@@ -204,7 +227,9 @@ export type Sprint = {
   /** A deletion the service started and has not finished: how many tasks it set out to delete and the ones still left. Such
    *  a sprint is archived but stays on view, so its unfinished deletion can be seen and retried. */
   deletion?: { total: number; left: string[] };
-  planningFailure?: string; planningTaskId?: string; targetBranch: string | null; planning: "planning" | "question" | "ready" | "created" | "cancelled";
+  /** String is a legacy record with no step or timestamp. */
+  planningFailure?: PlanningFailure | string; planningWarning?: PlanningWarning;
+  planningTaskId?: string; targetBranch: string | null; planning: "planning" | "question" | "ready" | "created" | "cancelled";
   conversation: SprintEntry[]; settings?: { model: string; effort: string; mode?: TaskSettings["mode"]; language?: TaskSettings["language"] };
   plan: PlanVersion | null; history?: PlanVersion[]; materializedVersion: number | null;
   taskIds: string[]; queueState: "idle" | "running" | "paused" | "complete"; pauseReason: string | null; mock?: true;
@@ -212,10 +237,27 @@ export type Sprint = {
 export type WorkerStatus = "working" | "waiting_you" | "pending" | "not_started" | "paused" | "completed" | "failed" | "cancelled" | "unknown";
 export type ActivityKind = "note" | "assignment" | "divider" | "tools" | "tool" | "edit" | "command" | "message";
 export type CommandState = "running" | "stopping" | "stopped" | "passed" | "failed" | "native";
+/** A retained broker receipt, scoped to the row's project and task. Not an output artifact ID. */
+export type CommandOutputRef = { attemptId: string; toolCallRef: string };
+export type CommandOutputRead = CommandOutputRef & { projectId: string; taskId: string; offset?: number; limit?: number };
+export type CommandOutput = {
+  operation: "command_run" | "outside_command";
+  status: "running" | "passed" | "failed" | "stopped";
+  argv: string[] | null;
+  cwd: string | null;
+  exitCode: number | null;
+  signal: number | null;
+  failure: string | null;
+  output: { state: "pending" | "unavailable" } | {
+    state: "available"; chunk: string; encoding: "utf-8" | "base64";
+    offset: number; byteLength: number; totalBytes: number; nextOffset: number | null;
+    truncated: boolean; captureComplete: boolean; complete: boolean;
+  };
+};
 /** One entry of a worker's history. Unknown details stay absent, never invented. */
 export type Activity = {
   sequence: number; text: string; error?: boolean; kind: ActivityKind; at: number | null; mock?: true;
-  code?: string; note?: string; toolCallRef?: string;
+  code?: string; note?: string; toolCallRef?: string; commandOutputRef?: CommandOutputRef;
   rows?: { icon: "file" | "search"; code: string; note: string }[];
   /** The call's input and output as the machine recorded them, shown when the owner opens the step. */
   args?: string;
@@ -400,11 +442,12 @@ export type WorkspaceCommand =
   | { type: "rename_project"; projectId: string; name: string }
   | { type: "remove_project"; projectId: string; confirmed: boolean }
   | { type: "open_editor"; projectId: string; checkoutId?: string; file?: string; line?: number }
+  | { type: "reveal_file"; projectId: string; checkoutId: string; file: string }
   | { type: "pair_machine"; id: string; name: string; code: string; fingerprintsMatch: boolean; now?: number }
   | { type: "rename_machine"; machineId: string; name: string }
   | { type: "remove_machine"; machineId: string; confirmed: boolean }
   | { type: "set_retention"; machineId: string; days: number }
-  | { type: "save_storage"; machineId: string; retentionDays: number; autoArchiveDays: number }
+  | { type: "save_storage"; machineId: string; retentionDays: number; autoArchiveDays: number; automaticArchivePurge?: boolean; unreferencedAttachmentRetentionDays?: number }
   | { type: "set_worktree_root"; machineId: string; path: string }
   | { type: "save_surface"; machineId: string; projectId?: string | null; surface: SurfaceKey; value: unknown; revision: number }
   | { type: "activate_profile"; machineId: string; profileId: string; keep: "save" | "discard" }
@@ -435,22 +478,25 @@ export type WorkspaceCommand =
   | { type: "rename_task"; taskId: string; title: string }
   | { type: "edit_task"; taskId: string; expectedVersion: string; title: string; description: string; attachments: AttachmentInput[]; settings: TaskSettings; checkout: { kind: CheckoutChoice["kind"] } }
   | { type: "generate_title"; taskId: string; fail?: boolean }
-  | { type: "start_task" | "continue_task" | "retry_task" | "confirm_stop" | "clear_issue" | "restore_task" | "flush_queue" | "stop_resolution" | "abort_merge" | "finish_merge"; taskId: string; now?: number }
+  | { type: "start_task" | "continue_task" | "retry_task" | "confirm_stop" | "clear_issue" | "restore_task" | "flush_queue" | "stop_resolution" | "finish_merge"; taskId: string; now?: number }
+  | { type: "abort_merge"; taskId: string; now?: number; discardLegacy?: true }
   /** Merges the task's target branch into its own branch, once the owner confirmed it for the result they reviewed (`digest`). */
   | { type: "update_from_target"; taskId: string; confirmed: boolean; digest: string; now?: number }
   | { type: "retry_delivery"; messageId: string }
-  | { type: "resolve_with_cortex"; taskId: string; guidance?: string; attachments?: AttachmentInput[]; now?: number }
+  | { type: "inspect_merge" | "request_merge_checks"; taskId: string; conflictId: string | null }
+  | { type: "resolve_with_cortex"; taskId: string; conflictId?: string; guidance?: string; attachments?: AttachmentInput[]; now?: number }
   | { type: "resolve_block"; taskId: string; path: string; blockId: string; choice: Exclude<BlockChoice, "cortex"> }
   | { type: "stop_task"; taskId: string; confirmed: boolean; now?: number }
   | { type: "set_task_settings"; taskId: string; settings: Partial<TaskSettings> }
   | { type: "close_task"; taskId: string; confirmed: boolean; now: number } & (
-      { choice: "as_is" | "cancel" | "external" | "already_in_target" }
+      { choice: "as_is" | "cancel" | "external" | "already_in_target" | "remove_worktree" }
       | { choice: "unconfirmed"; executionId: string; expectedVersion: string }
     )
   | { type: "rerun_check"; taskId: string; digest: string; checkIndex: number }
   | { type: "accept_result"; taskId: string; digest: string; sourceVersion?: string; openChecks?: boolean; automaticFinish?: { sprintId: string; targetBranch: string }; now?: number }
   | { type: "integrate"; taskId: string; method: "squash" | "pr" | "commit"; confirmed: boolean; digest: string; targetBranch: string; now: number; message?: string; title?: string; draft?: boolean; deleteWorktree?: boolean }
   | { type: "request_changes"; taskId: string; text: string; attachments?: AttachmentInput[]; now?: number }
+  | { type: "rework_task"; taskId: string; expectedVersion: string; ownerEpoch: string | null; executionId: string | null; text: string; attachments?: AttachmentInput[] }
   | { type: "add_comment"; taskId: string; path: string; line: number; text: string; attachments?: AttachmentInput[] }
   | { type: "edit_comment"; taskId: string; commentId: string; text: string; attachments?: AttachmentInput[] }
   | { type: "remove_comment"; taskId: string; commentId: string }
@@ -468,7 +514,7 @@ export type WorkspaceCommand =
   | { type: "git_pull_abort"; checkoutId: string; confirmed: boolean; now?: number }
   /** A task's recorded pull request in the system browser; the address comes from the machine, never from the page. */
   | { type: "open_pull_request"; projectId: string; taskId: string }
-  | { type: "git_push"; checkoutId: string; remote: string; branch: string; confirmed: boolean }
+  | { type: "git_push"; checkoutId: string; remote: string; branch: string; confirmed: boolean; summary?: string }
   | { type: "create_branch"; projectId: string; name: string; at?: string }
   | { type: "revert_commit"; checkoutId: string; sha: string; confirmed: boolean; now?: number }
   | { type: "delete_worktree"; checkoutId: string; confirmed: boolean; discard: boolean; now?: number }

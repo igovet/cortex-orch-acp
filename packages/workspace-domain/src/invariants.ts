@@ -7,6 +7,20 @@ import { DomainError, entity, machineFor, nonempty, projectFor, requireFact } fr
  */
 /** Editing the saved request is distinct from messaging or changing a live session. */
 export const taskEditable = (task: Task) => task.executionId === null && task.status === "draft" && task.process === "stopped" && !task.archive && !task.closedAs;
+/** Close preflight for a sprint's members on the read side. The service rechecks the current records and running effects. */
+export function sprintCloseBlockers(state: WorkspaceState, sprint: Sprint) {
+  const tasks = new Map(state.tasks.filter(task => task.projectId === sprint.projectId).map(task => [task.id, task]));
+  const ids = new Set([...sprint.taskIds, ...[...tasks.values()].filter(task => task.sprintId === sprint.id).map(task => task.id)]);
+  return [...ids].flatMap(id => {
+    const task = tasks.get(id);
+    const reason = !task ? "task details not loaded; refresh the sprint"
+      : task.sprintId && task.sprintId !== sprint.id ? "membership changed; refresh the sprint"
+      : task.closedAs === "unconfirmed" || task.warnings?.some(w => w === "contradictory_evidence" || w === "owner_closed_unconfirmed") ? "task records disagree"
+      : task.reworkEvent && task.status !== "done" ? "returned for rework and not closed"
+      : task.status !== "done" && (task.status !== "draft" || task.executionId !== null) ? "started but not done" : null;
+    return reason ? [{ id, title: task?.title ?? id, reason }] : [];
+  });
+}
 /** The title is presentation, not lifecycle: any task still kept can be renamed, started, finished or closed. Only a cleared task cannot. */
 export const taskRenamable = (task: Task) => !task.archive;
 export const repoOf = (state: WorkspaceState, projectId: string) => state.repos.find(r => r.projectId === projectId) ?? null;
@@ -18,8 +32,13 @@ export function checkoutOf(state: WorkspaceState, id: string): { repo: ProjectRe
   throw new DomainError("Unknown checkout: " + id);
 }
 /** The record of the checkout a task works in, when there is one. */
-export const taskCheckout = (state: WorkspaceState, task: Task) =>
-  repoOf(state, task.projectId)?.checkouts.find(c => c.taskId === task.id || (c.kind === "main" && task.checkout.kind === "main")) ?? null;
+export const taskCheckout = (state: WorkspaceState, task: Task) => {
+  const binding = task.checkout;
+  const checkouts = repoOf(state, task.projectId)?.checkouts;
+  if (binding.kind === "main") return checkouts?.find(c => c.kind === "main") ?? null;
+  if (binding.unavailable) return null;
+  return checkouts?.find(c => c.kind === "worktree" && (binding.id ? c.id === binding.id : c.taskId === task.id)) ?? null;
+};
 /** What deleting this worktree would lose. Merged commits are safe in the target branch. */
 export function worktreeWork(state: WorkspaceState, checkout: RepoCheckout) {
   const task = checkout.taskId ? state.tasks.find(t => t.id === checkout.taskId) ?? null : null;

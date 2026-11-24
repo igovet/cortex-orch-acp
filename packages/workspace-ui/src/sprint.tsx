@@ -1,5 +1,5 @@
 import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Match, on, onCleanup, Show, Switch, useContext, type Accessor } from "solid-js";
-import { automaticQueueOf, dependencyProblem, queueDrivenMode, runBlocker, SPRINT_RUN_MODES, type PlanItem, type Sprint, type TaskSettings, type WorkspaceState } from "@cortex/workspace-domain";
+import { automaticQueueOf, dependencyProblem, queueDrivenMode, runBlocker, sprintCloseBlockers, SPRINT_RUN_MODES, type PlanItem, type Sprint, type TaskSettings, type WorkspaceState } from "@cortex/workspace-domain";
 import { AttachChips, createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
 import { useWs } from "./ctx";
 import { REQUESTING, RequestLabel } from "./request-feedback";
@@ -21,7 +21,7 @@ import { ResultText } from "./result-text";
 import { ResultScope } from "./result-links";
 import { CopySource, MessageTools } from "./message-copy";
 import { SentMessages } from "./sent";
-import { createLabel, itemTitle, planCaption, planGraph, planningAsks, planningThread, planRows, queueStall, sprintGap, sprintSummary, type PlanRow } from "./sprint-model";
+import { createLabel, itemTitle, planCaption, planGraph, planningAsks, planningThread, planRows, queueStall, sprintGap, sprintSummary, SPRINT_CLOSE_NOTE, type PlanRow } from "./sprint-model";
 import { graphCounts, planLayers } from "./plan-graph";
 import { GraphView, type GraphApi, type GraphMemory } from "./sprint-graph";
 import { arrange, INLINE_FLOOR, inlineScale, type Opened } from "./sprint-space";
@@ -162,9 +162,15 @@ export function SprintCrumb(props: { sprint: Sprint }) {
 export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }) {
   const ws = useWs();
   const planning = () => props.sprint.planning !== "created";
-  const close = () => ws.open({kind:"confirm",title:"Close this sprint?",action:"Close sprint",
-    note:"The sprint moves to Archive and its automatic queue stops. Unfinished tasks stay in the project, outside the active sprint lists; tasks already running continue. No task is cancelled, accepted, merged, archived or deleted. Close or archive individual tasks separately.",
-    go:async () => { const r = await ws.run({type:"close_sprint",sprintId:props.sprint.id,confirmed:true}); if (r.ok) ws.go({name:"archive",machine:ws.machine().id}); return r.ok; }});
+  const closeWhy = createMemo(() => {
+    const blocked = sprintCloseBlockers(ws.store.state(), props.sprint);
+    return ws.gate("close_sprint") ?? (blocked.length ? `Close sprint is blocked by: ${blocked.map(b => `${b.title}: ${b.reason}`).join("; ")}.` : undefined);
+  });
+  const close = () => {
+    if (closeWhy()) return;
+    ws.open({kind:"confirm",title:"Close this sprint?",action:"Close sprint",note:SPRINT_CLOSE_NOTE,
+      go:async () => { const r = await ws.run({type:"close_sprint",sprintId:props.sprint.id,confirmed:true}); if (r.ok) ws.go({name:"archive",machine:ws.machine().id}); return r.ok; }});
+  };
   const remove = () => {
     const id = props.sprint.id, projectId = props.sprint.projectId;
     const count = new Set([...props.sprint.taskIds,...ws.store.state().tasks.filter(t => t.sprintId === id).map(t => t.id)]).size;
@@ -186,13 +192,13 @@ export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }
   </Show>}><>
     <Show when={props.tab === "summary"}><QueueButton sprint={props.sprint} line /></Show>
     <Show when={props.sprint.planning === "created"}><button class="btn btn-line tb-fold" onClick={() => ws.newItem("task", props.sprint.projectId, props.sprint.id)}><I n="plus" s={14} />New task</button></Show>
-    <button class="btn btn-line tb-fold" {...ws.needs("close_sprint")} onClick={close}>Close sprint…</button>
+    <button class="btn btn-line tb-fold" aria-disabled={closeWhy() ? "true" : undefined} data-why={closeWhy()} onClick={close}>Close sprint…</button>
     <button data-tooltip="" class="ib" popovertarget="m-sprint-menu" aria-label="Sprint actions"><I n="more" /></button>
     <Pop id="m-sprint-menu" class="pop-right" align="right" label="Sprint actions">
       <Show when={props.sprint.planning === "created"}><div class="tb-fold-only"><MenuItem icon="plus" label="New task" onSelect={() => ws.newItem("task", props.sprint.projectId, props.sprint.id)} /></div></Show>
       <Show when={planning() && props.sprint.planning !== "cancelled"}><MenuItem icon="x" label="Cancel planning" needs="cancel_planning" onSelect={() => ws.run({ type: "cancel_planning", sprintId: props.sprint.id })} /></Show>
       <Show when={props.sprint.planning === "cancelled" && !planningChangeRequired(props.sprint)}><MenuItem icon="play" label={props.sprint.planningFailure ? "Retry planning" : "Resume planning"} needs="resume_planning" onSelect={() => ws.run({ type: "resume_planning", sprintId: props.sprint.id })} /></Show>
-      <MenuItem icon="archive" label="Close sprint…" needs="close_sprint" onSelect={close} />
+      <MenuItem icon="archive" label="Close sprint…" disabled={closeWhy()} onSelect={close} />
       <MenuItem icon="trash" label="Delete sprint…" needs="delete_sprint" onSelect={remove} />
     </Pop>
   </></Show>;

@@ -47,6 +47,15 @@ it("round-trips an Automatic hold, native continuation and an already-landed fin
 });
 
 const memory = () => {let raw:string|null=null;return {getItem:()=>raw,setItem:(_key:string,value:string)=>{raw=value;}};};
+it("keeps archived drafts and the separate Done retention clock in the cold board", () => {
+  const storage = memory(), board = structuredClone(saved);
+  board.product.tasks[items[0].taskId] = { archive:{at:40, previousStatus:"draft"} };
+  board.product.tasks[items[1].taskId] = { archive:{at:40, previousStatus:"done", retentionAt:30} };
+  board.product.tasks[items[2].taskId] = { archive:{at:40, previousStatus:"done", retentionAt:null} };
+  writeBoards(storage,"owner",[board]);
+  expect(readBoards(storage,"owner")[0].product.tasks).toEqual(board.product.tasks);
+});
+
 describe("confirmed board cache",()=>{
   it("paints 31 real saved tasks synchronously before a cold service read without granting actions",()=>{
     const storage=memory();writeBoards(storage,"owner",[saved]);

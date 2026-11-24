@@ -147,6 +147,30 @@ fn persist(
 mod tests {
     use super::*;
 
+    #[test]
+    fn sprint_close_refuses_an_in_flight_owner_git_effect() {
+        use std::os::unix::fs::DirBuilderExt;
+        let state = std::env::temp_dir().join(format!("cw-sprint-close-{}", settings::unique()));
+        std::fs::DirBuilder::new().mode(0o700).create(&state).unwrap();
+        let path = product_path(&state, "p").unwrap();
+        let product = json!({"tasks":{"task":{"status":"done","title":"Merging member"}},
+            "sprints":[{"id":"s","taskIds":["task"]}]});
+        settings::write_json(&path, &product).unwrap();
+        let claim = {
+            let lock = Lock::new(&state, "machine.lock").unwrap();
+            settings::claim(&state, "p", "task", "A merge is still running.", &lock).unwrap()
+        };
+        let request = json!({"action":"close","sprintId":"s","confirmed":true});
+        let refused = sprint(&state, "p", &request, None).unwrap_err();
+        assert_eq!(refused.code, "sprint_close_blocked");
+        assert!(refused.message.contains("Merging member (task): A merge is still running."));
+        assert_eq!(settings::read_json(&path, Value::Null).unwrap(), product);
+        drop(claim);
+        sprint(&state, "p", &request, None).unwrap();
+        assert_eq!(settings::read_json(&path, Value::Null).unwrap()["tasks"]["task"]["archive"]["previousStatus"], "done");
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
     /// L2: a rewrite of the same condition keeps the hold's identity; any other hold,
     /// even with the same code and task, is a new one.
     #[test]
@@ -872,24 +896,160 @@ pub(super) fn check_planning_recovery(sprint: &Value, action: &str) -> Result<()
     Ok(())
 }
 
+/// Resolve and validate the entire membership before changing either the sprint
+/// or any task. Start admission and owner Git effects share the machine lock.
+fn close_sprint(
+    state: &Path,
+    project: &str,
+    p: &Value,
+    root: Option<&Path>,
+    product: &mut Value,
+    lock: &Lock,
+) -> Result<Value> {
+    let index = product["sprints"]
+        .as_array()
+        .and_then(|sprints| sprints.iter().position(|s| s["id"] == p["sprintId"]))
+        .ok_or_else(|| refuse("unknown_sprint", "Unknown sprint."))?;
+    if p["confirmed"] != true {
+        return Err(refuse("confirmation_required", "Confirm before closing the sprint."));
+    }
+    let sprint = &product["sprints"][index];
+    if !sprint["archivedAt"].is_null() {
+        return Ok(json!({"done":true}));
+    }
+    let id = string(sprint, "id")?;
+    let mut members = std::collections::BTreeSet::new();
+    for member in sprint["taskIds"].as_array().ok_or_else(invalid_sprint_members)? {
+        members.insert(member.as_str().ok_or_else(invalid_sprint_members)?);
+    }
+    let mut reverse_only = Vec::new();
+    for (task, record) in product["tasks"].as_object().ok_or_else(invalid_sprint_members)? {
+        if record["sprintId"] == id && record["purged"] != true && members.insert(task) {
+            reverse_only.push(json!(task));
+        }
+    }
+
+    // Board status may be runtime-derived, so a missing saved status alone is
+    // not proof of a draft. Project rework and runtime closes into a read-only copy.
+    let mut current = product.clone();
+    let mut facts = std::collections::BTreeMap::new();
+    if let Some(root) = root {
+        use super::context;
+        if let Some(store) = context::open(root, cortex_core::OpenMode::LiveReadOnly)? {
+            super::task_rework::project(&store, project, &mut current, false)?;
+            context::owner_closed(&store, project, &mut current)?;
+            let root = store.key().root().to_string_lossy();
+            store.read(|db| {
+                for &task in &members {
+                    if let Some(fact) = cortex_core::projections::task_records(db, project, &root, task)? {
+                        facts.insert(task, fact);
+                    }
+                }
+                Ok(())
+            }).map_err(context::core)?;
+        }
+    }
+
+    let mut blocked = Vec::new();
+    let mut eligible = Vec::new();
+    let mut rework_pending = false;
+    for task in members {
+        let record = &current["tasks"][task];
+        let fact = facts.get(task);
+        if record["purged"] == true {
+            continue;
+        }
+        let busy = settings::idle(state, project, task, lock).err();
+        let rework = super::task_rework::open_rework(record);
+        rework_pending |= rework;
+        let disagrees = record["closedAs"] == "unconfirmed"
+            || fact.is_some_and(|fact| fact.warnings.iter().any(|warning| {
+                matches!(warning.as_str(), "contradictory_evidence" | "owner_closed_unconfirmed")
+            }));
+        let draft = (record["status"].is_null() || record["status"] == "draft")
+            && fact.is_none_or(|fact| fact.execution_id.is_none() && fact.phase == "not_started");
+        let reason = if !record["sprintId"].is_null() && record["sprintId"] != id {
+            Some("membership changed; refresh the sprint")
+        } else if rework {
+            Some("returned for rework and not closed")
+        } else if let Some(busy) = &busy {
+            Some(busy.message.as_str())
+        } else if disagrees {
+            Some("task records disagree")
+        } else if !record.is_object() && fact.is_none() {
+            Some("task details could not be read")
+        } else if record["status"] != "done" && !draft {
+            Some("started but not done")
+        } else {
+            if record["archive"].is_null() {
+                eligible.push((task.to_owned(), draft));
+            }
+            None
+        };
+        if let Some(reason) = reason {
+            let title = record["title"].as_str()
+                .or_else(|| fact.and_then(|fact| fact.title.as_deref()));
+            let label = title.map_or_else(|| task.to_owned(), |title| format!("{title} ({task})"));
+            blocked.push(format!("{label}: {}", reason.trim_end_matches('.')));
+        }
+    }
+    if !blocked.is_empty() {
+        let code = if rework_pending { "rework_pending" } else { "sprint_close_blocked" };
+        return Err(refuse(code, format!("Close sprint is blocked by: {}.", blocked.join("; "))));
+    }
+
+    let before = files::held(product);
+    let at = now_ms();
+    let archive_days = settings::machine(state)?["autoArchiveDays"].as_u64()
+        .filter(|days| (1..=3650).contains(days));
+    for (task, draft) in eligible {
+        let record = &mut product["tasks"][&task];
+        if !record.is_object() {
+            *record = json!({});
+        }
+        if !draft && record["status"].is_null() {
+            // Keep the existing, Core-confirmed completion when adding its archive.
+            for key in ["status", "closedAs", "doneAt", "notVerifiedByCortex"] {
+                record[key] = current["tasks"][&task][key].clone();
+            }
+        }
+        super::task_lifecycle::archive(record, at, if draft { "draft" } else { "done" });
+        if !draft {
+            // Count from completion without bypassing the ordinary auto-archive
+            // delay. An unknown completion clock never authorizes an age purge.
+            let retention_at = record["doneAt"].as_u64().zip(archive_days)
+                .map(|(done, days)| done.saturating_add(days * 86_400_000));
+            record["archive"]["retentionAt"] = json!(retention_at);
+        }
+    }
+    let sprint = &mut product["sprints"][index];
+    sprint["taskIds"].as_array_mut().unwrap().extend(reverse_only);
+    sprint["archivedAt"] = json!(at);
+    sprint["queueState"] = json!("paused");
+    sprint["pauseReason"] = json!("Sprint closed by you");
+    for key in [
+        "pauseKind",
+        "questionExecutions",
+        "planningAttempt",
+        "planningRetry",
+        "automaticQueue",
+    ] {
+        sprint.as_object_mut().unwrap().remove(key);
+    }
+    persist(state, project, product, &before)?;
+    Ok(json!({"done":true}))
+}
+
+fn invalid_sprint_members() -> Refused {
+    refuse("state_unreadable", "Saved sprint membership is unreadable.")
+}
+
 pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Result<Value> {
     let _lock = Lock::new(state, "machine.lock")?;
     let mut product = product(state, project)?;
     let action = string(p, "action")?;
     if action == "close" {
-        if let Some(root) = root {
-            if let Some(store) = super::context::open(root, cortex_core::OpenMode::LiveReadOnly)? {
-                // Project into a copy: only the owner disposition below is saved.
-                let mut current = product.clone();
-                super::task_rework::project(&store, project, &mut current, false)?;
-                if current["sprints"].as_array().into_iter().flatten()
-                    .find(|s| s["id"] == p["sprintId"])
-                    .is_some_and(|s| super::task_rework::sprint_has_open_rework(&current, s))
-                {
-                    return Err(super::task_rework::error("rework_pending"));
-                }
-            }
-        }
+        return close_sprint(state, project, p, root, &mut product, &_lock);
     }
     let before = files::held(&product);
     if action == "create" {
@@ -949,30 +1109,6 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
         .iter_mut()
         .find(|s| s["id"] == p["sprintId"])
         .ok_or_else(|| refuse("unknown_sprint", "Unknown sprint."))?;
-    if action == "close" {
-        if p["confirmed"] != true {
-            return Err(refuse(
-                "confirmation_required",
-                "Confirm before closing the sprint.",
-            ));
-        }
-        if sprint["archivedAt"].is_null() {
-            sprint["archivedAt"] = json!(now_ms());
-            sprint["queueState"] = json!("paused");
-            sprint["pauseReason"] = json!("Sprint closed by you");
-            for key in [
-                "pauseKind",
-                "questionExecutions",
-                "planningAttempt",
-                "planningRetry",
-                "automaticQueue",
-            ] {
-                sprint.as_object_mut().unwrap().remove(key);
-            }
-        }
-        persist(state, project, &mut product, &before)?;
-        return Ok(json!({"done":true}));
-    }
     if !sprint["archivedAt"].is_null() {
         return Err(refuse(
             "sprint_closed",

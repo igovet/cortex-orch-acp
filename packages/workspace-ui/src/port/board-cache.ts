@@ -27,7 +27,11 @@ function board(raw: unknown, legacy = false): CachedBoard {
     if (typeof value.planning === "boolean") overlay.planning=value.planning;
     if (typeof value.purged === "boolean") overlay.purged=value.purged;
     if (text(value.sprintId)) overlay.sprintId=value.sprintId;
-    if (object(value.archive) && typeof value.archive.at === "number" && Number.isFinite(value.archive.at)) overlay.archive={at:value.archive.at,previousStatus:"done"};
+    if (object(value.archive) && typeof value.archive.at === "number" && Number.isFinite(value.archive.at)) {
+      const {at, previousStatus, retentionAt} = value.archive;
+      overlay.archive = {at, previousStatus: previousStatus === "draft" ? "draft" : "done",
+        ...("retentionAt" in value.archive ? {retentionAt: typeof retentionAt === "number" && Number.isFinite(retentionAt) ? retentionAt : null} : {})};
+    }
     // Only the display facts for a recorded automatic finish, never the task result or Git contents.
     const integration = value.integration;
     if (value.status === "done" && object(integration) && integration.method === "commit" && integration.automatic === true
@@ -54,6 +58,7 @@ function board(raw: unknown, legacy = false): CachedBoard {
         ...(hold.nextActor ? {nextActor:hold.nextActor,ownerActions:hold.ownerActions,asks:hold.asks} : {}),
         ...(typeof hold.allowedAt === "number" ? {allowedAt:hold.allowedAt} : {}),
         ...(typeof hold.holdId === "string" && hold.holdId ? {holdId:hold.holdId} : {})}} : {}),
+      // Planning diagnostics stay live-only, like the matching conversation entries.
       targetBranch:null,conversation:[],plan:null,materializedVersion:null,
       ...(typeof s.archivedAt === "number" && Number.isFinite(s.archivedAt)?{archivedAt:s.archivedAt}:{}),...deletion};
   });

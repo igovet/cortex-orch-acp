@@ -22,6 +22,10 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_routes(None).await
+    }
+
+    async fn with_routes(routes: Option<std::sync::Arc<dyn workspace_service::native_runtime::NativeRoutes>>) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         // Unix socket limits must not depend on the caller's TMPDIR.
         let base = Path::new("/tmp").join(format!(
@@ -35,7 +39,7 @@ impl Fixture {
         let root = base.join("repo");
         fs::create_dir(&root).unwrap();
         let state = base.join("state");
-        let service = Service::bind(Config {
+        let config = Config {
             runtime_dir: base.join("run"),
             state_dir: state.clone(),
             allowed_root: base.clone(),
@@ -43,9 +47,11 @@ impl Fixture {
             request_timeout: Duration::from_secs(10),
             shutdown_timeout: Duration::from_millis(100),
             event_capacity: 16,
-        })
-        .await
-        .unwrap();
+        };
+        let service = match routes {
+            Some(routes) => Service::bind_native(config, routes).await,
+            None => Service::bind(config).await,
+        }.unwrap();
         let id = service.register(&root, "Actions").await.unwrap()["projectId"]
             .as_str()
             .unwrap()
@@ -113,6 +119,52 @@ fn seed(f: &Fixture, store: &cortex_core::Store) {
         Ok(())
     }).unwrap();
 }
+
+#[tokio::test]
+async fn sprint_close_reads_core_start_and_disputed_completion_before_archiving() {
+    let f = Fixture::new().await;
+    let store = f.store();
+    seed(&f, &store);
+    let sprint = |params: Value| f.service.machine(serde_json::from_value(json!({
+        "op":"product.sprint","projectId":f.id,"params":params
+    })).unwrap());
+    let created = sprint(json!({"action":"create","description":"Sprint"})).await.unwrap();
+    let id = &created["result"]["sprintId"];
+    let read = || serde_json::from_slice::<Value>(&fs::read(f.path()).unwrap()).unwrap();
+    let mut product = read();
+    product["sprints"][0]["taskIds"] = json!(["t1"]);
+    product["tasks"]["t1"] = json!({"sprintId":id,"title":"Core member"});
+    fs::write(f.path(), serde_json::to_vec(&product).unwrap()).unwrap();
+    store.write(|db| {
+        db.execute("INSERT INTO tasks VALUES ('r1',?,'now')", [f.root.to_str()])?;
+        db.execute("INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at)
+            VALUES ('r1','EXECUTING','Fixture','now','now')", [])?;
+        db.execute("INSERT INTO task_owners VALUES ('r1','owner',1,'now')", [])?;
+        db.execute("INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)", [f.root.to_str()])?;
+        db.execute("INSERT INTO workspace_executions VALUES ('started','t1','r1','s1',1,1,'now')", [])?;
+        db.execute("UPDATE workspace_tasks SET execution_id='started' WHERE task_id='t1'", [])?;
+        Ok(())
+    }).unwrap();
+    let close = json!({"action":"close","sprintId":id,"confirmed":true});
+    let reply = sprint(close.clone()).await.unwrap();
+    assert_eq!(reply["code"], "sprint_close_blocked", "{reply}");
+    assert!(reply["message"].as_str().unwrap().contains("Core member (t1): started but not done"), "{reply}");
+    assert_eq!(read(), product);
+
+    // A saved Done overlay cannot hide contradictory authoritative evidence.
+    product["tasks"]["t1"]["status"] = json!("done");
+    fs::write(f.path(), serde_json::to_vec(&product).unwrap()).unwrap();
+    store.write(|db| {
+        db.execute("UPDATE workspace_tasks SET execution_id='unknown-start' WHERE task_id='t1'", [])?;
+        Ok(())
+    }).unwrap();
+    let reply = sprint(close).await.unwrap();
+    assert_eq!(reply["code"], "sprint_close_blocked", "{reply}");
+    assert!(reply["message"].as_str().unwrap().contains("Core member (t1): task records disagree"), "{reply}");
+    assert_eq!(read(), product);
+    f.service.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn concurrent_edits_and_unknown_start_keep_the_draft_fence() {
     let f = Fixture::new().await;
@@ -378,6 +430,39 @@ async fn owner_lifecycle_matches_without_an_engine() {
 async fn close_commit_and_task_draft_do_not_copy_french_task_prose() {
     use std::os::unix::fs::PermissionsExt;
 
+    // This path uses the real short-text resolver rather than the task session route.
+    // Run it in a fresh process so neither the routing override nor native credentials
+    // can leak through the environment. Enable the shared private HOME/XDG initializer.
+    const CHILD: &str = "CW_TASK_DRAFT_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "close_commit_and_task_draft_do_not_copy_french_task_prose",
+            ])
+            .env_clear()
+            .env("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"))
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    assert!(home.as_os_str().as_encoded_bytes().starts_with(b"/tmp/cw-test-home-"));
+    for (key, leaf) in [("XDG_CONFIG_HOME", "config"), ("XDG_STATE_HOME", "state")] {
+        let directory = PathBuf::from(std::env::var_os(key).unwrap());
+        assert_eq!(directory, home.join(leaf));
+        assert!(fs::read_dir(directory).unwrap().next().is_none());
+    }
+    assert!(std::env::var_os("CORTEX_ROUTING").is_none());
+
     let f = Fixture::new().await;
     let store = f.store();
     seed(&f, &store);
@@ -430,8 +515,9 @@ async fn close_commit_and_task_draft_do_not_copy_french_task_prose() {
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
     }).await.unwrap();
-    assert_eq!(draft["source"], "template");
+    assert_eq!(draft["source"], "fallback");
     assert!(draft["route"].is_null());
+    assert_eq!(draft["reason"], "no_routing", "{draft}");
     assert_eq!(draft["text"]["message"], "Update 1 file\n\nChanged files:\n- `upload.txt` (+1 -1)");
 
     store.write(|db| {
@@ -580,6 +666,366 @@ fn worktree_git(root: &Path, argv: &[&str]) -> String {
     String::from_utf8(done.stdout).unwrap().trim().into()
 }
 
+struct ReworkRoute;
+impl workspace_service::native_runtime::NativeRoutes for ReworkRoute {
+    fn route(
+        &self,
+        root: &Path,
+        _: &str,
+    ) -> cortex_core::CoreResult<workspace_service::native_sessions::SessionRoute> {
+        use cortex_engine::environment::{EngineKind, LaunchSpec as EngineLaunch};
+        // This fixture checks the service boundary and durable handoff, not model
+        // completion. The local process cannot dispatch model calls.
+        Ok(workspace_service::native_sessions::SessionRoute {
+            launch: EngineLaunch {
+                engine: EngineKind::Codex,
+                executable: "/usr/bin/false".into(),
+                args: Vec::new(),
+                cwd: root.into(),
+                native_home: root.into(),
+                credential_directory: root.into(),
+                base_environment: Default::default(),
+                codex_launcher: None,
+                confinement: None,
+            },
+            relay: "/usr/bin/false".into(),
+            broker_parent: root.into(),
+            connection: "fixture".into(),
+            connection_limit: 1,
+            model: "fixture".into(),
+            parameters: Default::default(),
+            instructions: "Local rework fixture.".into(),
+            deadline: Duration::from_secs(2),
+        })
+    }
+}
+
+#[tokio::test]
+async fn owner_rework_uses_the_current_target_and_reopens_sprint_membership() {
+    use cortex_core::workspace::{self, worktrees};
+    for kind in ["main", "worktree"] {
+        let f = Fixture::with_routes(Some(std::sync::Arc::new(ReworkRoute))).await;
+        let response = |op: &str, params: Value| {
+            let service = f.service.clone();
+            let request = serde_json::from_value(json!({"op":op,"projectId":f.id,"params":params})).unwrap();
+            async move { service.machine(request).await.unwrap() }
+        };
+        let store = f.store();
+        worktree_git(&f.root, &["init", "-b", "main"]);
+        fs::write(f.root.join("tracked"), "initial").unwrap();
+        worktree_git(&f.root, &["add", "tracked"]);
+        worktree_git(&f.root, &["commit", "-m", "initial"]);
+        let initial = worktree_git(&f.root, &["rev-parse", "HEAD"]);
+        let directory = f.base.join("trees");
+        let settings = response("machine.update", json!({"patch":{"worktreeRoot":directory}})).await;
+        assert_eq!(settings["ok"], true, "{settings}");
+        f.service.activate(&f.id).await.unwrap();
+        let actor = format!("uid:{}", unsafe { libc::geteuid() });
+        let command = |operation: &str, target: &str, request: &str, expected: &str, payload: Value| json!({
+            "protocol":{"major":1,"minor":8},"requestId":request,"projectId":f.id,
+            "actorId":actor,"operation":operation,"target":target,
+            "ownerEpoch":null,"expectedVersion":expected,"payload":payload,
+        });
+        let task = |kind: &str, create_key: &str, start_key: &str| {
+            let t = workspace::create_draft(&store, &f.id, &actor, &command(
+                "tasks.create", &f.id, create_key, "0",
+                json!({"description":"Fixture","checkout":{"kind":kind}}),
+            )).unwrap().receipt["target"].as_str().unwrap().to_owned();
+            let start = command("tasks.start", &t, start_key, "1", json!({}));
+            let admitted = if kind == "main" {
+                workspace::start_native(&store, &f.id, &actor, &start)
+            } else {
+                workspace::start_native_worktree(&store, &f.id, &actor, &start, &directory)
+            }.unwrap();
+            (t, admitted)
+        };
+        let (task, admission) = task(kind, "create-old", "start-old");
+        let (dependent, downstream) = {
+            let draft = workspace::create_draft(&store, &f.id, &actor, &command(
+                "tasks.create", &f.id, "create-next", "0", json!({"description":"Depends on old result"}),
+            )).unwrap().receipt["target"].as_str().unwrap().to_owned();
+            let start = command("tasks.start", &draft, "start-next", "1", json!({}));
+            (draft, workspace::start_native(&store, &f.id, &actor, &start).unwrap())
+        };
+        let execution = admission["receipt"]["target"].as_str().unwrap();
+        let runtime = admission["task"].as_str().unwrap();
+        store.write(|db| {
+            for id in [runtime, downstream["task"].as_str().unwrap()] {
+                db.execute("UPDATE runtime_tasks SET state='COMPLETED',revision=2,synthesis='Old result'
+                    WHERE task_id=?", [id])?;
+            }
+            Ok(())
+        }).unwrap();
+        let old_tree = worktrees::owned(&store, &f.id, &task).unwrap();
+        if let Some(tree) = &old_tree {
+            worktree_git(&f.root, &["worktree", "remove", tree.path.to_str().unwrap()]);
+        }
+        fs::write(f.root.join("tracked"), "advanced target").unwrap();
+        worktree_git(&f.root, &["commit", "-am", "advance target"]);
+        let advanced = worktree_git(&f.root, &["rev-parse", "HEAD"]);
+        assert_ne!(advanced, initial);
+        fs::create_dir_all(f.path().parent().unwrap()).unwrap();
+        let closed = json!({
+            "tasks":{
+                (&task):{"status":"done","work":"merged","doneAt":now_ms(),"targetBranch":"main",
+                    "checkout":{"kind":kind},"integration":{"targetBranch":"main","commit":initial},
+                    "acceptance":{"version":"1"},"sprintId":"sprint"},
+                (&dependent):{"status":"done","sprintId":"sprint","dependencies":[task]},
+            },
+            "sprints":[{"id":"sprint","taskIds":[task,dependent],"runMode":"manual","queueState":"complete"}],
+        });
+        fs::write(f.path(), serde_json::to_vec(&closed).unwrap()).unwrap();
+        let read = response("product.board", json!({})).await;
+        let projected = &read["result"]["tasks"][&task];
+        assert_eq!(projected["reworkAvailable"], true, "{read}");
+        assert_eq!(projected["reworkWarnings"], json!(["dependents_started"]));
+        let upload = response("product.attachment", json!({"action":"upload","files":[
+            {"name":"notes.txt","mimeType":"text/plain","data":"bm90ZXM="},
+        ]})).await;
+        assert_eq!(upload["ok"], true, "{upload}");
+        let request = json!({
+            "action":"rework","taskId":task,"requestId":"explicit-rework","text":"Do it again.",
+            "attachments":upload["result"],
+            "executionId":execution,"expectedVersion":projected["reworkVersion"],
+            "ownerEpoch":projected["reworkOwnerEpoch"],
+        });
+        assert_eq!(
+            f.service.prompt_execution(&f.id, execution, "Late ordinary message", Some("late"), json!([]))
+                .await.unwrap_err().to_string(),
+            "task_not_resumable",
+        );
+        assert_eq!(f.call(json!({"action":"reopen","taskId":task})).await["code"], "task_not_resumable");
+        for (key, value, refusal) in [
+            ("text",json!(" \n "),"invalid_message"),
+            ("attachments",json!([{}]),"invalid_attachments"),
+            ("expectedVersion",json!("0"),"stale_version"),
+            ("ownerEpoch",json!("0"),"stale_epoch"),
+            ("somethingElse",json!(true),"invalid_request"),
+        ] {
+            let mut bad = request.clone();
+            bad[key] = value;
+            let reply = f.call(bad).await;
+            assert_eq!(reply["code"], refusal, "{reply}");
+        }
+        let mut archived = closed.clone();
+        archived["tasks"][&task]["archive"] = json!({"at":2});
+        fs::write(f.path(), serde_json::to_vec(&archived).unwrap()).unwrap();
+        let paused = f.call(request.clone()).await;
+        assert_eq!(paused["code"], "task_archived", "{paused}");
+        assert_eq!(paused["message"], "Restore the task first.", "{paused}");
+        let archived_board = response("product.board", json!({})).await;
+        assert_eq!(archived_board["result"]["tasks"][&task]["reworkAvailable"], false);
+        let restored = f.call(json!({"action":"restore","taskId":task})).await;
+        assert_eq!(restored["ok"], true, "{restored}");
+        let reply = f.call(request.clone()).await;
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["result"]["state"], "PLANNING");
+        assert_eq!(reply["result"]["baseRevision"], advanced);
+        assert_eq!(f.call(request.clone()).await, reply);
+        let board = response("product.board", json!({})).await;
+        let working = &board["result"]["tasks"][&task];
+        for key in ["status", "doneAt", "acceptance", "integration"] {
+            assert!(working[key].is_null(), "{key}: {board}");
+        }
+        assert_eq!(working["reworkAvailable"], false, "{board}");
+        assert_eq!(board["result"]["sprints"][0]["queueState"], "paused", "{board}");
+        // The durable event also recovers a lost overlay replacement.
+        fs::write(f.path(), serde_json::to_vec(&closed).unwrap()).unwrap();
+        let recovered = response("product.board", json!({})).await;
+        assert_eq!(recovered["result"]["tasks"][&task]["baseRevision"], advanced);
+        assert!(recovered["result"]["tasks"][&task]["integration"].is_null());
+        let sprint_close = response("product.sprint", json!({"action":"close","sprintId":"sprint","confirmed":true})).await;
+        assert_eq!(sprint_close["code"], "rework_pending", "{sprint_close}");
+        if let Some(old) = old_tree {
+            let current = worktrees::owned(&store, &f.id, &task).unwrap().unwrap();
+            assert_ne!(current.path, old.path);
+            assert!(!old.path.exists());
+            assert_eq!(current.base_sha, advanced);
+            assert_eq!(worktree_git(&current.path, &["rev-parse", "HEAD"]), advanced);
+            assert_eq!(fs::read_to_string(current.path.join("tracked")).unwrap(), "advanced target");
+        } else {
+            assert_eq!(worktree_git(&f.root, &["rev-parse", "HEAD"]), advanced);
+        }
+        store.read(|db| {
+            let (origin, integration, base): (String,String,String) = db.query_row(
+                "SELECT json_extract(payload_json,'$.origin'),
+                    json_extract(payload_json,'$.closed.integration.commit'),
+                    json_extract(payload_json,'$.baseRevision') FROM runtime_events
+                 WHERE type='TASK_REOPENED' AND task_id=?", [runtime],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            )?;
+            assert_eq!((origin.as_str(), integration, base), ("owner_rework",initial,advanced));
+            let source: i64 = db.query_row(
+                "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='USER_STEERING'
+                  AND json_extract(payload_json,'$.text')='Do it again.'
+                  AND json_extract(payload_json,'$.attachments[0].name')='notes.txt'", [runtime], |r|r.get(0),
+            )?;
+            assert_eq!(source, 1);
+            Ok(())
+        }).unwrap();
+        f.service.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn owner_rework_after_cleanup_restores_the_verified_unmerged_branch() {
+    use cortex_core::workspace::{self, worktrees};
+    let f = Fixture::with_routes(Some(std::sync::Arc::new(ReworkRoute))).await;
+    let store = f.store();
+    worktree_git(&f.root, &["init", "-b", "main"]);
+    worktree_git(&f.root, &["commit", "--allow-empty", "-m", "initial"]);
+    let base = worktree_git(&f.root, &["rev-parse", "HEAD"]);
+    let trees = f.base.join("trees");
+    fs::write(
+        f.state.join("machine.json"),
+        json!({"worktreeRoot":trees}).to_string(),
+    )
+    .unwrap();
+    f.service.activate(&f.id).await.unwrap();
+    let actor = format!("uid:{}", unsafe { libc::geteuid() });
+    let command = |operation: &str, target: &str, request: &str, expected: &str, payload: Value| json!({
+        "protocol":{"major":1,"minor":8},"requestId":request,"projectId":f.id,
+        "actorId":actor,"operation":operation,"target":target,
+        "ownerEpoch":null,"expectedVersion":expected,"payload":payload,
+    });
+    let draft = workspace::create_draft(&store, &f.id, &actor, &command(
+        "tasks.create", &f.id, "create", "0",
+        json!({"description":"Retain the unmerged commit","checkout":{"kind":"worktree"}}),
+    )).unwrap().receipt["target"].as_str().unwrap().to_owned();
+    let start = command("tasks.start", &draft, "start", "1", json!({}));
+    let admission = workspace::start_native_worktree(&store, &f.id, &actor, &start, &trees).unwrap();
+    let task = admission["task"].as_str().unwrap();
+    let execution = admission["receipt"]["target"].as_str().unwrap();
+    let old = worktrees::owned(&store, &f.id, &draft).unwrap().unwrap();
+    fs::write(old.path.join("previous.txt"), "unmerged work").unwrap();
+    worktree_git(&old.path, &["add", "previous.txt"]);
+    worktree_git(&old.path, &["commit", "-m", "keep this change"]);
+    let retained = worktree_git(&old.path, &["rev-parse", "HEAD"]);
+    worktree_git(&f.root, &["commit", "--allow-empty", "-m", "advance target separately"]);
+    let target = worktree_git(&f.root, &["rev-parse", "HEAD"]);
+    assert_ne!(retained, target);
+    store.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='CANCELLED' WHERE task_id=?", [task])?;
+        Ok(())
+    }).unwrap();
+    let closed = f.call(json!({
+        "action":"close_remove_worktree","taskId":draft,"confirmed":true,
+    })).await;
+    assert_eq!(closed["result"]["worktreeCleanup"]["status"], "removed", "{closed}");
+    assert!(closed["result"]["worktreeCleanup"]["retainedHead"].is_null());
+    assert!(!old.path.exists());
+    let branch = format!("refs/heads/{}", old.branch);
+    assert_eq!(worktree_git(&f.root, &["rev-parse", &branch]), retained);
+    let board = f.service.machine(serde_json::from_value(json!({
+        "op":"product.board","projectId":f.id,"params":{},
+    })).unwrap()).await.unwrap();
+    let projected = &board["result"]["tasks"][&draft];
+    assert_eq!(projected["reworkAvailable"], true, "{board}");
+    let request = json!({
+        "action":"rework","taskId":draft,"requestId":"rework","text":"Build on the unmerged work.",
+        "executionId":execution,"expectedVersion":projected["reworkVersion"],
+        "ownerEpoch":projected["reworkOwnerEpoch"],
+    });
+
+    // A branch with the right name and ancestry but a different tip is not proof.
+    worktree_git(&f.root, &["update-ref", &branch, &base, &retained]);
+    let refused = f.call(request.clone()).await;
+    assert_eq!(refused["code"], "worktree_unavailable", "{refused}");
+    assert_eq!(worktrees::owned(&store, &f.id, &draft).unwrap().unwrap().id, old.id);
+    store.read(|db| {
+        assert_eq!(db.query_row(
+            "SELECT state FROM runtime_tasks WHERE task_id=?", [task], |r| r.get::<_, String>(0),
+        )?, "CANCELLED");
+        assert_eq!(db.query_row(
+            "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='TASK_REOPENED'",
+            [task], |r| r.get::<_, i64>(0),
+        )?, 0);
+        Ok(())
+    }).unwrap();
+    worktree_git(&f.root, &["update-ref", &branch, &retained, &base]);
+
+    // Git must not override another checkout of the retained branch.
+    let elsewhere = f.base.join("elsewhere");
+    let elsewhere_path = elsewhere.to_str().unwrap();
+    worktree_git(&f.root, &["worktree", "add", elsewhere_path, &old.branch]);
+    let occupied = f.call(request.clone()).await;
+    assert_eq!(occupied["code"], "worktree_git_failed", "{occupied}");
+    assert!(elsewhere.join("previous.txt").is_file());
+    worktree_git(&f.root, &["worktree", "remove", elsewhere_path]);
+
+    let reopened = f.call(request.clone()).await;
+    assert_eq!(reopened["ok"], true, "{reopened}");
+    assert_eq!(reopened["result"]["state"], "PLANNING");
+    assert_eq!(reopened["result"]["baseRevision"], base);
+    assert_eq!(f.call(request).await, reopened);
+    let current = worktrees::owned(&store, &f.id, &draft).unwrap().unwrap();
+    assert_ne!(current.path, old.path);
+    assert_eq!(current.branch, old.branch);
+    assert_eq!(current.base_sha, base);
+    assert_eq!(worktree_git(&current.path, &["rev-parse", "HEAD"]), retained);
+    assert_eq!(fs::read_to_string(current.path.join("previous.txt")).unwrap(), "unmerged work");
+    assert_eq!(worktree_git(&f.root, &["rev-parse", "HEAD"]), target);
+    assert!(!f.root.join("previous.txt").exists());
+    f.service.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn owner_rework_can_start_a_task_that_was_closed_before_its_first_run() {
+    for kind in ["main", "worktree"] {
+        let f = Fixture::with_routes(Some(std::sync::Arc::new(ReworkRoute))).await;
+        let store = f.store();
+        let git = kind == "worktree";
+        if git {
+            worktree_git(&f.root, &["init", "-b", "main"]);
+            worktree_git(&f.root, &["commit", "--allow-empty", "-m", "fixture"]);
+        }
+        fs::write(f.state.join("machine.json"), json!({"worktreeRoot":f.base.join("trees")}).to_string()).unwrap();
+        f.service.activate(&f.id).await.unwrap();
+        let create = f.service.workspace(json!({"protocol":{"major":1,"minor":8},
+            "requestId":"draft","projectId":f.id,"operation":"tasks.create","target":f.id,
+            "expectedVersion":"0","ownerEpoch":null,
+            "payload":{"description":"Original task","checkout":{"kind":kind}},
+        })).await.unwrap();
+        let task = create["target"].as_str().unwrap();
+        let close = f.call(json!({"action":"close","taskId":task,"choice":"as_is","confirmed":true})).await;
+        assert_eq!(close["ok"], true, "{close}");
+        let board = f.service.machine(serde_json::from_value(json!({"op":"product.board",
+            "projectId":f.id,"params":{}})).unwrap()).await.unwrap();
+        let projected = &board["result"]["tasks"][task];
+        assert_eq!(projected["reworkAvailable"], true, "{board}");
+        assert!(projected["reworkOwnerEpoch"].is_null());
+        assert!(projected["reworkExecutionId"].is_null());
+        let plain = f.service.workspace(json!({"protocol":{"major":1,"minor":8},
+            "requestId":"unexpected-start","projectId":f.id,"operation":"tasks.start","target":task,
+            "expectedVersion":projected["reworkVersion"],"ownerEpoch":null,"payload":{},
+        })).await.unwrap_err();
+        assert_eq!(plain.to_string(), "task_not_resumable");
+        let request = json!({"action":"rework","taskId":task,"requestId":"first-rework","text":"Begin rework.",
+            "expectedVersion":projected["reworkVersion"],"ownerEpoch":null,"executionId":null});
+        let result = f.call(request.clone()).await;
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["result"]["state"], "PLANNING");
+        assert_eq!(f.call(request).await, result);
+        store.read(|db| {
+            let (execution, event, steering): (String, i64, i64) = db.query_row(
+                "SELECT t.execution_id,
+                    (SELECT count(*) FROM runtime_events v WHERE v.task_id=e.runtime_task_id AND v.type='TASK_REOPENED'
+                     AND json_extract(v.payload_json,'$.previous')='NOT_STARTED'),
+                    (SELECT count(*) FROM runtime_events v WHERE v.task_id=e.runtime_task_id AND v.type='USER_STEERING'
+                     AND json_extract(v.payload_json,'$.text')='Begin rework.')
+                 FROM workspace_tasks t JOIN workspace_executions e ON e.execution_id=t.execution_id
+                 WHERE t.task_id=?", [task], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            )?;
+            assert_eq!(execution, result["result"]["target"]);
+            assert_eq!((event, steering), (1, 1));
+            Ok(())
+        }).unwrap();
+        let binding = cortex_core::workspace::worktrees::owned(&store, &f.id, task).unwrap();
+        assert_eq!(binding.is_some(), git);
+        f.service.stop().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn worktree_cleanup_requires_a_settled_owned_tree_and_preserves_the_branch() {
     use cortex_core::workspace::{self, worktrees::{self, Cleanup}};
@@ -588,6 +1034,7 @@ async fn worktree_cleanup_requires_a_settled_owned_tree_and_preserves_the_branch
         ("dirty-close", "retained", json!("worktree_dirty")),
         ("locked-close", "retained", json!("worktree_occupied")),
         ("missing-close", "retained", json!("worktree_missing")),
+        ("uncertain-merge-cleanup", "retained", json!("worktree_cleanup_unconfirmed")),
         ("clean-purge", "removed", Value::Null),
         ("dirty-purge", "retained", json!("worktree_dirty")),
         ("main", "refused", Value::Null),
@@ -637,7 +1084,22 @@ async fn worktree_cleanup_requires_a_settled_owned_tree_and_preserves_the_branch
             } else if kind == "locked-close" {
                 worktree_git(&f.root, &["worktree", "lock", binding.path.to_str().unwrap()]);
             } else if kind == "missing-close" {
+                // An older pending intent is not evidence that Cortex removed the folder.
+                store.write(|db| worktrees::queue_close_tx(db, &f.id, &draft)).unwrap();
                 worktree_git(&f.root, &["worktree", "remove", binding.path.to_str().unwrap()]);
+            } else if kind == "uncertain-merge-cleanup" {
+                // Model an unconfirmed prior removal with the checkout still present.
+                let previous = json!({
+                    "status":"retained","path":binding.path,
+                    "reason":"worktree_cleanup_unconfirmed","afterMerge":true,
+                });
+                store.write(|db| {
+                    db.execute(
+                        "UPDATE native_worktree_starts SET close_cleanup=? WHERE runtime_task_id=?",
+                        (previous.to_string(), task),
+                    )?;
+                    Ok(())
+                }).unwrap();
             }
         }
         let purge = kind.ends_with("-purge");
@@ -658,7 +1120,7 @@ async fn worktree_cleanup_requires_a_settled_owned_tree_and_preserves_the_branch
             }
             f.call(json!({"action":"purge","taskId":draft,"confirmed":true})).await
         } else {
-            f.call(close).await
+            f.call(close.clone()).await
         };
         if let Some(binding) = binding {
             assert_eq!(reply["ok"], true, "{kind}: {reply}");
@@ -675,7 +1137,42 @@ async fn worktree_cleanup_requires_a_settled_owned_tree_and_preserves_the_branch
             }
             assert_eq!(worktrees::cleanup_outcome(&store, &f.id, &draft, disposition).unwrap().as_ref(), Some(cleanup));
             assert_eq!(binding.path.exists(), expected == "retained" && kind != "missing-close");
-            worktree_git(&f.root, &["show-ref", "--verify", &format!("refs/heads/{}", binding.branch)]);
+            let branch = format!("refs/heads/{}", binding.branch);
+            let branch_head = worktree_git(&f.root, &["rev-parse", "--verify", &branch]);
+            match kind {
+                "dirty-close" => {
+                    let ignored = binding.path.join("local-ignore");
+                    assert_eq!(fs::read_to_string(&ignored).unwrap(), "keep");
+                    fs::remove_file(ignored).unwrap();
+                }
+                "locked-close" => {
+                    worktree_git(&f.root, &["worktree", "unlock", binding.path.to_str().unwrap()]);
+                }
+                _ => {}
+            }
+            if matches!(kind, "dirty-close" | "locked-close") {
+                let unconfirmed = f.call(json!({
+                    "action":"close_remove_worktree","taskId":draft,"confirmed":false,
+                })).await;
+                assert_eq!(unconfirmed["code"], "confirmation_required", "{kind}: {unconfirmed}");
+                assert!(binding.path.is_dir());
+                assert_eq!(
+                    worktrees::cleanup_outcome(&store, &f.id, &draft, Cleanup::Close).unwrap().as_ref(),
+                    Some(cleanup),
+                );
+
+                let retried = f.call(close.clone()).await;
+                let removed = &retried["result"]["worktreeCleanup"];
+                assert_eq!(retried["ok"], true, "{kind}: {retried}");
+                assert_eq!(removed["status"], "removed", "{kind}: {retried}");
+                assert_eq!(
+                    worktrees::cleanup_outcome(&store, &f.id, &draft, Cleanup::Close).unwrap().as_ref(),
+                    Some(removed),
+                );
+                assert!(!binding.path.exists());
+                assert_eq!(f.call(close.clone()).await, retried, "{kind}: removal stays recorded");
+            }
+            assert_eq!(worktree_git(&f.root, &["rev-parse", "--verify", &branch]), branch_head);
         } else {
             assert_eq!(reply["code"], "worktree_not_owned", "{reply}");
             assert_eq!(worktrees::cleanup_outcome(&store, &f.id, &draft, Cleanup::Close).unwrap(), None);

@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { applySprintDeletion, capabilityOf, emptyWorkspace, MACHINE_COMMANDS, mapTask } from "../src";
+import { applySprintDeletion, capabilityOf, emptyWorkspace, MACHINE_COMMANDS, mapTask, sprintCloseBlockers, type Sprint, type TaskStatus } from "../src";
 it("removes confirmed sprint tasks from primary and secondary surfaces, preserving other work", () => {
   const state = emptyWorkspace();
   const wire = {description:"Saved",title:null,titleAvailability:"not_connected",version:"1",executionId:null,phase:"not_started",runtimeState:null,executionState:"not_started",waitReason:null,lastConfirmedAt:null,warnings:[]} as const;
@@ -11,4 +11,20 @@ it("removes confirmed sprint tasks from primary and secondary surfaces, preservi
   expect(applySprintDeletion(next,"s",new Set(["deleted"]))).toEqual(next);
   expect(capabilityOf("delete_sprint")).toBe("workspace.delete_sprint");
   expect(MACHINE_COMMANDS).toContain("delete_sprint");
+});
+
+it("names each started, disputed or missing sprint member without blocking drafts or done tasks", () => {
+  const state = emptyWorkspace();
+  const sprint: Sprint = {id:"s",projectId:"p",description:"Sprint",title:null,runMode:"manual",targetBranch:null,
+    planning:"created",conversation:[],plan:null,materializedVersion:1,taskIds:["draft","done","missing"],queueState:"paused",pauseReason:null};
+  const task = (taskId: string, status: TaskStatus) => ({
+    ...mapTask({taskId,description:taskId,title:taskId,titleAvailability:"generated",version:"1",executionId:null,phase:"not_started",
+      runtimeState:null,executionState:"not_started",waitReason:null,lastConfirmedAt:null,warnings:[]},{projectId:"p"}),
+    sprintId:"s", status,
+  });
+  const unfinished: TaskStatus[] = ["working","stopping","needs_you","paused","review","ready_to_merge","failed","cancelled","closed_unverified"];
+  state.tasks = [task("draft","draft"), {...task("done","done"),archive:{at:1,previousStatus:"done"}},
+    ...unfinished.map(status => task(status,status)), {...task("disagree","done"),warnings:["owner_closed_unconfirmed"]}];
+  expect(sprintCloseBlockers(state,sprint).map(b => b.id)).toEqual(["missing",...unfinished,"disagree"]);
+  expect(sprintCloseBlockers({...state,tasks:[]},{...sprint,taskIds:[]})).toEqual([]);
 });

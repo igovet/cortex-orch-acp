@@ -132,6 +132,9 @@ impl Fixture {
         assert_eq!(reply["ok"], true, "{reply}");
         reply["result"].clone()
     }
+    async fn lease(&self, file: &str) -> Value {
+        self.ok("repo.file.lease.acquire", json!({"file":file})).await["leaseToken"].clone()
+    }
     async fn action(&self, p: Value) -> Value {
         self.ok("git", p).await
     }
@@ -153,6 +156,20 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.base);
     }
 }
+#[tokio::test]
+async fn code_lsp_without_a_bundle_leaves_code_readable() {
+    let fixture = Fixture::plain().await;
+    fixture.write("lib.rs", b"fn on_disk() {}");
+    let result = fixture.call("repo.lsp.open",
+        json!({"file":"lib.rs","text":"fn unsaved() {}","version":1})).await;
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["code"], "lsp_unavailable");
+    assert_eq!(result["reason"], "server_not_installed");
+    assert_eq!(fixture.ok("repo.file", json!({"file":"lib.rs"})).await["text"], "fn on_disk() {}");
+    assert_eq!(fs::read(fixture.repo.join("lib.rs")).unwrap(), b"fn on_disk() {}");
+    fixture.stop().await;
+}
+
 #[tokio::test]
 async fn explicit_workflows_and_maintenance_reads_need_no_activation() {
     let f = Fixture::new().await;
@@ -972,11 +989,12 @@ async fn file_revision_conflicts_absent_save_exact_bytes_mode_and_concurrent_sav
     assert_eq!(read["readOnly"], Value::Null);
     assert_eq!(read["writer"], Value::Null);
     let base = read["revision"].clone();
+    let token = f.lease("a.txt").await;
     f.write("a.txt", b"worker");
     assert_eq!(
         f.ok(
             "repo.file.save",
-            json!({"file":"a.txt","text":"owner","revision":base})
+            json!({"file":"a.txt","text":"owner","revision":base,"leaseToken":token})
         )
         .await["outcome"],
         "conflict"
@@ -985,7 +1003,7 @@ async fn file_revision_conflicts_absent_save_exact_bytes_mode_and_concurrent_sav
     assert_eq!(
         f.ok(
             "repo.file.save",
-            json!({"file":"a.txt","text":"owner","revision":base})
+            json!({"file":"a.txt","text":"owner","revision":base,"leaseToken":token})
         )
         .await["revision"],
         Value::Null
@@ -993,7 +1011,7 @@ async fn file_revision_conflicts_absent_save_exact_bytes_mode_and_concurrent_sav
     let saved = f
         .ok(
             "repo.file.save",
-            json!({"file":"a.txt","text":"owner","revision":null}),
+            json!({"file":"a.txt","text":"owner","revision":null,"leaseToken":token}),
         )
         .await;
     assert_eq!(saved["outcome"], "saved");
@@ -1002,11 +1020,12 @@ async fn file_revision_conflicts_absent_save_exact_bytes_mode_and_concurrent_sav
         let service = f.service.clone();
         let id = f.id.clone();
         let base = saved["revision"].clone();
+        let token = token.clone();
         jobs.push(tokio::spawn(async move {
             service
                 .machine(
                     serde_json::from_value(json!({"op":"repo.file.save","projectId":id,
-            "params":{"file":"a.txt","text":format!("writer {i}"),"revision":base}}))
+            "params":{"file":"a.txt","text":format!("writer {i}"),"revision":base,"leaseToken":token}}))
                     .unwrap(),
                 )
                 .await
@@ -1023,9 +1042,10 @@ async fn file_revision_conflicts_absent_save_exact_bytes_mode_and_concurrent_sav
     f.write("run.sh", b"#!/bin/sh\r\necho hi\r\n");
     fs::set_permissions(f.repo.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
     let base = f.ok("repo.file", json!({"file":"run.sh"})).await["revision"].clone();
+    let script_token = f.lease("run.sh").await;
     f.ok(
         "repo.file.save",
-        json!({"file":"run.sh","text":"#!/bin/sh\r\necho bye\r\n\u{feff}","revision":base}),
+        json!({"file":"run.sh","text":"#!/bin/sh\r\necho bye\r\n\u{feff}","revision":base,"leaseToken":script_token}),
     )
     .await;
     assert_eq!(
@@ -1042,6 +1062,50 @@ async fn file_revision_conflicts_absent_save_exact_bytes_mode_and_concurrent_sav
     );
     f.stop().await;
 }
+#[tokio::test]
+async fn code_lease_gates_save_and_heartbeat_without_persisting_the_token() {
+    let f = Fixture::plain().await;
+    f.write("a.txt", b"original");
+    let rev = f.ok("repo.file", json!({"file":"a.txt"})).await["revision"].clone();
+    assert_eq!(f.ok("repo.file.lease.status", json!({"file":"a.txt"})).await["status"], "available");
+    let save = json!({"file":"a.txt","text":"new","revision":rev});
+    assert_eq!(f.call("repo.file.save", save.clone()).await["code"], "edit_lease_lost");
+    let lease = f.ok("repo.file.lease.acquire", json!({"file":"a.txt"})).await;
+    assert_eq!(lease["expiresInMs"], 60000);
+    assert_eq!(lease["renewAfterMs"], 20000);
+    let token = &lease["leaseToken"];
+    let store = f.store();
+    let hash: String = store.read(|db| Ok(db.query_row(
+        "SELECT token_hash FROM code_owner_file_leases", [], |r| r.get(0),
+    )?)).unwrap();
+    use sha2::{Digest, Sha256};
+    assert!(token.as_str().is_some_and(|t| hash == format!("{:x}", Sha256::digest(t.as_bytes())) && hash != t));
+    assert_eq!(f.ok("repo.file.lease.status", json!({"file":"a.txt"})).await["status"], "held");
+    assert_eq!(f.call("repo.file.lease.acquire", json!({"file":"a.txt"})).await["code"], "owner_file_lease_held");
+    let held = json!({"file":"a.txt","leaseToken":token});
+    assert_eq!(f.ok("repo.file.lease.status", held.clone()).await["status"], "yours");
+    assert_eq!(f.ok("repo.file.lease.renew", held.clone()).await["expiresInMs"], 60000);
+    let mut fenced = save;
+    fenced["leaseToken"] = token.clone();
+    assert_eq!(f.call("repo.file.save", json!({"file":"other.txt","leaseToken":token,
+        "revision":null,"text":"wrong file"})).await["code"], "edit_lease_lost");
+    store.write(|db| {
+        db.execute("UPDATE code_owner_file_leases SET expires_at=0", [])?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(f.call("repo.file.lease.renew", held).await["code"], "edit_lease_lost");
+    assert_eq!(f.call("repo.file.save", fenced.clone()).await["code"], "edit_lease_lost");
+    assert_eq!(fs::read(f.repo.join("a.txt")).unwrap(), b"original");
+    let new_token = f.lease("a.txt").await;
+    fenced["leaseToken"] = new_token.clone();
+    assert_eq!(f.ok("repo.file.save", fenced.clone()).await["outcome"], "saved");
+    assert_eq!(f.ok("repo.file.lease.release", json!({"file":"a.txt","leaseToken":new_token})).await["released"], true);
+    assert_eq!(f.call("repo.file.save", fenced).await["code"], "edit_lease_lost");
+    assert_eq!(fs::read(f.repo.join("a.txt")).unwrap(), b"new");
+    drop(store);
+    f.stop().await;
+}
+
 #[tokio::test]
 async fn files_refuse_escapes_symlinks_binary_oversize_and_missing_base() {
     let f = Fixture::new().await;
@@ -1070,11 +1134,11 @@ async fn files_refuse_escapes_symlinks_binary_oversize_and_missing_base() {
     for name in ["dir-link/new", "inner-link"] {
         assert_eq!(
             f.call(
-                "repo.file.save",
-                json!({"file":name,"text":"x","revision":null})
+                "repo.file.lease.acquire",
+                json!({"file":name})
             )
             .await["code"],
-            "symlink_refused"
+            "unsafe_edit_path"
         );
     }
     let read = f.ok("repo.file", json!({"file":"inner-link"})).await;
@@ -1084,15 +1148,16 @@ async fn files_refuse_escapes_symlinks_binary_oversize_and_missing_base() {
         f.call("repo.file", json!({"file":"dir-link/secret"})).await["code"],
         "invalid_path"
     );
+    let token = f.lease("a.txt").await;
     assert_eq!(
-        f.call("repo.file.save", json!({"file":"a.txt","text":"x"}))
+        f.call("repo.file.save", json!({"file":"a.txt","text":"x","leaseToken":token}))
             .await["code"],
         "invalid_request"
     );
     assert_eq!(
         f.call(
             "repo.file.save",
-            json!({"file":"a.txt","text":"x".repeat(512*1024+1),"revision":null})
+            json!({"file":"a.txt","text":"x".repeat(512*1024+1),"revision":null,"leaseToken":token})
         )
         .await["code"],
         "file_too_large"
@@ -1100,7 +1165,7 @@ async fn files_refuse_escapes_symlinks_binary_oversize_and_missing_base() {
     assert_eq!(
         f.call(
             "repo.file.save",
-            json!({"file":"a.txt","text":"x\0y","revision":null})
+            json!({"file":"a.txt","text":"x\0y","revision":null,"leaseToken":token})
         )
         .await["code"],
         "binary_file"
@@ -1114,18 +1179,20 @@ async fn files_refuse_escapes_symlinks_binary_oversize_and_missing_base() {
     );
     let read = f.ok("repo.file", json!({"file":"latin"})).await;
     assert!(read["readOnly"].as_str().unwrap().contains("UTF-8"));
+    let latin_token = f.lease("latin").await;
     assert_eq!(
         f.call(
             "repo.file.save",
-            json!({"file":"latin","text":"cafe","revision":read["revision"]})
+            json!({"file":"latin","text":"cafe","revision":read["revision"],"leaseToken":latin_token})
         )
         .await["code"],
         "not_text"
     );
+    let big_token = f.lease("big").await;
     assert_eq!(
         f.call(
             "repo.file.save",
-            json!({"file":"big","text":"x","revision":null})
+            json!({"file":"big","text":"x","revision":null,"leaseToken":big_token})
         )
         .await["code"],
         "file_too_large"
@@ -1143,9 +1210,21 @@ async fn files_refuse_escapes_symlinks_binary_oversize_and_missing_base() {
 #[tokio::test]
 async fn settings_validation_private_logs_and_diagnostics() {
     let f = Fixture::new().await;
+    let defaults = f.ok("overview", json!({})).await;
+    assert_eq!(defaults["autoArchiveDays"], 7);
+    assert_eq!(defaults["retentionDays"], 30);
+    assert_eq!(defaults["automaticArchivePurge"], true);
+    assert_eq!(defaults["unreferencedAttachmentRetentionDays"], 1);
     for patch in [
         json!({"retentionDays":0}),
         json!({"retentionDays":true}),
+        json!({"retentionDays":3651}),
+        json!({"autoArchiveDays":0}),
+        json!({"autoArchiveDays":3651}),
+        json!({"automaticArchivePurge":"false"}),
+        json!({"unreferencedAttachmentRetentionDays":0}),
+        json!({"unreferencedAttachmentRetentionDays":1.5}),
+        json!({"unreferencedAttachmentRetentionDays":3651}),
         json!({"unknown":1}),
         json!({"worktreeRoot":"relative"}),
         json!({"worktreeRoot":f.repo}),
@@ -1158,11 +1237,13 @@ async fn settings_validation_private_logs_and_diagnostics() {
     let root = f.base.join("trees");
     f.ok(
         "machine.update",
-        json!({"patch":{"retentionDays":14,"worktreeRoot":root,"name":"Desk"}}),
+        json!({"patch":{"retentionDays":14,"automaticArchivePurge":false,"unreferencedAttachmentRetentionDays":3650,"worktreeRoot":root,"name":"Desk"}}),
     )
     .await;
     let view = f.ok("overview", json!({})).await;
     assert_eq!(view["retentionDays"], 14);
+    assert_eq!(view["automaticArchivePurge"], false);
+    assert_eq!(view["unreferencedAttachmentRetentionDays"], 3650);
     assert_eq!(view["name"], "Desk");
     assert_eq!(view["worktreeRoot"], json!(root));
     assert!(
@@ -1251,6 +1332,83 @@ async fn concurrent_git_reads_need_no_helper_launch() {
         .is_err());
     f.stop().await;
 }
+
+#[tokio::test]
+async fn sprint_close_guards_and_archives_members_atomically() {
+    let f = Fixture::new().await;
+    let sprint = f.ok("product.sprint", json!({"action":"create","description":"Sprint"})).await["sprintId"].clone();
+    let path = f.state.join("product").join(format!("{}.json", f.id));
+    let read = || serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap();
+    let write = |product: &Value| fs::write(&path, serde_json::to_vec(product).unwrap()).unwrap();
+    let mut product = read();
+    product["sprints"][0]["taskIds"] = json!(["working", "waiting", "review", "failed", "draft", "finished", "old"]);
+    product["sprints"][0]["queueState"] = json!("running");
+    let day = 86_400_000;
+    let done = 2 * day;
+    product["tasks"] = json!({
+        "working":{"status":"working","title":"Running member"},
+        "waiting":{"status":"needs_you","title":"Waiting member"},
+        "review":{"status":"review","title":"Review member"},
+        "failed":{"status":"failed","title":"Failed member"},
+        "draft":{"status":"draft","sprintId":sprint,"title":"Queued member"},
+        "reverse":{"status":"draft","sprintId":sprint},
+        "finished":{"status":"done","doneAt":done,"work":"merged"},
+        "old":{"status":"done","doneAt":0,"archive":{"at":1,"previousStatus":"done"}}
+    });
+    write(&product);
+    let close = json!({"action":"close","sprintId":sprint,"confirmed":true});
+    let refusal = f.call("product.sprint", close.clone()).await;
+    assert_eq!(refusal["code"], "sprint_close_blocked", "{refusal}");
+    for name in ["Running member (working)", "Waiting member (waiting)", "Review member (review)", "Failed member (failed)"] {
+        assert!(refusal["message"].as_str().unwrap().contains(name), "{refusal}");
+    }
+    assert_eq!(read(), product, "a refusal must leave every record unchanged");
+    for task in ["working", "waiting", "review", "failed"] {
+        product["tasks"][task]["status"] = json!("done");
+    }
+    product["tasks"]["review"]["closedAs"] = json!("unconfirmed");
+    write(&product);
+    let refusal = f.call("product.sprint", close.clone()).await;
+    assert_eq!(refusal["code"], "sprint_close_blocked", "{refusal}");
+    assert!(refusal["message"].as_str().unwrap().contains("Review member (review): task records disagree"));
+    assert_eq!(read(), product);
+    product["tasks"]["review"]["closedAs"] = Value::Null;
+    write(&product);
+    f.ok("product.sprint", close.clone()).await;
+    let closed = read();
+    let at = closed["sprints"][0]["archivedAt"].as_u64().unwrap();
+    assert_eq!(closed["sprints"][0]["queueState"], "paused");
+    assert_eq!(closed["tasks"]["old"], product["tasks"]["old"]);
+    assert!(closed["sprints"][0]["taskIds"].as_array().unwrap().contains(&json!("reverse")));
+    for draft in ["draft", "reverse"] {
+        assert_eq!(closed["tasks"][draft]["status"], "draft");
+        assert_eq!(closed["tasks"][draft]["archive"], json!({"at":at,"previousStatus":"draft"}));
+        assert!(closed["tasks"][draft]["doneAt"].is_null());
+        assert!(!cortex_core::store::expired_closed_archive(&closed["tasks"][draft], at + 100 * day, 30));
+    }
+    let finished = &closed["tasks"]["finished"];
+    assert_eq!(finished["doneAt"], done);
+    assert_eq!(finished["archive"], json!({"at":at,"previousStatus":"done","retentionAt":done + 7 * day}));
+    let expired = cortex_core::store::expired_closed_archive;
+    assert!(!expired(finished, done + 37 * day - 1, 30));
+    assert!(expired(finished, done + 37 * day, 30));
+    assert!(!expired(&closed["tasks"]["working"], at + 100 * day, 30), "unknown completion is not a purge clock");
+    let head = f.git(&["rev-parse", "HEAD"]);
+    let purge = f.call("product.task", json!({"action":"purge","taskId":"draft","confirmed":true})).await;
+    assert_eq!(purge["code"], "unmerged_work", "{purge}");
+    assert_eq!(read(), closed);
+    assert_eq!(f.git(&["rev-parse", "HEAD"]), head);
+    f.ok("product.task", json!({"action":"restore","taskId":"draft"})).await;
+    let restored = read();
+    assert_eq!(restored["tasks"]["draft"]["status"], "draft");
+    assert!(restored["tasks"]["draft"]["archive"].is_null());
+    assert!(restored["tasks"]["draft"]["sprintId"].is_null());
+    assert!(!restored["sprints"][0]["taskIds"].as_array().unwrap().contains(&json!("draft")));
+    f.ok("product.sprint", close).await;
+    assert_eq!(read(), restored, "repeating Close must not rearchive any restored task");
+    f.stop().await;
+}
+
 #[tokio::test]
 async fn private_queue_comments_sprints_and_drafts_are_durable_without_core() {
     let f = Fixture::new().await;
@@ -1542,38 +1700,28 @@ async fn core_context_editor_and_attachments_work() {
         "unknown_task"
     );
     let base = f.ok("repo.file", json!({"file":"a.txt"})).await["revision"].clone();
+    cortex_core::lifecycle::TaskMachine::new(&store)
+        .create("runtime-holder", "Scoped holder", "owner").unwrap();
     store.write(|db| {
-        db.execute("UPDATE workspace_tasks SET execution_id='held' WHERE task_id='task'",[])?;
-        db.execute("INSERT INTO workspace_executions VALUES ('held','task','unconfirmed','display',1,1,?)",[cortex_core::now()])?;
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='runtime-holder'",[])?;
+        db.execute("INSERT INTO runtime_nodes VALUES ('runtime-holder',1,'write','worker-backend-dev','Write','[]','[\"a.txt\"]','execution','running','active-assignment',NULL)",[])?;
         Ok(())
     }).unwrap();
-    let busy = f.ok("repo.file", json!({"file":"a.txt"})).await;
-    assert_eq!(busy["writer"], "task");
-    assert!(busy["readOnly"].is_string());
-    assert_eq!(
-        f.call(
-            "repo.file.save",
-            json!({"file":"a.txt","text":"not saved","revision":base})
-        )
-        .await["code"],
-        "checkout_busy"
-    );
+    let busy = f.call("repo.file.lease.acquire", json!({"file":"a.txt"})).await;
+    assert_eq!(busy["code"], "task_file_lease_held");
+    assert_eq!(busy["holderTaskId"], "runtime-holder");
+    assert_eq!(f.ok("repo.file", json!({"file":"a.txt"})).await["text"], "one\ntwo\n");
+    // An unrelated file can be edited without stopping the task.
+    assert!(f.lease("other.txt").await.is_string());
     assert_eq!(fs::read(f.repo.join("a.txt")).unwrap(), b"one\ntwo\n");
-    store
-        .write(|db| {
-            db.execute(
-                "UPDATE workspace_tasks SET execution_id=NULL WHERE task_id='task'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    store.write(|db| {
+        db.execute("UPDATE runtime_nodes SET status='completed' WHERE task_id='runtime-holder'", [])?;
+        Ok(())
+    }).unwrap();
+    let token = f.lease("a.txt").await;
     assert_eq!(
-        f.ok(
-            "repo.file.save",
-            json!({"file":"a.txt","text":"saved","revision":base})
-        )
-        .await["outcome"],
+        f.ok("repo.file.save", json!({"file":"a.txt","text":"saved","revision":base,"leaseToken":token}))
+            .await["outcome"],
         "saved"
     );
     drop(store);
@@ -1910,17 +2058,18 @@ async fn code_tree_lists_ignored_and_dot_files_one_folder_level_at_a_time() {
     let read = f.ok("repo.file", json!({"file":".env"})).await;
     assert_eq!(read["text"], "API_KEY=fake-fixture-value\n");
     assert_eq!(read["readOnly"], Value::Null);
+    let token = f.lease(".env").await;
     let stale = f
         .call(
             "repo.file.save",
-            json!({"file":".env","text":"x","revision":"0".repeat(64)}),
+            json!({"file":".env","text":"x","revision":"0".repeat(64),"leaseToken":token}),
         )
         .await;
     assert_eq!(stale["result"]["outcome"], "conflict");
     let saved = f
         .ok(
             "repo.file.save",
-            json!({"file":".env","text":"API_KEY=other-fake\n","revision":read["revision"]}),
+            json!({"file":".env","text":"API_KEY=other-fake\n","revision":read["revision"],"leaseToken":token}),
         )
         .await;
     assert_eq!(saved["outcome"], "saved");

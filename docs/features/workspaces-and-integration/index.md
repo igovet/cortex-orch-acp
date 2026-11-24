@@ -3,8 +3,9 @@
 > Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
-The ACP client's canonical project root is the destination for all worker changes.
+Worker changes target the canonical project root for incoming ACP or project-folder execution. In Workspace's [separate worktree mode](../../cortex-workspace/local-task-execution.md#separate-worktrees), they target the verified linked checkout instead. File and command evidence cannot cross checkout roots, even when the file bytes match.
 There are no hidden candidate copies or model-controlled integration operations.
+In Workspace, [closing a sprint](../../cortex-workspace/local-task-execution.md#editing-saved-tasks-and-closing-sprints) archives the sprint and its tasks without changing checkout files or branches. Incomplete started work, disputed completion and an ongoing merge or pull-request operation block closure. Drafts can be archived without starting, and existing purge safeguards still protect unmerged work.
 The runtime reserves dependency-ready scopes and runs at most four workers in
 one chat session across all engines, roles and connections. Excess dependency-
 ready nodes remain pending until a worker slot is free. A connection's
@@ -26,10 +27,10 @@ for that holding, with one `NATIVE_WRITE_CONFLICT_WAITING` record naming the
 holder task, the step and the overlapping paths
 (`crates/workspace-service/src/native_runtime.rs`), instead of stopping its task
 with `native_continuation_unavailable`. The same holds for a step queued behind
-another task's open access request. While it waits, the task's status reads
-"Waiting for the task “<title>” to release <files>" (projection warning
-`waiting_for_files`), and the step starts by itself once the holding ends; the
-owner is not asked. A stop that does name `native_continuation_unavailable`
+another task's open access request. While it waits, the Working card and opened
+task read "Waiting for the task “<title>” to release <files>" (projection warning
+`waiting_for_files`), using the title shown on the holder's card when available.
+The step starts by itself once the holding ends; the owner is not asked. A stop that does name `native_continuation_unavailable`
 says, from the scheduler's own rules (`claim_obstacles_tx`), which step could
 not start and why: the files and the owner's `deny-write:` rule that denies
 them, an earlier step of the same task whose engine exit was not confirmed, the
@@ -99,6 +100,18 @@ pre-existing edits and is not an authorship claim. Model commands cannot read `.
 The sections below describe the isolated snapshot workspaces, candidate staging
 and the integration entry point. Their claims are
 not yet re-verified line by line against source; the introduction above says there are no candidate copies, while the former implementation included candidate staging; this conflict is open and must be resolved by review against source.
+
+## Code lease and managed file effects
+
+A local desktop Code lease prevents overlapping writes through this project's
+structured file tools (`project_write`, `project_edit`, `project_delete`,
+`project_mkdir` and `project_skill_link`) in the same channel. A conflicting
+effect is refused before mutation with `owner_file_lease_held`. The scheduler
+waits with that reason when managed writer admission overlaps an active owner
+lease. Disjoint file-scoped work need not wait. Code saves validate the lease
+and disk revision. This does not constrain host commands, outside writes from
+other projects, native engine writes, Git or external editors and terminals.
+See [Code editing and write leases](../../cortex-workspace/ide-and-git.md#code-editing-and-write-leases).
 
 ## Workspace model
 

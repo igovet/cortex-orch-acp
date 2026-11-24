@@ -193,7 +193,7 @@ it("a busy button keeps its label and icon readable, so it never seems to vanish
   expect(css).not.toMatch(/\[data-busy\][^{]*\{[^}]*(color: transparent|visibility: hidden)/);
 });
 
-it("a sprint whose tasks could not be loaded offers Retry and an explicit container-only close", async () => {
+it("a sprint whose tasks could not be loaded offers Retry and refuses to archive unseen tasks", async () => {
   const state = world({}, {}, [sprint({ taskIds: ["gone"] })]);
   state.projects[0].issue = "The project failed repeated reads.";
   await mount(state, `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/summary`);
@@ -201,9 +201,11 @@ it("a sprint whose tasks could not be loaded offers Retry and an explicit contai
   expect(text()).not.toContain("No tasks yet");
   expect(control("Retry")).toBeTruthy();
   expect(control("Close sprint…")).toBeTruthy();
-  expect(control("Close sprint…")!.getAttribute("aria-disabled")).not.toBe("true");
-  control("Close sprint…")!.click(); await settle();
-  expect(text()).toContain("No task is cancelled, accepted, merged, archived or deleted");
+  const close = control("Close sprint…")!;
+  expect(close.getAttribute("aria-disabled")).toBe("true");
+  expect(close.getAttribute("data-why")).toContain("gone: task details not loaded");
+  close.click(); await settle();
+  expect(text()).not.toContain("Close this sprint?");
 });
 
 it("an empty sprint board offers New task for that sprint, already selected", async () => {

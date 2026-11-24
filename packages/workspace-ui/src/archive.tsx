@@ -64,7 +64,7 @@ function BlockedDialog(props: { row: ArchiveRow; onClose: () => void }) {
     <div class="dlg-h"><h2>Cleanup of {t().title} is blocked</h2><button data-tooltip="" class="ib" aria-label="Decide later" onClick={() => props.onClose()}><I n="x" /></button></div>
     <div class="dlg-b"><div>{props.row.sub}.</div><div class="cap muted">It stays in the Archive until you decide. Nothing is deleted on its own.</div></div>
     <ActionBar place="dialog"><button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Decide later</button>
-      <button class="btn btn-line btn-lg" {...ws.needs("restore_task")} onClick={() => { ws.ok({ type: "restore_task", taskId: t().id, now: ws.store.clock() }, () => { props.onClose(); }); }}>Restore to Done</button>
+      <button class="btn btn-line btn-lg" {...ws.needs("restore_task")} onClick={() => { ws.ok({ type: "restore_task", taskId: t().id, now: ws.store.clock() }, () => { props.onClose(); }); }}>Restore {t().archive?.previousStatus === "draft" ? "draft" : "to Done"}</button>
       <Show when={t().work === "unmerged" && props.row.view.machine.connection === "connected"}><button class="btn btn-danger btn-lg" {...ws.needs("confirm_discard")} onClick={() => { ws.ok({ type: "confirm_discard", taskId: t().id, now: ws.store.clock() }, () => { props.onClose(); }); }}>Allow deleting the work at cleanup</button></Show>
       <Show when={clearable()}><button class="btn btn-danger btn-lg" {...ws.needs("clear_purge_block")} onClick={() => { ws.ok({ type: "clear_purge_block", taskId: t().id, confirmed: true }, () => { props.onClose(); }); }}>Discard the new files</button></Show></ActionBar>
   </>;
@@ -130,7 +130,7 @@ export function Archive() {
     </section>
   </Show>;
   return <div class="page"><div class="page-in">
-    <div class="page-h"><div><p><OverviewShown inline><>Kept for {ws.machine().retentionDays} days after archiving by default. </></OverviewShown><A class="lnk" to={{ name: "settings", section: "storage", machine: ws.machine().id }}>Change it for each machine.</A> Merged commits stay in Git.</p></div></div>
+    <div class="page-h"><div><p><OverviewShown inline><>Kept for {ws.machine().retentionDays} days after archiving by default. Sprint drafts aren’t cleaned up automatically.  </></OverviewShown><A class="lnk" to={{ name: "settings", section: "storage", machine: ws.machine().id }}>Change it for each machine.</A> Merged commits stay in Git.</p></div></div>
     <Show when={ids().length > 0} fallback={<Toolbar class="tbar" label="Filter the Archive" start={<>
       <input class="inp ws-filter-wide" placeholder="Filter archived tasks" aria-label="Filter archived tasks" value={filter().text} onInput={e => setFilter({ ...filter(), text: e.currentTarget.value })} />
       <Picker id="m-ar-machine" label="Machine" value={machines().find(m => m.id === filter().machine)?.label ?? "All"} options={machines()} onPick={machine => setFilter({ ...filter(), machine })} />
@@ -145,7 +145,7 @@ export function Archive() {
     <Show when={closedSprints().length}><section aria-label="Closed sprints">
       <SectionHead title="Closed sprints" count={closedSprints().length} />
       <div class="surface"><For each={closedSprints()}>{s => <div class="srow">
-        <span><span class="t">{sprintTitle(s)}</span><span class="d">{s.taskIds.length} tasks retained. Unfinished tasks remain in the project.</span></span>
+        <span><span class="t">{sprintTitle(s)}</span><span class="d">{s.taskIds.length} tasks retained. Restoring a task returns it to the project without a sprint.</span></span>
         <A class="btn btn-line btn-sm" to={{name:"sprint",machine:ws.store.state().projects.find(p => p.id === s.projectId)!.machineId,project:s.projectId,sprint:s.id,tab:"summary"}}>Open summary</A>
       </div>}</For></div>
     </section></Show>

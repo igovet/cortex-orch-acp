@@ -154,6 +154,49 @@ fn truth(v: &Value) -> bool {
         Value::Object(m) => !m.is_empty(),
     }
 }
+/// The explicit destructive choice does not stop an active run, acknowledge an
+/// unknown effect, or certify verification. Only settled, owned checkouts qualify.
+pub(super) async fn close_with_cleanup(
+    root: &Path,
+    project: &str,
+    state: &Path,
+    task: &str,
+    product: &mut Value,
+    p: &Value,
+    git: &mut Git,
+) -> Result<Value> {
+    use cortex_core::workspace::worktrees::{finish_cleanup, queue_close_tx, Cleanup};
+    if p["confirmed"] != true {
+        return Err(refuse("confirmation_required", "Confirm closing and deleting the task worktree."));
+    }
+    let store = context::open(root, OpenMode::RuntimeValidate)?
+        .ok_or_else(|| refuse("worktree_not_owned", "Cortex did not create a worktree for this task."))?;
+    let record = &mut product["tasks"][task];
+    if truth(&record["archive"]) || truth(&record["purged"]) || truth(&record["merge"]) {
+        return Err(refuse("close_worktree_unavailable", "The task is archived, removed, or has a merge in progress."));
+    }
+    if record["status"] != "done" {
+        // Reuse the close-as-is presentation, without its optional acknowledgement
+        // of an unknown effect or any mutation of the runtime's state machine.
+        apply(root, project, task, record, &json!({"action":"close","choice":"as_is","confirmed":true}), git).await?;
+    }
+    store.write(|db| {
+        queue_close_tx(db, project, task)?;
+        super::settings::write_json(
+            &product_path(state, project).map_err(|e| CoreError::Refused(e.code))?,
+            product,
+        ).map_err(|e| CoreError::Refused(e.code))?;
+        Ok(())
+    }).map_err(|e| match e.code() {
+        "active_execution" => unsettled(),
+        "worktree_not_owned" => refuse(e.code(), "Cortex did not create a worktree for this task."),
+        _ => settle_error(e),
+    })?;
+    let cleanup = finish_cleanup(&store, project, task, Cleanup::Close)
+        .ok().flatten().unwrap_or_else(|| json!({"status":"pending","reason":"worktree_cleanup_unconfirmed"}));
+    Ok(json!({"done":true,"worktreeCleanup":cleanup}))
+}
+
 pub async fn apply(
     root: &Path,
     project: &str,
@@ -227,30 +270,15 @@ pub async fn apply(
                     "Only a finished task can go to the Archive.",
                 ));
             }
-            // Archiving never asks and never discards: the work, checkout and result
-            // stay as they are. Only the explicit delete of an archived task confirms.
-            record["archive"] = json!({"at":at,"previousStatus":"done"});
-            record["archiveQuestion"] = json!(false);
-            if let Some(fields) = record.as_object_mut() {
-                fields.remove("archiveAskAfter");
-            }
+            archive(record, at, "done");
         }
         "resolution_started" => {
-            // Retained ordering validates the checkout even when no merge exists.
+            // Keep the old action an explicit refusal, not a second write path.
             retention::task_path(root, record, git).await?;
             if !truth(&record["merge"]) {
-                return Err(refuse(
-                    "no_conflict",
-                    "There is no retained merge conflict for this task.",
-                ));
+                return Err(refuse("no_conflict", "There is no retained merge conflict for this task."));
             }
-            let merge = record["merge"]
-                .as_object_mut()
-                .ok_or_else(|| refuse("machine_tool_failed", "AttributeError"))?;
-            merge.insert("handedAt".into(), json!(at));
-            merge.insert("guidance".into(), p["guidance"].clone());
-            record["conflict"] = json!("resolving");
-            record["acceptance"] = Value::Null;
+            return Err(refuse("handoff_required", "Use the owning execution's handoff_merge action."));
         }
         _ => {
             return Err(refuse(
@@ -260,4 +288,11 @@ pub async fn apply(
         }
     }
     Ok(())
+}
+
+/// Archiving never asks or discards: work, checkout and result stay as they are.
+pub(super) fn archive(record: &mut Value, at: u64, previous_status: &str) {
+    record["archive"] = json!({"at":at,"previousStatus":previous_status});
+    record["archiveQuestion"] = json!(false);
+    record.as_object_mut().unwrap().remove("archiveAskAfter");
 }
