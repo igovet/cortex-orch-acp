@@ -20,8 +20,10 @@ It does not let an ordinary late message reopen closed work, bypass an
 unconfirmed execution or side effect, or carry acceptance into the new cycle.
 See [rework admission](docs/cortex-workspace/local-task-execution.md#return-for-rework).
 
-A new confirmed close-and-delete request can retry a retained cleanup only after
-an earlier dirty or occupied result. It rechecks task quiescence, checkout
+The desktop can offer a fresh close-and-delete confirmation after refresh only
+for a retained dirty or occupied cleanup that passes the current read-only
+preflight. This hint does not reopen the checkout or grant access to its files.
+A new confirmed request can retry only after an earlier dirty or occupied result. It rechecks task quiescence, checkout
 ownership and cleanliness before non-forcing Git removal. Uncertain outcomes
 are not requeued, and a recorded removal is reported without deleting again.
 

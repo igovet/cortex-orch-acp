@@ -99,6 +99,71 @@ it("opts in only identified controls on the desktop frame and task composer", as
   expect($(".ws-tooltip-host")).not.toBeNull();
 });
 
+it("reconfirms retained worktree cleanup after refresh without reopening the checkout", async () => {
+  const s = machine([wireTask()]);
+  const checkout = { kind: "worktree", id: "wt", branch: "task", path: "/work/task" };
+  const requests: unknown[] = [];
+  let state: "initial" | "retained" | "ready" | "removed" | "uncertain" = "initial";
+  s.answers["service.capabilities"] = () => ({ methods: ["machine.call", "native.open_editor"], machine: true, taskWorktrees: true });
+  const answer = s.answers["machine.call"]!;
+  s.answers["machine.call"] = message => {
+    const { op, params } = message as { op: string; params: unknown };
+    if (op === "product.read") return { ok: true, result: { tasks: { "task-1": {
+      ...(state === "initial" ? {} : { status: "done", closedAs: "closed" }),
+      checkout: {
+        ...checkout,
+        ...(state !== "initial" && state !== "uncertain" ? { unavailable: true } : {}),
+        ...(state !== "initial" ? { cleanupRetryReady: state === "ready" } : {}),
+      },
+    } }, sprints: [], messages: [] } };
+    if (op === "repo.snapshot") return { ok: true, result: { ...repo,
+      checkouts: [...repo.checkouts, { ...repo.checkouts[0], ...checkout, taskId: "task-1" }],
+    } };
+    if (op === "product.task") {
+      requests.push(params);
+      state = requests.length === 1 ? "retained" : "removed";
+      return { ok: true, result: { worktreeCleanup: state === "retained"
+        ? { status: "retained", reason: "worktree_occupied" } : { status: "removed" } } };
+    }
+    return answer(message);
+  };
+
+  await open(s, TASK);
+  const label = "Close and delete worktree folder";
+  const menu = () => {
+    if (!button(label, "#m-task")) button("Task actions")!.click();
+    return button(label, "#m-task")!;
+  };
+  menu().click();
+  expect(requests).toHaveLength(0);
+  button(label, "dialog[open]")!.click();
+  await settled();
+  expect(requests).toHaveLength(1);
+  expect(menu().getAttribute("aria-disabled")).toBe("true");
+
+  state = "ready";
+  s.send({ type: "refresh" });
+  await settled();
+  expect(menu().getAttribute("aria-disabled")).toBeNull();
+  expect(all('#m-task [role="menuitem"]').find(el => el.textContent?.includes("Worktree unavailable"))?.getAttribute("aria-disabled")).toBe("true");
+  menu().click();
+  expect(requests).toHaveLength(1);
+  button(label, "dialog[open]")!.click();
+  await settled();
+  expect(requests).toEqual(Array(2).fill({ action: "close_remove_worktree", taskId: "task-1", confirmed: true }));
+  expect(menu().getAttribute("aria-disabled")).toBe("true");
+
+  // An uncertain outcome can still have a usable checkout (for example after a squash).
+  state = "uncertain";
+  s.send({ type: "refresh" });
+  await settled();
+  expect(menu().getAttribute("aria-disabled")).toBe("true");
+  expect(menu().textContent).toContain("Worktree cleanup is unavailable.");
+  menu().click();
+  expect($("dialog[open]")).toBeNull();
+  expect(requests).toHaveLength(2);
+});
+
 describe("machine overview, read when a screen shows it", () => {
   const ops = (s: ReturnType<typeof machine>) => s.calls.filter(c => c.operation === "machine.call").map(c => (c.message as { op: string }).op);
   const go = async (to: string) => { history.pushState(null, "", to); window.dispatchEvent(new PopStateEvent("popstate")); await settled(); };

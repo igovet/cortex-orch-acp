@@ -372,6 +372,14 @@ export function TaskMenu(props: { taskId: string | null; ref: (el: HTMLDivElemen
   const closeReason = () => { const m = model(); return m ? closeBlocked(m) ?? undefined : undefined; };
   const externalDoneReason = () => { const m = model(); return m ? externalDoneBlocked(m) ?? undefined : undefined; };
   const hasBoundWorktree = (task: TaskView["task"]) => task.checkout.kind === "worktree" && !!task.checkout.id;
+  const worktreeCleanupBlocker = (task: TaskView["task"]) => {
+    if (task.checkout.kind === "worktree") {
+      if (task.checkout.cleanupRetryReady === true) return undefined;
+      if (task.checkout.cleanupRetryReady === false) return "Worktree cleanup is unavailable.";
+    }
+    const checkout = taskCheckout(ws.store.state(), task);
+    return !checkout ? ws.t("worktreeUnavailable") : checkout.files.length ? "Commit or remove uncommitted files first." : undefined;
+  };
   const closeWorktree = (taskId: string) => ws.open({ kind: "confirm",
     title: ws.t("closeDeleteWorktreeFolder"), action: ws.t("closeDeleteWorktreeFolder"), danger: true,
     note: "Close this task and remove its clean worktree folder. The branch and main project folder are kept. If safe removal cannot be confirmed, the worktree is kept.",
@@ -399,7 +407,7 @@ export function TaskMenu(props: { taskId: string | null; ref: (el: HTMLDivElemen
       <Show when={offersExternalDone(v())}><MenuItem icon="check" label={EXTERNAL_DONE_LABEL} disabled={externalDoneReason()} needs="close_task" onSelect={() => ws.closeTask(v().id, "external")} /></Show>
       <Show when={hasBoundWorktree(v().task) && !v().task.archive}><MenuItem icon="trash" label={ws.t("closeDeleteWorktreeFolder")} needs="close_task"
         disabled={blocked() ?? (!ws.can("workspace.task_worktrees") ? ws.t("noTaskWorktrees") : v().task.process !== "stopped" ? "Stop the task and wait for its workers first."
-          : v().task.merge && !v().task.merge!.finished ? "Finish or abort the merge first." : !taskCheckout(ws.store.state(), v().task) ? ws.t("worktreeUnavailable") : taskCheckout(ws.store.state(), v().task)!.files.length ? "Commit or remove uncommitted files first." : undefined)}
+          : v().task.merge && !v().task.merge!.finished ? "Finish or abort the merge first." : worktreeCleanupBlocker(v().task))}
         onSelect={() => closeWorktree(v().id)} /></Show>
       <MenuItem icon="archive" label="Archive" disabled={archiveBlocked(v().task)} needs="archive_task" onSelect={() => ws.archiveTask(v().id)} />
       <MenuItem icon="pin" label={ws.panels.pins().includes(v().id) ? "Unpin" : "Pin"} onSelect={() => ws.panels.togglePin(v().id)} />

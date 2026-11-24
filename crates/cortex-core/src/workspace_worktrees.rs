@@ -557,6 +557,27 @@ pub fn cleanup_preflight(store: &Store, project: &str, draft: &str) -> CoreResul
     })
 }
 
+const RETRYABLE_CLOSE_CLEANUP: &str = "json_extract(close_cleanup,'$.status')='retained'
+    AND json_extract(close_cleanup,'$.reason') IN ('worktree_dirty','worktree_occupied')";
+
+/// Read-only hint for a fresh owner confirmation, not a usable task checkout.
+pub fn close_cleanup_retry_ready_on(
+    db: &Connection, key: &ProjectKey, project: &str, draft: &str, can_check: bool,
+) -> CoreResult<Option<bool>> {
+    let Some(task) = runtime(db, project, draft)? else { return Ok(None); };
+    let retained: Option<bool> = db.query_row(&format!(
+        "SELECT COALESCE(({RETRYABLE_CLOSE_CLEANUP}), 0) FROM native_worktree_starts
+         WHERE project_id=? AND draft_id=? AND runtime_task_id=? AND state='bound'
+         AND close_cleanup IS NOT NULL"
+    ), (project, draft, &task), |r| r.get(0)).optional()?;
+    let Some(retained) = retained else { return Ok(None); };
+    if !can_check || !retained { return Ok(Some(false)); }
+    let Some((plan, witness)) = rows(db, &task)? else { return Ok(Some(false)); };
+    Ok(Some(crate::store::require_quiet_workspace_task(db, &task).is_ok()
+        && crate::lifecycle::automatic::require_settled_execution(db, &task).is_ok()
+        && plan.check_remove(key.root(), &witness).is_ok()))
+}
+
 /// Called within the same owner action that persists close, before any Git.
 pub fn queue_close_tx(db: &Connection, project: &str, draft: &str) -> CoreResult<()> {
     queue_checkout_cleanup_tx(db, project, draft, false)
@@ -578,12 +599,11 @@ fn queue_checkout_cleanup_tx(db: &Connection, project: &str, draft: &str, after_
     // Only a newly confirmed explicit close may retry a known obstruction.
     // Other failures may have occurred during Git removal; do not requeue them.
     one(db.execute(
-        "UPDATE native_worktree_starts SET close_cleanup=CASE
-           WHEN close_cleanup IS NULL OR (? AND json_extract(close_cleanup,'$.status')='retained'
-              AND json_extract(close_cleanup,'$.reason') IN ('worktree_dirty','worktree_occupied'))
+        &format!("UPDATE native_worktree_starts SET close_cleanup=CASE
+           WHEN close_cleanup IS NULL OR (? AND {RETRYABLE_CLOSE_CLEANUP})
              THEN ?
            ELSE close_cleanup END
-         WHERE project_id=? AND draft_id=? AND runtime_task_id=?",
+         WHERE project_id=? AND draft_id=? AND runtime_task_id=?"),
         (!after_merge, pending.to_string(), project, draft, &task),
     )?)
 }

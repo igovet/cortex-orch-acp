@@ -59,10 +59,19 @@ pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) ->
             if rows.len() > 10000 { return Err(CoreError::Refused("machine_reply_too_large")); }
             rows.into_iter().map(|(task, options)| {
                 let owned = cortex_core::workspace::worktrees::owned_on(db, project, &task)?;
-                let missing = owned.is_some() && cortex_core::workspace::worktrees::desktop_checkout_on(
-                    db, store.key(), project, Some(&task), None
-                ).is_err();
-                Ok((task,options,owned,missing))
+                let unavailable = owned.as_ref().and_then(|_| {
+                    cortex_core::workspace::worktrees::desktop_checkout_on(
+                        db, store.key(), project, Some(&task), None
+                    ).err()
+                });
+                let missing = unavailable.is_some();
+                let cleanup_retry_ready = if owned.is_some() {
+                    cortex_core::workspace::worktrees::close_cleanup_retry_ready_on(
+                        db, store.key(), project, &task,
+                        !missing || matches!(unavailable, Some(CoreError::Refused("worktree_closed"))),
+                    )?
+                } else { None };
+                Ok((task, options, owned, missing, cleanup_retry_ready))
             }).collect::<CoreResult<Vec<_>>>()
         }).map_err(core)?;
             super::task_rework::project(&store, project, &mut value, false)?;
@@ -88,7 +97,7 @@ pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) ->
     let mut branch = None;
     let mut base = None;
     let mut trees = None;
-    for (task, raw, owned, missing) in options {
+    for (task, raw, owned, missing, cleanup_retry_ready) in options {
         let options: Value = serde_json::from_str(&raw)
             .map_err(|_| refuse("state_unreadable", "Task options are unreadable."))?;
         let record = &mut value["tasks"][&task];
@@ -107,6 +116,9 @@ pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) ->
         if let Some(w) = owned {
             set_worktree(record, &w);
             if missing { record["checkout"]["unavailable"] = json!(true); }
+            if let Some(ready) = cleanup_retry_ready {
+                record["checkout"]["cleanupRetryReady"] = json!(ready);
+            }
         } else if record["checkout"]["kind"] == "main" {
             if branch.is_none() {
                 branch = Some(if has_git {

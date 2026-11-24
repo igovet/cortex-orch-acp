@@ -90,7 +90,7 @@ export type Project = {
   hasGit?: boolean;
 };
 export type CheckoutChoice = { kind: "main" } | { kind: "worktree"; branch?: string; path?: string };
-export type Checkout = { kind: "main"; branch: string } | { kind: "worktree"; branch: string; path: string; id?: string; unavailable?: boolean };
+export type Checkout = { kind: "main"; branch: string } | { kind: "worktree"; branch: string; path: string; id?: string; unavailable?: boolean; cleanupRetryReady?: boolean };
 export type CheckOutcome = "passed" | "failed" | "not_run" | "unverified";
 export type Check = { name: string; outcome: CheckOutcome; detail: string; source?: "runtime" | "worker"; technicalReason?: string; kind?: "automated" | "manual" | "policy"; command?: string[]; cwd?: string; rerunnable?: boolean; output?: string; exitCode?: number; running?: boolean };
 export type Result = { kind?: "answer" | "work" | "unknown"; acceptanceAvailable?: boolean; sourceVersion?: string; evidence?: {reference: string; digest: string}[]; warnings?: string[]; version: number; digest: string; checks: Check[]; summary: string; at?: number | null; automaticReady?: boolean; mock?: true };

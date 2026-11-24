@@ -576,7 +576,7 @@ done
                     |r| r.get(0),
                 )?;
                 let receipt = skill_proposals::request(db, &fixture_root, "t", &channel, "format",
-                    &json!({"question":"Какой формат?","options":["Long","Short"]}))?;
+                    &json!({"question":"Какой формат?","options":["Long","Short"],"recommended":1}))?;
                 waits::answer_tx(db, "t", receipt["question_id"].as_str().unwrap(), "Short", "text", None)?;
                 Ok(())
             })

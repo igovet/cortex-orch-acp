@@ -1415,7 +1415,11 @@ before another attempt. Real GitHub creation and paid-engine resolution are not
 qualified by the no-paid fixtures.
 
 Ordinary Close, Stop and Archive keep the folder. To close and request cleanup,
-use **Close and delete worktree folder** and confirm. In Finish, after a confirmed
+use **Close and delete worktree folder** and confirm. If the folder is retained
+because it is dirty or busy, resolve the obstruction outside Workspace, refresh
+the project and confirm the same action again. The task stays closed; Code,
+Changes and regular Git actions do not reopen that checkout. Missing or uncertain
+folders do not offer retry. In Finish, after a confirmed
 local squash, **Delete worktree folder** is on by default when eligible and disabled
 with a reason when unsafe. The merge is recorded before cleanup; if the folder
 cannot be safely removed, it is retained without undoing the merge. Archive purge

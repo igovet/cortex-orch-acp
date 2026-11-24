@@ -689,7 +689,13 @@ impl workspace_service::native_runtime::NativeRoutes for ReworkRoute {
                 confinement: None,
             },
             relay: "/usr/bin/false".into(),
-            broker_parent: root.into(),
+            // Like the product route (the store directory), never the checkout:
+            // a broker directory there would show up as untracked task changes.
+            broker_parent: root.join(if workspace_protocol::channel::current().is_dev() {
+                ".cortex-dev"
+            } else {
+                ".cortex"
+            }),
             connection: "fixture".into(),
             connection_limit: 1,
             model: "fixture".into(),
@@ -710,6 +716,9 @@ async fn worktree_start_requires_git_without_blocking_project_folder_tasks() {
         "op":"machine.update","projectId":f.id,"params":{"patch":{"worktreeRoot":directory}},
     })).unwrap()).await.unwrap();
     assert_eq!(settings["ok"], true, "{settings}");
+    // Initialize takes the store's access lock exclusively without waiting, so
+    // open it before the activated service starts using the store.
+    let store = f.store();
     f.service.activate(&f.id).await.unwrap();
 
     let server = tokio::spawn(f.service.clone().serve());
@@ -739,7 +748,6 @@ async fn worktree_start_requires_git_without_blocking_project_folder_tasks() {
             }
         }));
     }
-    let store = f.store();
     store.read(|db| {
         for table in ["runtime_tasks", "workspace_executions", "task_workspaces"] {
             let count: i64 = db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
@@ -1286,6 +1294,21 @@ async fn worktree_cleanup_requires_a_settled_owned_tree_and_preserves_the_branch
             }
             assert_eq!(worktrees::cleanup_outcome(&store, &f.id, &draft, disposition).unwrap().as_ref(), Some(cleanup));
             assert_eq!(binding.path.exists(), expected == "retained" && kind != "missing-close");
+            let read_checkout = || async {
+                let read = f.service.machine(
+                    serde_json::from_value(json!({"op":"product.read","projectId":f.id,"params":{}})).unwrap(),
+                ).await.unwrap();
+                assert_eq!(read["ok"], true, "{read}");
+                read["result"]["tasks"][&draft]["checkout"].clone()
+            };
+            if !purge {
+                let checkout = read_checkout().await;
+                // A retained merge cleanup can leave the normal checkout usable.
+                if kind != "uncertain-merge-cleanup" {
+                    assert_eq!(checkout["unavailable"], true, "{kind}: {checkout}");
+                }
+                assert_eq!(checkout["cleanupRetryReady"], false, "{kind}: {checkout}");
+            }
             let branch = format!("refs/heads/{}", binding.branch);
             let branch_head = worktree_git(&f.root, &["rev-parse", "--verify", &branch]);
             match kind {
@@ -1300,6 +1323,9 @@ async fn worktree_cleanup_requires_a_settled_owned_tree_and_preserves_the_branch
                 _ => {}
             }
             if matches!(kind, "dirty-close" | "locked-close") {
+                let checkout = read_checkout().await;
+                assert_eq!(checkout["unavailable"], true, "{kind}: {checkout}");
+                assert_eq!(checkout["cleanupRetryReady"], true, "{kind}: {checkout}");
                 let unconfirmed = f.call(json!({
                     "action":"close_remove_worktree","taskId":draft,"confirmed":false,
                 })).await;
@@ -1319,6 +1345,9 @@ async fn worktree_cleanup_requires_a_settled_owned_tree_and_preserves_the_branch
                     Some(removed),
                 );
                 assert!(!binding.path.exists());
+                let checkout = read_checkout().await;
+                assert_eq!(checkout["unavailable"], true, "{kind}: {checkout}");
+                assert_eq!(checkout["cleanupRetryReady"], false, "{kind}: {checkout}");
                 assert_eq!(f.call(close.clone()).await, retried, "{kind}: removal stays recorded");
             }
             assert_eq!(worktree_git(&f.root, &["rev-parse", "--verify", &branch]), branch_head);
@@ -2194,8 +2223,8 @@ async fn a_task_the_owner_finished_through_the_runtime_reads_closed_and_archives
 #[tokio::test]
 async fn owner_close_with_conflicting_records_survives_service_restart_without_replay() {
     let mut f = Fixture::new().await;
-    f.service.activate(&f.id).await.unwrap();
     let store = f.store();
+    f.service.activate(&f.id).await.unwrap();
     store.write(|db| {
         db.execute("INSERT INTO workspace_tasks(task_id,project_id,description,execution_id,created_at)
             VALUES ('t1',?,'Build task','e1','now')", [&f.id])?;
