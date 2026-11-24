@@ -24,40 +24,23 @@ export function readableToolText(value: unknown, depth = 0): string | null {
   return null;
 }
 
-function meaningful(value: unknown): boolean {
-  if (value == null || value === "") return false;
-  if (Array.isArray(value)) return value.length > 0;
-  return typeof value !== "object" || Object.keys(value as object).length > 0;
-}
-
-/** An MCP call envelope's own payload: `{result:{structuredContent}}` or the
- * text of `{result:{content:[{text}]}}` (parsed when it is JSON). */
-function unwrapMcp(value: unknown): unknown {
-  if (typeof value === "string") { try { return unwrapMcp(JSON.parse(value)); } catch { return value; } }
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const result = (value as Record<string, unknown>).result;
-  if (!result || typeof result !== "object") return value;
-  const { structuredContent, content } = result as Record<string, unknown>;
-  if (meaningful(structuredContent)) return structuredContent;
-  const texts = Array.isArray(content) ? content.map((item) => (item as Record<string, unknown>)?.text).filter((t) => typeof t === "string") : [];
-  if (texts.length === 1) { try { return JSON.parse(texts[0] as string); } catch { return texts[0]; } }
-  return texts.length ? texts.join("\n") : value;
-}
-
-/** A tool's detail section text, as the chat's Input/Output sections show it:
- * readable text when there is some, otherwise the value as formatted JSON.
- * Null only when there is nothing at all. */
+/** Format the exact retained value, without selecting fields or unwrapping MCP. */
 export function toolDetailText(value: unknown): string | null {
-  const readable = readableToolText(value);
-  if (readable) return readable;
-  const payload = unwrapMcp(value);
-  if (!meaningful(payload)) return null;
-  if (typeof payload === "string") return payload;
-  try { return JSON.stringify(payload, null, 2); } catch { return String(payload); }
+  if (value == null) return null;
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value, null, 2) ?? null; } catch { return null; }
 }
 
-/** The arguments a tool was called with, without the gateway envelope. */
-export function toolArguments(rawInput: unknown): unknown {
-  const envelope = rawInput && typeof rawInput === "object" && !Array.isArray(rawInput) ? rawInput as Record<string, unknown> : null;
-  return envelope && typeof envelope.server === "string" && typeof envelope.tool === "string" ? envelope.arguments : rawInput;
+/** Bound both width-independent text size and the number of initial lines. */
+export function toolDetailPreview(text: string, expanded: boolean) {
+  let end = Math.min(1000, text.length);
+  let newline = -1;
+  for (let line = 0; line < 24; line++) {
+    newline = text.indexOf("\n", newline + 1);
+    if (newline < 0 || newline >= end) break;
+    if (line === 23) end = newline;
+  }
+  // Don't split a supplementary character at the preview boundary.
+  if (end < text.length && /[\uD800-\uDBFF]/.test(text.charAt(end - 1))) end--;
+  return { text: expanded ? text : text.slice(0, end), canExpand: end < text.length };
 }

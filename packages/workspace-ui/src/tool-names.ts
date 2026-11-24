@@ -3,6 +3,7 @@
  * the screen says "Read" or "Read skill", the same words the Paseo plugin uses. Bookkeeping that is not work, such as
  * context-window updates or thinking, is left out of the activity. Nothing is deleted: this is presentation only.
  */
+import type { CommandOutputRef } from "@cortex/workspace-domain";
 import { presentToolSemantics } from "@cortex/workspace-domain/tool-presentation";
 import { chatToolIcon, nativeRow, summarizeToolRun } from "@cortex/workspace-domain/worker-panel-groups";
 import { isHiddenOperation, isPlumbingOperation } from "@cortex/workspace-domain/timeline-visibility";
@@ -45,7 +46,7 @@ export function isPlumbingStep(text: string): boolean {
  * Edit a.ts"). The row is the call's, so its name and kind come from the title after it. */
 const ROLE = /^(?:orchestrator|worker-[a-z0-9]+(?:-[a-z0-9]+)*):\s+(?=\S)/;
 export const bareTitle = (title: string) => title.replace(ROLE, "");
-export type DisplayStep = { title?: string; callId?: string; kind?: string; status?: string; path?: string; command?: string; query?: string; ref?: string; oldText?: string; newText?: string; output?: string; notice?: string; failure?: string };
+export type DisplayStep = { title?: string; callId?: string; kind?: string; status?: string; path?: string; command?: string; query?: string; ref?: string; oldText?: string; newText?: string; output?: string; notice?: string; failure?: string; commandOutputRef?: CommandOutputRef };
 export const STEP_PREFIX = "Workspace step: ";
 /** Only the helper's selected presentation fields, never raw protocol JSON. */
 export function displayStep(text?: string): DisplayStep | null {
@@ -60,7 +61,13 @@ export function displayStep(text?: string): DisplayStep | null {
     const out: DisplayStep = {};
     for (const key of ["title","callId","kind","status","path","command","query","ref","oldText","newText","output","notice","failure"] as const)
       if (typeof value[key] === "string") out[key] = key === "title" ? bareTitle(value[key]) : value[key];
-    return out;
+    const ref = value.commandOutputRef;
+    if (ref && typeof ref.attemptId === "string" && typeof ref.toolCallRef === "string" && ref.toolCallRef.startsWith("native-command:") &&
+        out.callId === `cortex-broker:${ref.attemptId}:${ref.toolCallRef}` &&
+        /^(command_run|outside_command)$/.test(operation(out.title ?? "")?.name ?? "")) {
+      out.commandOutputRef = { attemptId: ref.attemptId, toolCallRef: ref.toolCallRef };
+    }
+    return Object.keys(out).length ? out : null;
   } catch { return null; }
 }
 /** Whether opening a step shows something its row does not: what was sent, what came back, a diff or why it was refused. A
@@ -92,7 +99,7 @@ export const PROJECT_ROOT = "project root";
 /** The kinds and icons of the Paseo plugin's rows (workspace-domain/worker-panel-groups.ts): eye for reads, pencil for edits, a terminal for commands. */
 export type StepKind = "read" | "edit" | "shell" | "search" | "other";
 type PresentedEvent = Parameters<typeof nativeRow>[0];
-export type StepView = { kind: StepKind; icon: string; label: string; target: string; detail: DisplayStep | null; event?: PresentedEvent };
+export type StepView = { kind: StepKind; icon: string; label: string; target: string; detail: DisplayStep | null; event?: PresentedEvent; source?: string };
 const ICONS: Record<StepKind, string> = { read: "eye", edit: "pencil", shell: "terminal", search: "search", other: "wrench" };
 const view = (kind: StepKind, label: string, target = "", detail: DisplayStep | null = null): StepView => ({ kind, icon: ICONS[kind], label, target, detail });
 
@@ -119,7 +126,7 @@ function named(text: string, detail: DisplayStep | null = null): StepView {
 export function viewOfText(text: string): StepView {
   const detail = displayStep(text);
   const bare = bareTitle(text);
-  return detail ? viewOfDetail(detail) : isToolName(bare) ? viewOfDetail({title:bare}) : named(toolLabel(bare));
+  return { ...(detail ? viewOfDetail(detail) : isToolName(bare) ? viewOfDetail({title:bare}) : named(toolLabel(bare))), source: detail?.title ?? bare };
 }
 export const stepLabel = (s: DisplayStep) => viewOfDetail(s).label;
 
@@ -148,6 +155,9 @@ type Step = { sequence: number; text: string; kind: string; at: number | null; e
 export function viewOfActivity(a: Step): StepView {
   const detail = displayStep(a.args) ?? displayStep(a.text);
   const text = bareTitle(a.text);
+  return { ...activityView(a, detail, text), source: isToolName(text) ? text : detail?.title ?? (a.code && isToolName(a.code) ? a.code : text) };
+}
+function activityView(a: Step, detail: DisplayStep | null, text: string): StepView {
   if (detail) return viewOfDetail({...detail, title: isToolName(text) ? text : detail.title});
   const raw = isToolName(text) ? text : a.code && isToolName(a.code) ? a.code : null;
   if (raw) return viewOfDetail({title:raw});
@@ -156,6 +166,21 @@ export function viewOfActivity(a: Step): StepView {
   if (a.kind === "edit") return view("edit", "Edit", a.code ?? a.text, a.code ? { path: a.code } : null);
   const step = named(text);
   return { ...step, target: a.code && !IDENTIFIER.test(a.code.trim()) ? a.code : step.target };
+}
+const PRIVATE_DETAIL = new Set(["create_draft", "draft_write", "read_draft", "write_report", "read_report", "result_submit", "task_result", "sprint_task_result"]);
+const FILE_TOOLS = new Set(["project_read", "project_edit", "project_write", "project_delete", "project_mkdir", "outside_write", "project_skill_link"]);
+const detailOperation = (title: string) => operation(title)?.name ?? title.trim().toLowerCase().replaceAll(" ", "_");
+
+export const privateStep = (step: StepView) =>
+  [step.source, step.detail?.title].some(title => title && PRIVATE_DETAIL.has(detailOperation(title)));
+
+/** File actions keep their existing link/diff behavior. Plumbing visibility is decided before a row is built. */
+export function hasRecordedDetail(step: StepView): boolean {
+  const title = step.source ?? step.detail?.title ?? step.label;
+  const name = detailOperation(title);
+  if (PRIVATE_DETAIL.has(name) || isPlumbingStep(title)) return true;
+  if (FILE_TOOLS.has(name) || /^(read|edit)$/.test(step.detail?.kind ?? "")) return false;
+  return step.kind !== "read" && step.kind !== "edit";
 }
 // Recorded activity is never changed in place, so what was decided about a record holds for as long as the record lives.
 const hidden = new WeakMap<object, "status" | "plumbing" | "shown">();

@@ -8,6 +8,7 @@
     "test:steer": "node --experimental-strip-types server/provider-steer.test.ts && node --experimental-strip-types server/provider-worker-steer.test.ts && node --experimental-strip-types server/provider-question.test.ts && node --experimental-strip-types server/provider-question-batch.test.ts",
     "test:installed-questions": "node --experimental-strip-types server/installed-questions.test.ts",
     "test:native-queue": "node --experimental-strip-types server/installed-native-queue.test.ts",
+    "test:tool-details": "node --disable-warning=ExperimentalWarning --experimental-strip-types --test shared/tool-presentation.test.ts shared/gateway-presentation.test.ts client/tool-details.test.ts client/worker-panel-tool.test.ts server/provider-native-tool-detail.test.ts && node --experimental-strip-types --test --test-name-pattern=\"worker tab tool details\" client/client-bundle.test.ts",
     "test:diff": "node --experimental-strip-types client/worker-panel-diff.test.ts",
     "test:status": "node --experimental-strip-types client/worker-panel-status.test.ts",
     "test:display": "node --experimental-strip-types client/worker-display.test.ts && node --experimental-strip-types client/worker-prompt-model.test.ts && node --experimental-strip-types client/worker-panel-events.test.ts",

@@ -26,6 +26,13 @@ choice with the draft. Manual planning, replanning and planning recovery use the
 task's coordinator choice or its recorded route instead of resolving the machine
 default first. The chooser does not authorize engine dispatch.
 
+The reasoning-effort picker lists only concrete levels reported for the selected
+model, ordered from Low to Max. If no effort was chosen, including on older
+drafts saved with `default`, the coordinator uses the effort set in Settings,
+or Medium if Settings has none. If the model does not offer that level, it
+uses the nearest reported level (lower on a tie). A model with no reasoning-effort
+control does not receive a reasoning-effort setting.
+
 Save and Save-and-leave share one in-flight write per settings draft. A genuine
 conflict from another write still requires reading and reviewing the current
 settings; an unconfirmed write is not retried automatically.
@@ -1763,7 +1770,7 @@ cannot be waived by that acknowledgement.
 
 <a id="storage-retention"></a>
 Maintenance runs once when a local project is activated and then every 60 minutes while the service runs (a service-owned loop, separate from sprint execution; passes are coalesced and never overlap). Done records are eligible for archive after the machine's
-auto-archive interval `autoArchiveDays` (default seven days). A done record is archived without a question, with its work kept; a record saved with the retired archive-question fields loads as an ordinary Done or archived task and shows no question. Archive retention `retentionDays` defaults to 30 days, counted from the archive time, and is machine-configurable. The background purge is on by default (`automaticArchivePurge`: `true`) and can be switched off; the manual "Run cleanup now" is independent of that switch. Purge requires archived state (previously Done), an affirmative closure (merged, closed as-is by the owner, cancelled or closed externally) and a verified linked execution whose runtime state is COMPLETED, FAILED or CANCELLED. Paused, blocked, executing, awaiting-decision, unclosed, unlinked or ambiguous records, loaded sessions and unsettled attempts, processes or reservations are never purged, and eligibility and age are rechecked at the deletion fence. A scheduled pass never forces, and a transient refusal is retried at a later pass without writing a blocker. Unreferenced attachment files are swept by the same pass after `unreferencedAttachmentRetentionDays` (default 1). Runtime deletion reuses the existing exclusive-lock,
+auto-archive interval `autoArchiveDays` (default seven days). A done record is archived without a question, with its work kept; a record saved with the retired archive-question fields loads as an ordinary Done or archived task and shows no question. Archive retention `retentionDays` defaults to 30 days, counted from the archive time (except a Done task newly archived by sprint closure, which counts from its completion time plus the auto-archive delay; see [closing sprints](#editing-saved-tasks-and-closing-sprints)), and is machine-configurable. The background purge is on by default (`automaticArchivePurge`: `true`) and can be switched off; the manual "Run cleanup now" is independent of that switch. Purge requires archived state (previously Done), an affirmative closure (merged, closed as-is by the owner, cancelled or closed externally) and a verified linked execution whose runtime state is COMPLETED, FAILED or CANCELLED. Paused, blocked, executing, awaiting-decision, unclosed, unlinked or ambiguous records, loaded sessions and unsettled attempts, processes or reservations are never purged, and eligibility and age are rechecked at the deletion fence. A scheduled pass never forces, and a transient refusal is retried at a later pass without writing a blocker. Unreferenced attachment files are swept by the same pass after `unreferencedAttachmentRetentionDays` (default 1). Runtime deletion reuses the existing exclusive-lock,
 journaled retention cleanup and reports SQLite checkpoint/VACUUM outcomes. Storage shows a persistent count of purged records with failed space reclamation, including explicit purges, and a per-maintenance-run count.
 Dirty worktrees explicitly allowed for discard can still be retained rather than
 force-removed; their Git branch and files remain available. Owner queue/comment

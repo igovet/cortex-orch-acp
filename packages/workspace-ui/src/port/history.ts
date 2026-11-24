@@ -5,6 +5,10 @@ import { displayStep, STEP_PREFIX, isHiddenStep, isPlumbingStep, isToolName, too
 export type FeedRow = { historyId: string; revision: string; kind: string; text?: string | null; toolStatus?: string | null; recordedAt?: string | null; availability?: string };
 export type Dated = { at: string; entry: TimelineEntry };
 
+export function shownFold(fold: Extract<TimelineEntry, { kind: "fold" }>, showAllTools: boolean) {
+  return (showAllTools && fold.all) || fold;
+}
+
 const STATUS = /\s·\s(pending|in_progress|completed|failed|cancelled)$/;
 /** `call:coordinator:es_1:tc_2` or `verification:1:212:0`: a machine's name for a step, which means nothing to a person. */
 const isIdentifier = (text: string) => /^[A-Za-z_]+:\S+$/.test(text);
@@ -79,7 +83,10 @@ export function conversationOf(rows: FeedRow[], known: { description: string; an
       const prior = calls.get(detail.callId);
       if (prior) {
         const merged = { ...displayStep(prior.text ?? ""), ...detail };
-        Object.assign(prior, { text: STEP_PREFIX + JSON.stringify(merged), toolStatus: row.toolStatus });
+        // Receipt-backed updates already contain the complete allowlisted step.
+        // Keep their reference while coalescing the broker's start and finish.
+        const text = detail.callId.startsWith("cortex-broker:") ? row.text : STEP_PREFIX + JSON.stringify(merged);
+        Object.assign(prior, { text, toolStatus: row.toolStatus });
       } else { const copy = {...row}; calls.set(detail.callId, copy); ordered.push(copy); }
     } else ordered.push(row);
   }

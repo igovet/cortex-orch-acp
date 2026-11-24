@@ -79,6 +79,10 @@ it("shows or hides the runtime's own steps at once, in the conversation and on a
   await go(`${taskPath}/workers/w`);
   await open(".feed, .stream");
   expect(document.querySelector(".feed, .stream")!.textContent).toContain("Read skill");
+  const skill = [...document.querySelectorAll<HTMLButtonElement>(".stream button.step-row")].find(row => row.textContent?.includes("Read skill"))!;
+  skill.click(); await settle();
+  expect(skill.getAttribute("aria-expanded")).toBe("true");
+  expect(skill.parentElement?.textContent).toContain("No output was recorded.");
 
   await go("/settings/app/appearance");
   toggle().click(); await settle();

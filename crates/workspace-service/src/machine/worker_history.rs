@@ -435,28 +435,14 @@ fn shell(a: &[Value]) -> String {
         .collect::<Vec<String>>()
         .join(" ")
 }
-fn output(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Array(a) => a
-            .iter()
-            .map(output)
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Value::Object(m) => ["output", "text", "stdout", "formatted_output", "content"]
-            .iter()
-            .find_map(|k| m.get(*k))
-            .map(output)
-            .unwrap_or_default(),
-        _ => String::new(),
-    }
-}
 fn merge(old: &mut Value, new: &Value, recursive: bool) {
     for (k, v) in new.as_object().into_iter().flatten() {
+        // An explicit empty output string carries evidence; empty inputs do not.
+        let empty_placeholder =
+            v.as_str() == Some("") && !matches!(k.as_str(), "rawOutput" | "raw_output" | "output");
         if !recursive
             && (v.is_null()
-                || v.as_str() == Some("")
+                || empty_placeholder
                 || v.as_array().is_some_and(Vec::is_empty)
                 || v.as_object().is_some_and(|m| m.is_empty()))
         {
@@ -525,6 +511,16 @@ pub(super) fn detail(v: &Value) -> CoreResult<(Value, String)> {
     );
     if !v["status"].is_null() {
         put(&mut pairs, "status", v["status"].clone());
+    }
+    if let (Some(attempt), Some(reference)) = (
+        v["commandOutputRef"]["attemptId"].as_str(),
+        v["commandOutputRef"]["toolCallRef"].as_str(),
+    ) {
+        if matches!(v["title"].as_str(), Some("mcp__cortex__command_run" | "mcp__cortex__outside_command"))
+            && v["toolCallId"] == format!("cortex-broker:{attempt}:{reference}")
+        {
+            put(&mut pairs, "commandOutputRef", json!({"attemptId":attempt,"toolCallRef":reference}));
+        }
     }
     let kind = v
         .get("tool_kind")
@@ -643,17 +639,10 @@ pub(super) fn detail(v: &Value) -> CoreResult<(Value, String)> {
             }
         }
     }
-    if pairs.iter().any(|(k, v)| k == "command" && truthy(v)) {
-        let mut out = output(
-            v.get("rawOutput")
-                .or_else(|| v.get("raw_output"))
-                .or_else(|| v.get("output"))
-                .unwrap_or(&Value::Null),
-        );
-        if out.is_empty() {
-            out = output(&v["content"]);
+    if !private && pairs.iter().any(|(k, v)| k == "command" && truthy(v)) {
+        if let Some(text) = cortex_core::projections::retained_command_text(v) {
+            put(&mut pairs, "output", json!(text));
         }
-        put(&mut pairs, "output", json!(out));
     }
     if truthy(&v["projection_partial"]) {
         put(
@@ -980,6 +969,46 @@ impl History<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_command_text_distinguishes_missing_from_captured_empty_in_feed_steps() {
+        let db = Connection::open_in_memory().unwrap();
+        for (fields, expected) in [
+            (json!({}), None),
+            (json!({"output":null,"content":[]}), None),
+            (json!({"rawOutput":""}), Some("")),
+            (json!({"raw_output":{"stdout":""}}), Some("")),
+            (json!({"output":"recorded"}), Some("recorded")),
+        ] {
+            let start = json!({"activity_ref":"tool:exec","tool_kind":"execute","title":"Bash",
+                "status":"in_progress","rawInput":{"command":"printf ''"}});
+            let mut finish = json!({"activity_ref":"tool:exec","status":"completed"});
+            finish
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let rows = [
+                json!({"id":1,"payload_json":start.to_string()}),
+                json!({"id":2,"payload_json":finish.to_string()}),
+            ];
+            let args = |rows: &[Value]| -> Value {
+                let activity = activity(&db, rows).unwrap();
+                assert_eq!(activity.len(), 1);
+                assert_eq!(activity[0]["kind"], "command");
+                serde_json::from_str(activity[0]["args"].as_str().unwrap()).unwrap()
+            };
+            let waiting = args(&rows[..1]);
+            assert_eq!(waiting["status"], "in_progress");
+            assert!(waiting.get("output").is_none(), "{waiting}");
+            let done = args(&rows[..]);
+            assert_eq!(done["status"], "completed");
+            assert_eq!(
+                done.get("output"),
+                expected.map(|s| json!(s)).as_ref(),
+                "{done}"
+            );
+        }
+    }
 
     #[test]
     fn short_or_odd_dates_are_unparsed_never_a_panic() {

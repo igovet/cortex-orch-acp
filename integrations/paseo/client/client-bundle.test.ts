@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { build } from "esbuild";
+import { readWorkerHistory } from "../shared/worker-history.ts";
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RealReact = createRequire(join(pluginRoot, "package.json"))("react") as { Component: new (props: unknown) => unknown };
@@ -321,7 +322,7 @@ async function configReadFixture(input: { surface: string }): Promise<unknown> {
 type RpcCall = { name: string; input: Record<string, unknown> };
 
 async function loadClient(platformOs: "android" | "ios" | "web", rpcOverrides: Record<string, (input: Record<string, unknown>) => Promise<unknown>> = {},
-  options: { reduceMotion?: boolean } = {}) {
+  options: { reduceMotion?: boolean; copyText?: (text: string) => Promise<void> } = {}) {
   const rpcCalls: RpcCall[] = [];
   // Native Animated loops the bundle starts and stops (web pulses are CSS).
   const animation = { started: 0, stopped: 0 };
@@ -389,7 +390,7 @@ async function loadClient(platformOs: "android" | "ios" | "web", rpcOverrides: R
     "react-native": reactNative,
     "@getpaseo/plugin": await import("@getpaseo/plugin"),
     "@getpaseo/plugin/client": pluginClient,
-    "@getpaseo/plugin/client/react-native": { Icon: component("Icon"), ScrollView: component("ScrollView"), Modal: component("Modal") },
+    "@getpaseo/plugin/client/react-native": { Icon: component("Icon"), ScrollView: component("ScrollView"), Modal: component("Modal"), copyText: options.copyText },
     zod: await import("zod"),
   };
   const evaluate = new Function(`return ${await compileClientLikePaseo()}`)() as (require: (name: string) => unknown) => { default: (client: unknown) => () => void };
@@ -706,6 +707,118 @@ test("worker tab labels offloaded activity without hiding inline history", async
     const text = runtime.text();
     for (const shown of ["ACTIVITY ROW", "Preview only", reference, digest, "100000 bytes"]) {
       assert.ok(text.includes(shown), `worker tab must render ${shown}`);
+    }
+  } finally {
+    runtime.unmountAll();
+    cleanup();
+  }
+});
+
+for (const platformOs of ["web", "android"] as const) {
+  test(`worker tab tool details preserve values and disclose long command output (${platformOs})`, async () => {
+    const stdout = "prefix-" + "x".repeat(1400) + "-retained-tail";
+    const output = { stdout, stderr: "diagnostic", exit_code: 2 };
+    const copied: string[] = [];
+    let denyCopy = false;
+    const { runtime, captured, cleanup, rpcCalls } = await loadClient(platformOs, {
+      "cortex.worker-history.read": async (input) => {
+        const history = await workerHistoryFixture(input);
+        const base = { id: 2, type: "progress", createdAt: "2026-10-21T00:00:01Z", text: "", status: "completed" };
+        history.assignments[0].attempts[0].events.push(
+          { ...base, activity_ref: "tool:cmd", title: "mcp.cortex.command_run", tool_kind: "execute",
+            raw_input: { argv: ["check"], cwd: "/fixture" }, raw_output: output },
+          { ...base, id: 3, activity_ref: "tool:report", title: "mcp.cortex.read_report",
+            raw_output: { markdown: "PRIVATE-BODY" } },
+          { ...base, id: 4, activity_ref: "tool:internal", title: "mcp.cortex.ask_question" },
+        );
+        return history;
+      },
+    }, { copyText: platformOs === "web" ? async (text) => {
+      if (denyCopy) throw new Error("denied");
+      copied.push(text);
+    } : undefined });
+    try {
+      await runtime.mount(() => ({ type: captured.workers.Component, props: {
+        theme, host: { id: "h1", label: "Local" }, layout: { compact: platformOs !== "web", platform: platformOs },
+        workspaceId: "ws1", agentId: "a1", context: "agent",
+      } }), { press: false });
+      if (!runtime.text().includes("All workers")) await runtime.press(/^Open worker /);
+      const mountedRpcCount = rpcCalls.length;
+      await runtime.press(/^Ran 1 command and used 1 other tool$/);
+      assert.doesNotMatch(runtime.text(), /Ask question|retained-tail/);
+      await runtime.press(/^Shellcheck$/);
+      assert.match(runtime.text(), /"cwd": "\/fixture"/);
+      assert.match(runtime.text(), /Preview only/);
+      assert.doesNotMatch(runtime.text(), /retained-tail/);
+      await runtime.press("Show all Output");
+      assert.match(runtime.text(), /retained-tail/);
+      assert.match(runtime.text(), /"exit_code": 2/);
+      await runtime.press("Show readable text for Output");
+      assert.doesNotMatch(runtime.text(), /retained-tail|exit_code/);
+      await runtime.press("Show all Output");
+      assert.match(runtime.text(), /retained-tail/);
+      assert.match(runtime.text(), /diagnostic/);
+      await runtime.press("Show full value for Output");
+      assert.doesNotMatch(runtime.text(), /retained-tail/);
+      if (platformOs === "web") {
+        await runtime.press("Copy Output");
+        assert.deepEqual(copied, [JSON.stringify(output, null, 2)]);
+        assert.ok(runtime.liveRegions().includes("Copied"));
+        denyCopy = true;
+        await runtime.press("Copy Output");
+        assert.match(runtime.text(), /Could not copy/);
+      } else {
+        assert.doesNotMatch(runtime.text(), /Copy Output/);
+      }
+      await runtime.press("Read report");
+      assert.match(runtime.text(), /Private tool detail withheld/);
+      assert.doesNotMatch(runtime.text(), /PRIVATE-BODY/);
+      assert.equal(rpcCalls.length, mountedRpcCount, "opening and copying retained detail do not fetch anything");
+    } finally {
+      runtime.unmountAll();
+      cleanup();
+    }
+  });
+}
+
+test("worker tab tool details distinguish pending, uncaptured and empty command output", async () => {
+  const { runtime, captured, cleanup } = await loadClient("web", {
+    "cortex.worker-history.read": async (input) => {
+      const history = await workerHistoryFixture(input);
+      const attempt = history.assignments[0].attempts[0];
+      attempt.status = "running";
+      if (!input.compact) {
+        const command = (id: number, name: string) => ({
+          id, type: "worker_activity", createdAt: "2026-10-21T00:00:01Z", text: "",
+          activity_ref: `tool:${name}`, title: "Bash", tool_kind: "execute", status: "in_progress",
+          raw_input: { command: name }, content: [],
+        });
+        attempt.events.push(
+          command(2, "still-running"),
+          command(3, "no-capture"),
+          { ...command(4, "no-capture"), status: "completed" },
+          { ...command(5, "empty-capture"), status: "completed", raw_output: "" },
+        );
+      }
+      return readWorkerHistory.output.parse(JSON.parse(JSON.stringify(history)));
+    },
+  });
+  try {
+    await runtime.mount(() => ({ type: captured.workers.Component, props: {
+      theme, host: { id: "h1", label: "Local" }, layout: { compact: false, platform: "web" },
+      workspaceId: "ws1", agentId: "a1", context: "agent",
+    } }), { press: false });
+    if (!runtime.text().includes("All workers")) await runtime.press(/^Open worker /);
+    await runtime.press(/^Ran 3 commands$/);
+    for (const [name, state] of [
+      ["still-running", "Pending"],
+      ["no-capture", "Not recorded"],
+      ["empty-capture", '""'],
+    ]) {
+      await runtime.press(`Shell${name}`);
+      const output = runtime.text().split("Output\n")[1]?.split("\n")[0];
+      assert.equal(output, state, name);
+      await runtime.press(`Shell${name}`);
     }
   } finally {
     runtime.unmountAll();

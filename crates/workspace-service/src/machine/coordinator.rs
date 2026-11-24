@@ -116,6 +116,9 @@ fn activity(
             .cloned()
             .unwrap_or(json!("Tool activity"));
         item["args"] = json!(args);
+        if let Some(reference) = d.get("commandOutputRef") {
+            item["commandOutputRef"] = reference.clone();
+        }
         item["error"] = json!(status == "failed");
         if truthy(&d["callId"]) {
             item["toolCallRef"] = d["callId"].clone();
@@ -570,9 +573,13 @@ pub(super) fn read(db: &Connection, project: &str, params: &Value) -> CoreResult
         | "RECONCILING" | "ANSWER_READY" | "RECOVERING" => "working",
         _ => "unknown",
     };
+    let (elapsed, running_since, usage) = match e["runtime_task_id"].as_str() {
+        Some(runtime) => coordinator_metrics(db, runtime)?,
+        None => (None, None, None),
+    };
     let mut item = json!({"id":params["workerId"],"taskId":task,"executionId":e["execution_id"],"role":"coordinator","lane":"execution",
         "status":status,"goal":"Coordinator for this task","now":null,"waitsFor":null,"scope":[],"route":route(db,&e["runtime_task_id"])?,
-        "attempt":null,"elapsedMs":null,"runningSince":null,"context":null,"usage":null,"result":null,"messages":[]});
+        "attempt":null,"elapsedMs":elapsed,"runningSince":running_since,"context":null,"usage":usage,"result":null,"messages":[]});
     item.as_object_mut().unwrap().extend(
         page(
             db,
@@ -592,9 +599,145 @@ pub(super) fn read(db: &Connection, project: &str, params: &Value) -> CoreResult
     }
     Ok(found)
 }
+/// The coordinator worker page spans coordinator replacement attempts, not
+/// worker or consultant sessions. Elapsed is for its latest provisioned attempt.
+fn coordinator_metrics(
+    db: &Connection,
+    task: &str,
+) -> CoreResult<(Option<i64>, Option<i64>, Option<u64>)> {
+    use crate::notifier::progress;
+    let totals = progress::attempt_tokens(db, task)?;
+    let mut query = db.prepare(
+        "SELECT attempt_id,status,created_at,updated_at FROM delegation_provisioning
+         WHERE task_id=? AND role_id='orchestrator' ORDER BY rowid DESC",
+    )?;
+    let mut rows = query.query([task])?;
+    let mut time = (None, None);
+    let mut latest = true;
+    let mut counted = std::collections::BTreeSet::new();
+    let mut subtotal = None;
+    while let Some(row) = rows.next()? {
+        let Some(attempt) = row.get::<_, Option<String>>(0)? else {
+            continue;
+        };
+        if latest {
+            latest = false;
+            let status: String = row.get(1)?;
+            let start = at(db, &json!(row.get::<_, String>(2)?))?;
+            let live = matches!(status.as_str(), "ready" | "starting");
+            let end = if live {
+                Value::Null
+            } else {
+                at(db, &json!(row.get::<_, String>(3)?))?
+            };
+            time = progress::attempt_elapsed(start.as_i64(), end.as_i64(), live);
+        }
+        if counted.insert(attempt.clone()) {
+            if let Some(tokens) = totals.get(&attempt) {
+                *subtotal.get_or_insert(0) += tokens;
+            }
+        }
+    }
+    Ok((time.0, time.1, subtotal.and_then(progress::visible_tokens)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn coordinator_metrics_only_sum_its_attempts_and_freeze_a_terminated_clock() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(cortex_core::store::schema::SQL).unwrap();
+        db.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        for (attempt, role, status) in [
+            ("co_old", "orchestrator", "terminated"),
+            ("co_new", "orchestrator", "ready"),
+            ("worker", "worker-fullstack-dev", "terminated"),
+            ("consultant", "consultant", "terminated"),
+            ("unknown", "worker-backend-dev", "terminated"),
+        ] {
+            db.execute(
+                "INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at)
+                 VALUES (?,'task',?,?,'ready',?,1,'2026-11-24T01:00:00Z','2026-11-24T01:00:07Z')",
+                (attempt, attempt, role, status),
+            ).unwrap();
+        }
+        for (task, attempt, seq, basis, tokens) in [
+            ("task", "co_old", 1, "engine_reported", json!({"totalTokens":0})),
+            ("task", "co_new", 1, "engine_reported", json!({"inputTokens":8,"outputTokens":3})),
+            ("task", "co_new", 2, "unknown", json!({})),
+            ("task", "worker", 1, "engine_reported", json!({"totalTokens":32})),
+            ("task", "consultant", 1, "engine_reported", json!({"totalTokens":19})),
+            ("elsewhere", "co_new", 1, "engine_reported", json!({"totalTokens":999})),
+        ] {
+            db.execute(
+                "INSERT INTO usage_records(id,task_id,attempt_id,engine_session_ref,call_sequence,basis,tokens_json,created_at)
+                 VALUES (?,?,?,?,?,?,?,'2026-11-24T01:00:07Z')",
+                (format!("native_usage:{task}:{attempt}:{seq}"), task, attempt,
+                 format!("native:{attempt}:session"), seq, basis, tokens.to_string()),
+            ).unwrap();
+        }
+        let totals = crate::notifier::progress::attempt_tokens(&db, "task").unwrap();
+        assert_eq!(totals.get("co_old"), Some(&0));
+        assert_eq!(totals.get("worker"), Some(&32));
+        assert!(!totals.contains_key("unknown"));
+        let (elapsed, since, usage) = coordinator_metrics(&db, "task").unwrap();
+        assert_eq!((elapsed, usage), (None, Some(11)));
+        assert!(since.is_some());
+        db.execute("UPDATE delegation_provisioning SET status='terminated' WHERE attempt_id='co_new'", []).unwrap();
+        assert_eq!(coordinator_metrics(&db, "task").unwrap(), (Some(7000), None, Some(11)));
+    }
+
+    #[test]
+    fn command_output_coordinator_activity_carries_only_a_reference() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(cortex_core::store::schema::SQL).unwrap();
+        db.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        let reference = json!({"attemptId":"xa_1","toolCallRef":"native-command:cmd"});
+        let update = json!({"sessionUpdate":"tool_call","toolCallId":"cortex-broker:xa_1:native-command:cmd",
+            "title":"mcp__cortex__outside_command","kind":"execute","status":"completed",
+            "commandOutputRef":reference,"large_output_id":"lo_private"});
+        db.execute("INSERT INTO host_updates VALUES ('s',0,?,'2026-11-24T01:00:00Z')", [update.to_string()]).unwrap();
+        let result = page(&db,"p","draft",&json!("s"),&Value::Null,&json!("runtime")).unwrap();
+        let row = &result["activity"][0];
+        assert_eq!(row["commandOutputRef"], reference);
+        assert!(!row.to_string().contains("lo_private"));
+        assert!(row.get("output").is_none());
+    }
+
+    #[test]
+    fn native_command_text_distinguishes_missing_from_captured_empty_in_feed_steps() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(cortex_core::store::schema::SQL).unwrap();
+        db.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        for (seq, update) in [
+            json!({"sessionUpdate":"tool_call","toolCallId":"exec","title":"Bash","kind":"execute",
+                "rawInput":{"command":"printf ''"},"status":"in_progress"}),
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"exec","status":"completed"}),
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"exec","rawOutput":""}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            db.execute(
+                "INSERT INTO host_updates VALUES ('s',?,?,'2026-11-24T01:00:00Z')",
+                (seq as i64, update.to_string()),
+            )
+            .unwrap();
+        }
+        let result = page(&db, "p", "draft", &json!("s"), &Value::Null, &json!("runtime")).unwrap();
+        let args = |index: usize| -> Value {
+            let row = &result["activity"][index];
+            assert_eq!(row["kind"], "command");
+            serde_json::from_str(row["args"].as_str().unwrap()).unwrap()
+        };
+        assert_eq!(args(0)["status"], "in_progress");
+        assert!(args(0).get("output").is_none());
+        assert_eq!(args(1)["status"], "completed");
+        assert!(args(1).get("output").is_none());
+        assert_eq!(args(2).get("output"), Some(&json!("")));
+    }
+
     /// Both call lookups of a coordinator page are served by the store's call index.
     #[test]
     fn a_coordinator_rows_call_updates_are_read_through_the_call_index() {

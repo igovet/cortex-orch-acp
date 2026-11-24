@@ -16,14 +16,26 @@ test("retains readable command output and MCP text without the envelope", () => 
 assert.equal(readableToolText({ error: null, result: { content: [{ type: "text",
   text: JSON.stringify({ data: { output: "diff --git a/x b/x" } }) }] } }), "diff --git a/x b/x");
 
-test("a generic tool always shows what it returned, like the chat's Input/Output sections", async () => {
-  const { toolDetailText, toolArguments } = await import("./tool-details.ts");
-  // Readable text wins over its envelope.
-  assert.equal(toolDetailText({ result: { content: [{ type: "text", text: "3 tests passed" }] } }), "3 tests passed");
-  // Pure data is shown as formatted JSON of the payload, not the MCP envelope.
-  assert.equal(toolDetailText({ error: null, result: { content: [{ type: "text", text: '{"task_id":"t_1"}' }] } }), '{\n  "task_id": "t_1"\n}');
-  assert.equal(toolDetailText({ result: { structuredContent: { total: 2 } } }), '{\n  "total": 2\n}');
-  for (const empty of [null, "", {}, []]) assert.equal(toolDetailText(empty), null);
-  assert.deepEqual(toolArguments({ server: "GitKraken", tool: "git_log_or_diff", arguments: { action: "diff" } }), { action: "diff" });
-  assert.deepEqual(toolArguments({ command: "pwd" }), { command: "pwd" });
+test("full Input/Output preserve the envelope, sibling fields, and empty values", async () => {
+  const { toolDetailText } = await import("./tool-details.ts");
+  const input = { server: "example", tool: "work", arguments: { message: "requested", count: 2 } };
+  const output = { error: null, result: { content: [{ type: "text", text: "done" }], structuredContent: { total: 2 } } };
+  assert.equal(toolDetailText(input), JSON.stringify(input, null, 2));
+  assert.equal(toolDetailText(output), JSON.stringify(output, null, 2));
+  assert.equal(readableToolText(output), "done");
+  assert.equal(toolDetailText({ output: "ok", exit_code: 0 }), '{\n  "output": "ok",\n  "exit_code": 0\n}');
+  assert.equal(toolDetailText({}), "{}");
+  assert.equal(toolDetailText([]), "[]");
+  assert.equal(toolDetailText(""), "");
+  assert.equal(toolDetailText(false), "false");
+  assert.equal(toolDetailText(undefined), null);
+});
+
+test("preview caps characters and lines, then restores the exact retained text", async () => {
+  const { toolDetailPreview } = await import("./tool-details.ts");
+  const long = "x".repeat(999) + "🙂" + "tail";
+  assert.deepEqual(toolDetailPreview(long, false), { text: long.slice(0, 999), canExpand: true });
+  assert.deepEqual(toolDetailPreview(long, true), { text: long, canExpand: true });
+  assert.equal(toolDetailPreview("line\n".repeat(30), false).text.split("\n").length, 24);
+  assert.deepEqual(toolDetailPreview("short", false), { text: "short", canExpand: false });
 });

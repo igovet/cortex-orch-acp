@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { chatToolIcon, nativeRow, summarizeToolRun } from "./worker-panel-groups.ts";
 import { presentTool } from "./worker-panel-tool.ts";
 import { groupWorkerEvents } from "./worker-panel-events.ts";
 import type { WorkerEvent } from "./worker-panel-events.js";
@@ -16,7 +17,7 @@ assert.equal(edit.kind, "edit");
 assert.equal(edit.newText, "first\nsecond\n");
 assert.equal(edit.path, "/project/seed.txt");
 assert.equal(presentTool(event({ tool_kind: "other", title: "mcp__cortex__publish_result" })).label, "Publish result");
-assert.equal(presentTool(event({ title: "Read file" })).kind, "generic");
+assert.equal(presentTool(event({ title: "Read file" })).kind, "read");
 console.log("worker-panel tool presentation tests passed");
 const gatewayRead = presentTool(event({ tool_kind: "execute", title: "mcp.cortex.project_read", raw_input: { server: "cortex", tool: "project_read", arguments: { path: "calc.py" } }, raw_output: { result: { structuredContent: { content: "return a + b" } } } }));
 assert.equal(gatewayRead.kind, "read");
@@ -64,3 +65,18 @@ assert.equal(mcpTool.kind, "generic");
 const claudeBashBlocks = presentTool(event({ tool_kind: "execute", title: "git status", raw_input: { command: "git status" }, raw_output: [{ type: "text", text: "clean" }] }));
 assert.equal(claudeBashBlocks.kind, "shell");
 assert.equal(claudeBashBlocks.output, "clean");
+
+// Labels, group counts and file-detail eligibility use the same classifier.
+for (const [changes, kind, icon, label, summary] of [
+  [{ title: "Read — a.txt" }, "read", "Eye", "Read", "Read 1 file"],
+  [{ title: "Edit — a.txt" }, "edit", "Pencil", "Edit", "Edited 1 file"],
+  [{ title: "mcp__cortex__project_edit", tool_kind: "execute" }, "edit", "Pencil", "Edit", "Edited 1 file"],
+  [{ title: "mcp.example.read_file", tool_kind: "read" }, "generic", "Wrench", "Read File", "Used 1 other tool"],
+  [{ title: "mcp__cortex__write_report", tool_kind: "execute" }, "generic", "Wrench", "Write report", "Used 1 other tool"],
+] as const) {
+  const row = event(changes);
+  assert.equal(presentTool(row).kind, kind);
+  assert.equal(chatToolIcon(row), icon);
+  assert.equal(nativeRow(row).label, label);
+  assert.equal(summarizeToolRun([row]), summary);
+}

@@ -204,7 +204,11 @@ export function TranscriptEvent({ event, expanded, onToggle, onOpenFile, theme, 
   const row = nativeRow(event);
   const privateDetail = privateToolDetail(event);
   const diffs = privateDetail ? [] : diffBlocks(event.content ?? (event.input && typeof event.input === "object" ? (event.input as Record<string, unknown>).content : null));
-  const output = event.raw_output ?? event.output ?? event.content;
+  // An ACP content list with no blocks is not a captured command result.
+  // Keep explicitly retained output values, including the empty string.
+  const content = presentation.kind === "shell" && Array.isArray(event.content) && event.content.length === 0
+    ? undefined : event.content;
+  const output = event.raw_output ?? event.output ?? content;
   const hasEdit = !privateDetail && presentation.kind === "edit" && (diffs.length > 0 || presentation.newText !== null);
   const showDetails = presentation.kind === "generic" || presentation.kind === "shell";
   const shellCommand = presentation.kind === "shell" ? presentation.command : null;

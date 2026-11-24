@@ -474,7 +474,12 @@ Live worker view:
   fenced code block is one panel with a header naming the fence's language, when it names one, and its own
   Copy, which copies the block's lines exactly as written, without the fences, and then says "Copied" or
   "Not copied"; the message's own Copy still copies the whole Markdown source. Worker notes span the content columns; internal message prefixes are
-  not displayed. Tool labels, icons, Worked summaries and which calls appear reuse the Paseo integration’s
+  not displayed, and a worker message keeps its single line breaks (results and reports wrap as before).
+  File paths in messages, results, reports and questions are clickable: a path inside the project's checkout
+  opens in Code at its line; a path outside the project or not found in the checkout opens a small menu with
+  Copy path and, on the local desktop, an explicit open in the external editor or default app. http(s) and
+  mailto links open outside the app; other schemes stay text. Question options and their per-option detail
+  render inline Markdown (including these links); a link in an option does not select or submit it. Tool labels, icons, Worked summaries and which calls appear reuse the Paseo integration’s
   presentation functions, so both clients show the same rows; an engine's raw tool name never reaches the
   screen, and an unknown tool gets Paseo's humanized name. Every tool the runtime advertises has its own
   words (for example List model routes), whether the engine names it `mcp.cortex.…`, `mcp__cortex__…` or

@@ -365,12 +365,21 @@ fn settle(
     }
     let code = status["exit_code"].as_i64();
     let signal = status["signal"].as_i64();
-    let failure = status["failure"].as_str().map(str::to_owned);
+    let current = match h.get("checkout") {
+        Some(binding) => crate::native_project::retained_checkout_matches(store, task, binding)?,
+        None => true,
+    };
+    let revision = revision.filter(|_| current);
+    let failure = if current { status["failure"].as_str().map(str::to_owned) }
+        else { Some("worktree_binding_invalid".to_owned()) };
     let mut value = json!({"tool_call_ref":h["reference"],"argv":h["argv"],"cwd":h["cwd"],
         "profile":h["profile"],"access_mode":h["mode"],"revision_digest":revision,
         "exit_code":code,"signal":signal,"failure":failure,"settled":true,
         "complete":failure.is_none()&&code.is_some(),"output":String::from_utf8_lossy(&prefix),
         "output_truncated":size>65536,"byte_count":size,"large_output_id":h["id"]});
+    if let Some(checkout) = h.get("checkout") {
+        value["checkout"] = checkout.clone();
+    }
     if let Some(hint) = nested_sandbox_hint(h["profile"].as_str().unwrap_or(""), &[&prefix, &tail])
     {
         value["nested_sandbox"] = hint;
@@ -402,6 +411,10 @@ fn settle(
         crate::native_change_set::add(&mut observation,&changes);
         lifecycle::event_tx(db,task,"NATIVE_COMMAND_FINISHED",json!({"receipt":{
             "tool_call_ref":h["reference"],"argv":h["argv"],"observation":observation}}))?;
+        if let Some(reference) = h["reference"].as_str() {
+            crate::owner_command_output::coordinator_marker(db, task, actor, reference,
+                if value["complete"] == true && code == Some(0) {"completed"} else {"failed"})?;
+        }
         Ok(value)
     })
 }
@@ -448,14 +461,18 @@ pub(super) async fn execute(
     args: Value,
     profile: String,
     scoped: Option<ScopedAuthority>,
+    operation: String,
+    checkout: Option<Value>,
 ) -> CoreResult<Value> {
     let status_file = format!("{id}.status");
     let stopping = format!("{id}.stop");
+    let lease = scoped.is_some() || checkout.is_some();
     let spec = Spec {
         root: root.clone(),
         cwd: cwd.clone(),
         argv: argv.clone(),
         profile: profile.clone(),
+        checkout: checkout.clone(),
         writes,
         protected,
         output: dir.join(&output),
@@ -488,7 +505,7 @@ pub(super) async fn execute(
             if scoped.is_some() { None } else { native_commands::check_digest(root.clone(), &argv).await }
         },
         async {
-            if readonly || scoped.is_some() {
+            if readonly || scoped.is_some() || checkout.is_some() {
                 None
             } else {
                 Some(crate::native_change_set::snapshot(root.clone()).await)
@@ -516,7 +533,7 @@ pub(super) async fn execute(
     input.write_all(b"\n").await?;
     let mut messages = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut authorizing = 0u64;
-    let h;
+    let mut h;
     loop {
         // Each preparation step is normally well under a second. Under heavy host disk
         // load (observed on 2026-11-20) one step took longer than the former 15 seconds,
@@ -571,7 +588,9 @@ pub(super) async fn execute(
             }
             h = json!({"reference":reference,"identity":v["ready"],"status":status_file,"stop":stopping,
                 "output":output,"id":id,"argv":argv,"cwd":cwd,"profile":profile,"mode":mode,"denied":denied});
+            if let Some(binding) = &checkout { h["checkout"] = binding.clone(); }
             let handle = h.clone();
+            let op = operation.clone();
             let t = i.task.clone();
             let actor = c.channel_id.clone();
             let key = args["request_key"].as_str().unwrap().to_owned();
@@ -582,7 +601,14 @@ pub(super) async fn execute(
             let launch_credential = c.clone();
             let launch_mode = mode.clone();
             let launch_denied = denied.clone();
-            recv(ex.write(move|db|{
+            let launch_checkout = checkout.clone();
+            recv(ex.publication(move |store| {
+                if let Some(binding) = &launch_checkout {
+                    if !crate::native_project::retained_checkout_matches(store, &t, binding)? {
+                        return Err(CoreError::Refused("worktree_binding_invalid"));
+                    }
+                }
+                store.write(|db| {
                 if let Some(authority) = &launch_authority {
                     let current = channels::authenticate(db, &launch_credential.channel_id, launch_credential.secret(), true)?;
                     if access::current(db, &current.task)? != launch_mode || native_commands::denials(db, &current.task)? != launch_denied {
@@ -592,9 +618,9 @@ pub(super) async fn execute(
                 }
                 // A receipt the runtime already settled (its call was lost) never launches.
                 let bound = db.execute("UPDATE runtime_requests SET result_json=json_set(result_json,'$.handle',json(?))
-                    WHERE task_id=? AND actor=? AND request_key=? AND operation='command_run'
+                    WHERE task_id=? AND actor=? AND request_key=? AND operation=?
                     AND json_extract(result_json,'$.settled') IS NOT 1",
-                    (handle.to_string(),&t,&actor,&key))?;
+                    (handle.to_string(),&t,&actor,&key,&op))?;
                 if bound != 1 {
                     return Err(CoreError::Refused("command_outcome_unknown"));
                 }
@@ -603,6 +629,7 @@ pub(super) async fn execute(
                     "ref":handle["reference"],"process_identity":handle["identity"],"supervised":true,
                     "timings":stages}))?;
                 Ok(())
+                })
             })?).await.inspect_err(|e| cause = Some(store_cause(e)))?;
             input.write_all(b"go\n").await?;
             break;
@@ -613,7 +640,7 @@ pub(super) async fn execute(
         }
         input.write_all(b"go\n").await?;
     }
-    let authority_pipe = scoped.is_some().then_some(input);
+    let authority_pipe = lease.then_some(input);
     Ok::<_, CoreError>((before, listed, child, messages, h, authority_pipe))
     }
     .await;
@@ -702,7 +729,7 @@ pub(super) async fn execute(
                 );
                 let valid = if owner_stopped {
                     false
-                } else if scoped.is_some() {
+                } else if lease {
                     matches!(
                         tokio::time::timeout(Duration::from_secs(1), authorization).await,
                         Ok(Ok(()))
@@ -720,12 +747,12 @@ pub(super) async fn execute(
                         Ok(Ok(()))
                     )
                 } else {
-                    scoped.is_none()
+                    !lease
                 };
                 if !valid || !renewed {
                     // EOF is a fail-closed stop even if retaining a stop marker
                     // fails. A stuck monitor also stops renewing the lease.
-                    if owner_stopped || scoped.is_none() {
+                    if owner_stopped || !lease {
                         stop(&dir, &h)?;
                     }
                     authority_pipe.take();
@@ -849,7 +876,9 @@ pub(super) fn status(
 ) -> CoreResult<Value> {
     use rusqlite::OptionalExtension;
     let raw: String = store.read(|db| Ok(db.query_row(
-        "SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=? AND operation='command_run' AND json_extract(result_json,'$.tool_call_ref')=?",
+        "SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=? AND
+         (operation='command_run' OR (operation='project_git' AND json_type(result_json,'$.checkout')='object'))
+         AND json_extract(result_json,'$.tool_call_ref')=?",
         (task,channel,reference), |row| row.get::<_,String>(0)).optional()?))?
         .ok_or(CoreError::Refused("unknown_command_ref"))?;
     public_status(store, task, &serde_json::from_str(&raw)?).map(crate::native_sources::reply)
@@ -859,7 +888,8 @@ pub(super) async fn recover(runtime: &crate::native_runtime::Runtime) -> CoreRes
     let ex = runtime.host.executor.clone();
     let running = runtime.host.commands.clone();
     let rows=recv(ex.publication(|s|s.read(|db|Ok(db.prepare(
-        "SELECT task_id,actor,request_key,result_json FROM runtime_requests WHERE operation='command_run'
+        "SELECT task_id,actor,request_key,result_json FROM runtime_requests
+         WHERE (operation='command_run' OR (operation='project_git' AND json_type(result_json,'$.checkout')='object'))
          AND json_extract(result_json,'$.settled') IS NOT 1 AND json_type(result_json,'$.handle')='object'")?
         .query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?
         .collect::<Result<Vec<_>,_>>()?)))?).await?;
@@ -1033,7 +1063,7 @@ pub(super) fn resettle_row(
 ) -> CoreResult<Resettled> {
     use rusqlite::OptionalExtension;
     let row: Option<(String, String)> = store.read(|db| Ok(db.query_row("SELECT operation,result_json FROM runtime_requests
-        WHERE task_id=? AND actor=? AND request_key=? AND operation IN ('command_run','outside_command')",
+        WHERE task_id=? AND actor=? AND request_key=? AND (operation IN ('command_run','outside_command') OR (operation='project_git' AND json_type(result_json,'$.checkout')='object'))",
         (task, actor, key), |r| Ok((r.get(0)?, r.get(1)?))).optional()?))?;
     let Some((operation, raw)) = row else {
         return Ok(Resettled::Left);
@@ -1053,7 +1083,7 @@ pub(super) fn resettle_row(
                 .and_then(|p| p["receipt"]["observation"]["exit_code"].as_i64())
         }))
     };
-    let decision: Option<(&str, Option<i64>, &str)> = if operation == "command_run" {
+    let decision: Option<(&str, Option<i64>, &str)> = if matches!(operation.as_str(), "command_run" | "project_git") {
         let h = &v["handle"];
         if h.is_object() {
             if h["reference"].as_str() != reference.as_deref() {
@@ -1091,7 +1121,9 @@ pub(super) fn resettle_row(
                         None,
                         "supervisor_and_process_group_gone",
                     ))
-                } else if h["profile"] == "read_only" {
+                } else if h["profile"] == "read_only"
+                    || h["profile"] == crate::native_command_sandbox::WORKTREE_READ_ONLY
+                {
                     Some((
                         "outcome_not_recorded",
                         None,
@@ -1164,7 +1196,7 @@ pub(super) fn orphans(
     Ok(db
         .prepare(
             "SELECT task_id,actor,request_key,json_extract(result_json,'$.tool_call_ref') FROM runtime_requests
-            WHERE operation IN ('command_run','outside_command') AND json_extract(result_json,'$.settled') IS NOT 1
+            WHERE (operation IN ('command_run','outside_command') OR (operation='project_git' AND json_type(result_json,'$.checkout')='object')) AND json_extract(result_json,'$.settled') IS NOT 1
             AND json_extract(result_json,'$.complete') IS NOT 1 ORDER BY rowid",
         )?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?

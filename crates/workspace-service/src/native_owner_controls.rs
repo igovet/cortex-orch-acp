@@ -109,6 +109,29 @@ pub(super) fn guidance_prompt(message: &Value) -> String {
         message["text"].as_str().unwrap_or_default()
     )
 }
+/// ACP has a cancel notification followed by a reply to the old prompt, not a
+/// portable inline-message API. Never overlap two prompts on a worker session.
+async fn preempt_guidance(
+    driver: &SessionDriver,
+    mut pending: std::pin::Pin<&mut impl std::future::Future<Output = CoreResult<crate::native_sessions::Turn>>>,
+) -> (CoreResult<()>, bool) {
+    let reached = std::sync::atomic::AtomicBool::new(false);
+    let result = tokio::time::timeout(Duration::from_secs(3), async {
+        let cancel = async {
+            while !driver.prompt_active() { tokio::time::sleep(Duration::from_millis(1)).await; }
+            reached.store(true, std::sync::atomic::Ordering::SeqCst);
+            driver.cancel().await
+        };
+        tokio::pin!(cancel);
+        tokio::select! {
+            result=&mut pending => { reached.store(true,std::sync::atomic::Ordering::SeqCst); result?; },
+            result=&mut cancel => { result?; (&mut pending).await?; },
+        }
+        Ok(())
+    }).await.unwrap_or(Err(CoreError::Refused("native_guidance_delivery_unknown")));
+    (result, reached.load(std::sync::atomic::Ordering::SeqCst))
+}
+
 impl Runtime {
     pub(super) async fn task_settings(&self, task: &str) -> CoreResult<Value> {
         let task = task.to_owned();
@@ -123,62 +146,105 @@ impl Runtime {
         driver: &SessionDriver,
         initial: &str,
         guidance: &mut tokio::sync::mpsc::Receiver<Value>,
+        execution_worker: bool,
     ) -> CoreResult<()> {
         let mut prompt = initial.to_owned();
         let mut delivery = None;
         loop {
-            let next = {
-                let current = prompt.clone();
-                let pending = driver.prompt(&current);
-                tokio::pin!(pending);
-                tokio::select! {
-                    result=&mut pending => {
-                        if let Some(message) = delivery.take() { driver.guidance_delivery(message, result.is_ok(), false).await?; }
-                        let turn=result?;
-                        if turn.compacted && driver.needs_compaction_continuation().await? {
-                            prompt="Continue from the rebuilt recovery capsule after observed compaction. Do not replay effects.".into();
-                            continue;
-                        }
-                        return Ok(());
-                    },
-                    Some(text)=guidance.recv()=> {
-                        // Capsule/attachment preparation may still be running.
-                        // Cancelling a ready session poisons it before any prompt
-                        // can reply. Keep polling preparation and wire writes while
-                        // waiting to cancel an actually active prompt.
-                        // The guidance being replaced reached the engine when its prompt
-                        // was active or finished; only then is it recorded as delivered.
-                        let reached=std::sync::atomic::AtomicBool::new(false);
-                        let settled=tokio::time::timeout(Duration::from_secs(3), async {
-                            let cancel=async {
-                                while !driver.prompt_active() { tokio::time::sleep(Duration::from_millis(1)).await; }
-                                reached.store(true,std::sync::atomic::Ordering::SeqCst);
-                                driver.cancel().await
-                            };
-                            tokio::pin!(cancel);
-                            tokio::select! {
-                                result=&mut pending => { reached.store(true,std::sync::atomic::Ordering::SeqCst); result?; },
-                                result=&mut cancel => { result?; (&mut pending).await?; },
-                            }
-                            Ok::<_,CoreError>(())
-                        }).await;
-                        if let Some(message)=delivery.take() {
-                            driver.guidance_delivery(message, reached.load(std::sync::atomic::Ordering::SeqCst), true).await?;
-                        }
-                        settled.map_err(|_|CoreError::Refused("native_guidance_delivery_unknown"))??;
-                        text
+            let current = prompt.clone();
+            let pending = driver.prompt(&current);
+            tokio::pin!(pending);
+            tokio::select! {
+                result=&mut pending => {
+                    if let Some(message) = delivery.take() { driver.guidance_delivery(message, result.is_ok(), false).await?; }
+                    let turn=result?;
+                    if execution_worker {
+                        driver.forward_coordinator_guidance(driver.coordinator_guidance(false).await?).await?;
                     }
+                    if turn.compacted && driver.needs_compaction_continuation().await? {
+                        prompt="Continue from the rebuilt recovery capsule after observed compaction. Do not replay effects.".into();
+                        continue;
+                    }
+                    return Ok(());
+                },
+                Some(text)=guidance.recv()=> {
+                    let (settled, reached) = preempt_guidance(driver, pending.as_mut()).await;
+                    if let Some(message)=delivery.take() {
+                        driver.guidance_delivery(message, reached, true).await?;
+                    }
+                    settled?;
+                    prompt = guidance_prompt(&text);
+                    delivery = Some(text);
+                },
+                next = driver.coordinator_guidance(true), if execution_worker => {
+                    let next = next?;
+                    let (settled, reached) = preempt_guidance(driver, pending.as_mut()).await;
+                    if let Some(message)=delivery.take() {
+                        driver.guidance_delivery(message, reached, true).await?;
+                    }
+                    if let Err(error) = settled {
+                        // A target with an unconfirmed cancel follows the ordinary
+                        // lost-worker path; it must not stop unrelated workers.
+                        return Err(if error.code() == "native_guidance_delivery_unknown" {
+                            CoreError::Refused("native_turn_outcome_unknown")
+                        } else { error });
+                    }
+                    return driver.forward_coordinator_guidance(next).await;
                 }
-            };
-            prompt = guidance_prompt(&next);
-            delivery = Some(next);
+            }
         }
     }
+    /// Settings have no external effect to settle. Keep the historical request
+    /// and finish keys, but commit them together with the task-local change.
+    async fn update_task_settings(&self, project: String, r: Value) -> CoreResult<Value> {
+        let executor = &self.host.executor;
+        let p = project.clone();
+        let q = r.clone();
+        let binding = executor
+            .publication_wait(move |s| {
+                if let Some(receipt) = control::replay(s, &p, &actor(), &q)? {
+                    return Ok(Err(receipt));
+                }
+                validate(&q)?;
+                s.read(|db| {
+                    control::binding(db, &s.key().root().to_string_lossy(), &p, &actor(),
+                        text(&q, "executionId")?).map(Ok)
+                })
+            })
+            .await?;
+        let b = match binding {
+            Ok(bound) => bound,
+            Err(receipt) => return Ok(receipt),
+        };
+        self.routes.task_route(&self.host.root, &r["settings"])?;
+        executor.publication_wait(move |store| store.write(|db| {
+            ownership::check_tx(db, &b.task, &b.owner)?;
+            let request = text(&r, "requestId")?;
+            lifecycle::request_tx(db, &b.task, &b.owner.owner, request, "native_desktop_control", &r,
+                || Ok(json!({"admitted":true})))?;
+            lifecycle::request_tx(db, &b.task, "native-desktop-finish", request, "native_desktop_finished", &r, || {
+                let settings = &r["settings"];
+                let mode = settings["mode"].as_str().ok_or(CoreError::Refused("invalid_settings"))?;
+                if cortex_core::access::current(db, &b.task)? != mode {
+                    cortex_core::access::switch_tx(db, &b.task, mode, &b.session, "native_owner_settings")?;
+                }
+                lifecycle::event_tx(db, &b.task, "NATIVE_TASK_SETTINGS", json!({"settings":settings,"activation":"next_use"}))?;
+                let effect = json!({});
+                lifecycle::event_tx(db, &b.task, "NATIVE_OWNER_CONTROL",
+                    json!({"action":"task_settings","worker":null,"request":request,"effect":effect}))?;
+                Ok(json!({"outcome":"recorded","native":true,"effect":effect}))
+            })
+        })).await
+    }
+
     pub(super) async fn owner_control(
         self: &Arc<Self>,
         project: String,
         r: Value,
     ) -> CoreResult<Value> {
+        if r["action"] == "task_settings" {
+            return self.update_task_settings(project, r).await;
+        }
         // Resolve binding/replay before capability validation, as for other native controls.
         let p = project.clone();
         let q = r.clone();
@@ -240,9 +306,6 @@ impl Runtime {
         } else {
             None
         };
-        if r["action"] == "task_settings" {
-            self.routes.task_route(&self.host.root, &r["settings"])?;
-        }
         let command = if r["action"] == "command_stop" {
             let task = b.task.clone();
             let reference = text(&r, "toolCallRef")?.to_owned();
@@ -285,7 +348,8 @@ impl Runtime {
             None
         };
         if let Some(argv) = &rerun {
-            let fresh = native_effects::observe(self.host.root.clone()).await?;
+            let checkout = self.host.execution_checkout(&b.task, &b.owner).await?;
+            let fresh = native_effects::observe(checkout.path().to_owned()).await?;
             if fresh.project_digest.as_deref() != r["digest"].as_str() {
                 return refused("stale_result");
             }
@@ -353,7 +417,8 @@ impl Runtime {
             "rerun_check" => {
                 let argv = rerun.unwrap();
                 effect = self.host.owner_verify(&b.task, &b.owner, &argv).await?;
-                let fresh = native_effects::observe(self.host.root.clone()).await?;
+                let checkout = self.host.execution_checkout(&b.task, &b.owner).await?;
+            let fresh = native_effects::observe(checkout.path().to_owned()).await?;
                 effect["revision_digest"] = r["digest"].clone();
                 if fresh.project_digest.as_deref() != r["digest"].as_str() {
                     effect["observation"]["complete"] = json!(false);
@@ -361,7 +426,6 @@ impl Runtime {
                         json!("verification_review_revision_changed");
                 }
             }
-            "task_settings" => {}
             _ => unreachable!(),
         }
         let q = r.clone();
@@ -372,13 +436,6 @@ impl Runtime {
             lifecycle::request_tx(db,&t,"native-desktop-finish",text(&q,"requestId")?,"native_desktop_finished",&q,||{
                 match q["action"].as_str().unwrap() {
                     "worker_stop" => {},
-                    "task_settings" => {
-                        let mode=q["settings"]["mode"].as_str().ok_or(CoreError::Refused("invalid_settings"))?;
-                        if cortex_core::access::current(db,&t)?!=mode {
-                            cortex_core::access::switch_tx(db,&t,mode,&b.session,"native_owner_settings")?;
-                        }
-                        lifecycle::event_tx(db,&t,"NATIVE_TASK_SETTINGS",json!({"settings":q["settings"],"activation":"next_use"}))?;
-                    },
                     "rerun_check" => { lifecycle::event_tx(db,&t,"NATIVE_CHECK_RERUN",json!({"index":q["checkIndex"],"receipt":effect,"digest":q["digest"]}))?; },
                     _=>{},
                 }
@@ -729,21 +786,22 @@ fn fit_frame(value: &mut Value) -> CoreResult<bool> {
     }
     Ok(trimmed)
 }
-/// The owner-facing number of a task's result: 1 for the first result, plus one for each
-/// time the task was reopened (Request changes or steering) up to event `upto`. Event ids
-/// and revisions move with every runtime event, so they are never shown as a version; they
-/// stay in `sourceVersion`, which commands bind to.
-pub(super) fn result_ordinal(
+/// Count published result generations through the identity of the presented or
+/// accepted result. A synthesis that never completes and a reopen with no result
+/// reserve no ordinal. Commands still bind to `sourceVersion`, not this count.
+fn completed_result_count(
     db: &rusqlite::Connection,
     task: &str,
     upto: Option<i64>,
 ) -> CoreResult<u64> {
-    let reopened: i64 = db.query_row(
-        "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='TASK_REOPENED' AND id<=?",
+    let completed: i64 = db.query_row(
+        "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='TASK_STATE_CHANGED' AND id<=?
+         AND json_extract(payload_json,'$.state')='COMPLETED'
+         AND json_extract(payload_json,'$.previous') IS NOT 'COMPLETED'",
         (task, upto.unwrap_or(i64::MAX)),
         |r| r.get(0),
     )?;
-    Ok(reopened as u64 + 1)
+    Ok(completed as u64)
 }
 /// A node's worker status for the owner. A node the runtime still records as running is
 /// working while its channel is starting or ready; only a recorded end state is failed.
@@ -938,25 +996,31 @@ impl Runtime {
         };
         // The rerun-check identity check decides on the folder as it is now.
         let native = crate::machine::task_facts::native_observation(&self.host.root).await;
-        self.reviews(project, vec![(execution.to_owned(), record)], native)
+        self.reviews(project, vec![(execution.to_owned(), record)], native, false)
             .await
-            .map(|mut r| r.pop())
+            .map(|mut r| r.pop().map(|(actions, work, _)| (actions, work)))
     }
     async fn reviews(
         &self,
         project: &str,
         completed: Vec<(String, Value)>,
         native: Option<String>,
-    ) -> CoreResult<Vec<(Value, bool)>> {
+        recent: bool,
+    ) -> CoreResult<Vec<(Value, bool, Option<String>)>> {
         let root = self.host.root.clone();
         let project = project.to_owned();
+        let mut observations = Vec::with_capacity(completed.len());
+        for (execution, _) in &completed {
+            observations.push(crate::machine::task_facts::execution_observation(
+                &root, &project, execution, native.as_deref(), recent,
+            ).await);
+        }
         tokio::task::spawn_blocking(move || {
             crate::machine::task_facts::native_reviews(
-                &root,
-                &project,
-                &completed,
-                native.as_deref(),
-            )
+                &root, &project, &completed, &observations,
+            ).into_iter().zip(observations).map(|((actions, work), observed)| {
+                (actions, work, observed)
+            }).collect()
         })
         .await
         .map_err(|_| CoreError::Refused("native_facts_unavailable"))
@@ -1049,12 +1113,13 @@ impl Runtime {
                 // A worker read returns no product: only its requested tasks' rows are read.
                 if workers_only && !wanted {continue;}
                 if !workers_only {
-                let ordinal=result_ordinal(db,&task,None)?;
+                let finished=completed_result_count(db,&task,None)?;
+                let ordinal=if state=="COMPLETED" {finished.max(1)} else {finished+1};
                 if state=="COMPLETED" { completed.push((draft.clone(),execution.clone(),synthesis.clone(),ordinal)); }
                 // Keep the event id for freshness validation; only the DTO gets the result number.
                 if let Some(event)=product["tasks"][&draft]["acceptance"]["version"].as_str().and_then(|s|s.parse::<i64>().ok())
                     .or_else(||product["tasks"][&draft]["acceptance"]["version"].as_i64()) {
-                    accepted_ordinals.push((draft.clone(),result_ordinal(db,&task,Some(event))?));
+                    accepted_ordinals.push((draft.clone(),completed_result_count(db,&task,Some(event))?.max(1)));
                 }
                 let settings:Option<String>=db.query_row("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='NATIVE_TASK_SETTINGS' ORDER BY id DESC LIMIT 1",
                     [&task],|r|r.get(0)).optional()?;
@@ -1091,10 +1156,11 @@ impl Runtime {
                 if !workers_only && product["tasks"][&draft].is_object() {
                     product["tasks"][&draft]["spend"]=crate::notifier::progress::read(db,&task,crate::notifier::progress::now_ms())?.json();
                 }
-                let nodes=db.prepare("SELECT n.assignment_ref,n.role,n.objective,n.status,p.status,n.scope_json,n.result_json,n.revision,p.attempt_id,n.node_id FROM runtime_nodes n
+                let usage = crate::notifier::progress::attempt_tokens(db, &task)?;
+                let nodes=db.prepare(&format!("SELECT n.assignment_ref,n.role,n.objective,n.status,p.status,n.scope_json,n.result_json,n.revision,p.attempt_id,n.node_id,{},{} FROM runtime_nodes n
                     JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
-                    WHERE n.task_id=? ORDER BY n.rowid DESC LIMIT 1001")?
-                    .query_map([&task],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,i64>(7)?,r.get::<_,Option<String>>(8)?,r.get::<_,Option<String>>(9)?)))?
+                    WHERE n.task_id=? ORDER BY n.rowid DESC LIMIT 1001",ms("p.created_at"),ms("p.updated_at")))?
+                    .query_map([&task],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,i64>(7)?,r.get::<_,Option<String>>(8)?,r.get::<_,Option<String>>(9)?,r.get::<_,Option<i64>>(10)?,r.get::<_,Option<i64>>(11)?)))?
                     .collect::<Result<Vec<_>,_>>()?;
                 let mut nodes=nodes;
                 if nodes.len()>1000 {nodes.truncate(1000);partial.insert("workers".into(),json!(true));}
@@ -1145,54 +1211,17 @@ impl Runtime {
                     }
                 }
                 // The task's command receipts, read once for all its workers (each worker filters its own below).
-                let mut command_rows:Option<Vec<(i64,String,Value,Option<String>,Option<i64>,Option<String>)>>=None;
+                let mut command_rows=None;
                 // The plan revisions the workers ran under: a superseded worker names the one that replaced it.
                 let revisions:std::collections::BTreeSet<i64>=nodes.iter().map(|n|n.7).collect();
-                for (id,role,goal,status,process,scope,node_result,revision,attempt,node) in nodes {
+                for (id,role,goal,status,process,scope,node_result,revision,attempt,node,started,updated) in nodes {
                     if params["workerId"].as_str().is_some_and(|w|w!=id) {continue;}
                     let superseded=revision<current_revision || reopened.is_some_and(|r|revision<=r);
-                    let mut activity=Vec::new();
-                    // A command started on a worker's own channel belongs to that worker (and
-                    // is stoppable there); any other (host verification) is shown on one
-                    // settled worker.
-                    let mut owners=std::collections::HashMap::<String,Option<String>>::new();
-                    // When each command started: a finished one keeps its place in time.
-                    let mut began=std::collections::HashMap::<String,Option<i64>>::new();
-                    // Every receipt is read in order (nothing is cut here); the page below takes the window.
                     if command_rows.is_none() {
-                        let mut rows=Vec::new();
-                        for row in db.prepare(&format!("SELECT e.id,e.type,e.payload_json,c.assignment_id,{},c.channel_id FROM runtime_events e
-                            LEFT JOIN trusted_channels c ON e.type='NATIVE_COMMAND_STARTED' AND c.task_id=e.task_id AND c.channel_id=json_extract(e.payload_json,'$.channel_id')
-                            WHERE e.task_id=? AND e.type IN ('NATIVE_COMMAND_STARTED','NATIVE_COMMAND_FINISHED') ORDER BY e.id",ms("e.created_at")))?
-                            .query_map([&task],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,Option<i64>>(4)?,r.get::<_,Option<String>>(5)?)))? {
-                            let (event,kind,raw,assignment,stamp,channel)=row?;
-                            rows.push((event,kind,serde_json::from_str::<Value>(&raw)?,assignment,stamp,channel));
-                        }
-                        command_rows=Some(rows);
+                        command_rows=Some(worker_command_rows(db, &task)?);
                     }
-                    for (event,kind,v,assignment,stamp,channel) in command_rows.iter().flatten() {
-                        let (event,stamp)=(*event,*stamp);
-                        let reference=if kind=="NATIVE_COMMAND_STARTED" {&v["ref"]}else{&v["receipt"]["tool_call_ref"]};
-                        let key=reference.as_str().unwrap_or_default().to_owned();
-                        // A command on a channel that is no worker's (the coordinator's own) is never shown on a worker page.
-                        let assignment=if kind=="NATIVE_COMMAND_STARTED" && assignment.is_none() && channel.is_some() {Some("\u{0}coordinator".to_owned())} else {assignment.clone()};
-                        if kind=="NATIVE_COMMAND_STARTED" { owners.insert(key.clone(),assignment); began.insert(key.clone(),stamp); }
-                        let stamp=began.get(&key).copied().flatten().or(stamp);
-                        let owner=owners.get(&key).cloned().flatten();
-                        let own=owner.as_deref()==Some(id.as_str());
-                        if !own && (owner.is_some() || host_worker.as_deref()!=Some(&id)) {continue;}
-                        if kind=="NATIVE_COMMAND_FINISHED" { activity.retain(|a:&Value|a["toolCallRef"]!=*reference); }
-                        let running=kind=="NATIVE_COMMAND_STARTED";
-                        let argv=if running {&v["argv"]} else {&v["receipt"]["argv"]};
-                        let text:String=if own {
-                            argv.as_array().filter(|a|!a.is_empty()&&a.iter().all(Value::is_string))
-                                .map(|a|a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ").chars().take(2000).collect())
-                                .unwrap_or_else(||"Command".into())
-                        } else {"Host verification".into()};
-                        activity.push(json!({"sequence":event,"kind":"command","text":text,"at":stamp,
-                            "toolCallRef":reference,"command":{"state":if running{"running"}else if v["receipt"]["observation"]["complete"]==true && v["receipt"]["observation"]["exit_code"]==0 {"passed"}else if v["receipt"]["observation"]["failure"]=="owner_stopped" {"stopped"}else{"failed"},
-                            "exit":v["receipt"]["observation"]["exit_code"],"took":null,"tail":"","reason":v["receipt"]["observation"]["failure"]}}));
-                    }
+                    let mut activity=present_worker_commands(
+                        command_rows.as_deref().unwrap_or_default(), &id, host_worker.as_deref());
                     // Project writes the worker's own channel recorded (the host verifier never edits).
                     let mut edits=Vec::<(String,u64,u64)>::new();
                     // The n-th write of one content to one path by one channel is that
@@ -1363,11 +1392,16 @@ impl Runtime {
                         if info.is_empty() { Value::Null } else { Value::Object(info) }
                     } else { Value::Null };
                     let route=worker_route(db,&task,&id)?;
+                    let live = matches!(process.as_str(), "ready" | "starting");
+                    let (elapsed, running_since) = crate::notifier::progress::attempt_elapsed(
+                        started, if live {None} else {updated}, live);
+                    let tokens = attempt.as_ref().and_then(|a| usage.get(a)).copied()
+                        .and_then(crate::notifier::progress::visible_tokens);
                     workers.push(json!({"id":id,"taskId":draft,"executionId":execution,"role":role.trim_start_matches("worker-"),
                         "status":worker_status(&status,&process,&state),
                         "lane":if role.contains("review"){"review"}else{"execution"},"goal":goal,"now":null,"waitsFor":null,
-                        "scope":serde_json::from_str::<Value>(&scope)?,"route":route,"attempt":null,"elapsedMs":null,"runningSince":null,
-                        "context":null,"usage":null,"activity":activity,"result":worker_result,"review":review_info,"messages":[]}));
+                        "scope":serde_json::from_str::<Value>(&scope)?,"route":route,"attempt":null,"elapsedMs":elapsed,"runningSince":running_since,
+                        "context":null,"usage":tokens,"activity":activity,"result":worker_result,"review":review_info,"messages":[]}));
                     // Present only when they apply, so a current worker keeps its recorded shape.
                     let worker=workers.last_mut().expect("pushed above");
                     if superseded {worker["superseded"]=json!(true);}
@@ -1452,10 +1486,12 @@ impl Runtime {
             };
             // A finished result carries the same review actions and acceptance
             // availability as Python's `result_projection`, never a fixed refusal.
-            let reviews = self.reviews(project, records, current.clone()).await?;
-            for ((draft, _, synthesis, ordinal), (mut actions, work)) in
+            let reviews = self.reviews(project, records, current.clone(), true).await?;
+            let mut observed_by_task = std::collections::BTreeMap::new();
+            for ((draft, _, synthesis, ordinal), (mut actions, work, observed)) in
                 completed.iter().zip(reviews)
             {
+                observed_by_task.insert(draft.as_str(), observed);
                 let task = &mut facts["product"]["tasks"][draft];
                 if !task["result"].is_object() {
                     task["result"] = json!({"checks":[],"digest":null,"sourceVersion":"0"});
@@ -1499,7 +1535,7 @@ impl Runtime {
                 }
             }
             if let Some(tasks) = facts["product"]["tasks"].as_object_mut() {
-                for task in tasks.values_mut().filter(|task| task["result"].is_object()) {
+                for (draft, task) in tasks.iter_mut().filter(|(_, task)| task["result"].is_object()) {
                     // A result with no recorded workspace digest (an answer, or work not yet
                     // verified) carries an identity placeholder. It is not a claim about the
                     // files, so it is never labelled stale; a verified digest that no longer
@@ -1525,6 +1561,10 @@ impl Runtime {
                     task["workspaceDigest"] =
                         if placeholder || own_writes || committed || ordinary_commit {
                             task["result"]["digest"].clone()
+                        } else if let Some(observed) = observed_by_task.get(draft.as_str()) {
+                            json!(observed)
+                        } else if task["checkout"]["kind"] == "worktree" {
+                            Value::Null
                         } else {
                             json!(current)
                         };
@@ -1534,6 +1574,92 @@ impl Runtime {
         Ok(facts)
     }
 }
+type WorkerCommandRow = (i64, String, Value, Option<String>, Option<i64>, bool, Option<String>);
+
+fn worker_command_rows(db: &rusqlite::Connection, task: &str) -> CoreResult<Vec<WorkerCommandRow>> {
+    let mut q = db.prepare(&format!(
+        "WITH broker AS MATERIALIZED (
+            SELECT actor, json_extract(result_json,'$.tool_call_ref') AS ref
+            FROM runtime_requests WHERE task_id=?1 AND operation IN ('command_run','outside_command')
+                AND json_type(result_json,'$.tool_call_ref')='text'
+            GROUP BY actor,ref HAVING count(*)=1
+         ), starts AS MATERIALIZED (
+            SELECT json_extract(payload_json,'$.ref') AS ref FROM runtime_events
+            WHERE task_id=?1 AND type='NATIVE_COMMAND_STARTED'
+            GROUP BY ref HAVING count(*)=1
+         )
+         SELECT e.id,e.type,e.payload_json,c.assignment_id,{},c.channel_id IS NOT NULL,
+                CASE WHEN s.ref IS NOT NULL THEN c.attempt_id END
+         FROM runtime_events e
+         LEFT JOIN trusted_channels c ON e.type='NATIVE_COMMAND_STARTED'
+             AND c.task_id=e.task_id AND c.channel_id=json_extract(e.payload_json,'$.channel_id')
+         LEFT JOIN broker b ON b.actor=c.channel_id AND b.ref=json_extract(e.payload_json,'$.ref')
+         LEFT JOIN starts s ON s.ref=b.ref
+         WHERE e.task_id=?1 AND e.type IN ('NATIVE_COMMAND_STARTED','NATIVE_COMMAND_FINISHED')
+         ORDER BY e.id", ms("e.created_at")
+    ))?;
+    let rows = q.query_map([task], |r| Ok((r.get(0)?,r.get(1)?,r.get::<_,String>(2)?,
+        r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
+    rows.map(|r| {
+        let (event, kind, raw, assignment, stamp, on_channel, attempt) = r?;
+        Ok((event, kind, serde_json::from_str(&raw)?, assignment, stamp, on_channel, attempt))
+    }).collect()
+}
+
+#[cfg(test)]
+pub(crate) fn worker_commands(
+    db: &rusqlite::Connection, task: &str, worker: &str, host_worker: Option<&str>,
+) -> CoreResult<Vec<Value>> {
+    Ok(present_worker_commands(&worker_command_rows(db, task)?, worker, host_worker))
+}
+
+fn present_worker_commands(
+    rows: &[WorkerCommandRow], worker: &str, host_worker: Option<&str>,
+) -> Vec<Value> {
+    let mut result = Vec::new();
+    let mut started = std::collections::HashMap::new();
+    for (event, kind, v, assignment, stamp, on_channel, attempt) in rows {
+        let running = kind == "NATIVE_COMMAND_STARTED";
+        let reference = if running { &v["ref"] } else { &v["receipt"]["tool_call_ref"] };
+        let key = reference.as_str().unwrap_or_default();
+        if running {
+            started.insert(key, (assignment.as_deref(), *on_channel, stamp, attempt.as_deref()));
+        }
+        let (owner, on_channel, started_at, attempt) = started.get(key).copied()
+            .unwrap_or((None, false, stamp, None));
+        // Coordinator calls are not worker activity. Unowned host verification
+        // retains its existing worker and never gets a broker-output reference.
+        let own = owner == Some(worker);
+        if !own && (on_channel || owner.is_some() || host_worker != Some(worker)) {
+            continue;
+        }
+        if !running {
+            result.retain(|a: &Value| a["toolCallRef"] != *reference);
+        }
+        let argv = if running { &v["argv"] } else { &v["receipt"]["argv"] };
+        let text: String = if own {
+            argv.as_array().filter(|a| !a.is_empty() && a.iter().all(Value::is_string))
+                .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>()
+                    .join(" ").chars().take(2000).collect())
+                .unwrap_or_else(|| "Command".into())
+        } else {
+            "Host verification".into()
+        };
+        let observation = &v["receipt"]["observation"];
+        let state = if running {"running"} else if observation["complete"] == true && observation["exit_code"] == 0 {
+            "passed"
+        } else if observation["failure"] == "owner_stopped" {"stopped"} else {"failed"};
+        let mut item = json!({"sequence":event,"kind":"command","text":text,"at":started_at.or(*stamp),
+            "toolCallRef":reference,"command":{"state":state,"exit":observation["exit_code"],
+                "took":null,"tail":"","reason":observation["failure"]}});
+        if let (true, Some(attempt)) = (own, attempt) {
+            item["commandOutputRef"] = json!({"attemptId":attempt,"toolCallRef":reference});
+        }
+        result.push(item);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1737,32 +1863,39 @@ mod tests {
         );
     }
     #[test]
-    fn result_number_counts_results_not_events() {
+    fn result_number_counts_completions_across_empty_reworks() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE runtime_events(id INTEGER PRIMARY KEY,task_id TEXT,type TEXT,payload_json TEXT);").unwrap();
-        // Event ids 55 (first result), 57 (reopened), 117 (second result) and later noise.
-        for (id, kind) in [
-            (1, "TASK_CREATED"),
-            (55, "SYNTHESIS_RUNTIME_COMPOSED"),
-            (57, "TASK_REOPENED"),
-            (117, "SYNTHESIS_SUBMITTED"),
-            (119, "NATIVE_TURN_SETTLED"),
+        let cancelled = json!({"previous":"EXECUTING","state":"CANCELLED"});
+        let reworked = json!({"previous":"CANCELLED","origin":"owner_rework"});
+        let completed = json!({"previous":"RECONCILING","state":"COMPLETED"});
+        for (id, task, kind, payload) in [
+            (2, "t", "TASK_STATE_CHANGED", cancelled.clone()),
+            (4, "t", "TASK_REOPENED", reworked.clone()),
+            (7, "t", "SYNTHESIS_RUNTIME_COMPOSED", json!({})),
+            (8, "t", "TASK_STATE_CHANGED", completed.clone()),
+            (9, "t", "NATIVE_TURN_SETTLED", json!({})),
+            (12, "t", "TASK_REOPENED", json!({"previous":"COMPLETED"})),
+            (16, "t", "SYNTHESIS_SUBMITTED", json!({})),
+            (17, "t", "TASK_STATE_CHANGED", cancelled),
+            (19, "t", "TASK_REOPENED", reworked),
+            (20, "other", "TASK_STATE_CHANGED", completed.clone()),
+            (25, "t", "SYNTHESIS_SUBMITTED", json!({})),
+            (26, "t", "TASK_STATE_CHANGED", completed),
         ] {
             db.execute(
-                "INSERT INTO runtime_events VALUES (?,'t',?,'{}')",
-                (id, kind),
+                "INSERT INTO runtime_events VALUES (?,?,?,?)",
+                (id, task, kind, payload.to_string()),
             )
             .unwrap();
         }
-        db.execute(
-            "INSERT INTO runtime_events VALUES (200,'other','TASK_REOPENED','{}')",
-            [],
-        )
-        .unwrap();
-        assert_eq!(result_ordinal(&db, "t", Some(56)).unwrap(), 1);
-        assert_eq!(result_ordinal(&db, "t", Some(52)).unwrap(), 1);
-        assert_eq!(result_ordinal(&db, "t", Some(119)).unwrap(), 2);
-        assert_eq!(result_ordinal(&db, "t", None).unwrap(), 2);
+        // Cancel/rework before the first result doesn't reserve v1. An unpublished
+        // synthesis doesn't count, even when it was retained before cancellation.
+        assert_eq!(completed_result_count(&db, "t", Some(7)).unwrap(), 0);
+        assert_eq!(completed_result_count(&db, "t", Some(8)).unwrap(), 1);
+        assert_eq!(completed_result_count(&db, "t", Some(9)).unwrap(), 1);
+        assert_eq!(completed_result_count(&db, "t", Some(25)).unwrap(), 1);
+        assert_eq!(completed_result_count(&db, "t", None).unwrap(), 2);
     }
     #[test]
     fn running_worker_is_never_failed_while_its_channel_starts() {
@@ -1791,6 +1924,8 @@ impl NativeHost {
         owner: &ownership::OwnerEpoch,
         argv: &[String],
     ) -> CoreResult<Value> {
+        let checkout = self.execution_checkout(task, owner).await?;
+        let root = checkout.path().to_owned();
         let reference = format!("native-command:{}", native_effects::identity()?);
         let (cancel, receiver) = watch::channel(false);
         let (done, finished) = watch::channel(false);
@@ -1829,7 +1964,11 @@ impl NativeHost {
                 return Err(error);
             }
         };
-        let result = native_effects::verify_cancelled(self.root.clone(), argv, receiver).await;
+        let result = if checkout.worktree.is_some() {
+            native_effects::verify_worktree(root.clone(), self.root.clone(), argv, receiver).await
+        } else {
+            native_effects::verify_cancelled(root.clone(), argv, receiver).await
+        };
         let mut receipt = match result {
             Ok(r) => r,
             Err(e) => {
@@ -1839,7 +1978,21 @@ impl NativeHost {
         receipt["tool_call_ref"] = json!(reference);
         receipt["owner_epoch"] = json!(owner.epoch);
         receipt["revision"] = json!(revision);
-        match native_effects::observe(self.root.clone()).await {
+        if let Some(worktree) = &checkout.worktree {
+            receipt["checkout"] = cortex_core::workspace::worktrees::receipt_binding(worktree, &self.root, owner.epoch);
+            receipt["task"] = json!(task);
+            receipt["cwd"] = json!(root);
+            if receipt["observation"]["output_truncated"] == true {
+                receipt["observation"]["complete"] = json!(false);
+                receipt["observation"]["failure"] = json!("output_truncated");
+            }
+        }
+        let fresh = match self.execution_checkout(task, owner).await {
+            Ok(current) if current.path() == root => native_effects::observe(root).await,
+            Ok(_) => Err(CoreError::Refused("worktree_binding_invalid")),
+            Err(e) => Err(e),
+        };
+        match fresh {
             Ok(fresh) => {
                 receipt["revision_digest"] = json!(fresh.project_digest.unwrap_or_default())
             }

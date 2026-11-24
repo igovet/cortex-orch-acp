@@ -1,7 +1,7 @@
 import { wireAttachments as checkedAttachments } from "../attachments";
 import { capabilities as localCapabilities, decodeResponse, negotiate, PROTOCOL, validate } from "@cortex/workspace-contract";
 import type { Answer as WireAnswer, Decision as WireDecision, Receipt as WireReceipt, Result as WireResult, Task as WireTask, HistoryRow, WireTypes } from "@cortex/workspace-contract";
-import { ACCESS_MODES, readRemoteStatus, readSudoPrompts, capabilityOf, checksPassed, DomainError, effortLabel, ENGINE_KEYS, engineLabel, FEATURES, LANGUAGES, LOCAL_MACHINE_ID, MACHINE_COMMANDS, mapProjectSlice, readableCheckReason, routeIdOf, emptySession, overlayTask, validatePlan, WIRE_OPERATIONS } from "@cortex/workspace-domain";
+import { ACCESS_MODES, readRemoteStatus, readSudoPrompts, capabilityOf, checksPassed, DomainError, effortLabel, ENGINE_KEYS, engineLabel, FEATURES, LANGUAGES, LOCAL_MACHINE_ID, MACHINE_COMMANDS, mapProjectSlice, orderedEfforts, parseLiveSprintGraph, readableCheckReason, routeIdOf, emptySession, overlayTask, validatePlan, WIRE_OPERATIONS } from "@cortex/workspace-domain";
 import { nativeDelta, nativeVersion } from "./native";
 import { readOwnerActionReply, readOwnerActions, type OwnerActionRequests } from "@cortex/workspace-domain";
 import { applyNativeTaskDelta, weeklyUsage } from "@cortex/workspace-domain";
@@ -256,8 +256,8 @@ export function sessionOptions(config: MachineConfig, rules = config.surfaces?.r
       && (allowedRoutes === null || allowedRoutes.includes(routeIdOf(engine, m.id)) || (m.routeId !== undefined && allowedRoutes.includes(m.routeId))))
       .map(m => ({ ...m, engine: engineLabel(engine) }));
   });
-  const models = reported.map(({ id, routeId, label, engine, efforts }) => ({ id: routeId ?? id, label, engine, efforts }));
-  const efforts = [...new Set(reported.flatMap(m => m.efforts))].map(id => ({ id, label: effortLabel(id) }));
+  const models = reported.map(({ id, routeId, label, engine, efforts }) => ({ id: routeId ?? id, label, engine, efforts: orderedEfforts(efforts) }));
+  const efforts = orderedEfforts(reported.flatMap(m => m.efforts)).map(id => ({ id, label: effortLabel(id) }));
   return { models, efforts, modes: [...ACCESS_MODES], languages: [...LANGUAGES] };
 }
 /** The files a task in the project folder left there, once per path. */
@@ -2157,6 +2157,37 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
       },
       act: (projectId, actionId, action) => ownerAct({ projectId, actionId, action }),
       token: (projectId, actionId, token) => ownerAct({ projectId, actionId, action: "token", token }),
+    },
+    sprintGraph: {
+      // Desktop owner only. A service that does not know the action, or answers another shape, keeps the sprint read-only.
+      async read(sprintId) {
+        if (!machineOn) return { kind: "unsupported" };
+        const projectId = sprintProjects.get(sprintId);
+        if (!projectId) return { kind: "refused", code: "unknown_sprint", message: "Unknown sprint." };
+        const reply = await transport.request("machine.call", { op: "product.sprint", projectId, params: { action: "live_graph", sprintId } }) as { ok?: boolean; result?: unknown; code?: string; message?: string } | null;
+        if (reply?.ok !== true) {
+          const code = typeof reply?.code === "string" ? reply.code : "refused";
+          if (code === "unsupported_action") return { kind: "unsupported" };
+          return { kind: "refused", code, message: typeof reply?.message === "string" && reply.message ? reply.message : "The sprint graph could not be read." };
+        }
+        const graph = parseLiveSprintGraph(reply.result);
+        return graph && graph.sprintId === sprintId ? { kind: "graph", graph } : { kind: "unsupported" };
+      },
+      // Sent once. A lost answer, or a save the service could not confirm, is unknown: the caller reads again first.
+      async edit(edit) {
+        if (!machineOn) return { outcome: "refused", code: "not_available", message: OUTCOME_WORDS.unsupported };
+        const projectId = sprintProjects.get(edit.sprintId);
+        if (!projectId) return { outcome: "refused", code: "unknown_sprint", message: "Unknown sprint." };
+        let reply: { ok?: boolean; result?: { changed?: unknown }; code?: string; message?: string } | null;
+        try { reply = await transport.request("machine.call", { op: "product.sprint", projectId, params: { ...edit } }) as typeof reply; }
+        catch { return { outcome: "unknown" }; }
+        if (reply?.ok !== true) {
+          const message = typeof reply?.message === "string" && reply.message ? reply.message : "The change was not made.";
+          if (!reply || reply.code === "graph_save_unconfirmed") return { outcome: "unknown", message };
+          return { outcome: "refused", code: typeof reply.code === "string" ? reply.code : "refused", message };
+        }
+        return reply.result?.changed === true ? { outcome: "changed" } : reply.result?.changed === false ? { outcome: "unchanged" } : { outcome: "unknown" };
+      },
     },
     presented: () => Promise.all([...lateReads]).then(() => {}),
     watchOverview() {

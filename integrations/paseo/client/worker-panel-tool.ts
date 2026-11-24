@@ -1,5 +1,6 @@
 import { gatewayPresentation } from "../shared/gateway-presentation.ts";
 import { shellCommand } from "../shared/shell-command.ts";
+import { nativeKind } from "./worker-panel-groups.ts";
 import type { WorkerEvent } from "./worker-panel-events.js";
 
 export type ToolPresentation = {
@@ -64,16 +65,11 @@ export function presentTool(event: WorkerEvent): ToolPresentation {
   const newText = stringField(input, "new_string", "newString", "newText", "content");
   const outputValue = gateway?.output ?? event.raw_output ?? event.output;
   const output = outputText(outputValue) ?? contentText(event.content);
-  const kind = gateway?.kind === "shell" ? "execute" : gateway?.kind ?? event.tool_kind?.toLowerCase();
+  const kind = nativeKind(event);
   const title = event.title ?? "";
-  const read = kind === "read" || (kind == null && path !== null && /^Read(?:\s|$)/i.test(title));
-  // As in the chat, a row is a shell only with a command: external MCP tools
-  // also arrive as `execute`, and they are ordinary tools.
-  const shell = command !== null && (kind === "execute" || kind === "terminal" || kind == null);
-  const edit = kind === "edit" || (kind == null && path !== null && oldText !== null && newText !== null);
-  if (read) return { kind: "read", label: /^Read(?:\s|$)/i.test(title) ? title : `Read ${basename(path) ?? "file"}`, path, command, output, oldText, newText };
-  if (shell) return { kind: "shell", label: command ? `Shell  ${command}` : title || "Shell", path, command, output, oldText, newText };
-  if (edit) return { kind: "edit", label: /^Edit(?:\s|$)/i.test(title) ? title : `Edit ${basename(path) ?? "file"}`, path, command, output, oldText, newText };
+  if (kind === "read") return { kind: "read", label: /^Read(?:\s|$)/i.test(title) ? title : `Read ${basename(path) ?? "file"}`, path, command, output, oldText, newText };
+  if (kind === "shell") return { kind: "shell", label: command ? `Shell  ${command}` : title || "Shell", path, command, output, oldText, newText };
+  if (kind === "edit") return { kind: "edit", label: /^Edit(?:\s|$)/i.test(title) ? title : `Edit ${basename(path) ?? "file"}`, path, command, output, oldText, newText };
   const raw = title || event.tool_kind || event.type;
   const name = raw.startsWith("mcp__") ? raw.replace(/^mcp__[^_]+__/, "").replace(/^mcp__/, "").replace(/_/g, " ").trim() : raw;
   return { kind: "generic", label: name ? name.charAt(0).toUpperCase() + name.slice(1) : raw, path, command, output, oldText, newText };

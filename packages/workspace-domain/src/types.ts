@@ -236,6 +236,31 @@ export type Sprint = {
   plan: PlanVersion | null; history?: PlanVersion[]; materializedVersion: number | null;
   taskIds: string[]; queueState: "idle" | "running" | "paused" | "complete"; pauseReason: string | null; mock?: true;
 };
+/**
+ * A created sprint's live graph as the service reads it (`product.sprint` `live_graph`, contract version 1): the bound roster
+ * in saved order, each member's live prerequisites, the priority among ready drafts and the execution-order projection. It
+ * is owner data, separate from the approved plan; editing it never changes a plan version.
+ */
+export type LiveMemberRead = "confirmed" | "missing" | "unreadable" | "purged";
+export type LiveSprintMember = {
+  taskId: string; readStatus: LiveMemberRead;
+  /** Each listed prerequisite points to this member. Null when the member could not be read: never "no dependency". */
+  dependencies: string[] | null;
+  /** A confirmed saved draft that has not started, in an open sprint whose whole roster was read. */
+  editable: boolean; canBePredecessor: boolean;
+  /** The approved plan item this task was created from, when that can be proven. Null proves nothing about its origin. */
+  approvedPlanKey: string | null;
+};
+/** Working members in durable start order; `startOrder` is a decimal ordinal, null when unknown (those come last). */
+export type SprintOrderWorking = { taskId: string; startOrder: string | null };
+/**
+ * A not-started member. Ranked ones come first, 1-based; the rest follow in priority order with the service's reason code.
+ * `next` is the one current scheduler candidate, only on a running queue; `conditional` marks a pick that assumes earlier
+ * work settles. Neither is a reservation.
+ */
+export type SprintOrderPending = { taskId: string; rank: number | null; reason: string | null; next: boolean; conditional: boolean };
+export type SprintOrder = { mode: SprintRunMode; queueState: "idle" | "running" | "paused" | "complete"; working: SprintOrderWorking[]; notStarted: SprintOrderPending[] };
+export type LiveSprintGraph = { contractVersion: 1; sprintId: string; graphRevision: string; complete: boolean; members: LiveSprintMember[]; priority: string[]; order: SprintOrder };
 export type WorkerStatus = "working" | "waiting_you" | "pending" | "not_started" | "paused" | "completed" | "failed" | "cancelled" | "unknown";
 export type ActivityKind = "note" | "assignment" | "divider" | "tools" | "tool" | "edit" | "command" | "message";
 export type CommandState = "running" | "stopping" | "stopped" | "passed" | "failed" | "native";

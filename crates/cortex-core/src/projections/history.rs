@@ -65,24 +65,43 @@ fn shell_word(s: &str) -> String {
         format!("'{}'", s.replace('\'', "'\"'\"'"))
     }
 }
-fn output(v: &Value) -> String {
+fn output_text(v: &Value) -> Option<String> {
     if let Some(s) = v.as_str() {
-        return s.into();
+        return Some(s.into());
     }
     if let Some(a) = v.as_array() {
-        return a
-            .iter()
-            .map(output)
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
-    for k in ["output", "text", "stdout", "formatted_output", "content"] {
-        if let Some(s) = v.get(k) {
-            return output(s);
+        let mut parts = a.iter().filter_map(output_text);
+        let mut text = parts.next()?;
+        for part in parts.filter(|s| !s.is_empty()) {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&part);
         }
+        return Some(text);
     }
-    String::new()
+    ["output", "text", "stdout", "formatted_output", "content"]
+        .into_iter()
+        .find_map(|k| v.get(k))
+        .and_then(output_text)
+}
+
+/// Selected command text from a retained update. No text (including a terminal
+/// reference or an empty content list) is distinct from captured text of length zero.
+/// Callers must first check command identity and exclude private calls.
+pub fn retained_command_text(update: &Value) -> Option<String> {
+    let raw = ["rawOutput", "raw_output", "output"]
+        .into_iter()
+        .find_map(|key| update.get(key))
+        .and_then(output_text);
+    // Preserve the display's content fallback when there is no non-empty raw text.
+    match raw {
+        Some(text) if !text.is_empty() => Some(text),
+        empty_or_missing => update
+            .get("content")
+            .and_then(output_text)
+            .or(empty_or_missing),
+    }
 }
 fn detail(update: &Value) -> Value {
     let mut raw = update
@@ -106,6 +125,16 @@ fn detail(update: &Value) -> Value {
     let mut d = json!({"title":title,"callId":field(update,"toolCallId").or_else(||field(update,"activity_ref")).unwrap_or(""),"kind":kind});
     if let Some(s) = field(update, "status") {
         d["status"] = json!(s);
+    }
+    if let (Some(attempt), Some(reference)) = (
+        field(&update["commandOutputRef"], "attemptId"),
+        field(&update["commandOutputRef"], "toolCallRef"),
+    ) {
+        if matches!(title, "mcp__cortex__command_run" | "mcp__cortex__outside_command")
+            && d["callId"] == format!("cortex-broker:{attempt}:{reference}")
+        {
+            d["commandOutputRef"] = json!({"attemptId":attempt,"toolCallRef":reference});
+        }
     }
     for (target, keys) in [
         (
@@ -212,18 +241,9 @@ fn detail(update: &Value) -> Value {
         }
     }
     if d.get("command").is_some() && !private {
-        let text = output(
-            update
-                .get("rawOutput")
-                .or_else(|| update.get("raw_output"))
-                .or_else(|| update.get("output"))
-                .unwrap_or(&Value::Null),
-        );
-        d["output"] = json!(if text.is_empty() {
-            output(&update["content"])
-        } else {
-            text
-        });
+        if let Some(text) = retained_command_text(update) {
+            d["output"] = json!(text);
+        }
     }
     if update["projection_partial"] == true {
         d["notice"] = json!("Only the last 100 updates of this call are available in this view.");
@@ -837,6 +857,94 @@ mod tests {
         .unwrap();
         db
     }
+    #[test]
+    fn command_output_ref_on_conversation_is_a_namespaced_receipt_only() {
+        let db = fixture();
+        let reference = json!({"attemptId":"xa_c","toolCallRef":"native-command:fixture"});
+        for (seq, call) in [(0, "cortex-broker:xa_c:native-command:fixture"), (1, "xa_c:native-command:fixture")] {
+            let update = json!({"sessionUpdate":"tool_call","toolCallId":call,
+                "title":"mcp__cortex__command_run","kind":"execute","status":"completed",
+                "commandOutputRef":reference,"large_output_id":"never-projected",
+                "rawOutput":"not a retained display field"});
+            db.execute("INSERT INTO host_updates VALUES ('s',?,?,'now')",
+                (seq, update.to_string())).unwrap();
+        }
+        let request = Page { target: "t".into(), cursor: None, limit: 20 };
+        let result = page(&db, "p", &request).unwrap();
+        let get = |n:usize| -> Value {
+            serde_json::from_str(result.items[n].text.as_deref().unwrap().strip_prefix("Workspace step: ").unwrap()).unwrap()
+        };
+        assert_eq!(get(0)["commandOutputRef"], reference);
+        assert!(get(0).get("output").is_none());
+        assert!(get(0).get("large_output_id").is_none());
+        assert!(get(1).get("commandOutputRef").is_none());
+    }
+
+    #[test]
+    fn native_command_text_distinguishes_missing_from_captured_empty_in_feed_steps() {
+        let db = fixture();
+        for (index, (fields, expected)) in [
+            (json!({}), None),
+            (json!({"rawOutput":null,"content":[]}), None),
+            (json!({"rawOutput":{"exit_code":0},"content":[{"type":"terminal","terminalId":"term"}]}), None),
+            (json!({"rawOutput":""}), Some("")),
+            (json!({"raw_output":{"stdout":""}}), Some("")),
+            (json!({"content":[{"type":"content","content":{"type":"text","text":""}}]}), Some("")),
+            (json!({"rawOutput":"","content":[{"type":"content","content":{"type":"text","text":"recorded"}}]}), Some("recorded")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call = format!("xa_c:exec-{index}");
+            let initial = json!({"sessionUpdate":"tool_call","toolCallId":call,"title":"Bash",
+                "kind":"execute","status":"in_progress","rawInput":{"command":"printf ''"}});
+            let mut settled = json!({"sessionUpdate":"tool_call_update","toolCallId":call,
+                "status":"completed"});
+            settled
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let first = (index * 2) as i64;
+            let updates = [initial.to_string(), settled.to_string()];
+            for (seq, update) in (first..).zip(&updates) {
+                db.execute("INSERT INTO host_updates VALUES ('s',?,?,'now')", (seq, update))
+                    .unwrap();
+            }
+
+            // The native worker page uses this batched entry point for the same step.
+            let worker = tool_step_from(&db, "s", first + 1, &updates[1], &call, &updates)
+                .unwrap()
+                .unwrap();
+            let items = page(
+                &db,
+                "p",
+                &Page {
+                    target: "t".into(),
+                    cursor: None,
+                    limit: 100,
+                },
+            )
+            .unwrap()
+            .items;
+            let waiting = items[index * 2].text.as_deref().unwrap();
+            let completed = items[index * 2 + 1].text.as_deref().unwrap();
+            let decode = |step: &str| -> Value {
+                serde_json::from_str(step.strip_prefix("Workspace step: ").unwrap()).unwrap()
+            };
+            assert_eq!(decode(waiting)["status"], "in_progress");
+            assert!(decode(waiting).get("output").is_none(), "{waiting}");
+            assert_eq!(completed, worker.0);
+            assert_eq!(worker.1.as_deref(), Some("completed"));
+            let done = decode(completed);
+            assert_eq!(done["status"], "completed");
+            assert_eq!(
+                done.get("output"),
+                expected.map(|s| json!(s)).as_ref(),
+                "{done}"
+            );
+        }
+    }
+
     /// The store's own schema, with one session `s` of task `t` holding `calls` tool calls of
     /// three updates each, one call of 150 updates, and one malformed update.
     fn retained(calls: usize) -> Connection {

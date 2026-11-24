@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { render } from "solid-js/web";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { emptySession, emptyWorkspace, LOCAL_MACHINE_ID, type Activity, type Worker } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { STEP_PREFIX } from "../src/tool-names";
@@ -52,8 +52,13 @@ it("scrolls a worker step's long output, tail and diff sideways inside a focusab
   const boxes = [...document.querySelectorAll<HTMLElement>(".ws-out")];
   expect(boxes.map(b => b.getAttribute("aria-label")).sort()).toEqual(["Command output", "Command output", "Diff"]);
   for (const box of boxes) expectScrollable(box, box.getAttribute("aria-label")!);
-  expect(document.querySelector(".ws-step-detail .ws-out")?.textContent).toBe(LONG);
-  expect(document.querySelector(".tail.ws-out")?.textContent).toBe(LONG);
+  const output = boxes.filter(b => b.getAttribute("aria-label") === "Command output");
+  for (const box of output) {
+    expect(box.textContent).toBe(LONG.slice(0, 1000) + "…");
+    [...box.parentElement!.querySelectorAll("button")].find(b => b.textContent === "Show all retained text")!.click();
+    expect(box.textContent).toBe(LONG);
+  }
+  expect(document.body.textContent).toContain("Recorded command tail only.");
 });
 
 it("scrolls a Conversation step's long output sideways inside a focusable box", async () => {
@@ -63,8 +68,26 @@ it("scrolls a Conversation step's long output sideways inside a focusable box", 
   state.sessions = [session];
   await mount(`/m/${LOCAL_MACHINE_ID}/t/t`, structuredClone(state));
   await openAll();
-  const box = document.querySelector<HTMLElement>(".ws-step-detail .ws-out")!;
+  const box = document.querySelector<HTMLElement>('[role=region][aria-label="Command output"]')!;
+  expect(box.textContent).toBe(LONG.slice(0, 1000) + "…");
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  const write = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("denied"));
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: write } });
+  try {
+    const copy = box.parentElement!.querySelector<HTMLButtonElement>('[aria-label="Copy output (retained text)"]')!;
+    copy.click(); await settle();
+    expect(write).toHaveBeenCalledWith(LONG);
+    expect(box.parentElement?.textContent).toContain("Copied");
+    copy.click(); await settle();
+    expect(box.parentElement?.textContent).toContain("Not copied");
+  } finally {
+    if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+    else Reflect.deleteProperty(navigator, "clipboard");
+  }
+  const show = [...box.parentElement!.querySelectorAll("button")].find(b => b.textContent === "Show all retained text")!;
+  show.click();
   expect(box.textContent).toBe(LONG);
+  expect(show.getAttribute("aria-expanded")).toBe("true");
   expectScrollable(box, "Command output");
   box.focus();
   expect(document.activeElement).toBe(box);

@@ -360,6 +360,11 @@ textarea[data-grow] { max-height: 40vh; }
 .ws-read-t { margin-bottom: 10px; font-size: var(--t-ui); font-weight: 500; line-height: 20px; overflow-wrap: anywhere; }
 .ws-read-d { margin-top: 12px; font-size: var(--t-sec); line-height: 20px; color: var(--fg); overflow-wrap: anywhere; }
 .ws-read-s { margin: 16px 0 0; }
+/* A live task's links and priority in Details, and the priority arrows on its list row. */
+.ws-live-links { display: grid; gap: 8px; margin-top: 4px; }
+.ws-live-links > .btn { justify-self: start; }
+.ws-live-links .ws-plain-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: var(--t-sec); }
+.ws-prio { display: inline-flex; gap: 2px; margin-left: auto; flex: none; }
 
 /* The plan's Graph view: toolbar, canvas and status band, stacked and never layered. Only the minimap sits on the canvas.
    Every colour is a token; nothing in the canvas moves by itself, and no SVG uses group opacity, filters or transitions. */
@@ -370,7 +375,7 @@ textarea[data-grow] { max-height: 40vh; }
 .gv { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .gv-bar.l-toolbar { gap: 4px; padding-inline: 6px; }
 .gv-bar .l-z-start, .gv-bar .l-z-end { gap: 4px; }
-.gv-bar .ib[aria-pressed="true"] { color: var(--fg); background: var(--bg-selected); }
+.gv-bar .ib[aria-pressed="true"], .gv-bar .btn[aria-pressed="true"] { color: var(--fg); background: var(--bg-selected); }
 .gv-search { position: relative; flex: none; width: 180px; }
 .gv[data-tier="2"] .gv-search, .gv[data-tier="3"] .gv-search { width: 120px; }
 .gv-search .i { position: absolute; left: 7px; top: 7px; color: var(--fg-3); pointer-events: none; }

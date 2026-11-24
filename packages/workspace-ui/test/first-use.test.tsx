@@ -3,13 +3,15 @@ import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSyn
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { NativeService } from "./native-machine";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import { Workspace } from "../src";
 import { createRealPort } from "../src/port/real";
-import { capabilitiesWire, scriptedTransport, snapshot, flush } from "./support";
-import type { UserDefaults, WorkspaceCommand } from "@cortex/workspace-domain";
+import { conversationOf, type FeedRow } from "../src/port/history";
+import { capabilitiesWire, scriptedTransport, snapshot, flush, scriptedPort, withTask, projection } from "./support";
+import { emptySession, emptyWorkspace, LOCAL_MACHINE_ID, type UserDefaults, type Worker, type WorkspaceCommand } from "@cortex/workspace-domain";
 
 let dispose: (() => void) | undefined;
 const folders: string[] = [];
@@ -64,8 +66,89 @@ async function machine() {
   const facts=async()=> (await p.query("machine.facts",{}))[0];
   const overview=async()=> (await p.query("machine.overview",{}))[0];
   const ready=async()=>{await p.query("capabilities.get",{}); await p.query("project.snapshot",{}); await p.query("project.facts",{}); await facts();};
-  return {id,home,repo,state,env,git,helper,s,p,command,facts,overview,ready};
+  return {id,home,repo,state,env,git,helper,service,s,p,command,facts,overview,ready};
 }
+
+it("renders pending, uncaptured and empty command output from the native service on both feeds", async () => {
+  const m = await machine();
+  await m.service.call("projects.activate", { projectId: m.id });
+  await expect.poll(async () => (await m.service.call("projects.status", { projectId: m.id }) as { ready: boolean }).ready).toBe(true);
+  const at = "2026-11-24T01:00:00Z";
+  // Seed only synthetic engine records in the disposable Dev project. No engine is started.
+  const db = new DatabaseSync(resolve(m.repo, ".cortex-dev/cortex.sqlite3"));
+  try {
+    db.exec("BEGIN");
+    db.prepare("INSERT OR IGNORE INTO workspace_projects(project_id,project_root,activated_by,activated_at) VALUES (?,?,'fixture',?)").run(m.id, m.repo, at);
+    db.prepare("INSERT INTO workspace_tasks(task_id,project_id,description,execution_id,created_at) VALUES ('t',?,'Output fixture','e',?)").run(m.id, at);
+    db.prepare("INSERT INTO tasks(id,project_root,created_at) VALUES ('runtime',?,?)").run(m.repo, at);
+    db.prepare("INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES ('runtime','EXECUTING','Output fixture',?,?)").run(at, at);
+    db.prepare("INSERT INTO acp_host_sessions(session_id,project_root,task_id,client_info,client_capabilities,mcp_servers,created_at) VALUES ('display',?,'runtime','{}','{}','[]',?)").run(m.repo, at);
+    db.prepare("INSERT INTO workspace_executions(execution_id,task_id,runtime_task_id,acp_session_id,owner_epoch,bound_at) VALUES ('e','t','runtime','display',1,?)").run(at);
+    db.prepare("INSERT INTO runtime_nodes(task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status,assignment_ref) VALUES ('runtime',0,'worker','worker-frontend-dev','Output fixture','[]','[]','execution','running','w')").run();
+    db.prepare("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES ('w','runtime','xa_fixture','worker-frontend-dev','ready','ready',1,?,?)").run(at, at);
+    const insert = db.prepare("INSERT INTO host_updates(session_id,seq,update_json,created_at) VALUES ('display',?,?,?)");
+    const cases = [
+      { command: "still running", status: "in_progress" },
+      { command: "not captured", status: "completed" },
+      { command: "captured empty", status: "completed", rawOutput: "" },
+    ];
+    for (const [group, prefix] of ["", "xa_fixture:"].entries()) {
+      cases.forEach(({ command, ...fields }, i) => insert.run(group * cases.length + i, JSON.stringify({
+        sessionUpdate: "tool_call", toolCallId: `${prefix}exec-${i}`, title: "Bash", kind: "execute", rawInput: { command }, ...fields,
+      }), at));
+    }
+    db.exec("COMMIT");
+  } finally { db.close(); }
+
+  const history = await m.service.call("native.query", {
+    protocol: { major: 2, mapping: 2 }, requestId: "output-fixture", operation: "history.page", projectId: m.id,
+    payload: { target: "t", cursor: null, limit: 20 },
+  }) as { data: { type: string; value: { items: FeedRow[] } } };
+  expect(history.data.type).toBe("history");
+  const coordinator = await m.helper("workers", { taskIds: ["t"], workerId: "coordinator:t" });
+  expect(coordinator.ok, JSON.stringify(coordinator)).toBe(true);
+  const assignment = await m.helper("workers", { taskIds: ["t"], workerId: "w" });
+  expect(assignment.ok, JSON.stringify(assignment)).toBe(true);
+  const [coordinatorWorker] = coordinator.result as Worker[];
+  const [worker] = assignment.result as Worker[];
+  expect(coordinatorWorker.activity).toHaveLength(3);
+  expect(worker.activity).toHaveLength(3);
+
+  // Pass native history records through the Conversation mapper and native activity through the
+  // worker panel boundaries. Never hand-build any of the projected output fields.
+  const state = withTask(emptyWorkspace(), "Output fixture");
+  state.machines[0].connection = "connected";
+  state.tasks[0].status = "working";
+  state.tasks[0].process = "live";
+  const session = emptySession("t");
+  session.timeline = conversationOf(history.data.value.items, { description: "Output fixture", answers: [] }).map(row => row.entry);
+  state.sessions = [session];
+  state.workers = [worker];
+  for (const suffix of ["", "/workers/cortex", "/workers/w"]) {
+    const p = scriptedPort({ capabilities: { everything: true, operations: [] } });
+    p.port.readWorkerActivity = async (taskId, workerId) => {
+      expect(taskId).toBe("t");
+      expect([worker.id, coordinatorWorker.id]).toContain(workerId);
+      return workerId === worker.id ? worker : coordinatorWorker;
+    };
+    window.history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}/t/t${suffix}`);
+    dispose = render(() => <Workspace port={p.port} />, document.body);
+    p.emit(projection("1", state));
+    await settle();
+    all("button.fold").forEach(fold => fold.click());
+    await settle();
+    const rows = all("button.step-row");
+    expect(rows).toHaveLength(3);
+    rows.forEach(row => row.click());
+    await settle();
+    const outputs = rows.map(row => row.closest(".step")?.querySelector('section[aria-label="Output"]'));
+    expect(outputs.map(section => section?.children.item(1)?.textContent)).toEqual([
+      "Waiting for output…", "No output was recorded.", "Recorded empty.",
+    ]);
+    dispose(); dispose = undefined;
+    document.body.innerHTML = "";
+  }
+});
 
 it("empty HOME activation refreshes first saves of defaults, limits, profiles and MCP against real files",async()=>{
   const m=await machine(); await m.ready();

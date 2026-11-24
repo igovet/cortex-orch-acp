@@ -88,7 +88,9 @@ it("shows a read's file on its row and opens it in Code from there", async () =>
   expect(open.textContent).toBe("src/app.ts");
   expect(open.getAttribute("aria-label")).toBe("Open src/app.ts in Code");
   expect(skill.querySelector(".step-l")?.textContent).toBe("Read report: r_0123456789ab");
-  expect(skill.querySelector("button")).toBeNull();
+  expect(skill.getAttribute("aria-expanded")).toBe("false");
+  skill.click(); await settle();
+  expect(skill.parentElement?.textContent).toContain("Private or redacted.");
   open.click(); await settle();
   expect(location.search).toContain("file=src%2Fapp.ts");
 });
@@ -105,6 +107,6 @@ it("opens an edit on its diff and a command on its command line", async () => {
   expect([...detail.querySelectorAll(".diff .a")].map(l => l.textContent)).toEqual(["+let a = 2;"]);
   edit.click(); await settle();
   command.click(); await settle();
-  expect(document.querySelector(".ws-step-detail pre code")?.textContent).toBe("git status --short");
+  expect(document.querySelector(".ws-step-detail [role=region][aria-label=Input]")?.textContent).toBe("git status --short");
   expect(document.querySelector(".timeline")!.textContent).not.toMatch(/mcp[._]|orchestrator:|worker-frontend-dev:/);
 });

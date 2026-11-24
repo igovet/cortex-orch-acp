@@ -1,7 +1,7 @@
 import { CODE_LANGUAGE, type LocalCodePort } from "./code-support";
 import { batch, createMemo, createSignal, onCleanup } from "solid-js";
 import { applyFacts, applyMachineFacts, applyProjection, applySprintDeletion, capabilityOf, compareVersions, emptyWorkspace, FEATURES, hasCapability, noCapabilities, projectionKey } from "@cortex/workspace-domain";
-import type { Attachment, AttachmentInput, AttachmentRef, CommandEnvelope, CommandReceipt, FileRead, GitInterest, FolderListing, FolderListRequest, IntegrationText, IntegrationTextRequest, MachineFacts, RemoteOperation, RemoteRequests, RemoteStatus, PortCapabilities, PortConnection, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectSkills, WorkspaceCommand, WorkspacePort, WorkspaceState } from "@cortex/workspace-domain";
+import type { Attachment, AttachmentInput, AttachmentRef, CommandEnvelope, CommandReceipt, FileRead, GitInterest, FolderListing, FolderListRequest, IntegrationText, IntegrationTextRequest, LiveSprintGraph, MachineFacts, RemoteOperation, RemoteRequests, RemoteStatus, PortCapabilities, PortConnection, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectSkills, SprintGraphEdit, SprintGraphWrite, SprintOrder, WorkspaceCommand, WorkspacePort, WorkspaceState } from "@cortex/workspace-domain";
 import type { OwnerActionVerb } from "@cortex/workspace-domain";
 import { downloadAttachment } from "./attachments";
 import { COPY, REQUESTING } from "./copy";
@@ -41,6 +41,11 @@ export const PUSH_GAP_MS = 2000, HIDDEN_PUSH_GAP_MS = 15_000;
 /** A screen showing the machine overview that opens again rereads it when the last read is older than this. */
 export const OVERVIEW_STALE_MS = 60_000;
 const sameConnection = (a: PortConnection, b: PortConnection) => a.state === b.state && a.reason === b.reason;
+/**
+ * A sprint's live graph as last read. `unsupported`: this backend has no live graph, so the sprint is read-only. A failed read
+ * keeps the graph read before it, marked as not current. `key` names what the screens showed when it was asked for.
+ */
+export type LiveGraphState = { status: "loading" | "ready" | "unsupported" | "failed"; graph: LiveSprintGraph | null; message: string | null; key: string | null };
 const transientRead = (error: unknown) => /^(machine_busy|machine_tool_timeout|service_request_failed|bridge_request_refused|resync_required)$/.test(String((error as { code?: unknown })?.code ?? reasonOf(error)).replace(/^refused:/, ""));
 
 /** The machine this app runs on is connected exactly when its service is. */
@@ -111,7 +116,37 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
   const [acceptanceIssue, setAcceptanceIssue] = createSignal<{ taskId: string; message: string } | null>(null);
   const state = createMemo(() => port.mode === "real" ? withConnection(projected(), connection()) : projected());
   // Unchanged task views and summaries stay the same objects across reads, so rows built from them are not rebuilt.
-  const index = createMemo<WorkspaceIndex>(prev => stableIndex(prev, buildIndex(state(), now)));
+  // ---------- Live sprint graphs: read when a screen shows the sprint, and again when what it shows changes ----------
+  const [graphs, setGraphs] = createSignal<ReadonlyMap<string, LiveGraphState>>(new Map());
+  const graphReads = new Map<string, { seq: number; running: boolean; again: string | null }>();
+  const putGraph = (sprintId: string, next: LiveGraphState) => setGraphs(held => new Map(held).set(sprintId, next));
+  const readGraph = (sprintId: string, key: string | null, force = false): Promise<void> => {
+    const held = graphs().get(sprintId), read = graphReads.get(sprintId) ?? { seq: 0, running: false, again: null };
+    graphReads.set(sprintId, read);
+    if (!port.sprintGraph) { if (held?.status !== "unsupported") putGraph(sprintId, { status: "unsupported", graph: null, message: null, key }); return Promise.resolve(); }
+    if (read.running) { if (force || key !== held?.key) read.again = key ?? ""; return Promise.resolve(); }
+    if (!force && held && held.key === key && held.status !== "failed") return Promise.resolve();
+    const seq = ++read.seq;
+    read.running = true;
+    putGraph(sprintId, { status: "loading", graph: held?.graph ?? null, message: null, key });
+    return port.sprintGraph.read(sprintId).then(reply => {
+      if (read.seq !== seq) return;
+      putGraph(sprintId, reply.kind === "graph" ? { status: "ready", graph: reply.graph, message: null, key }
+        : reply.kind === "unsupported" ? { status: "unsupported", graph: null, message: null, key }
+        : { status: "failed", graph: held?.graph ?? null, message: reply.message, key });
+    }, error => {
+      if (read.seq === seq) putGraph(sprintId, { status: "failed", graph: held?.graph ?? null, message: reasonOf(error) || "The sprint graph could not be read.", key });
+    }).finally(() => {
+      read.running = false;
+      const again = read.again;
+      read.again = null;
+      if (again !== null) void readGraph(sprintId, again === "" ? key : again, true);
+    });
+  };
+  /** The service's execution order of each sprint whose live graph is current. A stale or failed read orders nothing. */
+  const orders = createMemo<ReadonlyMap<string, SprintOrder>>(() => new Map([...graphs()].flatMap(([id, g]) => g.status === "ready" && g.graph ? [[id, g.graph.order] as const] : [])),
+    new Map(), { equals: (a, b) => a.size === b.size && [...a].every(([id, o]) => b.get(id) === o) });
+  const index = createMemo<WorkspaceIndex>(prev => stableIndex(prev, buildIndex(state(), now, orders())));
   // The projects whose tasks a confirmed read delivered in this run. A cached first frame is not one, and neither is the empty
   // stand-in (version zero) of a project whose Cortex is away or not activated: neither says what the project holds.
   const [readProjects, setReadProjects] = createSignal<ReadonlySet<string>>(new Set(options.initial?.state.projects.map(p => p.id) ?? []));
@@ -530,6 +565,23 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
     ownerActions: () => port.ownerActions ? port.ownerActions.list() : Promise.resolve(null),
     actOwner: (projectId: string, actionId: string, action: OwnerActionVerb) => port.ownerActions ? port.ownerActions.act(projectId, actionId, action) : Promise.reject(new Error(COPY.notOffered)),
     ownerToken: (projectId: string, actionId: string, token: string) => port.ownerActions ? port.ownerActions.token(projectId, actionId, token) : Promise.reject(new Error(COPY.notOffered)),
+    /** A sprint's live graph as last read, or undefined before any screen asked for it. */
+    liveGraph: (sprintId: string): LiveGraphState | undefined => graphs().get(sprintId),
+    /** Reads the live graph when `key` (what the screen shows) differs from the last read's, or the last read failed. */
+    readLiveGraph: (sprintId: string, key: string | null = null, force = false) => readGraph(sprintId, key, force),
+    /**
+     * One owner edit of a live graph, sent once with the revision the owner saw. Whatever its answer, the graph is read again
+     * at once: a refusal or a lost answer never leaves the old revision on screen as if it were current.
+     */
+    editLiveGraph: async (edit: SprintGraphEdit): Promise<SprintGraphWrite> => {
+      if (!port.sprintGraph) return { outcome: "refused", code: "not_available", message: COPY.notOffered };
+      const held = graphs().get(edit.sprintId);
+      let result: SprintGraphWrite;
+      try { result = await track(port.sprintGraph.edit(edit)); } catch { result = { outcome: "unknown" }; }
+      if (result.outcome !== "unchanged" && held) putGraph(edit.sprintId, { ...held, status: "loading" });
+      await readGraph(edit.sprintId, held?.key ?? null, true);
+      return result;
+    },
     /** Null when this backend has no folder search. */
     searchDirectories: (request: Parameters<NonNullable<WorkspacePort["searchDirectories"]>>[0]) => port.searchDirectories?.(request) ?? Promise.resolve(null),
     cancelDirectorySearch: (machineId: string, session: string) => port.cancelDirectorySearch?.(machineId, session) ?? Promise.resolve(),

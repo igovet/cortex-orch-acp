@@ -1,5 +1,5 @@
 import type { McpServer, ConnectResult } from "./index";
-import type { CommandOutput, CommandOutputRead, Decision, EngineWeeklyUsage, Machine, Message, Project, ProjectRepo, SessionOptions, Sprint, Task, TaskChanges, TaskSession, TimelineEntry, Worker, WorkspaceCommand, WorkspaceState } from "./types";
+import type { CommandOutput, CommandOutputRead, Decision, EngineWeeklyUsage, LiveSprintGraph, Machine, Message, Project, ProjectRepo, SessionOptions, Sprint, Task, TaskChanges, TaskSession, TimelineEntry, Worker, WorkspaceCommand, WorkspaceState } from "./types";
 
 /**
  * The one seam between the presentation and any backend. A screen sends intents and reads projections; it never changes
@@ -170,7 +170,25 @@ export interface WorkspacePort {
   listFolders?(checkoutId: string, request: FolderListRequest): Promise<FolderListing>;
   /** Writes the owner's text only over the revision they last saw. A port with no writes has no editor. */
   saveFile?(checkoutId: string, file: string, text: string, revision: string | null): Promise<FileSaveResult>;
+  /**
+   * A created sprint's live graph, read and edited by the desktop owner only (`product.sprint` `live_graph`, `set_dependency`,
+   * `move_priority`). `read` throws when the machine could not be asked; a service without this graph answers `unsupported`,
+   * and its sprints stay read-only. An edit names the revision the owner saw and is sent once: `unknown` means the answer was
+   * lost, so the graph is read again before any other edit.
+   */
+  sprintGraph?: {
+    read(sprintId: string): Promise<SprintGraphRead>;
+    edit(edit: SprintGraphEdit): Promise<SprintGraphWrite>;
+  };
 }
+
+export type SprintGraphRead = { kind: "graph"; graph: LiveSprintGraph } | { kind: "unsupported" } | { kind: "refused"; code: string; message: string };
+/** One live edge to add or remove, or one move of a ready draft's priority. Both carry the revision the owner saw. */
+export type SprintGraphEdit =
+  | { action: "set_dependency"; sprintId: string; dependentTaskId: string; predecessorTaskId: string; present: boolean; expectedGraphRevision: string }
+  | { action: "move_priority"; sprintId: string; taskId: string; direction: "up" | "down"; expectedGraphRevision: string };
+/** `unchanged`: the graph already was as asked. `unknown`: no answer, or the service could not confirm its save. */
+export type SprintGraphWrite = { outcome: "changed" } | { outcome: "unchanged" } | { outcome: "refused"; code: string; message: string } | { outcome: "unknown"; message?: string };
 
 /** One read of a checkout file. `revision` is the hash of its bytes; `readOnly` and `writer` say why saving it is not possible now. */
 /** `pathOnly`: a bundled skill has the same name, so only the path names this file. `omitted` counts skills past the bound. */
