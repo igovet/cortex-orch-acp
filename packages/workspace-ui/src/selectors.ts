@@ -604,6 +604,9 @@ export function attentionOf(view: TaskView): Decision {
  * A runtime notice (an engine that would not start, an observed phase) keeps its own words.
  */
 export function cardFact(view: TaskView): Fact {
+  // A current file wait takes precedence over the historical automatic continuation spinner on the card.
+  if (view.column === "work" && view.filesWait && view.automaticFact?.spin)
+    return { text: view.filesWait.text, tone: "st-warn", icon: "hourglass" };
   const notice = !!view.task.warnings?.length || (!!view.task.observedPhase && view.task.observedPhase !== "not_started");
   if (view.unknown || notice || view.automaticFact || view.ownerDecision || view.ownerIntegration) return view.fact;
   // A run that failed or was cancelled waits on the owner too, but its own outcome is the fact to read.

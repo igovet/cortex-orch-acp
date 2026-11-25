@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { emptyWorkspace, LOCAL_MACHINE_ID, mapTask, overlayTask, type WorkspaceState } from "@cortex/workspace-domain";
 import type { Task as WireTask } from "@cortex/workspace-contract";
 import { Workspace } from "../src";
-import { buildIndex } from "../src/selectors";
+import { buildIndex, cardFact } from "../src/selectors";
 import { resumeState, sessionModel } from "../src/session-model";
 import { flush, projection, scriptedPort, wireTask, withTask } from "./support";
 
@@ -17,7 +17,7 @@ beforeEach(() => { localStorage.clear(); sessionStorage.clear(); });
 afterEach(() => { dispose?.(); document.body.innerHTML = ""; });
 const settle = async () => { for (let i = 0; i < 8; i++) await flush(); };
 
-const continuation = { policy: "automatic_continuation", continuationCount: 1, lastContinuationReason: null, pause: null };
+const continuation = { policy: "automatic_continuation" as const, continuationCount: 1, lastContinuationReason: null, pause: null };
 const WIRE: Record<string, Partial<WireTask>> = {
   paused: { phase: "paused", runtimeState: "PAUSED", executionState: "paused" },
   interrupted: { phase: "recovery", runtimeState: "RECOVERING", executionState: "recovering", waitReason: "turn_interrupted" },
@@ -123,6 +123,20 @@ describe("the file-wait display", () => {
     // A finished overlay can arrive before the next runtime read clears the old warning.
     s.tasks = [{ ...waiting(), status: "done", process: "stopped" }];
     expect(card().filesWait).toBeUndefined();
+  });
+
+  it("shows the current file wait on the Working card after automatic continuation", () => {
+    const s = world("running");
+    const own = overlayTask(holder(), { title: "Current holder title", titleState: "user" }, "");
+    const retry = { ...continuation, lastContinuationReason: "review_incomplete" };
+    s.tasks = [{ ...waiting(), automaticContinuation: retry }, own];
+    const card = () => buildIndex(s, 0).byId.get("t")!;
+    expect(card().column).toBe("work");
+    expect(cardFact(card())).toMatchObject({
+      text: `Waiting for the task “${own.title}” to release ${releaseTarget}`, icon: "hourglass",
+    });
+    s.tasks = [{ ...world("running").tasks[0], automaticContinuation: retry }, own];
+    expect(cardFact(card()).text).toMatch(/^Automatic continuation:/);
   });
 
   it("shows an unclamped linked wait in the opened task, then removes it on the next confirmed read", async () => {
