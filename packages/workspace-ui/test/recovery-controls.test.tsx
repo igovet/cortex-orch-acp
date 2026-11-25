@@ -188,7 +188,8 @@ describe("the task page", () => {
     expect(composerAction().getAttribute("aria-label")).not.toBe("Resume");
     const items = await menuItems();
     expect(menuItem(items, "Continue")!.getAttribute("aria-disabled")).toBeNull();
-    expect(menuItem(items, "Resume")).toBeUndefined();
+    expect(menuItem(items, "Resume")?.getAttribute("aria-disabled")).toBe("true");
+    expect(menuItem(items, "Resume")?.dataset.why).toBeTruthy();
     // The inspector names the same action the band offers.
     expect(inspectorState()).toContain("Continue lets the coordinator decide the next step");
     buttons($(".tb-actions")!).find(b => b.textContent?.trim() === "Continue")!.click(); await settle();
@@ -208,7 +209,8 @@ describe("the task page", () => {
       expect(band()).not.toContain("Resume");
       const items = await menuItems();
       expect(menuItem(items, "Continue")).toBeUndefined();
-      expect(menuItem(items, "Resume")).toBeUndefined();
+      expect(menuItem(items, "Resume")?.getAttribute("aria-disabled")).toBe("true");
+      expect(menuItem(items, "Resume")?.dataset.why).toBeTruthy();
       expect(p.commands).toHaveLength(0);
     });
   }
@@ -222,7 +224,8 @@ describe("the task page", () => {
     expect(band()).not.toContain("Resume");
     const items = await menuItems();
     expect(menuItem(items, "Continue")).toBeUndefined();
-    expect(menuItem(items, "Resume")).toBeUndefined();
+    expect(menuItem(items, "Resume")?.getAttribute("aria-disabled")).toBe("true");
+    expect(menuItem(items, "Resume")?.dataset.why).toBeTruthy();
     expect(p.commands).toHaveLength(0);
   });
 
@@ -256,7 +259,8 @@ describe("the task page", () => {
       expect(band()).not.toContain("Resume");
       const items = await menuItems();
       expect(menuItem(items, "Continue")).toBeUndefined();
-      expect(menuItem(items, "Resume")).toBeUndefined();
+      expect(menuItem(items, "Resume")?.getAttribute("aria-disabled")).toBe("true");
+      expect(menuItem(items, "Resume")?.dataset.why).toBeTruthy();
       expect(p.commands).toHaveLength(0);
     });
   }

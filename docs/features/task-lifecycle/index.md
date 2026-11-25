@@ -1,5 +1,7 @@
 # Runtime completion and lifecycle
 
+[Workspace task actions](../../cortex-workspace/SCREENS.md#task-actions) use the same runtime commands and lifecycle rules whether invoked from a row, a card, the task header or the command palette.
+
 > Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 

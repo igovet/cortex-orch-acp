@@ -28,7 +28,7 @@ export function Inbox() {
   return <div class="page"><div class="page-in">
     <div class="page-h"><div><h1>Inbox</h1><p>What waits on you {machines() === 1 ? "on this machine" : `on all ${machines()} connected machines`}, most urgent first.</p></div></div>
     <Show when={items().length > 0} fallback={<EmptyUntilRead name="inbox" pending={() => projectsPending(ws)} label="Loading what waits on you…"><div class="surface ws-empty">Nothing needs you right now.</div></EmptyUntilRead>}>
-      <div class="surface"><Keyed each={items()} by={d => d.key}>{d => <NeedRow decision={d()} waiting={when(d())} to={to(d())} />}</Keyed></div>
+      <div class="surface"><Keyed each={items()} by={d => d.key}>{d => <NeedRow view={d().view ?? undefined} decision={d()} waiting={when(d())} to={to(d())} />}</Keyed></div>
     </Show>
   </div></div>;
 }

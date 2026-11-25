@@ -6,6 +6,10 @@
 html { width: 100%; margin: 0; background: var(--bg-canvas); }
 /* WebKit lets a link be dragged out as a web page element would; a desktop app's rows and buttons stay put. */
 a:not([draggable="true"]), img { -webkit-user-drag: none; }
+.task-row-actions { display: flex; align-items: center; min-width: 0; }
+.task-row-actions > a { flex: 1; min-width: 0; }
+.task-row-actions > .ib { flex: none; }
+.need-shell + .need-shell { border-top: 1px solid var(--line); }
 #root { grid-row: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--titlebar-h) minmax(0, 1fr); min-width: 0; min-height: 0; background: var(--bg-canvas); }
 .ws-app, .ws-shell { display: contents; }
 html.theme-swap *, html.theme-swap *::before, html.theme-swap *::after { transition: none !important; }

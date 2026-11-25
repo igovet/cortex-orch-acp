@@ -21,6 +21,8 @@
 
 In Workspace, open [Board](docs/cortex-workspace/SCREENS.md#conversation-adoption) just below Home to see the selected machine’s tasks by status and project. Select a card to open its task.
 
+In Workspace, use **⋯** on a task to open its [task actions](docs/cortex-workspace/SCREENS.md#task-actions). On desktop, right-click a sidebar row, list row, board card or dashboard task row to open the same menu.
+
 In Workspace Code, the [File actions menu](docs/cortex-workspace/ide-and-git.md#code-file-actions) opens the file palette, opens the current file in an external editor, or shows it in the file manager.
 
 In Workspace, [Archive](docs/cortex-workspace/local-task-execution.md#archive-and-service-owned-work)

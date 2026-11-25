@@ -124,7 +124,7 @@ export function placeFocus(el: HTMLElement | null | undefined, options?: FocusOp
  * Native popover: light dismiss and Escape come from the platform. A popover role carries its label: a menu when it holds menu
  * items, otherwise a non-modal dialog, unless `role` says otherwise.
  */
-export function Pop(props: { id: string; class?: string; align?: Align; label?: string; role?: "menu" | "dialog"; style?: JSX.CSSProperties; children: JSX.Element; ref?: (el: HTMLDivElement) => void }) {
+export function Pop(props: { id: string; class?: string; align?: Align; label?: string; role?: "menu" | "dialog"; style?: JSX.CSSProperties; children: JSX.Element; ref?: (el: HTMLDivElement) => void; onKeyDown?: JSX.EventHandler<HTMLDivElement, KeyboardEvent> }) {
   let el!: HTMLDivElement;
   const name = () => { if (!props.role) el.setAttribute("role", el.querySelector("[role='menuitem']") ? "menu" : "dialog"); };
   const onBefore = (e: Event) => {
@@ -136,13 +136,13 @@ export function Pop(props: { id: string; class?: string; align?: Align; label?: 
   };
   const onToggle = (e: Event) => { if ((e as ToggleEvent).newState === "open") keepInside(el); };
   onMount(() => { name(); el.addEventListener("beforetoggle", onBefore); el.addEventListener("toggle", onToggle); });
-  return <div ref={r => { el = r; props.ref?.(r); }} popover="auto" id={props.id} class={props.class} style={props.style} role={props.role} aria-label={props.label}>{props.children}</div>;
+  return <div ref={r => { el = r; props.ref?.(r); }} popover="auto" id={props.id} class={props.class} style={props.style} role={props.role} aria-label={props.label} on:keydown={props.onKeyDown}>{props.children}</div>;
 }
-export function MenuItem(props: { icon?: string; label: JSX.Element; sub?: string; keys?: string; count?: string; check?: boolean; danger?: boolean; disabled?: string; needs?: WorkspaceCommand["type"]; onSelect?: () => void }) {
+export function MenuItem(props: { actionId?: string; icon?: string; label: JSX.Element; sub?: string; keys?: string; count?: string; check?: boolean; danger?: boolean; disabled?: string; needs?: WorkspaceCommand["type"]; onSelect?: () => void }) {
   const ws = useWs();
   // Read through a memo: a conditional prop read in a click handler would otherwise build a computation with no owner.
   const disabled = createMemo(() => props.disabled ?? (props.needs ? ws.gate(props.needs) : undefined));
-  return <button class={`mi${props.danger ? " mi-danger" : ""}`} role="menuitem" aria-disabled={disabled() ? "true" : undefined} data-why={disabled()}
+  return <button class={`mi${props.danger ? " mi-danger" : ""}`} role="menuitem" data-task-action={props.actionId} aria-disabled={disabled() ? "true" : undefined} data-why={disabled()}
     onClick={e => { const at = e.currentTarget; if (disabled()) return; closePop(at); props.onSelect?.(); }}>
     <Show when={props.icon}><I n={props.icon!} /></Show>
     <span class="grow">{props.label}<Show when={props.sub}><span class="sub">{props.sub}</span></Show><Show when={disabled()}>{why => <span class="sub">{why()}</span>}</Show></span>

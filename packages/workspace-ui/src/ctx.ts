@@ -130,7 +130,7 @@ export type Ws = {
   terminal?: TerminalPort;
   voice?: VoicePort;
   terminalAvailable: Accessor<boolean>; toggleTerminal: () => void;
-  openPalette: () => void; openHelp: () => void; openTaskMenu: (taskId: string, trigger: HTMLElement) => void;
+  openPalette: () => void; openHelp: () => void; openTaskMenu: (taskId: string, trigger: HTMLElement, point?: { x: number; y: number }) => void;
   /** Opens New task or sprint; a sprint id preselects that sprint for a new task. */
   newItem: (kind: "task" | "sprint", project?: string | null, sprint?: string | null) => void;
   /** The one Stop: the same path from the title band, the composer, a card, its menu and the keyboard. */

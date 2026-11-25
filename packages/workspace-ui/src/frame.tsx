@@ -2,6 +2,7 @@ import { createMemo, For, Match, Show, Switch } from "solid-js";
 import { LiveTerminal } from "./terminal";
 import { FEATURES, queueDrivenMode, type Sprint } from "@cortex/workspace-domain";
 import { ArchiveFacts, DeleteArchive } from "./archive";
+import { taskContextMenu, TaskMenuButton } from "./task-menu-trigger";
 import { useWs, type PhoneFrame, type WindowChrome } from "./ctx";
 import { machineLine, machineRefusal } from "./phone-words";
 import { Confirmed } from "./freshness";
@@ -145,7 +146,7 @@ export function TitleBar() {
             <button class="btn btn-primary" popovertarget="m-new" aria-label="New task or sprint"><I n="chevron-down" s={14} /></button>
           </span></Show>
           <Show when={route().name === "project"}><button data-tooltip="" class="ib" popovertarget="m-project" aria-label="Project actions"><I n="more" /></button></Show>
-        </>}><DeleteArchive /></Show>}>{s => <SprintActions sprint={s()} tab={(route() as Extract<Route, { name: "sprint" }>).tab} />}</Show>}>{v => <TaskActions view={v()} onMenu={el => ws.openTaskMenu(v().id, el)} git={<Show when={ctx.summary()}>{s => <BandActions view={v()} summary={s()} whyId={taskWhyId(v().id)} />}</Show>} />}</Show>
+        </>}><DeleteArchive /></Show>}>{s => <SprintActions sprint={s()} tab={(route() as Extract<Route, { name: "sprint" }>).tab} />}</Show>}>{v => <TaskActions view={v()} git={<Show when={ctx.summary()}>{s => <BandActions view={v()} summary={s()} whyId={taskWhyId(v().id)} />}</Show>} />}</Show>
       </div>
       <div class="tb-fixed">
         {ws.demo?.chip()}
@@ -248,10 +249,10 @@ function TaskRow(props: { view: TaskView; nested?: boolean; projectName?: string
   const word = () => sideWord(props.view);
   const fresh = () => ws.unseen?.task(props.view) ?? false;
   const label = () => [taskTitle(props.view.task), props.projectName, word(), fresh() ? "new update" : ""].filter(Boolean).join(" — ");
-  return <A class={`task-row${props.nested ? " in-sprint" : ""}${fresh() ? " unseen" : ""}`} aria-label={label()} to={{ name: "task", machine: props.view.machine.id, task: props.view.id }} aria-current={current() ? "page" : undefined}>
+  return <div class="task-row-actions" {...taskContextMenu(() => props.view.id)}><A class={`task-row${props.nested ? " in-sprint" : ""}${fresh() ? " unseen" : ""}`} aria-label={label()} to={{ name: "task", machine: props.view.machine.id, task: props.view.id }} aria-current={current() ? "page" : undefined}>
     <I n={rowIcon(props.view)} s={14} class={awaitsOwner(props.view) ? "st-warn" : props.view.fact.tone} /><SideTitle title={taskTitle(props.view.task)} projectName={props.projectName} /><span class={`sig${awaitsOwner(props.view) ? " st-warn" : ""}`}>{word()}</span>
     <Show when={fresh()}><span class="sb-new" aria-hidden="true"></span></Show>
-  </A>;
+  </A><TaskMenuButton view={props.view} /></div>;
 }
 
 /** One line per weekly window: Claude's general window under its engine name, its Fable window as "Fable".
@@ -348,7 +349,10 @@ function Sidebar() {
         <div class="sb-h"><span>Pinned</span></div>
         <Keyed each={pinned()} by={v => v.id}>{v => {
           const fresh = () => ws.unseen?.task(v()) ?? false;
-          return <A class={`task-row${fresh() ? " unseen" : ""}`} style={{ "padding-left": "8px" }} to={{ name: "task", machine: v().machine.id, task: v().id }}><I n="pin" s={14} class="faint" /><span class="trunc">{v().task.title}</span><Show when={fresh()}><NewMark text="new update" /></Show></A>;
+          return <div class="task-row-actions" {...taskContextMenu(() => v().id)}>
+            <A class={`task-row${fresh() ? " unseen" : ""}`} style={{ "padding-left": "8px" }} to={{ name: "task", machine: v().machine.id, task: v().id }}><I n="pin" s={14} class="faint" /><span class="trunc">{v().task.title}</span><Show when={fresh()}><NewMark text="new update" /></Show></A>
+            <TaskMenuButton view={v()} />
+          </div>;
         }}</Keyed>
       </Show>
       <div class="sb-h"><span>Projects</span><button data-tooltip="" class="ib" style={{ width: "22px", height: "22px" }} popovertarget="m-sort" aria-label="Sort projects"><I n="chevrons-v" s={14} /></button></div>

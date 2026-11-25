@@ -77,7 +77,9 @@ export function handleArchive(state: WorkspaceState, command: WorkspaceCommand):
     case "restore_task": {
       const task = entity(state.tasks, command.taskId);
       online(state, task); requireFact(task.archive, "Task is not archived");
-      task.status = task.archive.previousStatus; task.archive = null; task.purgeBlocker = null;
+      const { previousStatus } = task.archive;
+      requireFact(previousStatus !== "unknown", "Cannot restore a task with an unknown previous status");
+      task.status = previousStatus; task.archive = null; task.purgeBlocker = null;
       if (task.work === "discard_confirmed") task.work = "unmerged";
       // The Done clock starts again, or the next daily run would send it straight back.
       if (command.now !== undefined) task.doneAt = command.now;

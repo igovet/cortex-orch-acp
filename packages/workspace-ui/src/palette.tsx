@@ -1,11 +1,11 @@
 import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
-import { taskRoute } from "./board";
+import { taskActionsFor, taskRoute } from "./task-actions-model";
 import { useWs } from "./ctx";
 import { I, Keyed, Modal } from "./kit";
 import { rowIcon, sprintRoute, sprintTitle } from "./selectors";
-import { closeBlocked, EXTERNAL_DONE_LABEL, externalDoneBlocked, offersExternalDone, resumeState, sessionModel } from "./session-model";
 
-type Entry = { id: string; group: string; label: string; sub?: string; icon: string; keys?: string; disabled?: string; run: () => void };
+
+type Entry = { taskAction?: string; id: string; group: string; label: string; sub?: string; icon: string; keys?: string; disabled?: string; run: () => void };
 const RESULT_LIMIT = 8;
 
 /** One field for tasks, projects and sprints; ">" lists actions. It launches the same actions the buttons run, never a text command. */
@@ -21,20 +21,13 @@ export function Palette(props: { open: boolean; onClose: () => void }) {
   createEffect(on(() => props.open, open => { if (open) { setText(""); setActiveId(null); } }));
   const m = () => ws.machine().id;
   const taskActions = (): Entry[] => {
-    const r = ws.router.route(), model = r.name === "task" ? sessionModel(ws.store.index(), r.task) : null;
-    if (!model) return [];
-    const blocked = closeBlocked(model) ?? undefined, id = model.view.id, run = resumeState(model.view);
-    // Resume and Continue follow the one rule the card, the menu and the title band use; an unavailable Resume says why.
-    const notResumable = run?.action === "retry_task" ? "This task is not paused. Use Continue task to go on from the recorded state" : run?.why || "This task is not paused";
-    return [
-      { id: "a:stop", group: "Task", label: "Stop task", icon: "stop", keys: "Ctrl+.", disabled: model.mode === "live" ? ws.gate("stop_task") : "This task is not running", run: () => ws.stopTask(id) },
-      { id: "a:resume", group: "Task", label: "Resume task", icon: "play", disabled: run?.action === "continue_task" ? ws.gate("continue_task") : notResumable, run: () => ws.run({ type: "continue_task", taskId: id, now: ws.store.clock() }) },
-      ...(run?.action === "retry_task" ? [{ id: "a:continue", group: "Task", label: "Continue task", icon: "play", disabled: ws.gate("retry_task"), run: () => void ws.run({ type: "retry_task", taskId: id, now: ws.store.clock() }) }] : []),
-      { id: "a:close", group: "Task", label: "Close task…", icon: "x", disabled: blocked ?? ws.gate("close_task"), run: () => ws.closeTask(id) },
-      ...(offersExternalDone(model.view) ? [{ id: "a:external-done", group: "Task", label: EXTERNAL_DONE_LABEL, icon: "check", disabled: externalDoneBlocked(model) ?? ws.gate("close_task"), run: () => ws.closeTask(id, "external") }] : []),
-    ];
+    const r = ws.router.route();
+    const id = r.name === "task" ? r.task : ws.selected();
+    const view = id ? ws.store.index().byId.get(id) : undefined;
+    return view ? taskActionsFor(view, ws).map(a => ({
+      ...a, id: `a:task:${a.id}`, taskAction: a.id, group: "Task", disabled: a.why,
+    })) : [];
   };
-  // The sprint plan on view offers its graph: Show graph from the List view, Fit graph and Full view in the Graph view.
   const graphActions = (): Entry[] => {
     const g = ws.panels.graph();
     if (!g) return [];
@@ -114,7 +107,7 @@ export function Palette(props: { open: boolean; onClose: () => void }) {
         {/* Kept by id, so a background read (a task moving on, another task changing) leaves the rows, the scroll and the highlight in place. */}
         <Keyed each={found().entries} by={e => e.id}>{(entry, i) => <>
           <Show when={i() === 0 || found().entries[i() - 1]?.group !== entry().group}><div class="mi-h" role="presentation">{entry().group}</div></Show>
-          <div id={optionId(i())} class="mi ws-pal-o" role="option" aria-selected={active() === i()} aria-disabled={entry().disabled ? "true" : undefined} data-why={entry().disabled}
+          <div id={optionId(i())} class="mi ws-pal-o" role="option" data-task-action={entry().taskAction} aria-selected={active() === i()} aria-disabled={entry().disabled ? "true" : undefined} data-why={entry().disabled}
             onMouseMove={() => setActive(i())} onClick={() => pick(entry())}>
             <I n={entry().icon} /><span class="grow trunc">{entry().label}<Show when={entry().sub}><span class="sub trunc">{entry().sub}</span></Show><Show when={entry().disabled}>{why => <span class="sub ws-pal-why">{why()}</span>}</Show></span>
             <Show when={entry().keys && ws.keys(entry().keys!)}>{k => <span class="kbd">{k()}</span>}</Show>

@@ -1,5 +1,6 @@
 import { createMemo, Show } from "solid-js";
 import { useWs } from "./ctx";
+import { taskContextMenu, TaskMenuButton } from "./task-menu-trigger";
 import { Confirmed } from "./freshness";
 import { Tile } from "./frame";
 import { A, I, Keyed } from "./kit";
@@ -10,13 +11,13 @@ import { EmptyUntilRead, projectsPending } from "./skeleton";
 const NEEDS_LIMIT = 12;
 const taskRoute = (v: TaskView) => ({ name: "task" as const, machine: v.machine.id, task: v.id });
 
-export function NeedRow(props: { decision: Decision; waiting: string; to: Parameters<typeof A>[0]["to"]; selected?: boolean; onPreview?: () => void }) {
-  return <A class="need" to={props.to} aria-current={props.selected ? "true" : undefined}
+export function NeedRow(props: { view?: TaskView; decision: Decision; waiting: string; to: Parameters<typeof A>[0]["to"]; selected?: boolean; onPreview?: () => void }) {
+  return <div class="task-row-actions need-shell" {...taskContextMenu(() => props.view?.id)}><A class="need" to={props.to} aria-current={props.selected ? "true" : undefined}
     onKeyDown={e => { if (e.key === " " && props.onPreview) { e.preventDefault(); props.onPreview(); } }}>
     <span class={`kind ${props.decision.tone}`}><I n={props.decision.icon} s={14} />{props.decision.kind}</span>
     <span class="ask trunc">{props.decision.ask}</span>
     <span class="where trunc">{props.decision.where}</span><span class="age">{props.waiting}</span>
-  </A>;
+  </A><Show when={props.view}>{v => <TaskMenuButton view={v()} />}</Show></div>;
 }
 
 function ProjectLine(props: { summary: ProjectSummary; n: number }) {
@@ -52,7 +53,7 @@ export function Home() {
         <SectionHead id="h-need" title="Needs you" count={view().attention.length}><A class="more" to={inbox()}>Inbox</A></SectionHead>
         <Show when={view().attention.length > 0} fallback={<EmptyUntilRead name={`home|${ws.machine().id}`} pending={() => projectsPending(ws, p => p.machineId === ws.machine().id)} label="Loading what waits on you…"><div class="surface ws-empty">Nothing needs you on this machine.</div></EmptyUntilRead>}>
           <div class="surface"><Keyed each={view().attention.slice(0, NEEDS_LIMIT)} by={v => v.id}>{v =>
-            <NeedRow decision={attentionOf(v())} waiting={v().at === null ? "" : v().column === "needs" ? `waiting ${age(v().at, ws.store.clock())}` : `${age(v().at, ws.store.clock())} ago`.replace("now ago", "just now")} to={taskRoute(v())} selected={ws.selected() === v().id} onPreview={() => ws.select(v().id)} />
+            <NeedRow view={v()} decision={attentionOf(v())} waiting={v().at === null ? "" : v().column === "needs" ? `waiting ${age(v().at, ws.store.clock())}` : `${age(v().at, ws.store.clock())} ago`.replace("now ago", "just now")} to={taskRoute(v())} selected={ws.selected() === v().id} onPreview={() => ws.select(v().id)} />
           }</Keyed></div>
         </Show>
       </section>

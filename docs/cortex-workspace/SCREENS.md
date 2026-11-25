@@ -10,6 +10,12 @@ Android: Now, tasks and projects; decision detail, result/diff, discussion, conn
 
 Each screen needs loading, empty, offline/stale, permission denied, conflict and error states where applicable. A result must distinguish unrun from passed checks; unknown status must not be styled as success. Decision detail identifies effect, scope and rejection consequences. Return from mobile preserves task identity and context.
 
+## Task actions
+
+Use **⋯** on a task in the project list, on a board card, in Home’s task rows, in the sidebar or in an opened task’s title band. On desktop, right-click a row or card, or focus it and press **Shift+F10** or the **Context Menu** key. Use the arrow keys to move through the menu and **Esc** to dismiss it. In the command palette, task actions appear for the open or selected task.
+
+The same actions and availability reasons appear regardless of where the menu is opened. Start is for a draft; Resume is for a confirmed pause; Continue is for an interruption the service lets the owner retry. When the service offers Return for rework for a closed task, it is available here too. Closing a task, removing its worktree folder and archiving unfinished work keep their confirmation steps.
+
 ## Conversation adoption
 
 **Status: owner-selected on 2026-11-10. Built in the shared UI: the task conversation and worker messages below; in the page table, Home, the Inbox, the Board and list, New task and New sprint, Sprint planning, the knowledge and skill requests, and the shared row sizes; and the phone-width rules marked built under Responsive layout. The other page-table rows remain planned.** The visual anatomy, attention priorities and composer rules are in [DESIGN.md](DESIGN.md#conversation-model). This section replaces the earlier Dialog and Workers tabs, the plan strip and the Send button that turned into Stop.

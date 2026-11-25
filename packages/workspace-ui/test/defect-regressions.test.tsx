@@ -156,7 +156,7 @@ it("shows running and paused sprint trees without repeating their tasks within A
   expect(projectRows).toHaveLength(5);
   const child = projectRows.find(row => row.getAttribute("href") === taskPath)!;
   expect(child.classList.contains("in-sprint")).toBe(true);
-  expect(child.previousElementSibling?.getAttribute("href")).toBe(sprintPath + "/board");
+  expect(child.closest(".task-row-actions")?.previousElementSibling?.getAttribute("href")).toBe(sprintPath + "/board");
   expect(block.querySelector(".task-row .sb-row-project")?.textContent).toBe(s.projects[0].name);
   const current = () => sideLinks(document, '.sidebar a[aria-current="page"]').map(a => a.getAttribute("href"));
   expect(current()).toEqual([sprintPath + "/board", sprintPath + "/board"]);

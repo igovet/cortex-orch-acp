@@ -13,7 +13,7 @@ import { FrameMenus, Inspector, Nav, PhoneBar, PhoneConnection, PhoneDrawerHead,
 import { onScreen, ScreenActive, UnsentRegistry } from "./freshness";
 import { Home } from "./home";
 import { archiveBlocked } from "./git-actions-model";
-import { I, place } from "./kit";
+import { I, keepInside, place } from "./kit";
 import { ReasonTip, Strip } from "./layout";
 import { Tooltip } from "./tooltip";
 import { StartupScreen } from "./startup";
@@ -365,12 +365,17 @@ export function Workspace(props: WorkspaceProps) {
     },
     openPalette: () => setPaletteOpen(true),
     openHelp: () => setHelpOpen(true),
-    openTaskMenu(taskId, trigger) {
+    openTaskMenu(taskId, trigger, point) {
       setMenuTask(taskId);
       if (!taskMenu) return;
       press.invokedBy(taskMenu, trigger);
+      trigger.focus({ preventScroll: true });
       place(taskMenu, trigger, "right");
+      if (point) Object.assign(taskMenu.style, { inset: "auto", left: `${point.x}px`, top: `${point.y}px` });
       taskMenu.showPopover?.();
+      keepInside(taskMenu);
+      taskMenu.scrollTop = 0;
+      taskMenu.querySelector<HTMLElement>("[role=menuitem]")?.focus({ preventScroll: true });
     },
   };
   const { machine, go, inspectable, selected, select: setSelected, toggleTerminal } = ws;

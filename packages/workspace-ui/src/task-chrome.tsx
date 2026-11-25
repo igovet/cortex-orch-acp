@@ -1,17 +1,19 @@
 import { createEffect, createMemo, createSignal, For, on, Show, type JSX } from "solid-js";
 import { capabilityOf, taskRenamable, type Task } from "@cortex/workspace-domain";
-import { asOf, automaticAcceptanceHold, checkCounts, clock, dayClock, engineLimits, humanStatus, nothingToCommit, ownerHold, reviewDeadEnd, sameBranch, windowTitle, sprintModeLabel, sprintTitle, type TaskView } from "./selectors";
+import { asOf, automaticAcceptanceHold, checkCounts, clock, dayClock, engineLimits, humanStatus, nothingToCommit, sameBranch, windowTitle, sprintModeLabel, sprintTitle, type TaskView } from "./selectors";
 import { useWs } from "./ctx";
+import { taskActionsFor } from "./task-actions-model";
+import { TaskMenuButton } from "./task-menu-trigger";
 import { REQUESTING, RequestLabel, RequestStatus } from "./request-feedback";
 import { FieldEdit } from "./field-edit";
-import { onScreen } from "./freshness";
-import { revealCard, revealKey } from "./reveal-intent";
+
+
 import { A, FactLine, I, Keyed, Modal, Pop } from "./kit";
 import { ActionBar, revealWhenCut } from "./layout";
 import { behindTarget, conflictLine, finishBlocked, mergeControls, taskCheckout } from "./review-model";
-import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, externalDoneBlocked, languageLabel, modeLabel, REWORK_LABEL, resumeState, reworkBinding, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
+import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, externalDoneBlocked, languageLabel, modeLabel, resumeState, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
 import { CHECK_ICON, VERIFICATION } from "./worker";
-import { archiveBlocked, archiveLabel, ARCHIVE_STOP_UNCONFIRMED } from "./git-actions-model";
+import { archiveBlocked, ARCHIVE_STOP_UNCONFIRMED } from "./git-actions-model";
 import { spendRows, StallBadge } from "./task-spend";
 
 const useModel = (id: () => string) => {
@@ -85,76 +87,44 @@ export function titleBlock(m: SessionModel): string | null {
  * the Git controls and the task menu. Its state reads in the strip under the tabs, the sidebar and the composer; Start, Stop
  * and Resume are the composer's action button and stay in the menu. Offline and unconfirmed tasks offer nothing that could mislead.
  */
-export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) => void; git?: JSX.Element }) {
+export function TaskActions(props: { view: TaskView; git?: JSX.Element }) {
   const ws = useWs();
-  const m = useModel(() => props.view.id);
-  const why = () => taskWhyId(props.view.id);
-  const go = () => {
-    const task = props.view.id, tab = ws.router.route();
-    if (tab.name === "task" && (tab.tab || tab.live)) ws.go({ name: "task", machine: tab.machine, task });
-    // A conversation still on its first read has not shown the card yet: it brings it into view once it does.
-    const key = revealKey(props.view.machine.id, task, props.view.task.executionId);
-    queueMicrotask(() => revealCard(key, onScreen(), [".dc"]));
-  };
-  const mode = () => m()?.mode;
-  // Continue and the fallback Resume follow the one rule the card, the menu and the palette use.
-  const run = createMemo(() => resumeState(props.view));
-  const blocked = () => m() ? closeBlocked(m()!) : null;
-  const archiveWhy = () => archiveBlocked(props.view.task, props.view.machine) ?? ws.gate("archive_task");
-  const answering = () => mode() === "live" && props.view.task.conflict === "none" && ((m()?.open.length ?? 0) > 0 || (props.view.column === "needs" && props.view.task.observedPhase !== "recovery"));
-  const seeNeeded = () => {
-    const kind = m() ? unconfirmedState(m()!)?.kind ?? "" : "";
-    if (kind === "exit_unconfirmed" || kind === "records") return true;
-    const open = m()?.open.length ?? 0;
-    if (ownerHold(props.view)?.nextActor === "owner") return open === 0 || !answering();
-    return !!m() && open === 0 && !!reviewDeadEnd(props.view.task) && m()!.mode !== "unconfirmed";
-  };
+  const model = useModel(() => props.view.id);
+  const actions = createMemo(() => taskActionsFor(props.view, ws));
+  const action = (id: string) => actions().find(a => a.id === id);
+  const task = () => props.view.task;
+  const canMessage = () => ws.can(capabilityOf("send_message"));
+  const closePrimary = () => model()?.mode === "ended" || (model()?.mode === "review" && task().status === "ready_to_merge"
+    && (task().integrationFacts?.alreadyInTarget || (sameBranch(task(), props.view.target) ? !task().integrationFacts?.commitAvailable : props.view.project.hasGit === false)));
+  const closeLabel = () => model()?.mode === "ended" || task().integrationFacts?.alreadyInTarget
+    || (sameBranch(task(), props.view.target) && nothingToCommit(task())) ? "Close task…" : "Close as is…";
+  const Button = (p: { id: string; line?: boolean; css?: string; label?: string; icon?: boolean }) =>
+    <Show when={action(p.id)}>{a => <button class={`btn ${p.line ? "btn-line" : "btn-primary"}${p.css ? ` ${p.css}` : ""}`}
+      aria-label={p.label ?? a().label} aria-disabled={a().why ? "true" : undefined}
+      aria-describedby={a().why ? taskWhyId(props.view.id) : undefined} data-why={a().why} data-task-action={a().id}
+      onClick={() => void a().run()}>
+      <Show when={p.icon}><I n={a().icon} s={12} /></Show>
+      <Show when={p.id === "start"} fallback={<span>{p.label ?? a().label}</span>}>
+        <RequestLabel pending={ws.store.pendingTask("start_task", props.view.id)} text={REQUESTING.start_task}>Start</RequestLabel>
+      </Show>
+    </button>}</Show>;
   return <>
-    {/* A working task stuck past the owner's threshold says so here; it is information, not a control. */}
-    <StallBadge task={props.view.task} />
-    <Show when={mode() === "live" && props.view.task.conflict === "none" && ((m()?.open.length ?? 0) > 0 || (props.view.column === "needs" && props.view.task.observedPhase !== "recovery"))}><button class="btn btn-primary" onClick={go}>Answer</button></Show>
-    <Show when={props.view.task.status === "review" && mode() === "review"}><A class="btn btn-primary" to={{ name: "task", machine: props.view.machine.id, task: props.view.id, tab: "changes", sub: "diff" }}>Review changes</A></Show>
-    <Show when={props.view.task.status === "ready_to_merge" && mode() === "review"}>
-      {/* Merge… and Commit to the target… are the Git button's primary action in this state; only closing stays here. */}
-      <Show when={!props.view.task.integrationFacts?.alreadyInTarget} fallback={<button class="btn btn-primary" {...ws.needs("close_task")} onClick={() => ws.closeTask(props.view.id, "already_in_target")}>Close task…</button>}>
-      <Show when={sameBranch(props.view.task, props.view.target) && !props.view.task.integrationFacts?.commitAvailable}>
-        <button class="btn btn-primary" {...ws.needs("close_task")} onClick={() => ws.closeTask(props.view.id)}>{nothingToCommit(props.view.task) ? "Close task…" : "Close as is…"}</button>
-      </Show>
-      <Show when={!sameBranch(props.view.task, props.view.target) && props.view.project.hasGit === false}>
-        <button class="btn btn-primary" aria-describedby={blocked() ? why() : undefined} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("close_task")} onClick={() => { if (!blocked()) ws.closeTask(props.view.id); }}>Close as is…</button>
-      </Show>
-      </Show>
-    </Show>
-    {/* A run that ended by itself (failed or cancelled) only waits for the owner to close it. */}
-    <Show when={mode() === "ended"}>
-      <button class="btn btn-primary" aria-describedby={blocked() ? why() : undefined} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("close_task")} onClick={() => { if (!blocked()) ws.closeTask(props.view.id); }}>Close task…</button>
-    </Show>
-    <Show when={reworkBinding(props.view)}>
-      <button class="btn btn-line tb-rework" aria-label={REWORK_LABEL} {...ws.needs("rework_task")} onClick={() => ws.returnForRework(props.view.id)}><I n="message" s={14} /><span>{REWORK_LABEL}</span></button>
-    </Show>
-    {/* Archive remains available even when the runtime cannot confirm a stop. */}
-    <Show when={!props.view.task.archive}>
-      <button class="btn btn-line tb-archive" aria-label={archiveLabel(props.view.task)} aria-describedby={archiveWhy() ? why() : undefined} aria-disabled={archiveWhy() ? "true" : undefined} data-why={archiveWhy()} {...ws.needs("archive_task")} onClick={() => { if (!archiveWhy()) ws.archiveTask(props.view.id); }}><I n="archive" s={12} /><span>{archiveLabel(props.view.task)}</span></button>
-    </Show>
-    {/* A queue hold decided for the owner: its actions are on the pinned card above the message box; this brings it into view. */}
-    {/* It is offered only where its target is on the page: the pinned card, or (the card stays away while a question or a
-        permission is open) that open decision, unless Answer already brings the owner there. */}
-    <Show when={seeNeeded()}><button class="btn btn-primary" onClick={() => {
-      const tab = ws.router.route();
-      if (tab.name === "task" && (tab.tab || tab.live)) ws.go({ name: "task", machine: tab.machine, task: props.view.id });
-      const key = revealKey(props.view.machine.id, props.view.id, props.view.task.executionId);
-      queueMicrotask(() => revealCard(key, onScreen(), [".chat-review-hold", ".dc:not(.dc-done), .dc-panel"]));
-    }}>See what is needed</button></Show>
-    {/* A held task waits for the owner: say what is expected with one concrete action, not only a message box. */}
-    <Show when={run()?.action === "retry_task"}><button class="btn btn-primary" {...ws.needs("retry_task")} onClick={() => ws.run({ type: "retry_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Continue</button></Show>
-    {/* Start, Stop and Resume are the composer's action button. Where this machine offers no message composer, they stay here. */}
-    <Show when={!ws.can(capabilityOf("send_message"))}>
-      <Show when={mode() === "live" && props.view.task.status === "working"}><button class="btn btn-line" {...ws.needs("stop_task")} onClick={() => ws.stopTask(props.view.id)}><I n="stop" s={12} class="st-bad" />{stopLabel(ws.can(capabilityOf("continue_task")))}</button></Show>
-      <Show when={run()?.action === "continue_task"}><button class="btn btn-primary" {...ws.needs("continue_task")} onClick={() => ws.run({ type: "continue_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Resume</button></Show>
-      <Show when={mode() === "draft"}><button class="btn btn-primary" {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} /><RequestLabel pending={ws.store.pendingTask("start_task", props.view.id)} text={REQUESTING.start_task}>Start</RequestLabel></button></Show>
+    <StallBadge task={task()} />
+    <Button id="answer" />
+    <Show when={action("review")}>{a => <A class="btn btn-primary" data-task-action={a().id}
+      to={{ name: "task", machine: props.view.machine.id, task: props.view.id, tab: "changes", sub: "diff" }}>{a().label}</A>}</Show>
+    <Show when={closePrimary()}><Button id="close" label={closeLabel()} /></Show>
+    <Button id="rework" line css="tb-rework" icon />
+    <Show when={!task().archive}><Button id="archive" line css="tb-archive" icon /></Show>
+    <Button id="needed" />
+    <Button id="continue" icon />
+    <Show when={!canMessage()}>
+      <Show when={model()?.mode === "live" && task().status === "working"}><Button id="stop" line label={stopLabel(ws.can(capabilityOf("continue_task")))} icon /></Show>
+      <Show when={action("resume")?.enabled}><Button id="resume" icon /></Show>
+      <Show when={model()?.mode === "draft"}><Button id="start" icon /></Show>
     </Show>
     {props.git}
-    <button data-tooltip="" class="ib" aria-label="Task actions" onClick={e => props.onMenu(e.currentTarget)}><I n="more" /></button>
+    <TaskMenuButton view={props.view} label="Task actions" />
   </>;
 }
 
