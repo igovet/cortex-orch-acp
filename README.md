@@ -693,8 +693,9 @@ Ready to merge distinguishes local content already in the target branch from its
 Already-contained work offers owner-confirmed closure, not another merge. Shared-checkout tasks on their
 target branch use recorded task-file evidence: committed content offers closure even after later sibling
 edits; known pending files offer Commit to that branch without sweeping other files into the commit.
-Unknown attribution offers Close as is or Done outside the app, never a same-branch merge. Board cards can
-be moved manually only to Done, with “Done outside the app” confirmation after the task stops. This
+Unknown attribution offers Close as is or Done outside the app, never a same-branch merge. Board cards cannot
+be dragged; “Done outside the app…” is chosen from the task actions menu or command palette and confirmed
+after the task stops. This
 durable owner decision is not acceptance, merging or passing checks; sprint dependencies can continue.
 Ordinary run closures without acceptance have a closing step: a failed or cancelled run offers
 Close task… in its title band, a runtime result that can never be accepted offers Close as is…, and
