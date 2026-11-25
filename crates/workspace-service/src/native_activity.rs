@@ -416,16 +416,48 @@ pub(crate) async fn record(
                     &engine_session,
                     &Value::Null,
                     Some((text, engine_id)),
-                )
+                ).map(|_| ())
             })?;
             Ok(())
         }
         Some(Display::Update(_)) => executor
-            .write(move |db| record_tx(db, &credential, &engine_session, &params, None))?
+            .write(move |db| record_tx(db, &credential, &engine_session, &params, None).map(|_| ()))?
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))?,
     }
 }
+/// Only an acknowledged transcript write can attest to a live steering reply.
+/// Blank and non-message updates still follow the ordinary display path.
+pub(crate) async fn record_steering_reply(
+    executor: &StoreExecutor,
+    credential: &Credential,
+    engine_session: &str,
+    handoff: i64,
+    params: &Value,
+) -> CoreResult<Option<i64>> {
+    let Some(Display::Message(text, engine_id)) =
+        display(params, engine_session, "", "", &json!({}))?
+    else {
+        return Ok(None);
+    };
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    let credential = credential.clone();
+    let engine_session = engine_session.to_owned();
+    executor.write(move |db| {
+        let identity = cortex_core::channels::authenticate(db, &credential.channel_id, credential.secret(), true)?;
+        let Some((session, seq)) = record_tx(
+            db, &credential, &engine_session, &Value::Null, Some((text, engine_id)),
+        )? else {
+            return Ok(None);
+        };
+        cortex_core::lifecycle::event_tx(db, &identity.task, "NATIVE_STEERING_REPLY_CHUNK", json!({
+            "channel_id":credential.channel_id, "handoff":handoff, "display_session":session, "seq":seq,
+        })).map(Some)
+    })?.await.map_err(|_| CoreError::Refused("native_host_closed"))?
+}
+
 /// One display row in every display session of the bound task: `message` is a
 /// streamed message's text and engine identity; otherwise `params` is the update.
 fn record_tx(
@@ -434,7 +466,7 @@ fn record_tx(
     engine_session: &str,
     params: &Value,
     message: Option<(String, Option<String>)>,
-) -> CoreResult<()> {
+) -> CoreResult<Option<(String, i64)>> {
     // Final updates may arrive after result_submit revoked the channel. Bind
     // them to the persisted exact attempt/session/current epoch, not readiness
     // or task state. An old owner can never append into a replacement session.
@@ -463,7 +495,7 @@ fn record_tx(
         None => {
             let prior = prior_call(db, task, attempt, &params["update"])?;
             let Some(item) = display(params, engine_session, attempt, role, &prior)? else {
-                return Ok(());
+                return Ok(None);
             };
             item
         }
@@ -483,6 +515,7 @@ fn record_tx(
     // session keeps it.
     let workspace_only =
         matches!(&item, Display::Update(u) if u["sessionUpdate"] == "compaction_update");
+    let mut receipt = None;
     for session in &sessions {
         if workspace_only
             && !db.query_row(
@@ -517,8 +550,10 @@ fn record_tx(
                     (None, Some(id)) if id.starts_with(&own) => id,
                     _ => format!("{own}{session}:{seq}"),
                 };
-                db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,message_id,created_at) VALUES (?,?,'agent_message',?,?,?)",
-                    (session,seq,text,message_id,cortex_core::now()))?;
+                if db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,message_id,created_at) VALUES (?,?,'agent_message',?,?,?)",
+                    (session,seq,text,message_id,cortex_core::now()))? == 1 && receipt.is_none() {
+                    receipt = Some((session.clone(), seq));
+                }
             }
             Display::Update(update) => {
                 db.execute(
@@ -528,7 +563,7 @@ fn record_tx(
             }
         }
     }
-    Ok(())
+    Ok(receipt)
 }
 
 #[cfg(test)]

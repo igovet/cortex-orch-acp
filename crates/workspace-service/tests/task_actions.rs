@@ -1983,7 +1983,18 @@ async fn check_actions(fixture: &Value) {
                 "overlay altered task contents"
             );
         }
-        let mut after: Value = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
+        let persisted = fs::read(f.path()).unwrap();
+        if matches!(case["name"].as_str(), Some("sprint-plain" | "sprint-repeat")) {
+            // An unknown task is refused; an exact replay succeeds without a write.
+            assert_eq!(
+                persisted,
+                f.replace(&case["saved"]).to_string().as_bytes(),
+                "{} changed the saved overlay",
+                case["name"]
+            );
+        }
+        let preserves_git = matches!(case["params"]["action"].as_str(), Some("archive" | "sprint"));
+        let mut after: Value = serde_json::from_slice(&persisted).unwrap();
         for (key, default) in [
             ("tasks", json!({})),
             ("sprints", json!([])),
@@ -1995,7 +2006,7 @@ async fn check_actions(fixture: &Value) {
                 after[key] = default;
             }
         }
-        if after.get("ghAvailable").is_some() {
+        if !preserves_git && after.get("ghAvailable").is_some() {
             assert!(after["ghAvailable"].is_boolean());
             after["ghAvailable"] = json!("$GH_AVAILABLE");
         }
@@ -2050,9 +2061,9 @@ async fn check_actions(fixture: &Value) {
             expected_state["tasks"]["t1"]["worktreeCleanup"] = expected["result"]["worktreeCleanup"].clone();
             assert_eq!(fs::read(retained_path.join("a.txt")).ok(), worktree_before);
         }
-        if case["params"]["action"] == "archive" {
-            // Archive must not depend on Git or refresh its stored observations.
-            let saved = &case["saved"];
+        if preserves_git {
+            // Neither archive nor sprint linking should refresh saved Git observations.
+            let saved = f.replace(&case["saved"]);
             for key in ["hasGit", "ghAvailable"] {
                 if let Some(value) = saved.get(key) {
                     expected_state[key] = value.clone();

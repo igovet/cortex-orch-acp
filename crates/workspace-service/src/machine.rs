@@ -195,7 +195,8 @@ pub struct Helper {
     inspections: std::sync::Arc<Semaphore>,
     /// The machine's own settings (models, efforts, storage). Local file reads that must never queue behind a slow repository.
     settings: std::sync::Arc<Semaphore>,
-    actions: std::sync::Arc<Semaphore>,
+    pub(super) actions: std::sync::Arc<Semaphore>,
+    pub(super) sprint_links: std::sync::Arc<Semaphore>,
 }
 impl Default for Helper {
     fn default() -> Self {
@@ -204,6 +205,7 @@ impl Default for Helper {
             inspections: std::sync::Arc::new(Semaphore::new(2)),
             settings: std::sync::Arc::new(Semaphore::new(2)),
             actions: std::sync::Arc::new(Semaphore::new(4)),
+            sprint_links: std::sync::Arc::new(Semaphore::new(4)),
         }
     }
 }
@@ -706,10 +708,18 @@ impl crate::Service {
             | "product.facts" | "workers" | "command.output" => self.helper.reads.clone(),
             _ => self.helper.actions.clone(),
         };
-        let slot = tokio::time::timeout_at(deadline, slots.acquire_owned())
-            .await
-            .map_err(|_| failure("machine_busy"))?
-            .map_err(|_| failure("service_stopping"))?;
+        let sprint_link = call.op == "product.task" && call.params["action"] == "sprint";
+        let slot = if sprint_link {
+            // Membership updates need neither a generic Git slot nor an
+            // unbounded queue of threads blocked on the machine-state lock.
+            self.helper.sprint_links.clone().try_acquire_owned()
+                .map_err(|_| failure("machine_busy"))?
+        } else {
+            tokio::time::timeout_at(deadline, slots.acquire_owned())
+                .await
+                .map_err(|_| failure("machine_busy"))?
+                .map_err(|_| failure("service_stopping"))?
+        };
         let config = self.config.clone();
         let state = config.state_dir.clone();
         let editor = self.editor.clone();

@@ -101,6 +101,76 @@ async fn full_writer_admission_timeout_never_runs_the_unaccepted_job() {
         .unwrap());
 }
 
+#[tokio::test]
+async fn owner_reserve_is_bounded_and_keeps_ordinary_and_deferred_order() {
+    use std::{future::{poll_fn, Future}, task::Poll, time::Duration};
+
+    let p = Project::new();
+    let executor = StoreExecutor::open(p.key()).unwrap();
+    executor.write(|db| {
+        db.execute_batch("CREATE TABLE reserve_order(value INTEGER)")?;
+        Ok(())
+    }).unwrap().await.unwrap().unwrap();
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let blocker = executor.publication(move |_| {
+        entered.send(()).unwrap();
+        gate.recv_timeout(Duration::from_secs(6)).unwrap();
+        Ok(())
+    }).unwrap();
+    observed.await.unwrap();
+    let ordinary: Vec<_> = (0..128).map(|i| executor.write(move |db| {
+        db.execute("INSERT INTO reserve_order VALUES (?)", [i])?;
+        Ok(())
+    }).unwrap()).collect();
+    assert_eq!(executor.publication(|_| Ok(())).unwrap_err().code(), "busy");
+    executor.write_deferred(|db| {
+        db.execute("INSERT INTO reserve_order VALUES (128)", [])?;
+        Ok(())
+    }).unwrap();
+
+    let mut admitted = Vec::new();
+    for i in 129..137 {
+        let mut request = Box::pin(executor.owner_publication(move |store| store.write(|db| {
+            db.execute("INSERT INTO reserve_order VALUES (?)", [i])?;
+            Ok(())
+        })));
+        poll_fn(|cx| {
+            // The writer is blocked, so a pending result means the request was
+            // enqueued; a full reserve would return immediately.
+            assert!(request.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        }).await;
+        admitted.push(request);
+    }
+    let ticket = executor.submitted();
+    let rejected = executor.owner_publication(|_| -> cortex_core::CoreResult<()> {
+        panic!("a refused owner request must never run")
+    }).await.unwrap_err();
+    assert_eq!(rejected.code(), "owner_queue_busy");
+    assert_eq!(executor.submitted(), ticket);
+
+    release.send(()).unwrap();
+    blocker.await.unwrap().unwrap();
+    for job in ordinary {
+        job.await.unwrap().unwrap();
+    }
+    for request in admitted {
+        request.await.unwrap();
+    }
+    executor.owner_publication(|store| store.write(|db| {
+        db.execute("INSERT INTO reserve_order VALUES (137)", [])?;
+        Ok(())
+    })).await.unwrap();
+    let order = executor.read(|db| {
+        let mut query = db.prepare("SELECT value FROM reserve_order ORDER BY rowid")?;
+        let rows = query.query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }).unwrap().await.unwrap().unwrap();
+    assert_eq!(order, (0..138).collect::<Vec<_>>());
+}
+
 /// Deferred display writes: never reported, committed before any ordinary job
 /// submitted after them, each in its own savepoint (a failing one is rolled back
 /// alone), and on shutdown.

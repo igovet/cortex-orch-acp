@@ -49,6 +49,13 @@ Coordinator language reminders are prompt guidance, not output filtering or auth
 
 Conversation fallback text grants no decision authority. Answers still require the existing decision identity, capability and runtime validation. A draft kept visible in a read-only composer remains unsent; its explanation does not enable message delivery or change the capability check. For route consent, an option plus a comment must match exactly one recorded option in the stored answer format. The comment cannot grant another route or set effort, but recognized refusals still apply.
 
+Workspace owner draft creation and active-task settings have reserved writer
+slots, not a separate store or authorization path. Settings still validate the
+selected route and recheck task ownership before committing. A sprint link
+checks the saved task and sprint under the existing machine-state lock; an
+already recorded link can be acknowledged without editing a started task.
+The draft receipt alone does not confirm membership.
+
 Workspace model catalogues distinguish connection readiness from policy permission:
 engine/model denials make routes unselectable for new work. Displayed unknown
 usage is Unavailable, not zero; it grants no quota or execution authority.
@@ -554,10 +561,15 @@ The live steering turn that handles a Send now message during execution has only
 read tools and the two scoped steering tools; steering text never grants an
 assignment, route, approval or write reservation, `steer_plan` is validated against
 the retained plan, role/scope policy and `deny-write` rules, and targeted guidance
-reaches only an exact live attempt. Bounded writer-queue admission (two seconds) for
-sprint creation and live settings keeps request-identity replay and refuses a full
-queue explicitly rather than running a late job. Engine
-effects remain outside the transaction under channel/provisioning authority.
+reaches only an exact live attempt. A live delivery is confirmed only for the
+exact handoff's normal turn end and a committed nonblank owner transcript row.
+On reply expiry the service revokes that channel before waiting for shutdown;
+capacity is released only after process exit is observed.
+Sprint draft creation and active-task model or effort changes share eight
+reserved writer slots and preserve request-identity replay. Settings also use
+a separate per-project lane. A full writer reserve returns `owner_queue_busy`
+before enqueueing the write, rather than scheduling a late job. Engine effects
+remain outside the transaction under channel/provisioning authority.
 Only a host-supplied qualified route provider can authorize launch, never desktop
 JSON alone. The production binary binds a read-only configured provider: it checks
 approved connection fingerprints, genuine catalog identities, exact defaults/pins,

@@ -1808,6 +1808,19 @@ impl Runtime {
         request: Value,
         capture: Option<cortex_core::input::Capture>,
     ) -> io::Result<Value> {
+        // Setting a route for next use has no engine or Git effect. Its separate
+        // FIFO cannot be held by Start, merge, or a verifier. Bound all waiters
+        // before spawning any work; cancellation while waiting has no effect.
+        if request["action"] == "task_settings" {
+            let slot = self.settings_slots.clone().try_acquire_owned()
+                .map_err(|_| failure("owner_queue_busy"))?;
+            let serial = self.settings_controls.clone().lock_owned().await;
+            let runtime = self.clone();
+            return tokio::spawn(async move {
+                let (_slot, _serial) = (slot, serial);
+                runtime.apply_control(project, request, capture).await
+            }).await.map_err(|_| failure("native_control_outcome_unknown"))?;
+        }
         // Retain the operation if its socket/window disappears. Unknown effects are
         // reconciled from the intent, never silently retried.
         let runtime = self.clone();

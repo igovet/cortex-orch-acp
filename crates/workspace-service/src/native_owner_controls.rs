@@ -201,7 +201,7 @@ impl Runtime {
         let p = project.clone();
         let q = r.clone();
         let binding = executor
-            .publication_wait(move |s| {
+            .owner_publication(move |s| {
                 if let Some(receipt) = control::replay(s, &p, &actor(), &q)? {
                     return Ok(Err(receipt));
                 }
@@ -216,9 +216,19 @@ impl Runtime {
             Ok(bound) => bound,
             Err(receipt) => return Ok(receipt),
         };
-        self.routes.task_route(&self.host.root, &r["settings"])?;
-        executor.publication_wait(move |store| store.write(|db| {
+        let (routes, root, settings) = (self.routes.clone(), self.host.root.clone(), r["settings"].clone());
+        tokio::task::spawn_blocking(move || routes.task_route(&root, &settings))
+            .await
+            .map_err(|_| CoreError::Refused("native_task_route_unavailable"))??;
+        executor.owner_publication(move |store| store.write(|db| {
+            // Preparation does not hold the general control lock. Recheck
+            // the exact execution binding as well as the owner before commit.
             ownership::check_tx(db, &b.task, &b.owner)?;
+            let bound = control::binding(db, &store.key().root().to_string_lossy(), &project,
+                &actor(), text(&r, "executionId")?)?;
+            if bound.task != b.task || bound.session != b.session {
+                return refused("native_execution_binding_invalid");
+            }
             let request = text(&r, "requestId")?;
             lifecycle::request_tx(db, &b.task, &b.owner.owner, request, "native_desktop_control", &r,
                 || Ok(json!({"admitted":true})))?;

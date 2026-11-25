@@ -361,8 +361,10 @@ pub async fn main() {
                 },
                 _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
                     let scenario = std::fs::read_to_string("scenario.txt").unwrap_or_default();
-                    if !scenario.contains("hold")
-                        && !matches!(scenario.trim(), "rolling" | CHECKPOINT_SCENARIO)
+                    if (!scenario.contains("hold")
+                        && !matches!(scenario.trim(), "rolling" | CHECKPOINT_SCENARIO))
+                        || (scenario.trim() == "active-steering-regression-hold"
+                            && std::path::Path::new(".git/steer-regression-release-workers").exists())
                     {
                         for (sid, mut frame) in releasable.drain() {
                             held.remove(&sid);
@@ -777,9 +779,46 @@ pub async fn main() {
                     *n += 1;
                 }
                 let full_scenario = std::fs::read_to_string("scenario.txt").unwrap_or_default();
+                let steering_regression = full_scenario.trim() == "active-steering-regression-hold";
                 let active_steering = full_scenario.trim() == "active-steering-hold";
                 if let Some((_, snapshot)) = raw.rsplit_once("\n\nLive steering snapshot (runtime facts; targets may settle before tool use):\n") {
                     let snapshot: Value = serde_json::from_str(snapshot).unwrap();
+                    if steering_regression {
+                        let messages = snapshot["owner_messages"].as_array().unwrap();
+                        assert_eq!(messages.len(), 1, "an earlier live handoff must not be replayed");
+                        let case = messages[0]["text"].as_str().unwrap();
+                        let (reason, content) = match case {
+                            "max-tokens" => ("max_tokens", Some(json!({"type":"text","text":"Partial reply"}))),
+                            "max-turn-requests" => ("max_turn_requests", Some(json!({"type":"text","text":"Partial reply"}))),
+                            "empty" => ("end_turn", None),
+                            "blank" => ("end_turn", Some(json!({"type":"text","text":"  \n\t"}))),
+                            "ignored" => ("end_turn", Some(json!({"type":"image","mimeType":"image/png","data":"AA=="}))),
+                            "persistence" => ("end_turn", Some(json!({"type":"text","text":"Injected display failure"}))),
+                            "valid" => ("end_turn", Some(json!({"type":"text","text":"Committed owner reply"}))),
+                            "silent" => {
+                                std::fs::write(".git/steer-regression-silent", "").unwrap();
+                                held.insert(sid, id);
+                                continue;
+                            }
+                            "delayed" => {
+                                let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+                                std::fs::write(".git/steer-regression-delayed", "").unwrap();
+                                terminate.recv().await;
+                                std::fs::write(".git/steer-regression-cleanup-held", "").unwrap();
+                                while !std::path::Path::new(".git/steer-regression-release-peer").exists() {
+                                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                }
+                                return;
+                            }
+                            _ => panic!("unknown steering regression case"),
+                        };
+                        if let Some(content) = content {
+                            wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,
+                                "update":{"sessionUpdate":"agent_message_chunk","content":content}}})).await.unwrap();
+                        }
+                        wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":reason}})).await.unwrap();
+                        continue;
+                    }
                     let text = steering_fixture(&servers[&sid], &snapshot).await;
                     wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,
                         "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}}})).await.unwrap();
@@ -797,7 +836,9 @@ pub async fn main() {
                     assert!(raw.contains("Use the directed output."));
                     std::fs::write(".git/steer-guided", "same-session").unwrap();
                 }
-                if active_steering && mode == "desktop-worker" && (is_second || assignment["node"] == "work") && *n == 1 {
+                if (active_steering || steering_regression) && mode == "desktop-worker"
+                    && (is_second || assignment["node"] == "work") && *n == 1 && !replayed
+                {
                     std::fs::write(if is_second {".git/steer-second-held"} else {".git/steer-first-worker-held"}, "ready").unwrap();
                     releasable.insert(sid.clone(), r.clone());
                     held.insert(sid, id);
@@ -1089,7 +1130,7 @@ pub async fn main() {
                             tasks[0]["scope"] = json!(["work.txt", CHECKPOINT_ANSWER_LOG]);
                         }
                         if full_scenario.trim() == "stop-siblings"
-                            || rolling || active_steering
+                            || rolling || active_steering || steering_regression
                             || full_scenario == "reconcile-worker-replan"
                         {
                             tasks.as_array_mut().unwrap().push(json!({"id":"second","role":"backend-dev","objective":"Change other.txt","dependencies":[],"scope":["other.txt"],"model":"auto"}));

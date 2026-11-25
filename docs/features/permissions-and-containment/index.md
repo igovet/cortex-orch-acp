@@ -687,10 +687,10 @@ seconds, and a `command_run` rerouted to the host keeps its own timeout or 1800.
 limits are absolute elapsed deadlines, not output-idle timers; a stop sends SIGKILL to
 the owned process group, with two seconds for output drain, and a descendant that left
 that group is not covered. Preparation before launch has a separate 60-second bound per
-supervisor message, and an external MCP exchange a separate 300-second bound. An enormous value is not refused on the field —
-it is clamped internally to a ~68-year ceiling (`gateway.TIMEOUT_CEILING_SECONDS`,
-`2**31-1` seconds) before it reaches the deadline/subprocess-timeout arithmetic,
-so it can never overflow or crash; it behaves as effectively unbounded.
+supervisor message, and an external MCP exchange a separate 300-second bound.
+The current Rust tool schema advertises no maximum for `timeout_seconds`; the
+runtime does not implement the former documented ceiling. This is not a
+guarantee that arbitrarily large values are supported.
 An invalid argument is refused on its exact field (`invalid_arguments`) before
 anything starts. A failure once the command may have started (for example its
 retained output could not be written), or an unexpected runtime exception, is

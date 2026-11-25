@@ -315,12 +315,18 @@ pub async fn run(
     {
         require_consistent_records(root, project, task)?;
     }
-    let mut product = context::product(root, state, project, git).await?;
-    if product["tasks"].get(task).is_none() {
-        product["tasks"][task] = json!({});
-    }
-    let mut record = product["tasks"][task].clone();
     let action = p["action"].as_str().unwrap_or("");
+    // Linking changes only saved membership. Do not run a Git projection of
+    // every task with the machine lock held, or write that projection back.
+    let mut product = if action == "sprint" {
+        super::native::product(state, project)?
+    } else {
+        context::product(root, state, project, git).await?
+    };
+    let tasks = product["tasks"].as_object_mut()
+        .ok_or_else(|| refuse("state_unreadable", "Saved tasks are unreadable."))?;
+    let saved_task = tasks.contains_key(task);
+    let mut record = tasks.entry(task).or_insert_with(|| json!({})).clone();
     let close_as_is = action == "close" && p["choice"] == "as_is";
     let review_hold = product["sprints"]
         .as_array()
@@ -628,6 +634,14 @@ pub async fn run(
                 }
                 Some(_) => return Err(refuse("invalid_request", "A task title must be text.")),
             };
+            let planning = truth(&p["planning"]);
+            let existing = record["sprintId"] == sprint["id"]
+                && record.get("dependencies").unwrap_or(&empty) == &json!(deps)
+                && truth(&record["planning"]) == planning
+                && members.contains(&json!(task)) != planning
+                && title.as_ref().is_none_or(|title| {
+                    record["titleState"] == "user" || record["title"].as_str() == Some(title)
+                });
             {
                 record["sprintId"] = sprint["id"].clone();
                 record["dependencies"] = json!(deps);
@@ -654,11 +668,23 @@ pub async fn run(
             if let Some(store) = context::open(root, OpenMode::RuntimeValidate)? {
                 store
                     .write(|db| {
-                        let row:Option<Option<String>>=db.query_row(
-                        "SELECT execution_id FROM workspace_tasks WHERE project_id=? AND task_id=?",
-                        (project,task),|r|r.get(0)).optional()?;
-                        if row != Some(None) {
+                        let (execution, user_title): (Option<String>, Option<String>) = db.query_row(
+                            "SELECT t.execution_id, json_extract(o.options_json, '$.draftTitle')
+                             FROM workspace_tasks t LEFT JOIN workspace_task_options o USING(task_id)
+                             WHERE t.project_id=? AND t.task_id=?",
+                            (project, task), |r| Ok((r.get(0)?, r.get(1)?)),
+                        ).optional()?.ok_or(cortex_core::CoreError::Refused("not_editable"))?;
+                        // Exact membership is safe to acknowledge after Start.
+                        // Never reapply the change to a live task.
+                        if existing {
+                            return Ok(());
+                        }
+                        if execution.is_some() {
                             return Err(cortex_core::CoreError::Refused("not_editable"));
+                        }
+                        if let Some(title) = user_title {
+                            product["tasks"][task]["title"] = json!(title);
+                            product["tasks"][task]["titleState"] = json!("user");
                         }
                         settings::write_json(
                             &product_path(state, project)
@@ -679,7 +705,12 @@ pub async fn run(
                         }
                     })?;
             } else {
-                settings::write_json(&product_path(state, project)?, &product)?;
+                if !saved_task {
+                    return Err(refuse("invalid_task", "Unknown task."));
+                }
+                if !existing {
+                    settings::write_json(&product_path(state, project)?, &product)?;
+                }
             }
             return Ok(json!({"done":true}));
         }

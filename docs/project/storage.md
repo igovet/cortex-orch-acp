@@ -61,16 +61,24 @@ starting another attempt. Old sessions cannot mutate current state. Cleanup
 removes a workspace only after exact publication or an explicit abandonment;
 conflicts, failed reads and missing copies are retained.
 
-Each project store has one writer executor with a 128-entry FIFO. Ordinary
-submissions fail fast with `busy` when it is full. Workspace owner actions that must
-not be lost under sprint load (draft task creation and live model/effort changes)
-use bounded asynchronous admission instead: a request waits up to two seconds for a
-free slot, woken by dequeue notifications rather than polling, and an untouched job
-is never run after that deadline. Once accepted it keeps FIFO order and returns its
-real result; the same request identity replays the original receipt and a changed
-payload on that identity is refused. A live settings change commits its admission
-and finish receipts and event atomically, and does not reconfigure running engine
-sessions. A queue still full after two seconds refuses explicitly with `busy`.
+Each project store has one FIFO writer with 128 ordinary queue slots and eight
+reserved slots for Workspace owner draft creation and live settings. Ordinary
+work cannot consume the reserve or overtake an accepted owner job, and owner jobs
+do not jump ahead of accepted ordinary jobs or their deferred display writes.
+A full owner reserve is refused before enqueue (`owner_queue_busy`); ordinary
+submissions fail promptly with `busy` unless their caller explicitly uses the
+two-second ordinary admission wait. Neither rule sets a commit deadline: an
+in-flight job or SQLite lock can still delay the writer.
+
+A separate per-project setting lane accepts at most eight requests at a time,
+including its active request. It does not wait for the general execution-control
+lock. Each change writes its admission and finish receipts and the settings event
+in one transaction, for next use; it does not reconfigure an active engine
+session. Draft and live settings requests replay the original receipt for the
+same identity and payload; a changed payload on that identity is refused.
+Sprint membership uses the saved project overlay with the machine-state lock
+and the store's draft guard. It is a separate operation from draft creation;
+a failed link does not erase the draft.
 
 Task state is durable before recovery decisions. In-memory state may accelerate
 reads but cannot be the only record of a mutation or background-task failure.

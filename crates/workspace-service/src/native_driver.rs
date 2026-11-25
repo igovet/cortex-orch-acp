@@ -3810,7 +3810,7 @@ pub(crate) mod sprints {
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-        async fn sprint_owner_writes_survive_a_full_writer_queue() {
+        async fn sprint_owner_writes_survive_sustained_contention() {
             let (_scratch, folder, service, runtime, project, sprint_id, _) =
                 automatic_fixture("dev", "main", "main").await;
             let create = |request: String, description: &str| {
@@ -3834,6 +3834,11 @@ pub(crate) mod sprints {
                     "operation":"tasks.start","target":task,"expectedVersion":draft["entityVersion"],
                     "ownerEpoch":null,"payload":{}})).await.unwrap()["outcome"], "recorded");
                 let bound = task.clone();
+                // An exact link retry after Start confirms the committed membership
+                // without resetting the task or touching its active execution.
+                call(&service, "product.task", &project, json!({
+                    "action":"sprint","taskId":task,"sprintId":sprint_id,"dependencies":[]
+                })).await;
                 live.push(runtime.host.executor.read(move |db| {
                     Ok(db.query_row("SELECT execution_id FROM workspace_tasks WHERE task_id=?",
                         [bound], |row| row.get::<_, String>(0))?)
@@ -3858,11 +3863,13 @@ pub(crate) mod sprints {
             // Hold the lane *before* a transaction starts. Fill its backlog with
             // read-only jobs so a refusal here cannot originate in SQLite locking.
             let writer = &runtime.host.executor;
+            let controls = runtime.controls.lock().await;
+            let generic_actions = service.helper.actions.clone().try_acquire_many_owned(4).unwrap();
             let (entered, observed) = tokio::sync::oneshot::channel();
             let (release, gate) = std::sync::mpsc::channel();
             let blocker = writer.publication(move |_| {
                 entered.send(()).unwrap();
-                gate.recv_timeout(Duration::from_secs(3)).unwrap();
+                gate.recv_timeout(Duration::from_secs(12)).unwrap();
                 Ok(())
             }).unwrap();
             observed.await.unwrap();
@@ -3886,14 +3893,21 @@ pub(crate) mod sprints {
                 .await.expect("SQLite permits BEGIN IMMEDIATE while executor is full").unwrap();
 
             let start = tokio::time::Instant::now();
+            let last_background_ticket = writer.submitted();
             let mut requests = tokio::task::JoinSet::new();
-            for (index, execution) in live.into_iter().enumerate() {
-                let update = json!({"projectId":project,"executionId":execution,
+            for (index, execution) in live.iter().enumerate() {
+                let mut update = json!({"projectId":project,"executionId":execution,
                     "requestId":format!("load-settings-{index}"),"action":"task_settings","settings":settings});
+                // First change the model, then change only effort on this same active task.
+                update["settings"]["effort"] = json!("");
                 let draft = create(format!("load-new-{index}"), "Created during the held sprint");
                 let svc = service.clone();
                 let (project_id, sprint) = (project.clone(), sprint_id.clone());
                 requests.spawn(async move {
+                    let preflight = call(&svc, "product.read", &project_id, json!({})).await;
+                    let ready = preflight["sprints"].as_array().unwrap().iter()
+                        .any(|row| row["id"] == sprint && row["planning"] == "created");
+                    assert!(ready, "desktop sprint preflight must succeed while saturated");
                     let result = svc.workspace(draft.clone()).await;
                     if let Ok(receipt) = &result {
                         if receipt["outcome"] == "recorded" {
@@ -3902,36 +3916,82 @@ pub(crate) mod sprints {
                             })).await;
                         }
                     }
-                    (false, draft, result, start.elapsed())
+                    vec![(false, draft, result, start.elapsed())]
                 });
                 let svc = service.clone();
                 requests.spawn(async move {
                     let result = svc.control_execution(update.clone()).await;
-                    (true, update, result, start.elapsed())
+                    let mut effort = update.clone();
+                    effort["requestId"] = json!(format!("load-effort-{index}"));
+                    effort["settings"]["effort"] = json!("high");
+                    let model = (true, update, result, start.elapsed());
+                    let result = svc.control_execution(effort.clone()).await;
+                    vec![model, (true, effort, result, start.elapsed())]
                 });
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while writer.submitted() < last_background_ticket + 5 {
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("four draft jobs and the first settings lookup admitted while full");
+            let admitted_in = start.elapsed();
+            let ordinary = writer.publication_wait(|_| panic!("refusal must not execute"));
+            let ordinary: cortex_core::CoreResult<()> = ordinary.await;
+            assert_eq!(ordinary.unwrap_err().code(), "busy");
+            assert!(start.elapsed() >= Duration::from_secs(2));
+            assert_eq!(requests.len(), 8);
+            let held_for = start.elapsed();
             release.send(()).unwrap();
             blocker.await.unwrap().unwrap();
             for job in queued {
                 assert_eq!(job.await.unwrap().unwrap(), 1);
             }
+            // Replenished background work also progresses without releasing the unrelated
+            // project control lock or generic machine action class.
+            let sibling = writer.publication(|store| store.write(|db| {
+                db.execute_batch("CREATE TEMP TABLE owner_load_background(done); INSERT INTO owner_load_background VALUES(1);")?;
+                Ok(1)
+            })).unwrap();
+            assert_eq!(sibling.await.unwrap().unwrap(), 1);
             let mut replies = Vec::new();
             let mut counts = [0; 2];
             let mut busy = [0; 2];
             let mut max = [Duration::ZERO; 2];
             tokio::time::timeout(Duration::from_secs(2), async {
                 while let Some(reply) = requests.join_next().await {
-                    let reply = reply.unwrap();
-                    let lane = usize::from(reply.0);
-                    counts[lane] += usize::from(reply.2.is_ok());
-                    busy[lane] += usize::from(reply.2.as_ref().is_err_and(|e| e.to_string() == "busy"));
-                    max[lane] = max[lane].max(reply.3);
-                    replies.push(reply);
+                    for reply in reply.unwrap() {
+                        let lane = usize::from(reply.0);
+                        counts[lane] += usize::from(reply.2.is_ok());
+                        busy[lane] += usize::from(reply.2.as_ref().is_err_and(|e| e.to_string() == "owner_queue_busy"));
+                        max[lane] = max[lane].max(reply.3);
+                        replies.push(reply);
+                    }
                 }
-            }).await.expect("bounded owner acknowledgement");
+            }).await.expect("bounded owner acknowledgement after the writer was released");
             std::fs::write(folder.join("load-release"), "").unwrap();
-            eprintln!("sprint owner load: recorded API replies create/settings={counts:?}; busy={busy:?}; max latency={max:?}");
+            let peer_start = tokio::time::Instant::now();
+            let peers = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let executions = live.clone();
+                    let settled = writer.read(move |db| {
+                        Ok(db.query_row("SELECT count(DISTINCT w.execution_id)
+                            FROM workspace_executions w JOIN runtime_events e ON e.task_id=w.runtime_task_id
+                            WHERE w.execution_id IN (?1, ?2, ?3, ?4) AND e.type='NATIVE_TURN_SETTLED'
+                              AND json_extract(e.payload_json,'$.stop_reason')='end_turn'",
+                            rusqlite::params_from_iter(executions), |row| row.get::<_, i64>(0))?)
+                    }).unwrap().await.unwrap().unwrap();
+                    if settled == live.len() as i64 {
+                        break settled;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("all live sibling turns settle durably with unrelated controls still held");
+            eprintln!("sprint owner load: {peers}/4 ACP peers settled in {:?}", peer_start.elapsed());
+            drop(generic_actions);
+            drop(controls);
+            assert!(max.iter().all(|elapsed| *elapsed < held_for + Duration::from_secs(2)));
+            eprintln!("sprint owner load: admitted={admitted_in:?}; saturated={held_for:?}; \
+                background=128+1; create/settings replies={counts:?}; busy={busy:?}; max latency={max:?}");
             let stored = writer.read(|db| {
                 Ok((
                     db.query_row("SELECT count(*) FROM workspace_requests WHERE request_id LIKE 'load-new-%'", [], |r| r.get::<_, i64>(0))?,
@@ -3941,8 +4001,8 @@ pub(crate) mod sprints {
             }).unwrap().await.unwrap().unwrap();
             eprintln!("sprint owner load: persisted new drafts and task-local settings={stored:?}");
             let errors: Vec<_> = replies.iter().filter_map(|reply| reply.2.as_ref().err()).collect();
-            assert_eq!(counts, [4, 4], "{errors:?}");
-            assert_eq!(stored, (4, 4));
+            assert_eq!(counts, [4, 8], "{errors:?}");
+            assert_eq!(stored, (4, 8));
 
             // Exact duplicates acknowledge the retained original and do not repeat it.
             let retry_target = replies.iter().find(|reply| reply.0).unwrap().1.clone();
@@ -3953,14 +4013,18 @@ pub(crate) mod sprints {
                     assert_eq!(service.control_execution(request.clone()).await.unwrap(), receipt);
                     let execution = request["executionId"].as_str().unwrap().to_owned();
                     let persisted = writer.read(move |db| {
-                        Ok(db.query_row("SELECT count(*), max(e.payload_json) FROM runtime_events e
+                        let mut q = db.prepare("SELECT e.payload_json FROM runtime_events e
                             JOIN workspace_executions w ON w.runtime_task_id=e.task_id
-                            WHERE w.execution_id=? AND e.type='NATIVE_TASK_SETTINGS'", [execution],
-                            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?)
+                            WHERE w.execution_id=? AND e.type='NATIVE_TASK_SETTINGS' ORDER BY e.id")?;
+                        let rows = q.query_map([execution], |row| row.get::<_, String>(0))?
+                            .collect::<rusqlite::Result<Vec<_>>>()?;
+                        Ok(rows.into_iter().map(|s| serde_json::from_str::<Value>(&s)).collect::<Result<Vec<_>, _>>()?)
                     }).unwrap().await.unwrap().unwrap();
-                    assert_eq!(persisted.0, 1, "duplicate must not record another settings change");
-                    assert_eq!(serde_json::from_str::<Value>(&persisted.1).unwrap(),
-                        json!({"settings":request["settings"],"activation":"next_use"}));
+                    assert_eq!(persisted.len(), 2, "replay must not repeat a settings change");
+                    assert_eq!(persisted[0]["settings"]["effort"], "");
+                    assert_eq!(persisted[1]["settings"]["effort"], "high");
+                    let index = usize::from(request["settings"]["effort"] == "high");
+                    assert_eq!(persisted[index], json!({"settings":request["settings"],"activation":"next_use"}));
                     let mut conflicting = request;
                     conflicting["settings"]["language"] = json!("en");
                     assert_eq!(service.control_execution(conflicting).await.unwrap_err().to_string(),
@@ -3992,6 +4056,25 @@ pub(crate) mod sprints {
             }).unwrap().await.unwrap().unwrap();
             assert_eq!(drafts, 4, "duplicates must not create extra drafts");
 
+            // If the separately persisted membership is refused, replay the same
+            // create identity and link exactly that task once. Never create again.
+            let request = create("load-partial-create".into(), "Retry the existing sprint draft");
+            let draft = service.workspace(request.clone()).await.unwrap();
+            let link = json!({"action":"sprint","taskId":draft["target"],"sprintId":sprint_id,"dependencies":[]});
+            let full = service.helper.sprint_links.clone().try_acquire_many_owned(4).unwrap();
+            let refused = tokio::time::timeout(Duration::from_millis(500), service.machine(
+                serde_json::from_value(json!({"op":"product.task","projectId":project,"params":link})).unwrap()
+            )).await.unwrap().unwrap_err();
+            assert_eq!(refused.to_string(), "machine_busy");
+            drop(full);
+            assert!(!sprint(&service, &project, &sprint_id).await["taskIds"].as_array().unwrap().contains(&draft["target"]));
+            assert_eq!(service.workspace(request).await.unwrap(), draft);
+            call(&service, "product.task", &project, link.clone()).await;
+            call(&service, "product.task", &project, link).await;
+            let linked = sprint(&service, &project, &sprint_id).await;
+            assert_eq!(linked["taskIds"].as_array().unwrap().len(), 11);
+            assert_eq!(linked["taskIds"].as_array().unwrap().iter().filter(|id| **id == draft["target"]).count(), 1);
+
             // A failure writing the settings must also roll back the admission record.
             writer.write(|db| {
                 db.execute_batch("CREATE TEMP TRIGGER load_abort_setting BEFORE INSERT ON runtime_events
@@ -4006,12 +4089,25 @@ pub(crate) mod sprints {
             uncommitted["settings"]["model"] = json!("load-model");
             uncommitted["requestId"] = json!("load-settings-rollback");
             uncommitted["settings"]["language"] = json!("en");
-            assert!(service.control_execution(uncommitted).await.is_err());
+            let full = runtime.settings_slots.clone().try_acquire_many_owned(8).unwrap();
+            assert_eq!(tokio::time::timeout(Duration::from_millis(500), service.control_execution(uncommitted.clone()))
+                .await.unwrap().unwrap_err().to_string(), "owner_queue_busy");
+            drop(full);
+            assert!(service.control_execution(uncommitted.clone()).await.is_err());
             let rollback_count = writer.read(|db| {
                 Ok(db.query_row("SELECT count(*) FROM runtime_requests WHERE request_key='load-settings-rollback'",
                     [], |row| row.get::<_, i64>(0))?)
             }).unwrap().await.unwrap().unwrap();
             assert_eq!(rollback_count, 0, "failed local change must not leave partial admission");
+            writer.write(|db| {
+                db.execute_batch("DROP TRIGGER load_abort_setting")?;
+                Ok(())
+            }).unwrap().await.unwrap().unwrap();
+            let retry = service.control_execution(uncommitted.clone()).await.unwrap();
+            assert_eq!(retry["outcome"], "recorded");
+            assert_eq!(service.control_execution(uncommitted).await.unwrap(), retry);
+            eprintln!("sprint owner load: one refused link reconciled without a duplicate; \
+                one settings rollback retried and replayed");
             service.stop().await.unwrap();
         }
 

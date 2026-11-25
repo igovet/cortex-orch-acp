@@ -263,9 +263,22 @@ and identical instructions are deduplicated, and guidance for a completed or for
 attempt is refused. The queue receipt is not delivery; a replacement attempt does not
 inherit it. The steering turn is offered only read tools and the two steering tools:
 no planning, finalization, command, file-mutation or external-MCP lane, and steering
-prose never grants an assignment, route, approval or write reservation. An
-unconfirmed turn is not retried in a loop; the input stays pending for the next owner
-input or safe boundary. Queued (Queue) messages and messages during review or
+prose never grants an assignment, route, approval or write reservation. Delivery
+requires both a normal `end_turn` and a committed, nonblank conversation reply
+from that exact handoff. A limit stop, empty reply, failed transcript write or
+timed-out reply does not clear the pending input. The service does not retry the
+same live handoff; newer input can start a separate turn without replaying the
+earlier one. Unconfirmed input stays pending for the safe boundary.
+
+The live reply deadline is ten minutes after route resolution. Expiry fences
+the steering channel without stopping workers. The service retains supervision
+until it observes the process exit and releases capacity, or durably records
+that exit could not be confirmed. After the last worker ends, review does not
+wait for another steering reply after expiry; it still waits for the owned
+settlement. A full guidance reader queue delays delivery rather than ending
+a worker's active prompt or assignment-local question wait.
+
+Queued (Queue) messages and messages during review or
 verification still wait for their boundary, and the ordinary replan (which revokes
 running worker channels) is unchanged.
 

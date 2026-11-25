@@ -23,6 +23,8 @@ In Workspace, open [Board](docs/cortex-workspace/SCREENS.md#conversation-adoptio
 
 In Workspace, use **⋯** on a task to open its [task actions](docs/cortex-workspace/SCREENS.md#task-actions). On desktop, right-click a sidebar row, list row, board card or dashboard task row to open the same menu.
 
+Workspace reserves room for saving task drafts and active-task model or effort changes while a sprint is running. If a new draft is saved but joining the sprint is not confirmed, refresh the project and check for the existing draft before retrying. See [Workspace project actions](docs/features/workspaces-and-integration/index.md).
+
 In Workspace Code, the [File actions menu](docs/cortex-workspace/ide-and-git.md#code-file-actions) opens the file palette, opens the current file in an external editor, or shows it in the file manager.
 
 In Workspace, [Archive](docs/cortex-workspace/local-task-execution.md#archive-and-service-owned-work)
@@ -397,9 +399,13 @@ worker, independent review, bounded host verification, completion and versioned
 UI deltas with no Python controller. Exact Start retries never redispatch.
 A Send now steer is handled by the coordinator at once while workers run: it can
 reply, amend only unclaimed plan nodes, or instruct one live worker, without
-restarting the others (see [steering](docs/features/steering-and-questions/index.md)).
-Sprint draft creation and live model/effort changes wait up to two seconds for a
-writer-queue slot instead of failing at once (see [storage](docs/project/storage.md)).
+restarting the others. Live delivery needs a saved nonblank reply and a normal
+turn end; unconfirmed input stays pending for the safe boundary rather than
+being sent again to another live turn (see [steering](docs/features/steering-and-questions/index.md)).
+Sprint draft creation and active-task model or effort changes share eight
+reserved writer slots. Settings also use a separate per-project lane. If the
+writer reserve is full, the service returns `owner_queue_busy` without enqueueing
+the write (see [storage](docs/project/storage.md)).
 Commands default to 1800 seconds (`outside_command` 600), overridable per call.
 The production service now binds the configured native route provider by default.
 Projects whose stores contain tasks written by the former Python runtime are not adopted automatically (see [native recovery](docs/cortex-workspace/local-task-execution.md#legacy-task-adoption)); the retained controller and the `CORTEX_WORKSPACE_NATIVE=0` opt-out were removed.

@@ -288,6 +288,12 @@ pub struct NativeHost {
     pub(super) capacity_changed: Arc<tokio::sync::Notify>,
     pub(super) route_holds: Arc<crate::native_route_hold::Holds>,
     pub(super) guidance_changed: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(super) guidance_read_busy: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(super) guidance_read_idle: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(super) guidance_question_wait: tokio::sync::Notify,
 }
 impl NativeHost {
     pub(super) async fn execution_checkout(
@@ -386,6 +392,12 @@ impl NativeHost {
             capacity_changed: Arc::new(tokio::sync::Notify::new()),
             route_holds: Default::default(),
             guidance_changed: Default::default(),
+            #[cfg(test)]
+            guidance_read_busy: Default::default(),
+            #[cfg(test)]
+            guidance_read_idle: Default::default(),
+            #[cfg(test)]
+            guidance_question_wait: Default::default(),
         })
     }
     pub async fn create(
@@ -880,6 +892,10 @@ impl NativeHost {
             mcp_servers: std::sync::Mutex::new(Vec::new()),
             activity: Default::default(),
             guidance_changed: self.guidance_changed.clone(),
+            #[cfg(test)]
+            guidance_read_busy: self.guidance_read_busy.clone(),
+            #[cfg(test)]
+            guidance_read_idle: self.guidance_read_idle.clone(),
         });
         let credentials = || {
             Credentials::new(
@@ -1466,6 +1482,14 @@ pub struct Turn {
     pub stop_reason: String,
     pub updates: usize,
     pub compacted: bool,
+    pub(crate) steering_confirmed: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct SteeringPrompt {
+    pub after: i64,
+    pub through: i64,
+    pub deadline: tokio::time::Instant,
 }
 /// An open writing-worker turn: its identity, its start event and the checkout's
 /// dirty paths before the prompt (`SessionDriver::open_writer_turn`).
@@ -1616,20 +1640,33 @@ impl SessionDriver {
     }
 
     pub(crate) async fn prompt_guidance(&self, text: &str, guidance: &[Value]) -> CoreResult<Turn> {
+        self.prompt_inner(text, guidance, None).await
+    }
+
+    pub(super) async fn prompt_active_steering(&self, text: &str, input: SteeringPrompt) -> CoreResult<Turn> {
+        self.prompt_inner(text, &[], Some(input)).await
+    }
+
+    async fn prompt_inner(&self, text: &str, guidance: &[Value], steering: Option<SteeringPrompt>) -> CoreResult<Turn> {
+        if self.active_steering != steering.is_some() {
+            return Err(CoreError::Refused("active_steering_prompt_mismatch"));
+        }
+        let guided = !guidance.is_empty();
         self.policy
-            .check(true)
+            .prompt_identity(guided)
             .await
             .map_err(|_| CoreError::Refused("channel_authority_refused"))?;
         let c = self.credential.clone();
-        let active_steering = self.active_steering;
-        let (delivery, capsule, live_steering) = receive(self.executor.write(move |db| {
+        let (delivery, capsule, live_steering, handoff) = receive(self.executor.write(move |db| {
             let (delivery, capsule) = cortex_core::recovery_context::delivery_tx(db, &c)?;
             let mut section = String::new();
-            if active_steering {
-                use cortex_core::lifecycle::steering;
+            let mut handoff = None;
+            if let Some(input) = steering {
                 let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
-                let messages = steering::hand_active_tx(db, &i.task, &c.channel_id)?;
-                if messages.is_empty() { return Err(CoreError::Refused("active_steering_empty")); }
+                let (event, messages) = lifecycle::steering::hand_active_tx(
+                    db, &i.task, &c.channel_id, input.after, input.through,
+                )?;
+                handoff = Some(event);
                 let plan: String = db.query_row(
                     "SELECT plan_json FROM runtime_tasks WHERE task_id=?", [&i.task], |r| r.get(0)
                 )?;
@@ -1651,7 +1688,7 @@ impl SessionDriver {
                     json!({"plan":proposal,"plan_digest":digest,
                            "live_attempts":workers,"owner_messages":messages}));
             }
-            Ok((delivery, capsule, section))
+            Ok((delivery, capsule, section, handoff))
         })?).await?;
         let brief = format!("{text}{live_steering}");
         let mut prompt = format!("{}\n\n{capsule}\n\n{brief}", self.project_context);
@@ -1660,7 +1697,7 @@ impl SessionDriver {
         }
         let identity = self
             .policy
-            .check(true)
+            .prompt_identity(guided)
             .await
             .map_err(engine_error_to_core)?;
         let worker = identity.role == "worker";
@@ -1676,12 +1713,11 @@ impl SessionDriver {
             tokens: None,
             failed: true,
         };
-        let live_steering = identity.stage.as_deref() == Some(lifecycle::steering::ACTIVE_STAGE);
         let worker_attempt = usage.attempt.clone();
         let guidance_ids: Vec<Value> = guidance.iter().map(|g| g["guidance_id"].clone()).collect();
         let task = identity.task;
         let root = self.root_for_input();
-        let stored = receive(self.executor.read(move|db|{
+        let stored = session_state_read(&self.executor, guided, move|db|{
             use std::io::Read;
             let mut q=db.prepare("SELECT b.kind,b.mime,b.uri,b.sha256,b.size_bytes,b.body_ref,b.name FROM source_blocks b
                 JOIN source_revisions r ON r.report_id=b.report_id WHERE b.task_id=? AND b.availability='stored'
@@ -1704,7 +1740,7 @@ impl SessionDriver {
                 content.push(crate::native_attachments::Stored{kind,mime,uri,name:label,sha256:hash,key:name,bytes});
             }
             Ok(content)
-        })?).await?;
+        }).await?;
         let caps = self.engine.prompt_capabilities();
         let (attachments, fresh) = {
             let sent = self.delivered_attachments.lock().unwrap();
@@ -1735,6 +1771,8 @@ impl SessionDriver {
             None
         };
         let mut updates = 0;
+        // An owner-visible agent reply was observed in this turn (a tool call alone is not one).
+        let mut reply_chunk = None;
         let mut compacted = false;
         let mut watch = degenerate::Watch::default();
         let mut tripped = false;
@@ -1816,7 +1854,7 @@ impl SessionDriver {
                                 if tripped && degenerate::agent_text(&params["update"]) {
                                     continue;
                                 }
-                                compacted |= self.record_update(params).await?;
+                                compacted |= self.record_prompt_update(params, handoff, &mut reply_chunk).await?;
                             }
                             Some(Event::TransportClosed)|None=>break Err(Error::Closed),
                             _=>{}
@@ -1844,7 +1882,7 @@ impl SessionDriver {
                 if tripped && degenerate::agent_text(&params["update"]) {
                     continue;
                 }
-                compacted |= self.record_update(params).await?;
+                compacted |= self.record_prompt_update(params, handoff, &mut reply_chunk).await?;
             }
         }
         // A degenerate turn is never settled as an ordinary reply, whether the engine
@@ -1885,7 +1923,7 @@ impl SessionDriver {
         // Queue the insert before settlement can invalidate display snapshots.
         // Drop still records interrupted calls, but cannot enqueue this call again.
         usage.enqueue();
-        receive(self.executor.write(move |db| {
+        let steering_confirmed = receive(self.executor.write(move |db| {
             // A valid tool may already have advanced or revoked this channel.
             let task: String = db.query_row(
                 "SELECT task_id FROM trusted_channels WHERE channel_id=?",
@@ -1894,24 +1932,30 @@ impl SessionDriver {
             )?;
             // `writer` says whether the turn kept a change record
             // (`NATIVE_WRITER_TURN_CHANGES`).
-            let reply = lifecycle::event_tx(
-                db,
-                &task,
-                "NATIVE_TURN_SETTLED",
-                json!({"channel_id":credential.channel_id,"stop_reason":recorded,"writer":writer,"usage_id":usage_id}),
-            )?;
-            let answered = !matches!(recorded.as_str(), "cancelled" | "refusal");
-            if live_steering && answered && channels::authenticate(
-                db, &credential.channel_id, credential.secret(), true
-            ).is_ok() {
-                lifecycle::steering::confirm_active_tx(db, &task, &credential.channel_id, reply)?;
+            let mut settled = json!({"channel_id":credential.channel_id,"stop_reason":recorded,
+                                   "writer":writer,"usage_id":usage_id});
+            if let Some(handoff) = handoff {
+                settled["handoff"] = json!(handoff);
+                settled["reply_chunk"] = json!(reply_chunk);
             }
+            let reply = lifecycle::event_tx(db, &task, "NATIVE_TURN_SETTLED", settled)?;
+            let answered = !matches!(recorded.as_str(), "cancelled" | "refusal");
+            // A receipt can be queued behind unrelated writes past the prompt's
+            // deadline. Recheck the deadline and authority inside the writer lane.
+            let confirmed = if steering.is_some_and(|input| tokio::time::Instant::now() < input.deadline)
+                && recorded == "end_turn" && reply_chunk.is_some()
+                && channels::authenticate(db, &credential.channel_id, credential.secret(), true).is_ok()
+            {
+                lifecycle::steering::confirm_active_tx(db, &task, &credential.channel_id, reply)?
+            } else {
+                false
+            };
             for id in guidance_ids {
                 lifecycle::event_tx(db, &task, "NATIVE_COORDINATOR_GUIDANCE_SETTLED",
                     json!({"guidance_id":id,"attempt":worker_attempt,"channel_id":credential.channel_id,
                            "outcome":if answered {"delivered"} else {"unconfirmed"}}))?;
             }
-            Ok(())
+            Ok(confirmed)
         })?)
         .await?;
         // An ACP `refusal` stop is the model declining the turn (claude-agent-acp reports
@@ -1925,6 +1969,7 @@ impl SessionDriver {
             stop_reason: reason,
             updates,
             compacted,
+            steering_confirmed,
         })
     }
     /// Open a writing worker's turn window: a start record naming the turn, then the
@@ -2010,6 +2055,41 @@ impl SessionDriver {
         })?)
         .await
     }
+    async fn record_prompt_update(&self, params: Value, handoff: Option<i64>, reply_chunk: &mut Option<i64>) -> CoreResult<bool> {
+        if let Some(handoff) = handoff.filter(|_| reply_chunk.is_none()) {
+            let update = &params["update"];
+            if update["sessionUpdate"] == "agent_message_chunk" && update["content"]["type"] == "text"
+                && update["content"]["text"].as_str().is_some_and(|text| !text.trim().is_empty())
+            {
+                *reply_chunk = crate::native_activity::record_steering_reply(
+                    &self.executor, &self.credential, self.session.id(), handoff, &params,
+                ).await?;
+                return Ok(false);
+            }
+        }
+        self.record_update(params).await
+    }
+
+    /// Fence the exact expired channel before spending time on process cleanup.
+    /// If settlement already committed before the deadline, keep that outcome;
+    /// a delayed receipt wake cannot make a committed delivery unconfirmed.
+    pub(super) async fn expire_steering(&self) -> CoreResult<bool> {
+        let c = self.credential.clone();
+        session_state_write(&self.executor, move |db| {
+            let task: String = db.query_row("SELECT task_id FROM trusted_channels WHERE channel_id=?",
+                [&c.channel_id], |r| r.get(0))?;
+            let confirmed: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='STEERING_DELIVERED'
+                    AND json_extract(payload_json,'$.channel_id')=?)", (&task, &c.channel_id), |r| r.get(0),
+            )?;
+            channels::revoke_tx(db, &c.channel_id)?;
+            if !confirmed {
+                lifecycle::event_tx(db, &task, "NATIVE_ACTIVE_STEER_EXPIRED", json!({"channel_id":c.channel_id}))?;
+            }
+            Ok(confirmed)
+        }).await
+    }
+
     async fn record_update(&self, params: Value) -> CoreResult<bool> {
         if params["sessionId"] != self.session.id() {
             return Err(CoreError::Refused("native_activity_session_mismatch"));
@@ -2133,7 +2213,11 @@ impl SessionDriver {
             tokio::pin!(wake);
             wake.as_mut().enable();
             let channel = self.credential.channel_id.clone();
-            let pending = receive(self.executor.read(move |db| {
+            // A saturated reader queue is a transient admission failure of an observer
+            // read: it must not end the worker prompt or question wait that owns it.
+            let read = {
+                let channel = channel.clone();
+                self.executor.read(move |db| {
                 let live: Option<(String, String)> = db.query_row(
                     "SELECT c.task_id,c.attempt_id FROM trusted_channels c
                      JOIN runtime_nodes n ON n.task_id=c.task_id AND n.assignment_ref=c.assignment_id
@@ -2146,8 +2230,21 @@ impl SessionDriver {
                     Some((task, attempt)) => lifecycle::steering::pending_guidance(db, &task, &attempt),
                     None => Ok(Vec::new()),
                 }
-            })?).await?;
+                })
+            };
+            let pending = match read {
+                Ok(rx) => receive(rx).await?,
+                Err(error) if error.code() == "busy" => {
+                    #[cfg(test)]
+                    self.policy.guidance_read_busy.notify_one();
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if !wait || !pending.is_empty() { return Ok(pending); }
+            #[cfg(test)]
+            self.policy.guidance_read_idle.notify_one();
             wake.await;
         }
     }
@@ -2252,7 +2349,7 @@ impl SessionDriver {
         after: i64,
     ) -> CoreResult<Option<(i64, String)>> {
         let channel = self.credential.channel_id.clone();
-        let pending = receive(self.executor.read(move |db| {
+        let pending = session_state_read(&self.executor, true, move |db| {
             // A successful result or a revoked channel already closed this assignment.
             let mut events = db.prepare(
                 "SELECT e.id,e.type,e.payload_json,c.task_id FROM trusted_channels c
@@ -2295,7 +2392,7 @@ impl SessionDriver {
             )?;
             let latest: i64 = db.query_row("SELECT coalesce(max(id),0) FROM runtime_events", [], |r| r.get(0))?;
             Ok((cursor, refs, task, refusal_code, open, latest))
-        })?).await?;
+        }).await?;
         let (id, refs, task, refusal_code, open, latest) = pending;
         let Some(task) = task else {
             return Ok(open.then(|| (latest, String::from(
@@ -2563,6 +2660,41 @@ impl SessionDriver {
         Ok(())
     }
 }
+/// A guidance observer may succeed on a reader whose queue drained first.
+/// While preparing the still-unsent prompt, another reader's rejected
+/// admission is not proof that authority or the session was lost.
+async fn session_state_read<T: Send + 'static>(
+    executor: &StoreExecutor,
+    wait: bool,
+    body: impl FnOnce(&rusqlite::Connection) -> CoreResult<T> + Clone + Send + 'static,
+) -> CoreResult<T> {
+    loop {
+        match executor.read(body.clone()) {
+            Ok(receipt) => return receive(receipt).await,
+            Err(error) if wait && error.code() == "busy" => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Fencing and reservation settlement are owned cleanup, not best-effort
+/// interactive writes. Retry only a rejected queue admission, never a job that
+/// already ran (or one whose receipt was lost).
+async fn session_state_write<T: Send + 'static>(
+    executor: &StoreExecutor,
+    body: impl FnOnce(&rusqlite::Transaction<'_>) -> CoreResult<T> + Clone + Send + 'static,
+) -> CoreResult<T> {
+    loop {
+        match executor.write(body.clone()) {
+            Ok(receipt) => return receive(receipt).await,
+            Err(error) if error.code() == "busy" => tokio::time::sleep(Duration::from_millis(50)).await,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 async fn settle(
     executor: &StoreExecutor,
     c: Credential,
@@ -2570,7 +2702,7 @@ async fn settle(
     observation: ProcessObservation,
     provider_limit: Option<cortex_engine::ProviderLimit>,
 ) -> CoreResult<()> {
-    receive(executor.write(move |db| {
+    session_state_write(executor, move |db| {
         channels::revoke_tx(db, &c.channel_id)?;
         db.execute("UPDATE capsule_deliveries SET state='superseded',reason='session_settled',updated_at=?
             WHERE engine_session_ref IN (SELECT 'native:'||attempt_id||':'||engine_session_ref
@@ -2627,8 +2759,7 @@ async fn settle(
             }
         }
         Ok(())
-    })?)
-    .await
+    }).await
 }
 /// Concrete default-deny composition. Unsupported tools are not advertised.
 struct CorePolicy {
@@ -2649,12 +2780,26 @@ struct CorePolicy {
     mcp_servers: std::sync::Mutex<Vec<String>>,
     activity: Arc<std::sync::atomic::AtomicBool>,
     guidance_changed: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    guidance_read_busy: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    guidance_read_idle: Arc<tokio::sync::Notify>,
 }
 impl CorePolicy {
     fn worktree_receipt(&self) -> Option<Value> {
         self.worktree.as_ref().map(|id| json!({
             "id":id,"root":self.root,"logical":self.logical,"owner_epoch":self.owner.epoch,
         }))
+    }
+
+    async fn prompt_identity(&self, guided: bool) -> cortex_engine::Result<Identity> {
+        if !guided || self.worktree.is_some() {
+            return self.check(true).await;
+        }
+        let c = self.credential.clone();
+        session_state_read(&self.executor, true, move |db| {
+            channels::authenticate(db, &c.channel_id, c.secret(), true)
+        }).await.map_err(engine_error)
     }
 
     async fn check(&self, ready: bool) -> cortex_engine::Result<Identity> {

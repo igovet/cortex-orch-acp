@@ -21,8 +21,11 @@ type Job = Box<dyn FnOnce(CoreResult<&Store>) + Send + 'static>;
 const IDLE_RELEASE: Duration = Duration::from_millis(1000);
 /// How long opening a shared writer waits for another process's idle release.
 const OPEN_WAIT: Duration = Duration::from_millis(5000);
-/// Time an interactive operation can wait for admission, not for SQLite or commit.
-const OWNER_QUEUE_WAIT: Duration = Duration::from_secs(2);
+const QUEUE_LIMIT: usize = 128;
+/// Extra slots on the same FIFO, never available to background producers.
+const OWNER_QUEUE_LIMIT: usize = 8;
+/// Ordinary waiters (such as the sprint scheduler) do not use the reserve.
+const QUEUE_WAIT: Duration = Duration::from_secs(2);
 type Fences = (SchedulerOwner, ProjectOwner);
 fn fences(key: &ProjectKey) -> CoreResult<Fences> {
     let scheduler = SchedulerOwner::acquire(key)?;
@@ -61,14 +64,15 @@ fn idle(store: &Store) -> bool {
 struct Lane {
     sender: Option<SyncSender<Item>>,
     thread: Option<std::thread::JoinHandle<()>>,
-    space: Arc<tokio::sync::Notify>,
+    space: Arc<tokio::sync::Semaphore>,
+    owner_space: Arc<tokio::sync::Semaphore>,
     /// The writer lane's deferred display writes; `None` on read lanes.
     deferred: Option<Arc<Deferred>>,
 }
 /// What a lane receives: an ordinary job with its submission ticket, or a nudge to
 /// re-examine the deferred writes (a first deferral, or a full deferral batch).
 enum Item {
-    Job(u64, Job),
+    Job(u64, Job, tokio::sync::OwnedSemaphorePermit),
     Wake,
 }
 /// A display-only write committed later, together with others (see
@@ -88,6 +92,7 @@ struct DeferredState {
     ticket: u64,
     pending: Vec<(u64, DeferredBody)>,
     since: Option<Instant>,
+    wake_queued: bool,
 }
 impl Deferred {
     fn lock(&self) -> std::sync::MutexGuard<'_, DeferredState> {
@@ -146,12 +151,14 @@ impl Lane {
         orphaned: Arc<AtomicBool>,
         name: &str,
     ) -> CoreResult<Self> {
-        let (send, recv) = sync_channel::<Item>(128);
+        // A coalesced Wake occupies at most one slot, separate from both quotas.
+        let reserve = if owner { OWNER_QUEUE_LIMIT } else { 0 };
+        let (send, recv) = sync_channel::<Item>(QUEUE_LIMIT + reserve + usize::from(owner));
         let (ready, wait) = sync_channel(1);
         let deferred = owner.then(|| Arc::new(Deferred::default()));
         let pending = deferred.clone();
-        let space = Arc::new(tokio::sync::Notify::new());
-        let dequeued = space.clone();
+        let space = Arc::new(tokio::sync::Semaphore::new(QUEUE_LIMIT));
+        let owner_space = Arc::new(tokio::sync::Semaphore::new(reserve));
         let thread = std::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
@@ -219,12 +226,17 @@ impl Lane {
                                 Some(wait) => recv.recv_timeout(wait),
                                 None => recv.recv().map_err(|_| RecvTimeoutError::Disconnected),
                             };
-                            if owner && received.is_ok() {
-                                dequeued.notify_waiters();
-                            }
                             let (ticket, job) = match received {
-                                Ok(Item::Job(ticket, job)) => (ticket, job),
-                                Ok(Item::Wake) => continue,
+                                Ok(Item::Job(ticket, job, slot)) => {
+                                    drop(slot);
+                                    (ticket, job)
+                                }
+                                Ok(Item::Wake) => {
+                                    if let Some(deferred) = &pending {
+                                        deferred.lock().wake_queued = false;
+                                    }
+                                    continue;
+                                }
                                 Err(RecvTimeoutError::Timeout) => {
                                     if due.is_some() {
                                         if pending.as_ref().and_then(|d| d.due_in())
@@ -262,6 +274,7 @@ impl Lane {
                 sender: Some(send),
                 thread: Some(thread),
                 space,
+                owner_space,
                 deferred,
             }),
             Ok(Err(error)) => {
@@ -274,16 +287,16 @@ impl Lane {
             }
         }
     }
-    fn submit(&self, job: Job) -> CoreResult<()> {
-        if self.try_submit(job)?.is_some() {
-            return refuse("busy");
-        }
-        Ok(())
+    fn submit(&self, job: Job, owner: bool) -> CoreResult<()> {
+        let space = if owner { &self.owner_space } else { &self.space };
+        let slot = space.clone().try_acquire_owned().map_err(|_| {
+            CoreError::Refused(if owner { "owner_queue_busy" } else { "busy" })
+        })?;
+        self.enqueue(job, slot)
     }
 
-    /// On a full queue, return the untouched job. Only admitted jobs get tickets.
-    fn try_submit(&self, job: Job) -> CoreResult<Option<Job>> {
-        use std::sync::mpsc::TrySendError;
+    /// Only admitted jobs get tickets. Both classes retain the same FIFO.
+    fn enqueue(&self, job: Job, slot: tokio::sync::OwnedSemaphorePermit) -> CoreResult<()> {
         let sender = self
             .sender
             .as_ref()
@@ -291,56 +304,43 @@ impl Lane {
         // Ticketing and enqueue stay under the same lock as deferred writes.
         let mut state = self.deferred.as_ref().map(|d| d.lock());
         let ticket = state.as_ref().map_or(0, |s| s.ticket + 1);
-        match sender.try_send(Item::Job(ticket, job)) {
-            Ok(()) => {
-                if let Some(state) = state.as_mut() {
-                    state.ticket = ticket;
-                }
-                Ok(None)
-            }
-            Err(TrySendError::Full(Item::Job(_, job))) => Ok(Some(job)),
-            Err(TrySendError::Full(Item::Wake)) => unreachable!("submitted a job"),
-            Err(TrySendError::Disconnected(_)) => refuse("storage_executor_closed"),
+        sender.try_send(Item::Job(ticket, job, slot)).map_err(|e| match e {
+            std::sync::mpsc::TrySendError::Full(_) => CoreError::Refused("busy"),
+            std::sync::mpsc::TrySendError::Disconnected(_) => CoreError::Refused("storage_executor_closed"),
+        })?;
+        if let Some(state) = state.as_mut() {
+            state.ticket = ticket;
         }
+        Ok(())
     }
 
-    async fn submit_wait(&self, mut job: Job) -> CoreResult<()> {
-        tokio::time::timeout(OWNER_QUEUE_WAIT, async {
-            loop {
-                let space = self.space.notified();
-                tokio::pin!(space);
-                // Observe a dequeue even if it races the failed admission attempt.
-                space.as_mut().enable();
-                match self.try_submit(job)? {
-                    None => return Ok(()),
-                    Some(unsent) => job = unsent,
-                }
-                space.await;
-            }
-        })
-        .await
-        .map_err(|_| CoreError::Refused("busy"))?
+    async fn submit_wait(&self, job: Job) -> CoreResult<()> {
+        let slot = tokio::time::timeout(QUEUE_WAIT, self.space.clone().acquire_owned())
+            .await
+            .map_err(|_| CoreError::Refused("busy"))?
+            .map_err(|_| CoreError::Refused("storage_executor_closed"))?;
+        self.enqueue(job, slot)
     }
     fn defer(&self, body: DeferredBody) -> CoreResult<u64> {
         let (Some(sender), Some(deferred)) = (self.sender.as_ref(), self.deferred.as_ref()) else {
             return refuse("storage_executor_closed");
         };
-        let (wake, ticket) = {
-            let mut state = deferred.lock();
-            state.ticket += 1;
-            let ticket = state.ticket;
-            state.pending.push((ticket, body));
-            let first = state.since.is_none();
-            if first {
-                state.since = Some(Instant::now());
-            }
-            (first || state.pending.len() == DEFER_LIMIT, ticket)
-        };
-        if wake {
-            // A full queue already keeps the writer busy and re-examining its batch.
-            if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = sender.try_send(Item::Wake)
-            {
-                return refuse("storage_executor_closed");
+        let mut state = deferred.lock();
+        state.ticket += 1;
+        let ticket = state.ticket;
+        state.pending.push((ticket, body));
+        let first = state.since.is_none();
+        if first {
+            state.since = Some(Instant::now());
+        }
+        if (first || state.pending.len() == DEFER_LIMIT) && !state.wake_queued {
+            match sender.try_send(Item::Wake) {
+                Ok(()) => state.wake_queued = true,
+                // A full queue keeps the writer busy and re-examining its batch.
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {}
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    return refuse("storage_executor_closed");
+                }
             }
         }
         Ok(ticket)
@@ -417,10 +417,26 @@ impl StoreExecutor {
         let (send, recv) = tokio::sync::oneshot::channel();
         self.writer.submit(Box::new(move |store| {
             let _ = send.send(store.and_then(body));
-        }))?;
+        }), false)?;
         Ok(recv)
     }
-    /// Wait briefly for writer queue space before accepting an interactive job.
+
+    /// Reserve space for an owner mutation on the existing ordered writer. If
+    /// all reserved slots are in use, refuse before enqueue. Once enqueued,
+    /// return the real result rather than treating a slow commit as a refusal.
+    pub async fn owner_publication<T: Send + 'static>(
+        &self,
+        body: impl FnOnce(&Store) -> CoreResult<T> + Send + 'static,
+    ) -> CoreResult<T> {
+        let (send, recv) = tokio::sync::oneshot::channel();
+        self.writer.submit(Box::new(move |store| {
+            let _ = send.send(store.and_then(body));
+        }), true)?;
+        recv.await
+            .map_err(|_| CoreError::Refused("storage_executor_closed"))?
+    }
+
+    /// Wait briefly for ordinary writer queue space before accepting a job.
     /// A full-queue timeout happens before enqueue; after admission, return only
     /// the actual operation result. Accepted jobs keep the ordinary FIFO order.
     pub async fn publication_wait<T: Send + 'static>(
@@ -444,7 +460,7 @@ impl StoreExecutor {
         let (send, recv) = tokio::sync::oneshot::channel();
         self.writer.submit(Box::new(move |store| {
             let _ = send.send(store.and_then(|store| store.write(body)));
-        }))?;
+        }), false)?;
         Ok(recv)
     }
     /// Queue a display-only write on the writer lane without waiting for it. Writes
@@ -475,7 +491,7 @@ impl StoreExecutor {
         let index = self.next.fetch_add(1, Ordering::Relaxed) % self.readers.len();
         self.readers[index].submit(Box::new(move |store| {
             let _ = send.send(store.and_then(|store| store.read(body)));
-        }))?;
+        }), false)?;
         Ok(recv)
     }
 }

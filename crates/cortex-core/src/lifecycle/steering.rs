@@ -401,47 +401,101 @@ pub fn deliver_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<Value>> {
     }
     Ok(messages)
 }
-/// Bind only this turn's inputs to its exact channel. Leave them pending until
-/// that channel's reply is observed: an interrupted turn cannot clear the barrier.
-pub fn hand_active_tx(db: &Transaction<'_>, task: &str, channel: &str) -> CoreResult<Vec<Value>> {
-    let mut messages = pending(db, task)?;
-    messages.truncate(16);
-    for message in &mut messages {
-        let request = &message["request"];
-        let repeated: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='STEERING_HANDED'
-                AND json_extract(payload_json,'$.request')=?)",
-            (task, request.as_str()), |r| r.get(0),
-        )?;
-        event_tx(db, task, "STEERING_HANDED", json!({"request":request,"channel_id":channel}))?;
-        message["repeated"] = json!(repeated);
-    }
-    Ok(messages)
+/// Select only pending input inside the batch's admitted watermark. A new live
+/// turn does not replay input previously handed to a live channel; unresolved
+/// input remains available to the ordinary safe-boundary coordinator.
+const ACTIVE_INPUT: &str = "FROM runtime_events e WHERE e.task_id=?1 AND e.type='USER_STEERING'
+    AND json_extract(e.payload_json,'$.delivery')='boundary'
+    AND NOT EXISTS(SELECT 1 FROM runtime_events a WHERE a.task_id=e.task_id
+        AND (a.type='STEERING_APPLIED' OR (a.type='STEERING_HANDED' AND json_type(a.payload_json,'$.channel_id')='text'))
+        AND json_extract(a.payload_json,'$.request')=json_extract(e.payload_json,'$.request'))";
+
+pub fn active_watermark(db: &Connection, task: &str) -> CoreResult<Option<i64>> {
+    Ok(db.query_row(&format!("SELECT max(e.id) {ACTIVE_INPUT}"), [task], |r| r.get(0))?)
 }
 
-/// Called in the same transaction that records the observed prompt reply.
-pub fn confirm_active_tx(db: &Transaction<'_>, task: &str, channel: &str, reply: i64) -> CoreResult<()> {
-    let observed: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND id=? AND type='NATIVE_TURN_SETTLED'
-             AND json_extract(payload_json,'$.channel_id')=?
-             AND json_extract(payload_json,'$.stop_reason') NOT IN ('cancelled','refusal'))",
-        (task, reply, channel), |r| r.get(0),
+pub fn hand_active_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    channel: &str,
+    after: i64,
+    through: i64,
+) -> CoreResult<(i64, Vec<Value>)> {
+    let already_handed: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='NATIVE_ACTIVE_STEER_HANDOFF'
+            AND json_extract(payload_json,'$.channel_id')=?)", (task, channel), |r| r.get(0),
     )?;
-    if !observed { return Ok(()); }
+    if already_handed {
+        return refuse("active_steering_already_handed");
+    }
+    let messages = db.prepare(&format!(
+        "SELECT json_set(e.payload_json,'$.repeated',json('false')) {ACTIVE_INPUT} AND e.id>?2 AND e.id<=?3 ORDER BY e.id LIMIT 16"
+    ))?.query_map((task, after, through), |r| r.get::<_, String>(0))?
+        .map(|row| Ok(serde_json::from_str::<Value>(&row?)?))
+        .collect::<CoreResult<Vec<_>>>()?;
+    if messages.is_empty() {
+        return refuse("active_steering_empty");
+    }
+    let handoff = event_tx(db, task, "NATIVE_ACTIVE_STEER_HANDOFF", json!({"channel_id":channel}))?;
+    for message in &messages {
+        event_tx(db, task, "STEERING_HANDED", json!({
+            "request":message["request"],"channel_id":channel,"handoff":handoff
+        }))?;
+    }
+    Ok((handoff, messages))
+}
+
+/// Certify only the exact active handoff with a committed owner transcript receipt
+/// and an ordinary end_turn. Missing evidence is an unconfirmed outcome, not a
+/// successful delivery or an instruction to retry the prompt.
+pub fn confirm_active_tx(db: &Transaction<'_>, task: &str, channel: &str, reply: i64) -> CoreResult<bool> {
+    use rusqlite::OptionalExtension;
+    let evidence: Option<(i64, i64, String)> = db.query_row(
+        "SELECT h.id, c.id, transcript.text
+         FROM runtime_events s
+         JOIN runtime_events h ON h.task_id=s.task_id AND h.type='NATIVE_ACTIVE_STEER_HANDOFF'
+             AND h.id=json_extract(s.payload_json,'$.handoff')
+         JOIN runtime_events c ON c.task_id=s.task_id AND c.type='NATIVE_STEERING_REPLY_CHUNK'
+             AND c.id=json_extract(s.payload_json,'$.reply_chunk') AND h.id<c.id AND c.id<s.id
+             AND json_extract(c.payload_json,'$.handoff')=h.id
+         JOIN trusted_channels t ON t.task_id=s.task_id AND t.channel_id=?3 AND t.role='coordinator'
+             AND t.revoked_at IS NULL
+         JOIN task_owners o ON o.task_id=t.task_id AND o.epoch=t.owner_epoch
+         JOIN acp_host_sessions display ON display.task_id=s.task_id
+             AND display.session_id=json_extract(c.payload_json,'$.display_session')
+             AND (display.client_info='{\"name\":\"cortex-native\"}' OR json_extract(display.client_info,'$.name')='cortex-rust-acp')
+         JOIN host_transcript transcript ON transcript.session_id=display.session_id
+             AND transcript.seq=json_extract(c.payload_json,'$.seq') AND transcript.kind='agent_message'
+             AND substr(transcript.message_id,1,length(t.attempt_id)+1)=t.attempt_id||':'
+         WHERE s.task_id=?1 AND s.id=?2 AND s.type='NATIVE_TURN_SETTLED'
+             AND json_extract(s.payload_json,'$.channel_id')=?3
+             AND json_extract(h.payload_json,'$.channel_id')=?3
+             AND json_extract(c.payload_json,'$.channel_id')=?3
+             AND json_extract(s.payload_json,'$.stop_reason')='end_turn'
+             AND EXISTS(SELECT 1 FROM runtime_events a WHERE a.task_id=s.task_id
+                 AND a.type='NATIVE_ACTIVE_STEER_CHANNEL' AND a.id<h.id
+                 AND json_extract(a.payload_json,'$.channel_id')=?3)",
+        (task, reply, channel), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).optional()?;
+    let Some((handoff, chunk, text)) = evidence else { return Ok(false); };
+    if text.trim().is_empty() { return Ok(false); }
     let pending = pending(db, task)?;
+    let mut confirmed = false;
     for message in pending {
         let request = &message["request"];
         let in_turn: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND id<? AND type='STEERING_HANDED'
-             AND json_extract(payload_json,'$.channel_id')=? AND json_extract(payload_json,'$.request')=?)",
-            (task, reply, channel, request.as_str()), |r| r.get(0),
+            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND id>? AND id<? AND type='STEERING_HANDED'
+             AND json_extract(payload_json,'$.channel_id')=? AND json_extract(payload_json,'$.request')=?
+             AND json_extract(payload_json,'$.handoff')=?)",
+            (task, handoff, chunk, channel, request.as_str(), handoff), |r| r.get(0),
         )?;
         if in_turn {
             event_tx(db, task, "STEERING_APPLIED", json!({"request":request,"state":"EXECUTING","channel_id":channel}))?;
             event_tx(db, task, "STEERING_DELIVERED", json!({"request":request,"channel_id":channel,"reply_event":reply}))?;
+            confirmed = true;
         }
     }
-    Ok(())
+    Ok(confirmed)
 }
 
 pub fn source_was_handed(db: &Connection, task: &str, channel: &str, request: &str) -> CoreResult<bool> {
@@ -554,7 +608,7 @@ an explicit `deny-write:` path is already enforced by the runtime.")
         String::from("Owner input (oldest first; also retained in the capsule):")
     };
     if messages.iter().any(|m| m["repeated"] == true) {
-        out.push_str(" A message marked (repeated) was handed to an earlier turn whose reply was never observed; you may have seen it already.");
+        out.push_str(" A message marked (repeated) was handed to an earlier turn whose reply was not confirmed. Check retained state and do not repeat effects already committed.");
     }
     for (n, message) in messages.iter().enumerate() {
         out.push_str(&format!(

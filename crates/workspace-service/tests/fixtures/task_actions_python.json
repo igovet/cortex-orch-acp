@@ -3451,38 +3451,25 @@
       "runtime": null,
       "rows": [],
       "expected": {
-        "ok": true,
-        "result": {
-          "done": true
-        }
+        "ok": false,
+        "code": "invalid_task",
+        "message": "Unknown task."
       },
       "after": {
-        "tasks": {
-          "t1": {
-            "dependencies": [],
-            "planning": false,
-            "sprintId": "sp1",
-            "targetBranch": "main",
-            "targetInherited": true
-          }
-        },
+        "tasks": {},
         "sprints": [
           {
             "id": "sp1",
-            "pauseReason": "New task added. Continue the queue when ready.",
-            "queueState": "paused",
+            "queueState": "complete",
             "targetBranch": "main",
             "taskIds": [
-              "earlier",
-              "t1"
+              "earlier"
             ]
           }
         ],
         "drafts": {},
         "messages": [],
-        "comments": {},
-        "ghAvailable": "$GH_AVAILABLE",
-        "hasGit": false
+        "comments": {}
       },
       "observed": null
     },
@@ -4021,7 +4008,6 @@
             "dependencies": [
               "earlier"
             ],
-            "planning": false,
             "sprintId": "sp1",
             "targetBranch": "chosen"
           }
@@ -4039,9 +4025,7 @@
         ],
         "drafts": {},
         "messages": [],
-        "comments": {},
-        "ghAvailable": "$GH_AVAILABLE",
-        "hasGit": false
+        "comments": {}
       },
       "observed": {
         "tasks": [

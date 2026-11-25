@@ -27,6 +27,14 @@ use workspace_service::{
 
 struct Routes;
 impl NativeRoutes for Routes {
+    fn active_steering_timeout(&self, root: &Path) -> Duration {
+        if root.join(".git/steer-regression-timeout").exists() {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_secs(600)
+        }
+    }
+
     fn task_route(&self, root: &Path, settings: &Value) -> CoreResult<SessionRoute> {
         let mut route = self.route(root, "orchestrator")?;
         let model = settings["model"].as_str().unwrap();
@@ -1103,6 +1111,105 @@ async fn waiting_worker(variant: &str) {
     service.stop().await.unwrap();
     let _ = runner.await;
 }
+/// End-to-end live steering failures use real fake ACP processes and disposable
+/// Dev storage. A pending first handoff is never copied into a newer live prompt.
+async fn active_steering_regressions() {
+    use cortex_core::lifecycle::steering;
+    let f = Fixture::new();
+    let project = f.0.join("project");
+    let marker = |name: &str| project.join(".git").join(name);
+    std::fs::write(project.join("scenario.txt"), "active-steering-regression-hold").unwrap();
+    let service = Service::bind_native(f.config(), Arc::new(Routes)).await.unwrap();
+    let registered = service.register(&project, "Steering regressions").await.unwrap();
+    let id = registered["projectId"].as_str().unwrap();
+    service.activate(id).await.unwrap();
+    let runner = tokio::spawn(service.clone().serve());
+    let store = f.store();
+    let created = service.workspace(command(id, "tasks.create", json!(id), "create",
+        json!({"description":"Steering regression fixture","checkout":{"kind":"main"}}))).await.unwrap();
+    let started = service.workspace(command(id, "tasks.start", created["target"].clone(), "start",
+        json!({}))).await.unwrap();
+    let execution = started["target"].as_str().unwrap();
+    let count = |sql: &str| store.read(|db| Ok(db.query_row(sql, [], |r| r.get::<_, i64>(0))?)).unwrap();
+    let events = |event: &str| count(&format!("SELECT count(*) FROM runtime_events WHERE type='{event}'"));
+    let wait_for = async |name: &str, ready: &dyn Fn() -> bool| {
+        tokio::time::timeout(Duration::from_secs(12), async {
+            while !ready() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.unwrap_or_else(|_| {
+            let recent = store.read(|db| Ok(db.prepare("SELECT type,coalesce(json_extract(payload_json,'$.reason'),'')
+               FROM runtime_events ORDER BY id DESC LIMIT 25")?.query_map([], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?)))?
+               .collect::<Result<Vec<_>,_>>()?)).unwrap();
+            let refusal = std::fs::read_to_string(marker("steer-fixture-refused")).ok();
+            panic!("missing checkpoint {name}; refusal: {refusal:?}; recent: {recent:?}");
+        });
+    };
+    let active_with_state = |provisioning: &str, capacity: &str| count(&format!(
+        "SELECT count(*) FROM runtime_events e JOIN delegation_provisioning p
+         ON p.channel_id=json_extract(e.payload_json,'$.channel_id')
+         JOIN capacity_reservations r ON r.attempt_id=p.attempt_id
+         WHERE e.type='NATIVE_ACTIVE_STEER_CHANNEL' AND p.status='{provisioning}' AND r.state='{capacity}'"
+    ));
+    let pending = || store.read(|db| {
+        let task: String = db.query_row("SELECT task_id FROM runtime_tasks", [], |r| r.get(0))?;
+        steering::pending(db, &task)
+    }).unwrap();
+    let send = async |name: &str| service.prompt_execution(id, execution, name, Some(name), json!([])).await.unwrap();
+    wait_for("two workers held", &|| marker("steer-first-worker-held").exists() && marker("steer-second-held").exists()).await;
+    store.write(|db| {
+        db.execute_batch("CREATE TRIGGER fail_steering_display BEFORE INSERT ON host_transcript
+            WHEN NEW.text='Injected display failure' BEGIN SELECT RAISE(ABORT,'injected'); END;")?;
+        Ok(())
+    }).unwrap();
+    for (i, case) in ["max-tokens","max-turn-requests","empty","blank","ignored","persistence","valid"].into_iter().enumerate() {
+        send(case).await;
+        let n = i as i64 + 1;
+        wait_for(case, &|| active_with_state("terminated", "released") == n).await;
+        assert_eq!(events("NATIVE_ACTIVE_STEER_CHANNEL"), n, "{case}");
+        assert_eq!(events("STEERING_HANDED"), n, "{case}");
+        assert_eq!(events("STEERING_DELIVERED"), i64::from(case == "valid"), "{case}");
+        assert_eq!(pending().len(), if case == "valid" { 6 } else { i + 1 }, "{case}");
+        assert_eq!(count("SELECT count(*) FROM capacity_reservations WHERE kind='worker' AND state='reserved'"), 2);
+    }
+    assert_eq!(count("SELECT count(*) FROM host_transcript WHERE text='Injected display failure'"), 0);
+    assert_eq!(count("SELECT count(*) FROM host_transcript WHERE text='Committed owner reply'"), 1);
+    std::fs::write(marker("steer-regression-timeout"), "").unwrap();
+    send("silent").await;
+    wait_for("silent peer received exact prompt", &|| marker("steer-regression-silent").exists()).await;
+    wait_for("silent peer fenced and settled", &|| events("NATIVE_ACTIVE_STEER_EXPIRED") == 1
+        && active_with_state("terminated", "released") == 8).await;
+    assert_eq!(pending().len(), 7);
+    assert_eq!(events("STEERING_DELIVERED"), 1);
+    send("delayed").await;
+    wait_for("delayed peer received exact prompt", &|| marker("steer-regression-delayed").exists()).await;
+    wait_for("fenced peer entered its shutdown hold", &|| marker("steer-regression-cleanup-held").exists()).await;
+    assert_eq!(events("NATIVE_ACTIVE_STEER_EXPIRED"), 2);
+    assert_eq!(events("NATIVE_ACTIVE_STEER_CHANNEL"), 9);
+    assert_eq!(active_with_state("ready", "reserved"), 1);
+    assert_eq!(count("SELECT count(*) FROM trusted_channels c JOIN runtime_events e
+        ON c.channel_id=json_extract(e.payload_json,'$.channel_id')
+        WHERE e.type='NATIVE_ACTIVE_STEER_EXPIRED' AND c.revoked_at IS NOT NULL"), 2);
+    assert_eq!(pending().len(), 8);
+    assert_eq!(events("STEERING_DELIVERED"), 1);
+    std::fs::write(marker("steer-regression-release-workers"), "").unwrap();
+    // Make settlement remain delayed beyond a short observation window. The
+    // process supervisor still has its own bounded SIGKILL fallback.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(active_with_state("ready", "reserved"), 1);
+    assert_eq!(events("REVIEW_STARTED"), 0);
+    std::fs::write(marker("steer-regression-release-peer"), "").unwrap();
+    wait_for("released steering and review after both workers", &|| events("REVIEW_STARTED") == 1
+        && active_with_state("terminated", "released") == 9
+        && count("SELECT count(*) FROM runtime_nodes WHERE revision=1 AND stage='execution' AND status='completed'") == 2).await;
+    assert_eq!(events("ASSIGNMENT_RETRIED"), 0);
+    assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='STEERING_DELIVERED'
+        AND json_type(payload_json,'$.channel_id')='text'"), 1);
+    assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='STEERING_HANDED'
+        AND json_type(payload_json,'$.handoff')='integer'"), 9);
+    service.stop().await.unwrap();
+    runner.await.unwrap().unwrap();
+    println!("9 active-steering regression cases passed: two limited stops, empty, blank, ignored, persistence failure, valid, silent, delayed settlement");
+}
+
 /// A message the owner queues while a worker runs stays in the machine's queue and
 /// editable; no window is involved. The service takes it when the revision reaches
 /// its boundary, the coordinator receives it once, and the owner's facts show it
@@ -4759,6 +4866,15 @@ fn main() {
         }
     }
 
+    if mode == "active-steering-regression-probe" {
+        assert!(!namespace_host::assert_unavailable_view(), "the explicit steering probe needs the real plan-admission namespace");
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            tokio::time::timeout(Duration::from_secs(60), active_steering_regressions())
+                .await.expect("active steering regressions timed out");
+        });
+        return;
+    }
+
     if mode == "attachments-probe" {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             tokio::time::timeout(Duration::from_secs(60), attachments_journey())
@@ -4861,6 +4977,10 @@ fn main() {
         });
         println!("active steering: ordered replies, accepted plan amendment, exact-attempt guidance and the last-worker race");
         if mode == "active-steering-probe" { return; }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            tokio::time::timeout(Duration::from_secs(60), active_steering_regressions())
+                .await.expect("active steering regressions timed out");
+        });
     }
     if mode == "binary_journey" {
         tokio::runtime::Runtime::new().unwrap().block_on(async {

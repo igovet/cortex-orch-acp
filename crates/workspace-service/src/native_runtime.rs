@@ -3,8 +3,8 @@ use crate::{
     actor, failure,
     native_route_hold::{Attempt as RouteAttempt, RouteKey, LIMITED},
     native_sessions::{
-        LaunchInterrupts, LaunchTicket, NativeHost, SessionRole, SessionRoute, WorkerLaunch,
-        WorkerLaunchOrder,
+        LaunchInterrupts, LaunchTicket, NativeHost, SessionRole, SessionRoute, SteeringPrompt,
+        WorkerLaunch, WorkerLaunchOrder,
     },
     Service,
 };
@@ -47,6 +47,15 @@ impl ArchiveHold {
         .await
         .map_err(|_| CoreError::Refused("native_host_closed"))?
     }
+}
+
+/// Deadline for a live steering reply, not for its supervised cleanup.
+const ACTIVE_STEERING_TURN_BOUND: std::time::Duration = std::time::Duration::from_secs(600);
+
+enum TurnOutcome {
+    Ordinary,
+    SteeringConfirmed,
+    SteeringUnconfirmed,
 }
 
 static RETRY_WINDOW: std::sync::Mutex<Option<cortex_core::scheduler::retry::RetryWindow>> =
@@ -302,7 +311,31 @@ while IFS= read -r line; do
             printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"worker","configOptions":%s}}\n' "$id" "$config" ;;
         *'"method":"session/set_config_option"'*)
             printf '{"jsonrpc":"2.0","id":%s,"result":{"configOptions":%s}}\n' "$id" "$config" ;;
+        *'"method":"session/cancel"'*)
+            if [ -n "${held_prompt:-}" ]; then
+                printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"cancelled"}}\n' "$held_prompt"
+                held_prompt=
+            fi ;;
         *'"method":"session/prompt"'*)
+            if [ -f "$0/observe-guidance-load" ]; then
+                case "$line" in
+                    *'Coordinator guidance, oldest first'*)
+                        : > "$0/guided-$1" ;;
+                    *'\n\nShort"'*)
+                        : > "$0/answered-$1" ;;
+                    *'Your turn ended, but this assignment has no recorded result yet.'*)
+                        : ;;
+                    *)
+                        : > "$0/entered-$1"
+                        if [ "$1" = next ] && [ ! -f "$0/observe-open-question" ]; then
+                            held_prompt=$id
+                            continue
+                        fi
+                        while [ ! -f "$0/release-$1" ]; do /usr/bin/sleep .02; done ;;
+                esac
+                printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"
+                continue
+            fi
             if [ -f "$0/observe-owner-language" ]; then
                 instructions=$(printf '%s\n' "$CODEX_CONFIG" | /usr/bin/sed -n 's/.*"model_instructions_file":"\([^"]*\)".*/\1/p')
                 directive=no
@@ -655,7 +688,11 @@ done
             .await
             .unwrap()
             .unwrap();
-        runtime.steer_running(&task, &owner, cancelled).await.unwrap();
+        let through = runtime.active_steering_watermark(&task, 1).await.unwrap().unwrap();
+        assert!(matches!(
+            runtime.steer_running(&task, &owner, cancelled, 0, through).await.unwrap(),
+            TurnOutcome::SteeringUnconfirmed
+        ));
 
         assert_eq!(starts(&root), ["orchestrator", "orchestrator", "orchestrator"]);
         let observations = std::fs::read_to_string(root.join("owner-language")).unwrap();
@@ -674,6 +711,166 @@ done
             rows[0][1], rows[1][1],
             "answer must reuse the healthy coordinator process"
         );
+        tokio::task::spawn_blocking(move || drop(runtime)).await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn steering_guidance_reader_backpressure_preserves_running_prompt() {
+        guidance_reader_backpressure(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn steering_guidance_reader_backpressure_preserves_question_wait() {
+        guidance_reader_backpressure(true).await;
+    }
+
+    async fn guidance_reader_backpressure(question: bool) {
+        use cortex_core::lifecycle::{event_tx, waits};
+        use std::time::Duration;
+
+        let (runtime, owner, task, root) = fixture_with_routes(Arc::new(CapacityPeer)).await;
+        let executor = &runtime.host.executor;
+        let claims = capacity_claims(&runtime, &owner, &task).await;
+        std::fs::write(root.join("observe-guidance-load"), "").unwrap();
+        if question {
+            std::fs::write(root.join("observe-open-question"), "").unwrap();
+        }
+        let assignment = claims[0]["assignment_ref"].as_str().unwrap().to_owned();
+        let sibling = CapacityBatch::new();
+        let peer = launched(sibling.launch(&runtime, &owner, &claims[3])).await;
+        let sibling_job = tokio::spawn(async move {
+            let turn = peer.prompt("Hold sibling prompt").await;
+            let settled = peer.shutdown().await;
+            settled.unwrap();
+            turn.unwrap().stop_reason
+        });
+        entered(&root, "other").await;
+
+        let (_cancel, cancelled) = watch::channel(false);
+        let mut job = {
+            let (runtime, task, owner, assignment) = (
+                runtime.clone(), task.clone(), owner.clone(), assignment.clone(),
+            );
+            let route = CapacityPeer.route(&root, "next").unwrap();
+            tokio::spawn(async move {
+                runtime.turn_once(&task, &owner, SessionRole::Worker { assignment }, route,
+                    "Hold target prompt", cancelled, None).await
+            })
+        };
+        entered(&root, "next").await;
+        tokio::time::timeout(Duration::from_secs(5), runtime.host.guidance_read_idle.notified())
+            .await.expect("target's live prompt did not park its guidance observer");
+        let target = executor.write(move |db| {
+            let (channel, attempt): (String, String) = db.query_row(
+                "SELECT channel_id,attempt_id FROM delegation_provisioning WHERE task_id='t' AND idempotency_key=?",
+                [&assignment], |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let question_id = if question {
+                let form = waits::QuestionForm {
+                    question: "Which output?".into(), options: vec![json!("Short"), json!("Long")],
+                };
+                waits::request_tx_bound(db, "t", &channel, "guidance-load-question", &[form])?
+                    ["question_id"].as_str().map(str::to_owned)
+            } else {
+                None
+            };
+            Ok((attempt, question_id))
+        }).unwrap().await.unwrap().unwrap();
+        if question {
+            assert!(target.1.is_some());
+            std::fs::write(root.join("release-next"), "").unwrap();
+            tokio::time::timeout(Duration::from_secs(5), runtime.host.guidance_question_wait.notified())
+                .await.expect("target did not reach its assignment-local question wait");
+            tokio::time::timeout(Duration::from_secs(5), runtime.host.guidance_read_idle.notified())
+                .await.expect("target's open question did not park its guidance observer");
+        }
+
+        // Pin all four actual reader lanes, then fill each queue. Blocking
+        // readers release on timeout even if an assertion aborts the test.
+        let (entered, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        // The worker can enqueue a read between our submissions, so a
+        // single rotation of submissions need not occupy four different lanes.
+        for _ in 0..8 {
+            let (gate, entered) = (gate.clone(), entered.clone());
+            executor.read(move |_| {
+                let _ = entered.send(());
+                let (lock, wake) = &*gate;
+                let _guard = wake.wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(8), |open| !*open).unwrap();
+                Ok(())
+            }).unwrap();
+        }
+        for _ in 0..4 {
+            tokio::time::timeout(Duration::from_secs(5), observed.recv()).await.unwrap().unwrap();
+        }
+        for _ in 0..528 {
+            if let Err(error) = executor.read(|_| Ok(())) {
+                assert_eq!(error.code(), "busy");
+            }
+        }
+        for _ in 0..4 {
+            assert_eq!(executor.read(|_| Ok(())).unwrap_err().code(), "busy");
+        }
+        let (attempt, question_id) = target;
+        let guidance_id = executor.write(move |db| {
+            event_tx(db, "t", "NATIVE_COORDINATOR_GUIDANCE_QUEUED",
+                json!({"attempt":attempt,"text":"Use the short output","source_request":"steer-load"}))
+        }).unwrap().await.unwrap().unwrap();
+        runtime.host.guidance_changed.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(5), runtime.host.guidance_read_busy.notified())
+            .await.expect("guidance observer did not hit the saturated reader queue");
+        assert!(!job.is_finished());
+        assert!(!sibling_job.is_finished());
+        assert!(!root.join("guided-next").exists());
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+
+        tokio::select! {
+            biased;
+            _ = async {
+                while !root.join("guided-next").exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            } => {},
+            result = &mut job => panic!("worker ended before guidance reached it: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                panic!("guidance did not resume on the original worker");
+            },
+        }
+        if let Some(id) = question_id {
+            executor.write(move |db| {
+                let status: String = db.query_row(
+                    "SELECT status FROM pending_questions WHERE id=?", [&id], |row| row.get(0),
+                )?;
+                assert_eq!(status, "open");
+                waits::answer_tx(db, "t", &id, "Short", "text", None)?;
+                Ok(())
+            }).unwrap().await.unwrap().unwrap();
+            runtime.wake.notify_waiters();
+        }
+        end_provider_turn(job).await.unwrap();
+        assert_eq!(root.join("answered-next").exists(), question);
+        assert!(!sibling_job.is_finished());
+        std::fs::write(root.join("release-other"), "").unwrap();
+        assert_eq!(tokio::time::timeout(Duration::from_secs(5), sibling_job).await.unwrap().unwrap(), "end_turn");
+        assert_eq!(starts(&root), ["other", "next"]);
+        executor.read(move |db| {
+            let counts: (i64, i64, i64) = db.query_row(
+                "SELECT (SELECT count(*) FROM runtime_events WHERE type='NATIVE_COORDINATOR_GUIDANCE_SETTLED'
+                        AND json_extract(payload_json,'$.guidance_id')=? AND json_extract(payload_json,'$.outcome')='delivered'),
+                        (SELECT count(*) FROM runtime_events WHERE type='ASSIGNMENT_RETRIED'),
+                        (SELECT count(*) FROM capacity_reservations WHERE state='released')",
+                [guidance_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            assert_eq!(counts, (1, 0, 2));
+            let resumed: i64 = db.query_row(
+                "SELECT count(*) FROM runtime_events WHERE type='WORKER_WAIT_CHANGED'
+                    AND json_extract(payload_json,'$.status')='resumed'", [], |row| row.get(0),
+            )?;
+            assert_eq!(resumed, i64::from(question));
+            Ok(())
+        }).unwrap().await.unwrap().unwrap();
         tokio::task::spawn_blocking(move || drop(runtime)).await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1830,6 +2027,11 @@ pub fn seed_default_profile(
 }
 
 pub trait NativeRoutes: Send + Sync {
+    #[doc(hidden)]
+    fn active_steering_timeout(&self, _root: &Path) -> std::time::Duration {
+        ACTIVE_STEERING_TURN_BOUND
+    }
+
     fn default_language(&self) -> Option<String> {
         None
     }
@@ -2032,6 +2234,8 @@ pub(crate) struct Runtime {
     pub(super) routes: Arc<dyn NativeRoutes>,
     pub(super) controls: Mutex<()>,
     pub(super) command_controls: Mutex<()>,
+    pub(super) settings_controls: Arc<Mutex<()>>,
+    pub(super) settings_slots: Arc<tokio::sync::Semaphore>,
     pumps: Mutex<HashMap<String, Pump>>,
     pub(super) guidance: Mutex<HashMap<String, tokio::sync::mpsc::Sender<Value>>>,
     pub(super) worker_stops: Mutex<HashMap<String, (watch::Sender<bool>, watch::Receiver<bool>)>>,
@@ -2140,6 +2344,8 @@ impl Runtime {
                 routes,
                 controls: Mutex::new(()),
                 command_controls: Mutex::new(()),
+                settings_controls: Arc::new(Mutex::new(())),
+                settings_slots: Arc::new(tokio::sync::Semaphore::new(8)),
                 pumps: Mutex::new(HashMap::new()),
                 guidance: Mutex::new(HashMap::new()),
                 worker_stops: Mutex::new(HashMap::new()),
@@ -2193,20 +2399,16 @@ impl Runtime {
         if *self.stop.borrow() {
             return Err(failure("service_stopping"));
         }
-        self.host
-            .executor
-            .publication_wait(move |store| {
-                use cortex_core::workspace;
-                let receipt = match planning_sprint.as_deref() {
-                    Some(sprint) => workspace::create_sprint_planning_draft(
-                        store, &project, &actor(), &request, sprint,
-                    )?,
-                    None => workspace::create_draft(store, &project, &actor(), &request)?,
-                };
-                Ok(receipt.receipt)
-            })
-            .await
-            .map_err(err)
+        use cortex_core::workspace;
+        let executor = &self.host.executor;
+        match planning_sprint {
+            Some(sprint) => executor.publication_wait(move |store| {
+                Ok(workspace::create_sprint_planning_draft(store, &project, &actor(), &request, &sprint)?.receipt)
+            }).await,
+            None => executor.owner_publication(move |store| {
+                Ok(workspace::create_draft(store, &project, &actor(), &request)?.receipt)
+            }).await,
+        }.map_err(err)
     }
     pub(crate) async fn sprint_queue_snapshot(
         &self,
@@ -2679,7 +2881,8 @@ impl Runtime {
         cancelled: watch::Receiver<bool>,
         launch: Option<LaunchTicket>,
     ) -> CoreResult<()> {
-        self.turn_once_scoped(task, owner, role, route, prompt, cancelled, launch, None).await
+        self.turn_once_scoped(task, owner, role, route, prompt, cancelled, launch, None, None)
+            .await.map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2693,7 +2896,8 @@ impl Runtime {
         cancelled: watch::Receiver<bool>,
         mut launch: Option<LaunchTicket>,
         merge_handoff: Option<&str>,
-    ) -> CoreResult<()> {
+        steering: Option<SteeringPrompt>,
+    ) -> CoreResult<TurnOutcome> {
         // The task's settings must still be readable before any turn starts.
         self.task_settings(task).await?;
         let active_steering = matches!(role, SessionRole::ActiveSteering);
@@ -2772,13 +2976,13 @@ a question to the owner (question text and option labels). Write reports, report
             );
             let result = self.turn_once_attempt(
                 task, owner, role.clone(), route.clone(), &prompt, cancelled.clone(),
-                launch.take(), &mut attempt, merge_handoff,
+                launch.take(), &mut attempt, merge_handoff, steering,
             ).await;
             if active_steering || merge_handoff.is_some() || !matches!(&result, Err(error) if error.code() == LIMITED) {
                 return result;
             }
             if *self.stop.borrow() || *cancelled.borrow() {
-                return Ok(());
+                return Ok(TurnOutcome::Ordinary);
             }
             let channel = attempt.refused_channel.take().expect("confirmed provider refusal");
             if let SessionRole::Worker { assignment } = &mut role {
@@ -2801,7 +3005,7 @@ a question to the owner (question text and option labels). Write reports, report
                         launch = Some(order.push(assignment.clone(), self.host.capacity_changed.clone()));
                     }
                     // A durable pause, replan, or result wins over a retry.
-                    Err(error) if error.code() == "native_provider_retry_claim_changed" => return Ok(()),
+                    Err(error) if error.code() == "native_provider_retry_claim_changed" => return Ok(TurnOutcome::Ordinary),
                     Err(error) => return Err(error),
                 }
             }
@@ -2819,7 +3023,8 @@ a question to the owner (question text and option labels). Write reports, report
         launch: Option<LaunchTicket>,
         attempt: &mut RouteAttempt,
         merge_handoff: Option<&str>,
-    ) -> CoreResult<()> {
+        steering: Option<SteeringPrompt>,
+    ) -> CoreResult<TurnOutcome> {
         if self.archive_fenced(task, true).await? {
             return Err(CoreError::Refused("task_archived"));
         }
@@ -2862,16 +3067,45 @@ a question to the owner (question text and option labels). Write reports, report
                 }
                 match error.code() {
                     // No launch to settle. The batch reconciles the current task state.
-                    "native_task_interrupted" => return Ok(()),
+                    "native_task_interrupted" => return Ok(if active_steering {
+                        TurnOutcome::SteeringUnconfirmed
+                    } else {
+                        TurnOutcome::Ordinary
+                    }),
                     "native_worker_stopped_before_launch" => {
                         worker_done.send_replace(true);
-                        return Ok(());
+                        return Ok(TurnOutcome::Ordinary);
                     }
                     _ => return Err(error),
                 }
             }
         };
         driver.treat_refusal_as_degenerate();
+        if let Some(input) = steering {
+            let confirmed = if *stop.borrow_and_update() || *cancelled.borrow() {
+                Ok(false)
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = stop.changed() => Ok(false),
+                    _ = cancelled.changed() => Ok(false),
+                    _ = tokio::time::sleep_until(input.deadline) => driver.expire_steering().await,
+                    reply = driver.prompt_active_steering(prompt, input) => reply.map(|reply| reply.steering_confirmed),
+                }
+            };
+            // Neither the prompt deadline nor a worker ending can drop the owned
+            // shutdown. It observes process exit or records an ambiguous settlement.
+            let settled = driver.shutdown_managed(None).await;
+            if matches!(confirmed, Ok(true)) {
+                attempt.succeeded();
+            }
+            settled?;
+            return confirmed.map(|confirmed| if confirmed {
+                TurnOutcome::SteeringConfirmed
+            } else {
+                TurnOutcome::SteeringUnconfirmed
+            });
+        }
         // How the turn ended, as the runtime observed it; recorded for a worker below.
         let turn: CoreResult<&'static str> = if *stop.borrow_and_update() || *cancelled.borrow() {
             Err(CoreError::Refused("native_service_stopped"))
@@ -2880,14 +3114,6 @@ a question to the owner (question text and option labels). Write reports, report
         } else {
             tokio::select! {
                 result = async {
-                    if active_steering {
-                        let turn = driver.prompt(prompt).await?;
-                        if turn.stop_reason == "cancelled" {
-                            return Err(CoreError::Refused("active_steering_unconfirmed"));
-                        }
-                        attempt.succeeded();
-                        return Ok("turn_ended");
-                    }
                     let mut handled_refusal = if is_worker { driver.event_cursor().await? } else { 0 };
                     let mut continuations = 0;
                     self.guided_prompt(&driver, prompt, &mut guidance, is_worker).await?;
@@ -2908,21 +3134,27 @@ a question to the owner (question text and option labels). Write reports, report
                         use crate::native_sessions::SessionWait;
                         match driver.wait_state().await? {
                             SessionWait::Ready => { driver.continue_answer().await?; },
-                            SessionWait::Open(retry) => tokio::select! {
-                                _ = &mut wake => {},
-                                _ = tokio::time::sleep(retry.unwrap_or_default()), if retry.is_some() => {},
-                                // A worker process that dies while its question is open is
-                                // noticed now, not when the answer arrives. The turn ends
-                                // and the exited process is settled; the lost-worker path
-                                // then replaces the assignment and retires its wait.
-                                _ = driver.process_exited(), if is_worker => return Ok("process_exited"),
-                                next = driver.coordinator_guidance(true), if is_worker => {
-                                    driver.forward_coordinator_guidance(next?).await?;
-                                },
-                                Some(message) = guidance.recv() => {
-                                    let result = driver.prompt(&crate::native_owner_controls::guidance_prompt(&message)).await;
-                                    driver.guidance_delivery(message, result.is_ok(), false).await?;
-                                    result?;
+                            SessionWait::Open(retry) => {
+                                #[cfg(test)]
+                                if is_worker {
+                                    self.host.guidance_question_wait.notify_one();
+                                }
+                                tokio::select! {
+                                    _ = &mut wake => {},
+                                    _ = tokio::time::sleep(retry.unwrap_or_default()), if retry.is_some() => {},
+                                    // A worker process that dies while its question is open is
+                                    // noticed now, not when the answer arrives. The turn ends
+                                    // and the exited process is settled; the lost-worker path
+                                    // then replaces the assignment and retires its wait.
+                                    _ = driver.process_exited(), if is_worker => return Ok("process_exited"),
+                                    next = driver.coordinator_guidance(true), if is_worker => {
+                                        driver.forward_coordinator_guidance(next?).await?;
+                                    },
+                                    Some(message) = guidance.recv() => {
+                                        let result = driver.prompt(&crate::native_owner_controls::guidance_prompt(&message)).await;
+                                        driver.guidance_delivery(message, result.is_ok(), false).await?;
+                                        result?;
+                                    }
                                 }
                             },
                             _ if is_worker && continuations < 2 => {
@@ -2987,7 +3219,7 @@ a question to the owner (question text and option labels). Write reports, report
                 return Err(e);
             }
         }
-        Ok(())
+        Ok(TurnOutcome::Ordinary)
     }
     /// Records why a worker attempt that has no accepted result ended
     /// (`scheduler::retry::record_attempt_ending_tx`): the turn's end as the runtime
@@ -3230,8 +3462,8 @@ a question to the owner (question text and option labels). Write reports, report
             // Unlike ordinary continuation prompts, a Git handoff is not a
             // retryable input, even when a provider responds with a refusal.
             self.turn_once_scoped(
-                task, owner, SessionRole::Coordinator, route, &goal, cancelled.clone(), None, Some(request),
-            ).await
+                task, owner, SessionRole::Coordinator, route, &goal, cancelled.clone(), None, Some(request), None,
+            ).await.map(|_| ())
         } else {
             self.turn(task, owner, SessionRole::Coordinator, route, &goal, cancelled.clone()).await
         };
@@ -3429,6 +3661,7 @@ a question to the owner (question text and option labels). Write reports, report
         owner: &OwnerEpoch,
         cancelled: watch::Receiver<bool>,
     ) -> CoreResult<()> {
+        let mut failed_through = 0;
         loop {
             if *self.stop.borrow() || *cancelled.borrow() {
                 return Err(CoreError::Refused("native_service_stopped"));
@@ -3633,7 +3866,7 @@ a question to the owner (question text and option labels). Write reports, report
             let mut first: Option<CoreError> = None;
             let execution = step["state"] == "EXECUTING";
             let mut check_steering = execution;
-            let mut failed_through = 0;
+            let mut steering_read_busy = false;
             let mut started_through = 0;
             let mut live_steer = None;
             let wake = self.wake.notified();
@@ -3650,12 +3883,16 @@ a question to the owner (question text and option labels). Write reports, report
                     && !*batch_cancelled.borrow()
                 {
                     check_steering = false;
+                    steering_read_busy = false;
                     match self.active_steering_watermark(task, revision).await {
                         Ok(Some(at)) if at > failed_through => {
                             started_through = at;
-                            live_steer = Some(Box::pin(self.steer_running(task, owner, batch_cancelled.clone())));
+                            live_steer = Some(Box::pin(self.steer_running(
+                                task, owner, batch_cancelled.clone(), failed_through, at,
+                            )));
                         }
                         Ok(_) => {},
+                        Err(error) if error.code() == "busy" => steering_read_busy = true,
                         Err(error) => {
                             eprintln!("workspace-service: could not check active steering ({})", error.code());
                         }
@@ -3667,12 +3904,15 @@ a question to the owner (question text and option labels). Write reports, report
                     result = async { live_steer.as_mut().unwrap().await }, if live_steer.is_some() => {
                         live_steer = None;
                         check_steering = true;
-                        if let Err(error) = result {
-                            // A missing reply leaves the durable input pending. Do not
-                            // restart workers or spin paid retries; wait for newer owner
-                            // input or the safe boundary.
-                            failed_through = started_through;
-                            eprintln!("workspace-service: active steering did not settle ({})", error.code());
+                        match result {
+                            Ok(TurnOutcome::SteeringConfirmed) => {}
+                            Ok(TurnOutcome::SteeringUnconfirmed | TurnOutcome::Ordinary) => {
+                                failed_through = started_through;
+                            }
+                            Err(error) => {
+                                failed_through = started_through;
+                                eprintln!("workspace-service: active steering did not settle ({})", error.code());
+                            }
                         }
                         Ok(())
                     },
@@ -3686,6 +3926,8 @@ a question to the owner (question text and option labels). Write reports, report
                     _ = obstacle_tick.tick(), if execution && !*batch_cancelled.borrow()
                         && !turns.is_empty() && rechecking.is_none() => {
                         rechecking = Some(Box::pin(self.recheck_obstacles(task)));
+                        // Retry a rejected read admission, not an unconfirmed prompt.
+                        check_steering |= steering_read_busy;
                         continue;
                     },
                     result = async { rechecking.as_mut().unwrap().await }, if rechecking.is_some() => {
@@ -3744,21 +3986,29 @@ a question to the owner (question text and option labels). Write reports, report
         self.host.executor.read(move |db| {
             let executing: bool = db.query_row("SELECT state='EXECUTING' AND revision=? FROM runtime_tasks WHERE task_id=?",
                 (revision, &t), |r| r.get(0))?;
-            if !executing || cortex_core::lifecycle::automatic::held(db, &t)?
-                || cortex_core::lifecycle::steering::pending(db, &t)?.is_empty()
-            {
+            if !executing || cortex_core::lifecycle::automatic::held(db, &t)? {
                 return Ok(None);
             }
-            Ok(db.query_row("SELECT max(id) FROM runtime_events WHERE task_id=? AND type='USER_STEERING'",
-                [&t], |r| r.get(0))?)
+            cortex_core::lifecycle::steering::active_watermark(db, &t)
         })?.await.map_err(|_| CoreError::Refused("native_host_closed"))?
     }
 
-    async fn steer_running(&self, task: &str, owner: &OwnerEpoch, cancelled: watch::Receiver<bool>) -> CoreResult<()> {
+    /// Run one snapshot with an explicit outcome. Only the prompt is time-boxed;
+    /// the batch retains the session through fencing and supervised settlement.
+    async fn steer_running(
+        &self, task: &str, owner: &OwnerEpoch, cancelled: watch::Receiver<bool>, after: i64, through: i64,
+    ) -> CoreResult<TurnOutcome> {
         let route = self.coordinator_route(task, None).await?;
-        self.turn_once(task, owner, SessionRole::ActiveSteering, route,
-            "Handle the owner messages in this live steering snapshot and reply directly to the owner in chat.              Execution continues; this is not a completion or a planning turn.              Use the advertised steering tools only when an owner message warrants a change.              Keep unaffected work running. Do not claim worker instructions were applied from a queue receipt alone.",
-            cancelled, None).await
+        let input = SteeringPrompt {
+            after, through,
+            deadline: tokio::time::Instant::now() + self.routes.active_steering_timeout(&self.host.root),
+        };
+        self.turn_once_scoped(task, owner, SessionRole::ActiveSteering, route,
+            "Handle the owner messages in this live steering snapshot and reply directly to the owner in chat. \
+             Execution continues; this is not a completion or a planning turn. \
+             Use the advertised steering tools only when an owner message warrants a change. \
+             Keep unaffected work running. Do not claim worker instructions were applied from a queue receipt alone.",
+            cancelled, None, None, Some(input)).await
     }
 
     /// Close one worker turn of a batch. Every exit path, including a failed state read,

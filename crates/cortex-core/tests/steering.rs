@@ -273,44 +273,67 @@ fn active_consultation_plan_preserves_runtime_node_and_gates_new_work() {
 }
 
 #[test]
-fn an_unobserved_active_handoff_survives_and_only_its_own_reply_can_confirm() {
+fn an_unobserved_active_handoff_survives_and_only_its_own_committed_reply_can_confirm() {
+    use cortex_core::lifecycle::event_tx;
     let (_p, s) = setup();
     let (task, execution) = started(&s, 1);
     working(&s, &task, "EXECUTING", "execution");
     say(&s, &execution, "one", "First guidance").unwrap();
     say(&s, &execution, "two", "Second guidance").unwrap();
-    s.write(|db| {
-        let handed = steering::hand_active_tx(db, &task, "lost-steering-channel")?;
+    let abandoned = s.write(|db| {
+        let watermark = steering::active_watermark(db, &task)?.unwrap();
+        let (handoff, handed) = steering::hand_active_tx(db, &task, "lost", 0, watermark)?;
         assert_eq!(handed.iter().map(|m| &m["request"]).collect::<Vec<_>>(), vec![&json!("one"), &json!("two")]);
-        assert!(handed.iter().all(|m| m["repeated"] == false));
+        assert_eq!(steering::active_watermark(db, &task)?, None);
         assert_eq!(steering::confirm_tx(db, &task)?, 0);
-        assert_eq!(steering::pending(db, &task)?.len(), 2);
         assert_eq!(completion::pending_input_tx(db, &task)?.len(), 2);
-        // A reply from a different channel does not inherit an abandoned hand-off.
-        let unrelated = cortex_core::lifecycle::event_tx(db, &task, "NATIVE_TURN_SETTLED",
-            json!({"channel_id":"unrelated","stop_reason":"end_turn"}))?;
-        steering::confirm_active_tx(db, &task, "lost-steering-channel", unrelated)?;
-        assert_eq!(steering::pending(db, &task)?.len(), 2);
-        Ok(())
+        Ok(handoff)
     }).unwrap();
     say(&s, &execution, "three", "Third guidance").unwrap();
+    let (handoff, chunk) = s.write(|db| {
+        let channel = "current";
+        db.execute("INSERT INTO trusted_channels(channel_id,secret_hash,task_id,principal_thread_id,role,attempt_id,owner_epoch,issued_at)
+            VALUES (?,'x',?,'thread','coordinator','fixture-attempt',1,'now')", (channel, &task))?;
+        db.execute("INSERT INTO acp_host_sessions(session_id,project_root,task_id,client_info,client_capabilities,mcp_servers,created_at)
+            VALUES ('display','/fixture',?,'{\"name\":\"cortex-native\"}','{}','[]','now')", [&task])?;
+        event_tx(db, &task, "NATIVE_ACTIVE_STEER_CHANNEL", json!({"channel_id":channel}))?;
+        let through = steering::active_watermark(db, &task)?.unwrap();
+        let (handoff, handed) = steering::hand_active_tx(db, &task, channel, 0, through)?;
+        assert_eq!(handed.iter().map(|m| &m["request"]).collect::<Vec<_>>(), vec![&json!("three")]);
+        db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,message_id,created_at)
+            VALUES ('display',0,'agent_message','Visible reply','fixture-attempt:reply','now')", [])?;
+        let chunk = event_tx(db, &task, "NATIVE_STEERING_REPLY_CHUNK",
+            json!({"channel_id":channel,"handoff":handoff,"display_session":"display","seq":0}))?;
+        Ok((handoff, chunk))
+    }).unwrap();
+    say(&s, &execution, "four", "After the handoff").unwrap();
     s.write(|db| {
-        let handed = steering::hand_active_tx(db, &task, "replacement-steering-channel")?;
-        assert_eq!(handed.iter().map(|m| &m["repeated"]).collect::<Vec<_>>(), vec![&json!(true), &json!(true), &json!(false)]);
-        let channel = "replacement-steering-channel";
-        let cancelled = cortex_core::lifecycle::event_tx(db, &task, "NATIVE_TURN_SETTLED",
-            json!({"channel_id":channel,"stop_reason":"cancelled"}))?;
-        steering::confirm_active_tx(db, &task, channel, cancelled)?;
+        let channel = "current";
+        for (stop, linked_handoff, receipt) in [
+            ("cancelled", handoff, Some(chunk)),
+            ("max_tokens", handoff, Some(chunk)),
+            ("max_turn_requests", handoff, Some(chunk)),
+            ("end_turn", abandoned, Some(chunk)),
+            ("end_turn", handoff, None),
+            ("end_turn", handoff, Some(chunk + 10_000)),
+        ] {
+            let reply = event_tx(db, &task, "NATIVE_TURN_SETTLED",
+                json!({"channel_id":channel,"stop_reason":stop,"handoff":linked_handoff,"reply_chunk":receipt}))?;
+            assert!(!steering::confirm_active_tx(db, &task, channel, reply)?);
+        }
+        assert_eq!(completion::pending_input_tx(db, &task)?.len(), 4);
+        let reply = event_tx(db, &task, "NATIVE_TURN_SETTLED",
+            json!({"channel_id":channel,"stop_reason":"end_turn","handoff":handoff,"reply_chunk":chunk}))?;
+        assert!(!steering::confirm_active_tx(db, &task, "lost", reply)?);
+        assert!(steering::confirm_active_tx(db, &task, channel, reply)?);
+        assert!(!steering::confirm_active_tx(db, &task, channel, reply)?);
+        assert_eq!(steering::pending(db, &task)?.iter().map(|m| m["request"].as_str().unwrap().to_owned()).collect::<Vec<_>>(),
+            vec!["one", "two", "four"]);
         assert_eq!(completion::pending_input_tx(db, &task)?.len(), 3);
-        let reply = cortex_core::lifecycle::event_tx(db, &task, "NATIVE_TURN_SETTLED",
-            json!({"channel_id":channel,"stop_reason":"end_turn"}))?;
-        steering::confirm_active_tx(db, &task, channel, reply)?;
-        steering::confirm_active_tx(db, &task, channel, reply)?;
-        assert!(completion::pending_input_tx(db, &task)?.is_empty());
         Ok(())
     }).unwrap();
-    assert_eq!(count(&s, "STEERING_DELIVERED"), 3);
-    assert_eq!(count(&s, "STEERING_APPLIED"), 3);
+    assert_eq!(count(&s, "STEERING_DELIVERED"), 1);
+    assert_eq!(count(&s, "STEERING_APPLIED"), 1);
     assert_eq!(one(&s, "SELECT state FROM runtime_tasks"), "EXECUTING");
     assert_eq!(one(&s, "SELECT status FROM runtime_nodes"), "running");
 }

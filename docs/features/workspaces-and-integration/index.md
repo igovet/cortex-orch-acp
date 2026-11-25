@@ -6,6 +6,17 @@
 Worker changes target the canonical project root for incoming ACP or project-folder execution. In Workspace's [separate worktree mode](../../cortex-workspace/local-task-execution.md#separate-worktrees), they target the verified linked checkout instead. File and command evidence cannot cross checkout roots, even when the file bytes match.
 There are no hidden candidate copies or model-controlled integration operations.
 In Workspace, [closing a sprint](../../cortex-workspace/local-task-execution.md#editing-saved-tasks-and-closing-sprints) archives the sprint and its tasks without changing checkout files or branches. Incomplete started work, disputed completion and an ongoing merge or pull-request operation block closure. Drafts can be archived without starting, and existing purge safeguards still protect unmerged work.
+
+Creating a sprint task first saves the draft, then links that same task to the
+sprint. If the link is not confirmed, refresh the project and check the saved
+draft before retrying. Replaying the same create request returns the same draft;
+linking its existing membership again does not add a duplicate. Linking has
+four machine-wide slots separate from general machine actions; it still requires
+the machine-state lock and a valid sprint and task. Draft creation and active
+model/effort settings use [reserved writer capacity](../../project/storage.md#storage-and-recovery)
+without changing the order of accepted writer work. Live model and effort
+choices take effect at the next use, not in a prompt already in progress.
+
 The runtime reserves dependency-ready scopes and runs at most four workers in
 one chat session across all engines, roles and connections. Excess dependency-
 ready nodes remain pending until a worker slot is free. A connection's
