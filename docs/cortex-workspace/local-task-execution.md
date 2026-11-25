@@ -1652,16 +1652,24 @@ removes them with the sprint.
 
 #### Sprint planning conversation
 
-A sprint whose planning runs as its own read-only planning task (the sprint
-names it as `planningTaskId`) shows that task inside the sprint, never as a
-task of its own. The sprint page has **Conversation**, **Workers**, **Plan**,
-**Board** and **Summary**. Conversation is the planning task's conversation
-drawn with the same parts as any task's: the coordinator's messages, the
-folded "Worked …" steps, question and permission cards, the workers bar and
-the task composer. It starts with the sprint's description, not the planner's
-instructions, and ends with the proposed plan's line (**Open plan**) and any
-note the service wrote about planning, such as a failure or a time limit.
-Workers is the planning task's Work details, with each worker's activity.
+**New Sprint** uses the same description editor as **New Task**: type `/`
+for project skills or `@` for project files, and use the same attachment,
+dictation and keyboard controls. Neither form offers commands that need an
+active task. **Start planning** opens the sprint's **Conversation**.
+
+Conversation uses the task layout from the first frame. It starts with the
+sprint brief and shows whether planning is starting or its conversation is
+still loading. For an older, stopped or failed sprint, saved notes, messages
+and questions stay in that same feed, with Resume planning or the applicable
+Retry planning and Change request controls. Text and attachments in the
+composer stay in place as the planner becomes available.
+
+Once the linked read-only planner is available, Conversation also shows its
+coordinator messages, folded "Worked …" steps, questions, permission cards
+and workers bar. The sprint brief takes the place of the planner's internal
+instructions, and the proposed plan has an **Open plan** link. **Workers**
+opens the linked planner's work details. **Plan**, **Board** and **Summary**
+stay separate from the conversation.
 
 A message from the composer asks for changes to the plan and continues the same
 planning task; **Create tasks** waits for the revised plan. Answers, **Stop**,
@@ -1669,13 +1677,14 @@ planning task; **Create tasks** waits for the revised plan. Answers, **Stop**,
 sprint's planning state changes with them. Sending closes once the tasks are
 created. The plan is reviewed, edited and approved on the Plan tab as before.
 
-The planning task has no sidebar row, board card, list row, count, Inbox row,
-search result or desktop notification of its own, and no Git or commit
-action is offered for it. Its open question or permission makes the sprint
-read **Needs you** and gives the sprint one Inbox row; a notification about it
-opens the sprint's Conversation, and any address of the planning task opens
-its sprint (its Workers tab for a worker address). A sprint planned without such
-a task keeps its earlier **Chat** tab and planning conversation.
+The planning task has no sidebar row, board card, list row, count or search
+result of its own. The service identifies new planning drafts before the
+sprint links them, and the offline board preview preserves that identity and
+any existing sprint link. No Git or commit action is offered for the planner.
+A linked planner's open question or permission makes the sprint read **Needs
+you** and gives the sprint one Inbox row. A notification about linked
+planning opens the sprint's Conversation, and an address for the linked
+planner opens its sprint (Workers for a worker address).
 
 ### Already in the branch and external completion
 

@@ -693,9 +693,10 @@ not-run self-reported checks are listed as notes on the result and do not block 
 failure, a policy-blocked check or failed runtime verification
 still does. Sprint creation offers Project folder or Separate worktree, just like a single task. All tasks
 created from its plan inherit that choice; worktree mode prepares a separate worktree per task on explicit
-start. Sprint planning produces a description-only plan without starting implementation. The planning chat
-explains unusable output or engine setup failure, and the cancelled banner offers Resume planning; Create
-tasks saves drafts, and only an explicit task/queue start executes them. Planned tasks carry only their
+start. New Sprint supports project `/skills` and `@files` like New Task. The sprint opens directly in
+Conversation, with the brief and startup status while the read-only planner loads. The planner stays out
+of the sidebar; saved history and recovery actions remain on the sprint. Create tasks saves drafts, and
+only an explicit task/queue start executes them. Planned tasks carry only their
 own item's scope and relevant plain-text owner answers, not sibling work or internal conversation records.
 Explicit unanswered owner questions belong to the relevant item. Review previews new text files as
 additions, preserves the implementation summary on no-file follow-ups, and retains unchanged missing-tool

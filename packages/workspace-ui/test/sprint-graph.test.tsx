@@ -368,14 +368,14 @@ describe("dimmed graph text", () => {
 });
 
 describe("the sprint's tabs", () => {
-  it("offers Chat, Plan, Board and Summary once each, and gives the chat and the plan the whole width", async () => {
+  it("offers Conversation, Plan, Board and Summary once each, and gives Conversation and Plan the whole width", async () => {
     resize(1280);
     await open(sprint(), [], "list");
-    expect(all(".tabs [role=tab]").map(t => t.textContent?.trim())).toEqual(["Chat", "Plan", "Board", "Summary"]);
+    expect(all(".tabs [role=tab]").map(t => t.textContent?.trim())).toEqual(["Conversation", "Plan", "Board", "Summary"]);
     expect($(".tabs [aria-selected=true]")?.textContent).toBe("Plan");
     expect($(".sp-plan-h [aria-label='Planning conversation']")).toBeNull();
     all<HTMLAnchorElement>(".tabs [role=tab]")[0].click(); await settled();
-    expect($(".tabs [aria-selected=true]")?.textContent).toBe("Chat");
+    expect($(".tabs [aria-selected=true]")?.textContent).toBe("Conversation");
     expect($<HTMLElement>(".sp-conv")!.hidden).toBe(false);
     expect($<HTMLElement>(".sp-plan")!.hidden).toBe(true);
     expect($(".sp-body")?.getAttribute("style")).toContain("grid-template-columns: minmax(0, 1fr)");
@@ -403,7 +403,7 @@ describe("the sprint's tabs", () => {
 });
 
 describe("Request changes and the plan's other versions", () => {
-  it("leaves Full view, opens the Chat tab and puts the cursor in it, keeping the pick", async () => {
+  it("leaves Full view, opens the Conversation tab and puts the cursor in it, keeping the pick", async () => {
     resize(1440);
     await open(sprint());
     button("Full view")!.click(); await settled();

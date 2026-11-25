@@ -244,12 +244,11 @@ export const orderOf = (index: Pick<WorkspaceIndex, "orders">, sprint: Sprint | 
  */
 export const planningTaskIds = (state: Pick<WorkspaceState, "sprints" | "tasks">) => new Set([
   ...state.sprints.flatMap(s => s.planningTaskId ? [s.planningTaskId] : []),
-  ...state.tasks.filter(t => t.retiredPlanner === true).map(t => t.id),
+  ...state.tasks.filter(t => !!t.planningSprintId || t.retiredPlanner === true).map(t => t.id),
 ]);
 /** The sprint a planning task plans, or null for any other task. */
 export const planningSprintOf = (state: Pick<WorkspaceState, "sprints">, taskId: string) => state.sprints.find(s => s.planningTaskId === taskId) ?? null;
-/** The task planning this sprint, when the runtime has it as a task. A sprint saved by an earlier version plans without one
- *  (or with a hidden run that is not a task): its planning chat is the sprint's own. */
+/** The linked planner, when its task row is available. A classified draft alone is not the active planner. */
 export const planningTaskOf = (state: Pick<WorkspaceState, "tasks">, sprint: Pick<Sprint, "planningTaskId">) =>
   sprint.planningTaskId && state.tasks.some(t => t.id === sprint.planningTaskId) ? sprint.planningTaskId : null;
 /** The open questions and permissions of a sprint's planning task: they wait on the owner as the sprint's, never as a task's. */

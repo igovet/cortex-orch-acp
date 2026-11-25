@@ -16,9 +16,9 @@ export function planningAsks(sprint: Sprint, session: TaskSession | undefined): 
 
 export type ThreadEntry = { key: string; kind: "qa" | "note" | "message" | "event"; text: string; question?: string; at: number | null; attachments?: AttachmentInput[] };
 /** The planning conversation in order. A settled question reads with its answer, however each side was recorded. */
-export function planningThread(sprint: Sprint, session: TaskSession | undefined): ThreadEntry[] {
+export function planningThread(sprint: Sprint, session: TaskSession | undefined, showQuestion: boolean): ThreadEntry[] {
   const asked = (session?.decisions ?? []).filter(d => d.kind === "question");
-  const settled = asked.filter(d => d.answer && !d.held), open = openPlanningQuestion(sprint), out: ThreadEntry[] = [];
+  const settled = asked.filter(d => d.answer && !d.held), open = showQuestion ? openPlanningQuestion(sprint) : null, out: ThreadEntry[] = [];
   let question: string | null = null;
   const flush = (key: string) => { if (question !== null) out.push({ key: `note:${key}`, kind: "note", text: question, at: null }); question = null; };
   sprint.conversation.forEach((entry, i) => {

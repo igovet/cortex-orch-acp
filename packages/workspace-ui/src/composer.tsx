@@ -1,6 +1,6 @@
 import { plainChoice, classifiedPlanningFailure, stoppedPlanningComposerText } from "./selectors";
 import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, useContext, type Accessor, type JSX } from "solid-js";
-import { capabilityOf, FEATURES, machineEffort, orderedEfforts, resolveEffort, type Attachment, type AttachmentInput, type AttachmentRef, type Message, type SessionOptions, type TaskSettings, type WorkspaceCommand } from "@cortex/workspace-domain";
+import { capabilityOf, FEATURES, machineDefaults, machineEffort, orderedEfforts, resolveEffort, type Attachment, type AttachmentInput, type AttachmentRef, type Message, type SessionOptions, type TaskSettings, type WorkspaceCommand } from "@cortex/workspace-domain";
 import { attachmentFile, attachmentName, attachmentPreview, attachmentRef, keepBytes, readAttachments, wireAttachments } from "./attachments";
 import { autoGrow } from "./autogrow";
 import { useWs } from "./ctx";
@@ -467,23 +467,27 @@ function Delivery(props: { value: "send_now" | "queue"; onChange: (value: "send_
  * Stop, Resume and Start stay in the task's "…" menu too. While a question waits, it folds to one line so a general message is
  * never mistaken for an answer. The dock stands below the conversation in the panel's column, never over it.
  */
-export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Element; folded?: boolean }) {
+export function Composer(props: { model: Accessor<SessionModel | null>; team?: JSX.Element; folded?: boolean; onUnsent?: (unsent: boolean) => void }) {
   const ws = useWs();
-  const m = () => props.model();
+  const planning = usePlanningSprint();
+  // A sprint owns one draft and editor even before its planner exists or after it is replaced.
+  const m = () => props.model()!;
   const id = () => m().view.id;
-  const mode = () => m().mode;
-  const [text, setText] = createSignal(ws.drafts.get(id()) ?? "");
-  const write = (value: string) => { setText(value); ws.drafts.set(id(), value); };
+  const mode = () => props.model()?.mode;
+  const draftKey = () => { const s = planning(); return s ? `sprint:${s.id}` : id(); };
+  const [text, setText] = createSignal(ws.drafts.get(draftKey()) ?? "");
+  const write = (value: string) => { setText(value); ws.drafts.set(draftKey(), value); };
   const mic = createDictation();
   const files = createAttachments();
-  createUnsent(() => !!text().trim() || files.files().length > 0);
+  const unsent = () => !!text().trim() || files.files().length > 0;
+  createUnsent(unsent);
+  createEffect(() => props.onUnsent?.(unsent()));
   const now = () => ws.store.clock();
   const [delivery, setDelivery] = createSignal<"send_now" | "queue">("send_now");
   const [opened, setOpened] = createSignal(false);
   // The task planning a sprint is written to through its sprint's planning: a message asks for changes to the plan and
   // continues the same task, Stop pauses planning and Resume continues it. Sending stays open while the plan waits for
   // approval, and closes once its tasks are created.
-  const planning = usePlanningSprint();
   const changingRequest = useContext(PlanningPlace)?.changingRequest ?? (() => false);
   const binding = () => planning() ? null : reworkBinding(m().view);
   const [rework, setRework] = createSignal(false);
@@ -495,17 +499,18 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
     const s = planning();
     if (!s) return undefined;
     if (s.planning === "created") return "Tasks are created. Edit them on the Board.";
-    if (mode() === "offline" || mode() === "unconfirmed") return CLOSED_TEXT[mode()];
+    const currentMode = mode();
+    if (currentMode === "offline" || currentMode === "unconfirmed") return CLOSED_TEXT[currentMode];
     if (s.planning === "cancelled") return changingRequest() ? undefined : stoppedPlanningComposerText(s);
-    return mode() === "draft" ? "Planning is starting." : undefined;
+    return undefined;
   };
-  const queueIds = createMemo(() => m().queue.map(q => q.id));
-  const showQueue = () => !planning() && ["live", "paused", "stopping"].includes(mode()) && queueIds().length + queueSending().length > 0;
+  const queueIds = createMemo(() => props.model()?.queue.map(q => q.id) ?? []);
+  const showQueue = () => !planning() && ["live", "paused", "stopping"].some(state => state === mode()) && queueIds().length + queueSending().length > 0;
   // The message leaves the field as it is sent and reads at once where it went; a send that does not arrive keeps it there,
   // with Retry and Edit, so its text and files are never lost.
   const done = () => { write(""); files.clear(); };
   const send = (value: string) => {
-    if (!value.trim() || files.busy()) return;
+    if (!value.trim() || files.busy() || planning() && (planningOff() || planningPending() || mode() === "stopping")) return;
     const attachments = files.files();
     const target = binding();
     if (target) {
@@ -549,7 +554,8 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
   // A message taken back from a send that did not arrive returns to this field, beside whatever is written there now.
   createEffect(() => {
     const s = planning();
-    const back = (s ? ws.store.sends.returned({ kind: "sprint", sprintId: s.id }) : null) ?? ws.store.sends.returned({ kind: "task", taskId: id() }) ?? ws.store.sends.returned(queuePlace());
+    const back = (s ? ws.store.sends.returned({ kind: "sprint", sprintId: s.id }) : null)
+      ?? (props.model() ? ws.store.sends.returned({ kind: "task", taskId: id() }) ?? ws.store.sends.returned(queuePlace()) : null);
     if (!back) return;
     ws.store.sends.take();
     write(text().trim() ? `${text().trimEnd()}\n${back.text}` : back.text); files.add(back.attachments ?? []);
@@ -559,7 +565,7 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
     : reworkPending() ? "Sending and reopening…"
     : mode() === "archived" ? CLOSED_TEXT.archived
     : binding() ? reworking() ? undefined : `Use ${REWORK_LABEL} to reopen this task.`
-    : rework() && mode() !== "live" ? "Rework is no longer available. Recheck the task before sending." : CLOSED_TEXT[mode()];
+    : rework() && mode() !== "live" ? "Rework is no longer available. Recheck the task before sending." : CLOSED_TEXT[m().mode];
   const empty = () => !text().trim() && files.files().length === 0;
   // Something of this task runs now: its coordinator works or a worker does. A task waiting for the owner, or held after an
   // interruption, runs nothing, so it has no Stop here.
@@ -573,7 +579,7 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
     if (s.planning === "created" || changingRequest() || (s.planning === "cancelled" && s.planningFailure)) return null;
     if (mode() === "stopping" && empty()) return { label: "Stopping", icon: "loader", why: STOPPING, go: () => undefined, effect: "Stopping planning. Messages can be sent once the stop is confirmed." };
     if (s.planning === "cancelled" || (mode() === "paused" && empty())) return { label: "Resume", icon: "play", needs: "resume_planning", go: resumePlanning, effect: "Resume continues planning." };
-    if (running() && empty()) return { label: "Stop", icon: "stop", needs: "cancel_planning", go: stopPlanning, effect: "Stop pauses planning and keeps the conversation; Resume continues it. Write a message to send it instead." };
+    if ((running() || (!props.model() && s.planning === "planning")) && empty()) return { label: "Stop", icon: "stop", needs: "cancel_planning", go: stopPlanning, effect: "Stop pauses planning and keeps the conversation; Resume continues it. Write a message to send it instead." };
     return null;
   };
   /** The run control the action button is with an empty field, or none: then it sends. */
@@ -589,13 +595,18 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
       // A pause whose stop or process exit is not confirmed cannot be resumed yet: Resume stays off and says why.
       : { label: "Resume", icon: "play", why: resumeState(m().view)?.why || "This task cannot be resumed now", go: () => undefined, effect: resumeState(m().view)?.why || "This task cannot be resumed now" }
     : null;
-  const plane = (): { label: string; needs: WorkspaceCommand["type"] } => planning() ? { label: changingRequest() ? (classifiedPlanningFailure(planning()!) ? "Send amendment and retry" : "Send and resume planning") : "Send message now", needs: "plan_message" }
+  const plane = (): { label: string; needs: WorkspaceCommand["type"] } => planning() ? { label: changingRequest() ? (classifiedPlanningFailure(planning()!) ? "Send amendment and retry" : "Send and resume planning") : props.model() ? "Send message now" : "Send to the planner", needs: "plan_message" }
     : reworking() ? { label: "Send and reopen", needs: "rework_task" }
     : mode() === "review" ? { label: "Send and reopen", needs: "request_changes" }
     : mode() === "paused" ? { label: "Send and resume", needs: "send_message" }
     : delivery() === "queue" && mode() === "live" ? { label: "Queue message", needs: "send_message" }
     : { label: "Send message now", needs: "send_message" };
-  const sendWhy = () => mode() === "stopping" ? STOPPING : files.busy() ? "Attachments are still loading" : text().trim() ? reworking() && [...text()].length > 32_000 ? "Write no more than 32,000 characters" : undefined : "Write a message first";
+  const planningPending = () => {
+    const s = planning();
+    return s && !changingRequest() && (mode() === "draft" || (s.planning === "planning" && s.planningTaskId && !props.model()))
+      ? mode() === "draft" ? "Planning is starting." : "Loading the planning conversation…" : undefined;
+  };
+  const sendWhy = () => mode() === "stopping" ? STOPPING : planningPending() ?? (files.busy() ? "Attachments are still loading" : text().trim() ? reworking() && [...text()].length > 32_000 ? "Write no more than 32,000 characters" : undefined : "Write a message first");
   const planningEffect = () => control()?.effect ?? (changingRequest() ? (classifiedPlanningFailure(planning()!) ? "Sending your amendment starts planning again." : "Sending your changes resumes planning.") : props.folded ? "To the planner, not an answer to the question."
     : planning()!.planning === "ready" ? "Sending asks for changes to the plan. Create tasks waits for the revised plan." : undefined);
   const effect = () => planning() ? planningEffect() : reworking() ? "Sending reopens this task for rework" : control()?.effect ?? (mode() === "review" ? "Sending requests changes and reopens this task. Acceptance of this result is cleared."
@@ -604,6 +615,7 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
   const placeholder = () => mode() === "stopping" ? "Sending returns once the stop is confirmed" : SUGGEST_HINT;
   // `/` runs what this screen already offers: the title band's Stop or Resume, the delivery choice, the task's areas and New task.
   const commands = (): SlashCommand[] => {
+    if (!props.model()) return [];
     const v = m().view, at = (tab: "workers" | "changes" | "code") => () => ws.go({ name: "task", machine: v.machine.id, task: id(), tab });
     const demo = ws.store.mode === "demo";
     const s = planning();
@@ -631,7 +643,7 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
   let input: HTMLTextAreaElement | undefined;
   const shown = useContext(ScreenActive);
   createEffect(() => {
-    if (!shown() || ws.reworkIntent?.()?.taskId !== id() || !binding()) return;
+    if (!shown() || !props.model() || ws.reworkIntent?.()?.taskId !== id() || !binding()) return;
     setRework(true);
     setReworkError("");
     ws.dismissRework();
@@ -642,7 +654,7 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
     <Show when={showQueue()}>
       <div class="queue" role="group" aria-label="Queued messages, not sent">
         <div class="queue-h"><I n="queue" s={14} class="faint" />Queued {queueIds().length + queueSending().length}, not sent yet<span class="warn">Saved on this machine · not sent</span></div>
-        <For each={queueIds()}>{qid => <QueueRow message={() => m().queue.find(q => q.id === qid)!} ids={queueIds} mode={mode} onEdit={message => { write(text().trim() ? `${text().trimEnd()}\n${message.text}` : message.text); files.add(message.attachments ?? []); queueMicrotask(() => input?.focus()); }} />}</For>
+        <For each={queueIds()}>{qid => <QueueRow message={() => m().queue.find(q => q.id === qid)!} ids={queueIds} mode={() => m().mode} onEdit={message => { write(text().trim() ? `${text().trimEnd()}\n${message.text}` : message.text); files.add(message.attachments ?? []); queueMicrotask(() => input?.focus()); }} />}</For>
         {/* A message being queued stands at the end of the queue from the press until the machine's row takes its place. */}
         <For each={queueSending().map(e => e.key)}>{key => <Show when={queueSending().find(e => e.key === key)}>{e => <div class="qrow" data-sent={e().state}>
           <I n={e().state === "failed" ? "alert" : "loader"} s={14} class={e().state === "failed" ? "st-bad" : "spin ws-wait"} />
@@ -659,16 +671,16 @@ export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Elem
     </Show>
     {props.team}
     <Show when={!folded()} fallback={<div class="mc-fold"><button type="button" class="btn btn-line" onClick={() => { setOpened(true); queueMicrotask(() => input?.focus()); }}><I n="message" />Send a separate message</button></div>}>
-      <Show when={mode() === "draft"}><RequestStatus text={ws.store.pendingTask("start_task", id()) ? REQUESTING.start_task : undefined} /></Show>
+      <Show when={!planning() && mode() === "draft"}><RequestStatus text={ws.store.pendingTask("start_task", id()) ? REQUESTING.start_task : undefined} /></Show>
       <Show when={reworkError()}><div class="mc-effect st-bad" role="alert">{reworkError()}</div></Show>
-      <MessageComposer group="Task composer" label="Message" placeholder={placeholder()} text={text()} onText={write} files={files} mic={mic}
-        suggest={{ projectId: m().view.project.id, taskId: id(), commands, skills: true }}
+      <MessageComposer group="Task composer" label={planning() ? "Message the planner" : "Message"} inputId={planning() ? "ws-plan-input" : undefined} placeholder={placeholder()} text={text()} onText={write} files={files} mic={mic}
+        suggest={{ projectId: planning()?.projectId ?? m().view.project.id, taskId: props.model()?.view.id, commands: props.model() ? commands : undefined, skills: true }}
         effect={effect()} off={readOnly()} attachOff={mode() === "stopping" ? STOPPING : undefined} voiceOff={mode() === "stopping" ? STOPPING : undefined}
         inputRef={el => { input = el; }}
         route={<Show when={planning()} fallback={<RouteBar id="task" up needs="set_task_settings" settings={taskSettings(m())} disabled={readOnly() || mode() === "stopping" ? "Unavailable for this task now" : undefined}
           onChange={settings => ws.run({ type: "set_task_settings", taskId: id(), settings: { ...taskSettings(m()), ...settings } })} />}>{s =>
           // The planner's model is the sprint's, changed for the planning task and every later planning pass at once.
-          <RouteBar id="task" up needs="set_sprint_settings" settings={taskSettings(m())} disabled={readOnly() || mode() === "stopping" ? "Unavailable for planning now" : undefined}
+          <RouteBar id="task" up needs="set_sprint_settings" settings={props.model() ? taskSettings(m()) : { ...machineDefaults(ws.machine()).settings, ...s().settings }} disabled={(props.model() && readOnly()) || mode() === "stopping" ? "Unavailable for planning now" : undefined}
             onChange={settings => ws.run({ type: "set_sprint_settings", sprintId: s().id, settings })} />}</Show>}
         delivery={<Show when={mode() === "live" && !planning()}><Delivery value={delivery()} onChange={setDelivery} off={ws.gate("send_message")} /></Show>}
         send={control() ? { label: control()!.label, needs: control()!.needs, why: control()!.why, go: control()!.go, run: { icon: control()!.icon } }

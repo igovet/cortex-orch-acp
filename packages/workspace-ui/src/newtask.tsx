@@ -195,8 +195,8 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
     </Pop></Show>
 
     {/* The plane saves a draft, or for a sprint starts planning. Saving never starts the task: Start now below is its own explicit choice. */}
-    <div ref={form}><MessageComposer label={kind() === "sprint" ? "Describe the sprint" : "Describe the task"} placeholder={kind() === "sprint" ? "Describe the sprint, tag @files…" : "Describe the task. Tag @files, use /skills, paste images and logs, or attach files."}
-      suggest={projectId() ? { projectId: projectId()!, skills: kind() !== "sprint" } : undefined}
+    <div ref={form}><MessageComposer label={kind() === "sprint" ? "Describe the sprint" : "Describe the task"} placeholder={kind() === "sprint" ? "Describe the sprint. Tag @files, use /skills, paste images and logs, or attach files." : "Describe the task. Tag @files, use /skills, paste images and logs, or attach files."}
+      suggest={projectId() ? { projectId: projectId()!, skills: true } : undefined}
       text={text()} onText={write} files={files} mic={mic} autofocus sendKey="mod-enter" attachOff={saving() ? "Saving…" : undefined}
       route={<RouteBar id="new" options={options()} disabled={ws.can(FEATURES.taskRoute) ? undefined : ws.t("machineRoute")} settings={settings()} onChange={patch => { routePicked = true; setSettings({ ...settings(), ...patch }); }} />}
       send={kind() === "sprint" ? { label: "Start planning", needs: "create_sprint", go: () => submit(false, plane()) } : { label: "Save draft", needs: "create_task", go: () => submit(false, plane()) }} /></div>

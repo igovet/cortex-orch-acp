@@ -829,14 +829,6 @@ body[data-filter="errors"] [data-k]:not([data-k~="errors"]) { display: none; }
 .sp-body > * { min-width: 0; min-height: 0; }
 @media (min-width: 1800px) { .sp-body { grid-template-columns: 520px minmax(0, 1fr); } }
 @media (max-width: 720px) { .sp-body { grid-template-columns: minmax(0, 60%) minmax(0, 1fr); } }
-.sp-conv { position: relative; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
-.sp-conv .tl-in { padding: 12px 14px 16px; font-size: var(--t-sec); }
-.sp-conv .ai { font-size: var(--t-ui); line-height: 21px; }
-.sp-conv .mine { font-size: var(--t-sec); line-height: 19px; max-width: 86%; }
-.sp-conv .dock { padding: 0 25px 10px; max-width: none; }
-.sp-conv .composer textarea { height: 40px; padding: 9px 12px 0; font-size: var(--t-sec); }
-.sp-conv .c-bar { min-height: 36px; padding: 4px 6px; }
-.sp-conv .dc-opts { grid-template-columns: minmax(0, 1fr); }
 .sp-plan { display: flex; flex-direction: column; }
 .sp-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .pt-row { display: grid; grid-template-columns: 22px minmax(0, 1.5fr) minmax(0, 1.1fr) 104px; column-gap: 10px; align-items: start; width: 100%; padding: 8px 12px; border-bottom: 1px solid var(--line); text-align: left; }

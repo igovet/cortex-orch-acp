@@ -1,20 +1,19 @@
 import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Match, on, onCleanup, Show, Switch, useContext, type Accessor } from "solid-js";
-import { automaticQueueOf, dependencyProblem, queueDrivenMode, runBlocker, sprintCloseBlockers, SPRINT_RUN_MODES, type PlanItem, type Sprint, type SprintGraphEdit, type TaskSettings, type WorkspaceState } from "@cortex/workspace-domain";
+import { automaticQueueOf, dependencyProblem, isOpen, openPlanningQuestion, queueDrivenMode, runBlocker, sprintCloseBlockers, SPRINT_RUN_MODES, type AttachmentInput, type PlanItem, type Sprint, type SprintGraphEdit, type WorkspaceState } from "@cortex/workspace-domain";
+import { attachmentName } from "./attachments";
 import { dependentWhy, editNotice, linkProblem, linkWords, liveModel, placeWords, watchLiveGraphs, type LiveModel } from "./live-graph";
-import { AttachChips, createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
+import { AttachChips } from "./composer";
 import { useWs } from "./ctx";
 import { autoGrow } from "./autogrow";
 import { REQUESTING, RequestLabel } from "./request-feedback";
 import { FieldEdit } from "./field-edit";
-import { createFollow } from "./follow";
-import { Pill } from "./worker";
-import { createBodyMark, createUnsent, ScreenActive } from "./freshness";
+import { createBodyMark, ScreenActive } from "./freshness";
 import { A, I, Keyed, MenuItem, Modal, placeFocus, Pop } from "./kit";
 import { ActionBar, Page, revealCutIn, revealWhenCut, SectionHead, StatusLane, Toolbar, type StripItem, type StripTone } from "./layout";
 import { Hint } from "./settings-kit";
 import { Answered, QuestionForm, type AskAnswer } from "./questions";
 import type { Route } from "./router";
-import { activePlanningWarning, clock, decisionRoute, humanStatus, classifiedPlanningFailure, planningChangeRequired, planningFailureDetails, planningRequestInvalid, savedPlanningText, stoppedPlanningComposerText, stoppedPlanningText, planningTaskOf, sprintModeDescription, sprintModeLabel, sprintTitle, sprintView, stopReason, type ProjectSummary } from "./selectors";
+import { activePlanningWarning, clock, decisionRoute, humanStatus, classifiedPlanningFailure, planningChangeRequired, planningFailureDetails, planningRequestInvalid, savedPlanningText, stoppedPlanningText, planningTaskOf, sprintModeDescription, sprintModeLabel, sprintTitle, sprintView, stopReason, type ProjectSummary } from "./selectors";
 import { Conversation as TaskConversation, firstWorker, TaskWorkers, useSessionClock } from "./session";
 import { sessionModel, type SessionModel } from "./session-model";
 import { PlanningPlace } from "./task-place";
@@ -226,31 +225,101 @@ function PlanLine(props: { sprint: Sprint; onOpenPlan?: () => void }) {
 const planningRoute = (machine: string, sprint: Sprint, tab: "planning" | "workers", worker?: string): Route =>
   ({ name: "sprint", machine, project: sprint.projectId, sprint: sprint.id, tab, ...(worker ? { worker } : {}) });
 
-/**
- * The planning task's conversation, read on its sprint as an ordinary task's conversation: the coordinator's messages, its
- * "Worked …" steps, its questions and the composer, all the task page's own. It is headed by the sprint's description, its
- * plan stands for approval on the Plan tab, and what the service said about planning (a failure, a time limit) reads after
- * the conversation. Stays mounted while hidden, so a half-written message and its attachments survive.
- */
-function PlanningTaskConversation(props: { sprint: Sprint; taskId: string; hidden?: boolean; changingRequest: Accessor<boolean>; onOpenPlan: () => void }) {
+/** One conversation from the first frame. The planner supplies a runtime feed only once its linked row exists. */
+function SprintConversation(props: {
+  sprint: Sprint; taskId: string | null; hidden: boolean; changingRequest: Accessor<boolean>;
+  onOpenPlan: () => void; onUnsent: (unsent: boolean) => void;
+}) {
   const ws = useWs();
-  const model = createMemo<SessionModel | null>(prev => sessionModel(ws.store.index(), props.taskId) ?? prev ?? null);
+  const s = () => props.sprint;
+  const model = createMemo(() => { const id = props.taskId; return id ? sessionModel(ws.store.index(), id) : null; });
   const now = useSessionClock();
-  const machine = () => model()?.view.machine.id ?? ws.machine().id;
-  const onPick = (key: string) => ws.go(planningRoute(machine(), props.sprint, "workers", key));
-  // The service's own notes on planning; the coordinator's replies and the owner's messages are the task's conversation.
-  const notes = createMemo(() => {
-    const said = new Set((model()?.session.timeline ?? []).flatMap(e => e.kind === "cortex" ? [e.text.trim()] : []));
-    return props.sprint.conversation.flatMap((e, i) => (e.kind === "note" || e.kind === "event") && !said.has(e.text.trim()) ? [{ key: `${e.kind}:${i}`, ...e }] : []);
-  });
-  const tail = <>
-    <Keyed each={notes()} by={n => n.key}>{n => <Show when={n().kind === "note"} fallback={<div class="answered"><I n="check" s={14} /><span>{n().text}</span><Show when={n().at != null}><span class="faint">{clock(n().at!)}</span></Show></div>}>
-      <div class="ai"><ResultText breaks text={n().text} /><AttachChips files={n().attachments} open /></div><MessageTools text={n().text} /></Show>}</Keyed>
-    <PlanLine sprint={props.sprint} onOpenPlan={props.onOpenPlan} />
-  </>;
-  return <Show when={model()}>{m => <PlanningPlace.Provider value={{ sprint: () => props.sprint, changingRequest: props.changingRequest }}>
-    <TaskConversation model={m} now={now()} pick={firstWorker(m())} onPick={onPick} hidden={props.hidden} brief={<SprintBrief sprint={props.sprint} />} tail={tail} />
-  </PlanningPlace.Provider>}</Show>;
+  const onPick = (key: string) => ws.go(planningRoute(ws.machine().id, s(), "workers", key));
+  const saved = (runtimeVisible: Accessor<boolean>) => {
+    const session = () => ws.store.state().sessions.find(x => x.taskId === s().planningTaskId);
+    const activeDecisions = () => model()?.session.decisions.filter(d => d.kind === "question" && (isOpen(d) || d.held)) ?? [];
+    const asks = createMemo<ReturnType<typeof planningAsks>>(prev => {
+      // Answer linked decisions in the runtime feed, never via a saved sprint question while that feed loads.
+      if (activeDecisions().length) return [];
+      return share(prev, planningAsks(s(), model() ? undefined : session()));
+    }, []);
+    const thread = createMemo(() => {
+      const task = runtimeVisible() ? model() : null;
+      const showingQuestion = asks().some(a => a.id === "planning")
+        || !!task && activeDecisions().some(d => d.text === openPlanningQuestion(s())?.text);
+      if (!task) return planningThread(s(), model() ? undefined : session(), showingQuestion);
+      const rows = task.session.timeline;
+      const notes = new Set(rows.flatMap(e => e.kind === "cortex" ? [e.text.trim()] : []));
+      const fileNames = (files?: AttachmentInput[]) => JSON.stringify((files ?? []).map(attachmentName).sort());
+      const messageKey = (text: string, files?: AttachmentInput[]) => JSON.stringify([text.trim(), fileNames(files)]);
+      const messagesById = new Map(task.messages.map(m => [m.id, m]));
+      const messages = rows.flatMap(e => {
+        if (e.kind === "said") {
+          // Match the message whose file chips the shared Conversation displays on this text row.
+          const sent = task.messages.find(m => m.workerId === null && m.delivery !== "queued" && m.text.trim() === e.text.trim());
+          return [messageKey(e.text, sent?.attachments)];
+        }
+        const sent = e.kind === "message" ? messagesById.get(e.messageId) : undefined;
+        return sent ? [messageKey(sent.text, sent.attachments)] : [];
+      });
+      const decisionIds = new Set(rows.flatMap(e => e.kind === "decision" ? [e.decisionId] : []));
+      const answered = task.session.decisions.flatMap(d => decisionIds.has(d.id) && d.kind === "question" && d.answer && !d.held && !d.withdrawn
+        ? [{ question: d.text, answer: d.answer }] : []);
+      return planningThread(s(), undefined, showingQuestion).filter(e => {
+        if (e.kind === "note") return !!e.attachments?.length || !notes.has(e.text.trim());
+        // Each visible runtime row replaces at most one saved entry. Older saved answers may not carry the question.
+        if (e.kind === "message") {
+          const at = messages.indexOf(messageKey(e.text, e.attachments));
+          if (at < 0) return true;
+          messages.splice(at, 1);
+          return false;
+        }
+        if (e.kind === "qa") {
+          const at = answered.findIndex(d => (!e.question || d.question === e.question) && d.answer.text === e.text
+            && (!e.attachments?.length || fileNames(d.answer.attachments) === fileNames(e.attachments)));
+          if (at < 0) return true;
+          answered.splice(at, 1);
+          return false;
+        }
+        return true;
+      });
+    });
+    const answer = (answers: AskAnswer[]) => {
+      const [first] = answers;
+      if (!first) return undefined;
+      const planned = first.ask.id !== "planning";
+      return ws.run({ type: "answer_planning", sprintId: s().id, answer: first.text, attachments: first.attachments, now: ws.store.clock(),
+        ...(planned ? { decisionId: first.ask.id, optionId: first.optionId } : {}),
+        ...(planned && answers.length > 1 ? { answers: answers.map(a => ({ decisionId: a.ask.id, answer: a.text, optionId: a.optionId, attachments: a.attachments })) } : {}) });
+    };
+    const sentHere = () => ({ kind: "sprint" as const, sprintId: s().id });
+    const pending = () => {
+      const phase = s().planning, task = model();
+      if (phase !== "planning" && phase !== "question") return null;
+      if (task) return task.mode === "draft" ? "Planning is starting…" : null;
+      if (ws.machine().connection !== "connected") return "Planning conversation is unavailable while the machine is offline.";
+      if (s().planningTaskId) return "Loading the planning conversation…";
+      return phase === "planning" ? "Planning is starting…" : null;
+    };
+    const tail = <>
+        <Keyed each={thread()} by={e => e.key}>{e => <Switch>
+          <Match when={e().kind === "note"}><div class="ai"><ResultText breaks text={e().text} /><AttachChips files={e().attachments} open /></div><MessageTools text={e().text} /></Match>
+          <Match when={e().kind === "qa"}><Answered question={e().question ?? ""} answer={e().text} at={e().at} files={e().attachments} /></Match>
+          <Match when={e().kind === "message"}><div class="mine"><ResultText breaks text={e().text} /><AttachChips files={e().attachments} open /></div><div class="mine-meta"><I n="check" s={12} />Sent to the planner<Show when={e().at !== null}><span>{clock(e().at)}</span></Show><CopySource text={e().text} /></div></Match>
+          <Match when={e().kind === "event"}><div class="answered"><I n="check" s={14} /><span>{e().text}</span><Show when={e().at !== null}><span class="faint">{clock(e().at)}</span></Show></div></Match>
+        </Switch>}</Keyed>
+        <SentMessages place={sentHere()} />
+        <PlanLine sprint={s()} onOpenPlan={props.onOpenPlan} />
+        <Show when={asks().length > 0}><QuestionForm asks={asks()} needs="answer_planning" blocked={() => undefined} projectId={s().projectId} note={() => null} onSend={answer}
+          waiting={ask => ask.at === null ? "" : clock(ask.at)} /></Show>
+        <Show when={pending()}>{label => <div class="answered" role="status">{label()}</div>}</Show>
+    </>;
+    return { tail, count: () => thread().length + ws.store.sends.shown(sentHere()).length + asks().length + (s().plan ? 1 : 0) };
+  };
+  const sprintFeed = { brief: <SprintBrief sprint={s()} />, saved, onUnsent: props.onUnsent };
+  return <PlanningPlace.Provider value={{ sprint: s, changingRequest: props.changingRequest }}>
+    <TaskConversation model={model} now={now()} pick={model() ? firstWorker(model()!) : ""} onPick={onPick} hidden={props.hidden} sprintFeed={sprintFeed} />
+  </PlanningPlace.Provider>;
 }
 
 /** The planning task's workers, read on its sprint as an ordinary task's Work details. */
@@ -263,82 +332,6 @@ function PlanningTaskWorkers(props: { sprint: Sprint; taskId: string; worker?: s
   return <Show when={model()}>{m => <PlanningPlace.Provider value={{ sprint: () => props.sprint }}>
     <TaskWorkers model={m} now={now()} pick={props.worker ?? firstWorker(m())} onPick={onPick} />
   </PlanningPlace.Provider>}</Show>;
-}
-
-/** Stays mounted while hidden, so a half-written message and its attachments survive. `onUnsent` says whether any is waiting. */
-function Conversation(props: { sprint: Sprint; hidden?: boolean; changingRequest: Accessor<boolean>; onUnsent?: (unsent: boolean) => void; onOpenPlan?: () => void }) {
-  const ws = useWs();
-  const s = () => props.sprint;
-  const [text, setText] = createSignal("");
-  const mic = createDictation();
-  const files = createAttachments();
-  const session = () => ws.store.state().sessions.find(x => x.taskId === s().planningTaskId);
-  // A planner event rebuilds every question as a new object: an unchanged one stays the old object, so its chosen option and draft stay.
-  const asks = createMemo<ReturnType<typeof planningAsks>>(prev => share(prev, planningAsks(s(), session())), []);
-  const thread = createMemo(() => planningThread(s(), session()));
-  // One owner action answers every open question of the run at once; the planner's model and effort are not part of an answer.
-  const answer = (answers: AskAnswer[]) => {
-    const [first] = answers;
-    if (!first) return undefined;
-    const planned = first.ask.id !== "planning";
-    return ws.run({ type: "answer_planning", sprintId: s().id, answer: first.text, attachments: first.attachments, now: ws.store.clock(), ...(planned ? { decisionId: first.ask.id, optionId: first.optionId } : {}),
-      ...(planned && answers.length > 1 ? { answers: answers.map(a => ({ decisionId: a.ask.id, answer: a.text, optionId: a.optionId, attachments: a.attachments })) } : {}) });
-  };
-  // As in a task: while the planner works and the field is empty the button stops planning; stopped, it resumes it.
-  const planEmpty = () => !text().trim() && files.files().length === 0;
-  const planControl = () => s().planning === "planning" && asks().length === 0 && planEmpty() ? { label: "Stop", icon: "stop", needs: "cancel_planning" as const, go: () => void ws.run({ type: "cancel_planning", sprintId: s().id }), effect: "Stop cancels planning and keeps the conversation; Resume continues it. Write a message to send it instead." }
-    : s().planning === "cancelled" && !s().planningFailure && !props.changingRequest() ? { label: "Resume", icon: "play", needs: "resume_planning" as const, go: () => void ws.run({ type: "resume_planning", sprintId: s().id }), effect: "Resume continues planning." }
-    : null;
-  const closed = () => s().planning === "created" ? "Tasks are created. Edit them on the Board." : s().planning === "cancelled" && !props.changingRequest() ? stoppedPlanningComposerText(s()) : null;
-  // A message to the planner reads in the conversation from the press and leaves the field then; one that does not arrive
-  // keeps its text and files on its line, with Retry and Edit.
-  const sentHere = () => ({ kind: "sprint" as const, sprintId: s().id });
-  const send = (value: string) => {
-    if (!value.trim() || files.busy()) return;
-    const attachments = files.files();
-    setText(""); files.clear();
-    void ws.run({ type: "plan_message", sprintId: s().id, text: value, attachments, now: ws.store.clock() });
-  };
-  createEffect(() => {
-    const back = ws.store.sends.returned(sentHere());
-    if (!back) return;
-    ws.store.sends.take();
-    setText(t => t.trim() ? `${t.trimEnd()}\n${back.text}` : back.text); files.add(back.attachments ?? []);
-  });
-  const settings = (): TaskSettings => ({ model: "opus[1m]", effort: "high", mode: "development", language: "auto", ...s().settings });
-  createUnsent(() => !!text().trim() || files.files().length > 0);
-  createEffect(() => props.onUnsent?.(!!text().trim() || files.files().length > 0));
-  let timeline: HTMLDivElement | undefined;
-  // A conversation reads from its latest line, as the task's does: it opens at its end and stays there until the owner scrolls up.
-  const follow = createFollow(() => timeline, () => thread().length + ws.store.sends.shown(sentHere()).length + asks().length + (s().plan ? 1 : 0));
-  // A message or an answer the owner sends here brings the end into view and turns following on, as in a task's conversation.
-  let pressedSeen = ws.store.sends.pressed(sentHere());
-  createEffect(() => { const n = ws.store.sends.pressed(sentHere()); if (n > pressedSeen) follow.jump(); pressedSeen = n; });
-  return <section class="sp-conv" aria-label="Planning conversation" hidden={props.hidden}>
-    <div class="timeline" ref={timeline} onScroll={follow.onScroll}><div class="tl-in">
-      <SprintBrief sprint={s()} />
-      <Keyed each={thread()} by={e => e.key}>{e => <Switch>
-        <Match when={e().kind === "note"}><div class="ai"><ResultText breaks text={e().text} /><AttachChips files={e().attachments} open /></div><MessageTools text={e().text} /></Match>
-        <Match when={e().kind === "qa"}><Answered question={e().question ?? ""} answer={e().text} at={e().at} files={e().attachments} /></Match>
-        <Match when={e().kind === "message"}><div class="mine"><ResultText breaks text={e().text} /><AttachChips files={e().attachments} open /></div><div class="mine-meta"><I n="check" s={12} />Sent to the planner<Show when={e().at !== null}><span>{clock(e().at)}</span></Show><CopySource text={e().text} /></div></Match>
-        <Match when={e().kind === "event"}><div class="answered"><I n="check" s={14} /><span>{e().text}</span><Show when={e().at !== null}><span class="faint">{clock(e().at)}</span></Show></div></Match>
-      </Switch>}</Keyed>
-      <SentMessages place={sentHere()} />
-      <PlanLine sprint={s()} onOpenPlan={props.onOpenPlan} />
-      <Show when={asks().length > 0}><QuestionForm asks={asks()} needs="answer_planning" blocked={() => undefined} projectId={s().projectId} note={() => null} onSend={answer}
-        waiting={ask => ask.at === null ? "" : clock(ask.at)} /></Show>
-      <Show when={s().planning === "planning"}><div class="answered"><I n="loader" s={14} class="spin" />Working on the plan</div></Show>
-    </div></div>
-    <div class="dock">
-      <Pill follow={follow} />
-      <MessageComposer label="Message the planner" inputId="ws-plan-input" placeholder="Ask for changes to the plan, tag @files…" text={text()} onText={setText} files={files} mic={mic} off={closed() ?? undefined}
-        suggest={{ projectId: s().projectId }}
-        route={<RouteBar id="plan" up compact needs="set_sprint_settings" settings={settings()} onChange={patch => ws.run({ type: "set_sprint_settings", sprintId: s().id, settings: patch })} />}
-        effect={props.changingRequest() ? (classifiedPlanningFailure(s()) ? "Sending your amendment starts planning again." : "Sending your changes resumes planning.") : planControl()?.effect}
-        send={planControl() ? { label: planControl()!.label, needs: planControl()!.needs, go: planControl()!.go, run: { icon: planControl()!.icon } }
-          : { label: props.changingRequest() ? (classifiedPlanningFailure(s()) ? "Send amendment and retry" : "Send and resume planning") : "Send to the planner", needs: "plan_message", why: files.busy() ? "Attachments are still loading" : text().trim() ? undefined : "Write a message first", go: () => send(text()), insertAndSend: send }} />
-    </div>
-  </section>;
 }
 
 function DependencyPicker(props: { item: PlanItem; items: PlanItem[]; n: number; onToggle: (dep: string) => void }) {
@@ -625,17 +618,14 @@ function Plan(props: PlanProps) {
   </section>;
 }
 
-/**
- * Chat, Plan, Board and Summary: one tab each, so the chat and the plan each have the whole width. A sprint planned by a
- * runtime task reads that task as an ordinary task reads: Conversation and Workers, then the plan it proposed.
- */
+/** Conversation is always available; Workers appears when the linked planner row is loaded. */
 function Tabs(props: { route: SprintRoute; sprint: Sprint }) {
   const ws = useWs();
   const at = (tab: SprintRoute["tab"]): Route => ({ ...props.route, tab, worker: undefined });
   const board = (): Route => ({ name: "project", machine: props.route.machine, project: props.route.project, view: "board", scope: { kind: "sprint", id: props.sprint.id } });
   const task = () => planningTaskOf(ws.store.state(), props.sprint);
   return <><Toolbar small class="tabs" mid={<div class="ws-tablist" role="tablist" aria-label="Sprint views">
-    <A class="tab" role="tab" to={at("planning")} aria-selected={props.route.tab === "planning" || (props.route.tab === "workers" && !task()) ? "true" : "false"}>{task() ? "Conversation" : "Chat"}</A>
+    <A class="tab" role="tab" to={at("planning")} aria-selected={props.route.tab === "planning" || (props.route.tab === "workers" && !task()) ? "true" : "false"}>Conversation</A>
     <Show when={task()}><A class="tab" role="tab" to={at("workers")} aria-selected={props.route.tab === "workers" ? "true" : "false"}>Workers</A></Show>
     <A class="tab" role="tab" to={at("plan")} aria-selected={props.route.tab === "plan" ? "true" : "false"}>Plan</A>
     <A class="tab" role="tab" to={board()} aria-selected="false">Board</A>
@@ -770,7 +760,7 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
   // ---------- Space: the chat and the plan are tabs; in the plan, one yield rule and Full view ----------
   const panels = ws.panels;
   const at = (tab: SprintRoute["tab"]): Route => ({ ...props.route, tab, worker: undefined });
-  // A sprint planned by a runtime task reads it as that task's own Conversation and Workers; an older sprint keeps its chat.
+  // Workers requires a real linked task. Conversation remains mounted independently of that link.
   const planningTask = createMemo(() => planningTaskOf(ws.store.state(), s()));
   const workersTab = () => props.route.tab === "workers" && !!planningTask();
   /** Conversation or Workers: everything but the plan, each with the whole width. */
@@ -819,7 +809,7 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
   /** Request changes opens the chat, leaving Full view if need be, and puts the cursor in its message box. Selection and view stay. */
   const requestChanges = () => {
     batch(() => { setFull(false); showConv(); });
-    const input = () => body.querySelector<HTMLTextAreaElement>("#ws-plan-input") ?? body.querySelector<HTMLTextAreaElement>('section[aria-label="Conversation"] .dock textarea');
+    const input = () => body.querySelector<HTMLTextAreaElement>('section[aria-label="Conversation"] .dock textarea');
     input()?.focus();
     queueMicrotask(() => input()?.focus());
   };
@@ -876,8 +866,8 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
       </ActionBar>
     </Modal>
     <div ref={body} class="sp-body" data-reading={details() ? "true" : undefined} data-full={fullOn() ? "" : undefined} style={{ "grid-template-columns": columns() }}>
-      <Show when={planningTask()} keyed fallback={<Conversation sprint={s()} hidden={!chatTab()} changingRequest={changingRequest} onUnsent={setUnsent} onOpenPlan={() => ws.go(at("plan"))} />}>{task =>
-        <PlanningTaskConversation sprint={s()} taskId={task} hidden={!chatTab() || workersTab()} changingRequest={changingRequest} onOpenPlan={() => ws.go(at("plan"))} />}</Show>
+      <SprintConversation sprint={s()} taskId={planningTask()} hidden={!chatTab() || workersTab()} changingRequest={changingRequest}
+        onUnsent={setUnsent} onOpenPlan={() => ws.go(at("plan"))} />
       <Show when={workersTab() && planningTask()} keyed>{task => <PlanningTaskWorkers sprint={s()} taskId={task} worker={props.route.worker} />}</Show>
       <Plan sprint={s()} draft={draft()} setDraft={setDraft} reading={reading()} onRead={key => { if (key) setOpened("details"); setReading(key); }} rows={setRows}
         hidden={chatTab() || (space().replaced && details())} full={fullOn()} setFull={setFull} conv={conv}

@@ -130,11 +130,11 @@ describe("the fields that grow", () => {
     const fixed = new Set(["git.tsx", "orch-models.tsx", "orch-mcp.tsx"]);
     const src = join(dirname(fileURLToPath(import.meta.url)), "../src");
     const fields = readdirSync(src).filter(name => name.endsWith(".tsx")).flatMap(name => [...readFileSync(join(src, name), "utf8").matchAll(/<textarea\b[\s\S]*?\/>/g)].map(m => ({ name, tag: m[0] })));
-    // Every message draft now draws the one shared composer, whose single writing area grows through the helper.
+    // Every message draft draws the shared composer; sprint planning reaches it through the task Conversation.
     expect(fields.length).toBeGreaterThan(5);
     expect(fields.filter(f => !f.tag.includes("autoGrow(el,") && !fixed.has(f.name)).map(f => `${f.name}: ${f.tag.slice(0, 60)}`)).toEqual([]);
     const users = readdirSync(src).filter(name => name.endsWith(".tsx") && /<MessageComposer\b/.test(readFileSync(join(src, name), "utf8")));
-    expect(users.sort()).toEqual(["composer.tsx", "dialogs.tsx", "diff.tsx", "newtask.tsx", "questions.tsx", "sprint.tsx", "task-edit.tsx", "worker.tsx"]);
+    expect(users.sort()).toEqual(["composer.tsx", "dialogs.tsx", "diff.tsx", "newtask.tsx", "questions.tsx", "task-edit.tsx", "worker.tsx"]);
   });
 
   it("applies to the shared composer: Shift+Enter breaks the line, Enter sends", async () => {

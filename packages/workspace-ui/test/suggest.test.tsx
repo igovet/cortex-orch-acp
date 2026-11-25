@@ -30,11 +30,11 @@ function world(task: Partial<Task> = live, repos: ProjectRepo[] = [repo()], deci
   state.machines[0].connection = "connected";
   return state;
 }
-async function mount(state: WorkspaceState, skills?: ProjectSkills) {
+async function mount(state: WorkspaceState, skills?: ProjectSkills, path = "/t/t") {
   const p = scriptedPort({ capabilities: { everything: true, operations: [] } });
   const listed = vi.fn(async () => skills ?? { skills: [], omitted: 0 });
   p.port.listProjectSkills = listed;
-  history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}/t/t`);
+  history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}${path}`);
   const root = document.createElement("div"); document.body.append(root);
   dispose = render(() => <Workspace port={p.port} />, root);
   await settle(); p.emit(projection("1", state)); await settle();
@@ -205,6 +205,30 @@ describe("the task's message field", () => {
     expect(options()).toContain("/resume");
     expect(options()).not.toContain("/stop");
   });
+});
+
+it.each(["task", "sprint"] as const)("offers editable skills and files but no runtime actions on New %s", async kind => {
+  const p = await mount(world(), { skills: [{ name: "demo-data", path: ".agents/skills/demo-data/SKILL.md", description: null, pathOnly: false }], omitted: 0 }, `/new?kind=${kind}&project=p`);
+  const el = field(`Describe the ${kind}`);
+  type(el, "/");
+  await settle();
+  expect(p.listed).toHaveBeenCalledWith("p");
+  expect(options()).toEqual(["/demo-data"]);
+  press(el, "Enter");
+  await settle();
+  expect(el.value).toBe("Use the project skill demo-data (.agents/skills/demo-data/SKILL.md). ");
+  expect(p.commands).toEqual([]);
+  type(el, el.value + "@main");
+  await rest();
+  expect(options()).toEqual(["src/main.ts"]);
+  press(el, "Tab");
+  await settle();
+  const description = "Use the project skill demo-data (.agents/skills/demo-data/SKILL.md). @src/main.ts ";
+  expect(el.value).toBe(description);
+  expect(p.commands).toEqual([]);
+  press(el, "Enter", { ctrlKey: true });
+  await settle();
+  expect(p.commands.at(-1)?.payload).toMatchObject({ type: kind === "sprint" ? "create_sprint" : "create_task", description });
 });
 
 describe("an answer to a question", () => {

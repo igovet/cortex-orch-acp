@@ -606,37 +606,43 @@ export function conversationReads(ws: Ws, m: SessionModel): FirstRead[] {
   ];
 }
 /** One task's first-reveal gate, for one of its screens (`part`): the same machine, project, task and execution. */
-function createTaskFirstView(ws: Ws, m: Accessor<SessionModel>, part: string, reads: () => FirstRead[]) {
+function createTaskFirstView(ws: Ws, model: Accessor<SessionModel | null>, part: string, reads: (m: SessionModel) => FirstRead[]) {
+  const current = () => model()?.view;
   return createFirstView({
     scope: ws.store,
-    identity: () => `${part}|${m().view.machine.id}|${m().view.project.id}|${m().view.id}|${m().view.task.executionId ?? ""}`,
-    keep: () => `${part}|${m().view.machine.id}|${m().view.id}`,
-    reads, offline: () => unreachable(ws),
-    retry: () => ws.store.retryFirstView(m().view.project.id, m().view.id),
+    identity: () => { const v = current(); return v ? `${part}|${v.machine.id}|${v.project.id}|${v.id}|${v.task.executionId ?? ""}` : null; },
+    keep: () => { const v = current(); return v ? `${part}|${v.machine.id}|${v.id}` : ""; },
+    reads: () => { const m = model(); return m ? reads(m) : []; }, offline: () => unreachable(ws),
+    retry: () => { const v = current(); if (v) ws.store.retryFirstView(v.project.id, v.id); },
   });
 }
 
 /**
  * A task's conversation: its brief, timeline, questions, result and composer. The task that plans a sprint reads it on its
- * sprint's page (PlanningPlace): `brief` is then the sprint's own description, `tail` the proposed plan's line, and its
- * plan stands for approval on the sprint, so neither a result card nor a task decision is offered here.
+ * sprint's page (PlanningPlace): the sprint's brief and saved history stay visible while the task's first reads settle.
+ * The plan stands for approval on the sprint, so neither a result card nor a task decision is offered here.
  */
-export function Conversation(props: { model: Accessor<SessionModel>; now: number; pick: string; onPick: (key: string) => void; route?: TaskRoute; hidden?: boolean; brief?: JSX.Element; tail?: JSX.Element }) {
+export function Conversation(props: {
+  model: Accessor<SessionModel | null>; now: number; pick: string; onPick: (key: string) => void; route?: TaskRoute; hidden?: boolean;
+  /** Sprint content stays visible independently of the first read of its linked runtime task. */
+  sprintFeed?: { brief: JSX.Element; saved: (runtimeVisible: Accessor<boolean>) => { tail: JSX.Element; count: Accessor<number> }; onUnsent: (unsent: boolean) => void };
+}) {
   const ws = useWs();
-  const m = () => props.model();
+  // Only use the task-only helpers while the linked model is present.
+  const m = () => props.model()!;
   const planning = usePlanningSprint();
   const opened = createOpenState();
   let scroller: HTMLDivElement | undefined;
   // The team is not a feed entry: it stands pinned above the composer (TeamBar), so the feed never ends in a workers block.
-  const ids = createMemo(() => m().session.timeline.filter(e => e.kind !== "workers").map(e => e.id));
-  const entries = createMemo(() => new Map(m().session.timeline.map(e => [e.id, e])));
+  const ids = createMemo(() => (props.model()?.session.timeline ?? []).filter(e => e.kind !== "workers").map(e => e.id));
+  const entries = createMemo(() => new Map(props.model()?.session.timeline.map(e => [e.id, e])));
   const entry = (id: string) => entries().get(id)!;
   // Earlier rows read above the ones on screen are neither new nor the owner's latest: only entries after them count.
   const older = createPrepended(ids);
-  const historyKey = () => `${m().view.id}:${m().view.task.executionId ?? ""}`;
+  const historyKey = () => { const v = props.model()?.view; return v ? `${v.id}:${v.task.executionId ?? ""}` : undefined; };
   const partialTail = createMemo<string | undefined>(previous => {
     const key = historyKey();
-    return m().session.historyEarlier || previous === key ? key : undefined;
+    return props.model()?.session.historyEarlier || previous === key ? key : undefined;
   });
   let pendingCheck = false, disposed = false;
   const checkEarlier = () => {
@@ -644,7 +650,7 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
     pendingCheck = true;
     queueMicrotask(() => {
       pendingCheck = false;
-      if (disposed || props.hidden || !scroller?.clientHeight || m().session.historyEarlier?.state !== "available") return;
+      if (disposed || props.hidden || !scroller?.clientHeight || props.model()?.session.historyEarlier?.state !== "available") return;
       const marker = scroller.querySelector(".ws-earlier");
       // The brief can be tall: measure the boundary, not the distance from scrollTop to zero.
       const box = scroller.getBoundingClientRect(), at = marker?.getBoundingClientRect();
@@ -655,9 +661,13 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
     });
   };
   onCleanup(() => { disposed = true; });
-  const follow = createFollow(() => scroller, () => ids().length - older(), undefined, checkEarlier);
+  // The first-read gate applies to the runtime feed, not to the sprint's already available content.
+  const first = createTaskFirstView(ws, props.model, "conversation", model => conversationReads(ws, model));
+  const runtimeVisible = () => !!props.model() && !first.loading();
+  const saved = props.sprintFeed?.saved(runtimeVisible);
+  const follow = createFollow(() => scroller, () => (runtimeVisible() ? ids().length - older() : 0) + (saved?.count() ?? 0), undefined, checkEarlier);
   // ResizeObserver covers geometry changes. Also recheck after a history publish or reveal when the size stayed the same.
-  const available = createMemo(() => m().session.historyEarlier?.state === "available" ? historyKey() : undefined);
+  const available = createMemo(() => props.model()?.session.historyEarlier?.state === "available" ? historyKey() : undefined);
   createEffect(() => {
     if (props.hidden || available() === undefined) return;
     // Let keyed rows settle, then pin the end or restore the held row before measuring the boundary.
@@ -668,17 +678,22 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
   // from the press. A message that arrives from another window, or a record that takes a send's place, moves nobody.
   const sentHere = () => { const s = planning(); return s ? { kind: "sprint" as const, sprintId: s.id } : { kind: "task" as const, taskId: m().view.id }; };
   const pressed = () => {
-    const id = m().view.id, s = planning();
-    return ws.store.sends.pressed({ kind: "task", taskId: id }, { kind: "queue", taskId: id }, ...(s ? [{ kind: "sprint" as const, sprintId: s.id }] : []));
+    const id = props.model()?.view.id, s = planning();
+    return ws.store.sends.pressed(
+      ...(id ? [{ kind: "task" as const, taskId: id }, { kind: "queue" as const, taskId: id }] : []),
+      ...(s ? [{ kind: "sprint" as const, sprintId: s.id }] : []),
+    );
   };
   let pressedSeen = pressed();
   createEffect(() => { const n = pressed(); if (n > pressedSeen) follow.jump(); pressedSeen = n; });
-  // Nothing of the conversation shows before all of its first reads are in: then all of it at once, at its end, following.
-  const first = createTaskFirstView(ws, m, "conversation", () => conversationReads(ws, m()));
-  createEffect((was: boolean) => { const loading = first.loading(); if (was && !loading) queueMicrotask(() => { if (!disposed) follow.jump(); }); return loading; }, first.loading());
+  createEffect((was: boolean) => {
+    const loading = first.loading();
+    if (was && !loading) queueMicrotask(() => { if (!disposed) props.sprintFeed ? follow.sync() : follow.jump(); });
+    return loading;
+  }, first.loading());
   // Answer or See what is needed pressed before this conversation showed the card it brings into view: applied once the card
   // is on the page, after the pin to the end above, and dropped once every first read is in and the card is still not there.
-  const asked = () => revealIntent(revealKey(m().view.machine.id, m().view.id, m().view.task.executionId));
+  const asked = () => { const v = props.model()?.view; return v ? revealIntent(revealKey(v.machine.id, v.id, v.task.executionId)) : undefined; };
   createEffect(() => {
     const intent = asked();
     if (!intent || first.loading() || props.hidden) return;
@@ -696,16 +711,22 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
   const message = (id: string) => m().messages.find(x => x.id === id)!;
   const stranded = () => m().view.column === "needs" && !m().view.unknown && m().open.length === 0;
   // Questions asked together are one form until their answers are recorded.
-  const asks = createMemo(() => m().view.task.closedAs === "unconfirmed" ? [] : m().session.decisions.filter(d => d.kind === "question" && (isOpen(d) || d.held)));
+  const asks = createMemo(() => {
+    const model = props.model();
+    return !model || model.view.task.closedAs === "unconfirmed" ? [] : model.session.decisions.filter(d => d.kind === "question" && (isOpen(d) || d.held));
+  });
   const inAsks = (id: string) => asks().some(d => d.id === id);
   // While a decision waits or work runs, no completed result and no Accept stand beside it: the last one stays as history.
   const held = () => m().view.task.result ? resultHeld(m(), asks().length > 0) : null;
   const changesAt = (): Route => ({ name: "task", machine: m().view.machine.id, task: m().view.id, tab: "changes" });
-  const team = () => <Show when={!first.loading()}><TeamBar m={m()} now={props.now} pick={props.pick} onPick={props.onPick} /></Show>;
-  return <section class="task-panel" aria-label="Conversation" hidden={props.hidden}>
+  const team = () => <Show when={runtimeVisible()}><TeamBar m={m()} now={props.now} pick={props.pick} onPick={props.onPick} /></Show>;
+  return <section class="task-panel" classList={{ "sp-conv": !!props.sprintFeed }} aria-label="Conversation" hidden={props.hidden}>
     <div class="timeline" classList={{ "ws-history-end": partialTail() !== undefined }} ref={scroller} aria-busy={first.loading() ? "true" : undefined} onScroll={() => { follow.onScroll(); checkEarlier(); }}>
-      <div class="tl-in"><Show when={!first.loading()} fallback={<Skeleton kind="conversation" label="Loading the conversation…" />}>
-        <Show when={props.brief} fallback={<Brief m={m()} />}>{props.brief}</Show>
+      <div class="tl-in">
+        {props.sprintFeed?.brief}
+        <Show when={first.loading()}><Skeleton kind="conversation" label="Loading the conversation…" /></Show>
+        <Show when={runtimeVisible()}>
+        <Show when={!props.sprintFeed}><Brief m={m()} /></Show>
         <HistoryState m={m()} />
         <Earlier m={m()} />
         <For each={ids()}>{id => <Switch>
@@ -751,28 +772,31 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
             <div class="divide" role="separator">{(entry(id) as Extract<TimelineEntry, { kind: "divider" }>).text}</div>
           </Match>
         </Switch>}</For>
-        <SentMessages place={sentHere()} />
+        <Show when={!props.sprintFeed}><SentMessages place={sentHere()} /></Show>
         {/* Keyed by decision id: a refreshed record of an open decision keeps its card, and the answer being written in it. */}
         <Keyed each={m().open.filter(d => !m().session.timeline.some(e => e.kind === "decision" && e.decisionId === d.id))} by={d => d.id}>{d => <Show when={d().kind === "question"} fallback={<DecisionCard m={m()} d={d()} now={props.now} />}><Questions m={m()} asks={[d()]} now={props.now} /></Show>}</Keyed>
         {/* Only a task that waits on the owner reads as waiting for a decision: a cancelled or failed run has none. */}
         <Show when={stranded() && m().view.task.observedPhase !== "recovery" && (m().view.task.status === "needs_you" || m().view.task.conflict !== "none")}><Waiting m={m()} /></Show>
-        {props.tail}
         <Show when={m().view.task.result && !held() && !planning()}><ResultCard m={m()} /></Show>
         <Show when={m().view.task.result && held() && !planning()}>
           <div class="answered ws-prev-result" role="note"><I n="eye" s={14} /><span>Previous result v{m().view.task.result!.version}, read-only. {held()}.</span> <A class="lnk ws-ml4" to={changesAt()}>Open</A></div>
         </Show>
+        </Show>
+        {saved?.tail}
         {/* The last line says what the task is doing now, as its header does: waiting for an answer is not working. */}
-        <Show when={m().mode === "live" && m().view.task.observedPhase !== "recovery"}>
+        <Show when={runtimeVisible() && m().mode === "live" && m().view.task.observedPhase !== "recovery"}>
           <Show when={workingNow(m())} fallback={<Show when={!stranded()}><WaitingIndicator /></Show>}><WorkingIndicator text={coordinatorLine(m())} /></Show>
         </Show>
-      </Show></div>
+      </div>
     </div>
     {/* Everything pinned below the feed is in the dock. Latest hangs over the feed, not over a decision card. */}
     <div class="dock">
       <Pill follow={follow} />
       <FirstViewNotice view={first} />
       <Show when={props.route && !planning()}><OwnerHoldCard m={m()} route={props.route!} /><UnconfirmedCard m={m()} route={props.route!} /><DeadEndCard m={m()} /></Show>
-      <Show when={ws.can(capabilityOf("send_message"))} fallback={team()}><Composer model={props.model} team={team()} folded={m().open.some(d => d.kind === "question")} /></Show>
+      <Show when={ws.can(capabilityOf(props.sprintFeed ? "plan_message" : "send_message"))} fallback={team()}>
+        <Composer model={props.model} team={team()} folded={props.model()?.open.some(d => d.kind === "question")} onUnsent={props.sprintFeed?.onUnsent} />
+      </Show>
     </div>
   </section>;
 }

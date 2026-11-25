@@ -12,7 +12,8 @@ const archiveStatuses: readonly ArchiveStatus[] = ["draft", "working", "needs_yo
 const isArchiveStatus = (status: unknown): status is ArchiveStatus => archiveStatuses.some(s => s === status);
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const text = (v: unknown): v is string => typeof v === "string" && v.length <= 32000;
-const ids = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 1000 && v.every(x => typeof x === "string" && /^[a-zA-Z0-9_:.-]{1,128}$/.test(x));
+const idText = (v: unknown): v is string => typeof v === "string" && /^[a-zA-Z0-9_:.-]{1,128}$/.test(v);
+const ids = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 1000 && v.every(idText);
 /** Display only: no credentials, commands, capabilities, results, Git contents or conversation bodies. */
 function board(raw: unknown, legacy = false): CachedBoard {
   if (!object(raw) || !object(raw.project) || !Array.isArray(raw.items) || raw.items.length > 1000 || !object(raw.product)) throw Error("cache");
@@ -67,6 +68,7 @@ function board(raw: unknown, legacy = false): CachedBoard {
         ...(hold.nextActor ? {nextActor:hold.nextActor,ownerActions:hold.ownerActions,asks:hold.asks} : {}),
         ...(typeof hold.allowedAt === "number" ? {allowedAt:hold.allowedAt} : {}),
         ...(typeof hold.holdId === "string" && hold.holdId ? {holdId:hold.holdId} : {})}} : {}),
+      ...(idText(s.planningTaskId) ? {planningTaskId:s.planningTaskId} : {}),
       // Planning diagnostics stay live-only, like the matching conversation entries.
       targetBranch:null,conversation:[],plan:null,materializedVersion:null,
       ...(typeof s.archivedAt === "number" && Number.isFinite(s.archivedAt)?{archivedAt:s.archivedAt}:{}),...deletion};

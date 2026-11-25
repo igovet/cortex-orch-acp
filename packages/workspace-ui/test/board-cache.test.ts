@@ -75,6 +75,33 @@ describe("confirmed board cache",()=>{
       expect(store.connection().state).toBe("connecting");
     } finally {dispose();}
   });
+  it("keeps both old linked and newly classified planners out of the cold board", () => {
+    const storage = memory(), board = structuredClone(saved);
+    const [legacy, classified] = ["legacy-planner", "classified-planner"];
+    board.items.push(wireTask({ taskId: legacy }), wireTask({ taskId: classified, planningSprintId: "sprint" }));
+    board.product.sprints[0] = {
+      ...board.product.sprints[0], planningTaskId: legacy,
+      conversation: [{ kind: "note", text: "Do not cache this note." }],
+    };
+    writeBoards(storage, "owner", [board]);
+    const cached = readBoards(storage, "owner")[0];
+    expect(cached.product.sprints[0].planningTaskId).toBe(legacy);
+    expect(cached.product.sprints[0].conversation).toEqual([]);
+    expect(cached.items.at(-1)?.planningSprintId).toBe("sprint");
+
+    const s = scriptedTransport({ "service.capabilities": () => new Promise(() => {}) });
+    const p = createRealPort({ transport: s.transport, registry: true, actorId: "owner", boardStorage: storage });
+    createRoot(dispose => {
+      try {
+        const store = createWorkspaceStore(p);
+        const index = buildIndex(store.state(), Date.now());
+        expect(index.byId.has(legacy)).toBe(true);
+        expect(index.byId.has(classified)).toBe(true);
+        expect(index.views.map(v => v.id)).toEqual(items.map(item => item.taskId));
+      } finally { dispose(); }
+    });
+  });
+
   it("does not revive a retired legacy planner on the cold board",()=>{
     const storage=memory(), board=structuredClone(saved), id=items[0].taskId;
     board.product.sprints[0].taskIds = board.product.sprints[0].taskIds.filter(task => task !== id);

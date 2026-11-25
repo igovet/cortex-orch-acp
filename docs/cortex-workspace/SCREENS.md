@@ -147,7 +147,7 @@ A created sprint has **New task** and **Close sprint…** in its title band; a n
 | Inbox | Built: Home's Needs you list for every connected machine, in the same order: a question, permission or conflict, and each sprint planning question; then a result to review, with its check counts; then accepted work to finish. Each task appears once. A question, permission or result opens the task's conversation, where it is answered or accepted inline; a conflict opens its resolution; a planning question its sprint's planning. No separate answering interface. The sidebar's Inbox count is this list. |
 | Board and list | Built: each card or row shows its title, its column as the state, one concise fact and, on a card, one next action. The fact is the question itself, the result's check counts, what was accepted and where it goes, or Working without a worker count; a failed or cancelled run keeps its outcome. The action is Answer, Review (a permission), Resolve, Start, Resume, Open (running work), Review (a result, which opens the conversation) or the finishing step. Stop is no longer a card action: it stays in the card's menu and on the task. Scopes, sprint grouping and filters are unchanged. |
 | New task and New sprint | The shared composer, with the description first. Save draft is the default and starts nothing. Start now stays an explicit secondary action; a sprint uses Start planning. |
-| Sprint planning | Built: a sprint has four tabs, Chat, Plan, Board and Summary, so the planning chat and the plan each have the whole width at every window size. The proposed plan is a line in the chat ("Plan vN proposed: N tasks") whose Open plan opens the Plan tab; on the Plan tab a chip says Question waiting, Working on the plan or Unsent message and opens the Chat tab, and Request changes opens the Chat tab with the cursor in its message box. Once the tasks exist the chat's composer stays in place, smaller, and says once "Tasks are created. Edit them on the Board." Create tasks stays explicit. Queue semantics are unchanged. See [read-only sprint planning](#read-only-sprint-planning). |
+| Sprint planning | Built: a sprint opens in Conversation by default. Plan, Board and Summary are separate; Workers appears when the linked planner is loaded. Conversation and Plan each have the whole width. The proposed plan is a line in Conversation ("Plan vN proposed: N tasks") with Open plan. The Plan header shows Question waiting, Working on the plan or Unsent message when applicable; that link and Request changes return to Conversation, and Request changes focuses the message box. After Create tasks the composer stays in place and says "Tasks are created. Edit them on the Board." Create tasks stays explicit. Queue semantics are unchanged. See [read-only sprint planning](#read-only-sprint-planning). |
 | Knowledge and skills | Built: Collect knowledge, Refresh knowledge and New skill are written in the shared composer, with Voice, Attach disabled because the request is text only, and the machine's default route shown read-only. The plane, named "Create the task", creates an ordinary task, which does not start. |
 | Changes, ready to finish, merge and conflicts | An accepted result appears in the conversation; integration stays a separate confirmation. Conflict progress is a factual inline update that links to its detail. Same-branch results use Commit, non-Git projects use Close, and a pull request is not a merge. |
 | Archive | Read-only outcome rows, with details on open. Archive is available for any retained task when its machine is connected. Done tasks move with one click or after the auto-archive interval. Unfinished tasks ask for confirmation and show a note if process stop could not be confirmed. Work, history and the checkout are kept; Restore never starts work. Discard consent during cleanup is a separate explicit choice. No composer. |
@@ -158,16 +158,20 @@ A created sprint has **New task** and **Close sprint…** in its title band; a n
 
 #### Read-only sprint planning
 
-A sprint planned by its own read-only planning task has five tabs instead: Conversation, Workers, Plan,
-Board and Summary. Conversation is that task's conversation drawn exactly as a task's (the coordinator's
-messages, the "Worked …" step folds, question and permission cards, the workers bar and the task composer
-with its Stop and Resume), headed by the sprint's own description rather than the planner's instructions,
-with the plan line and any planning failure note after it. Workers is the task's Work details. A message
-asks for changes to the plan and continues the same planning task; an answer, Stop, Resume and the model
-choice go through the sprint's planning. The plan is still approved on the Plan tab and with Create tasks.
-The planning task itself has no row, card, count, page, search result or notification of its own: its
-questions make the sprint read Needs you, and any address of it opens its sprint. An older sprint planned
-without such a task keeps the four tabs and its planning chat.
+The sprint uses the task Conversation layout from the first frame, headed by the sprint's own
+description rather than the planner's instructions. While the planner starts or its feed loads, the
+same layout shows that status alongside any saved planning history. Older, stopped or failed sprints
+without a loaded planner keep their saved notes, messages and questions in Conversation, with the
+available recovery actions in the status strip above it.
+
+When the linked read-only planner is loaded, the Conversation uses its runtime feed: the coordinator's
+messages, "Worked …" step folds, question and permission cards, and the workers bar above the task
+composer. Saved entries stay visible if they are not already shown in the feed. Workers is the
+planner's Work details. A message asks for changes to the plan and continues the same planning task;
+an answer, Stop, Resume and the model choice go through the sprint's planning. Review the proposal
+on Plan; Create tasks stays explicit in the sprint header. The planning task itself has no row, card, count, page,
+search result or notification of its own: its questions make the sprint read Needs you, and its
+address opens the sprint.
 
 If planning fails, the strip above the conversation names the step and what went wrong. **Retry planning**
 asks the service to retry without a new message. If the planner never started, the service starts a
@@ -391,7 +395,7 @@ The small sprint dependency graph under the plan's list uses its intrinsic layou
 
 ## Sprint plan: List, Graph and Full view (desktop)
 
-The plan has its own tab beside the planning chat (Chat, Plan, Board, Summary). The plan header holds a chip for what waits in the chat, when anything does, the plan's name and count, a `List | Graph` switch and the plan's own actions. List is the default. The owner's choice is remembered and never changes by itself with the plan's size; the switch is hidden while there is no plan. Edit opens the editor in List, and the Graph then previews the draft.
+Plan has its own tab beside Conversation. The plan header holds a link to Conversation when a question, planning work or an unsent message needs attention, the plan's name and count, a `List | Graph` switch and the plan's own actions. List is the default. The owner's choice is remembered and never changes by itself with the plan's size; the switch is hidden while there is no plan. Edit opens the editor in List, and the Graph then previews the draft.
 
 The Graph view stacks a toolbar, the canvas and a status band under the plan header; the minimap is the only thing drawn on the canvas. Full view (the Full view button or E; Exit full view or Esc to leave) fills the window under the title band and tab strip. It hides the sidebar, the conversation, the sprint header and tabs, info strips and the plan header, and keeps warning strips, the stopped-planning strip with its reason and Retry planning or Resume planning, and Details. It writes no preference, so leaving it restores every panel as it was. It is not kept across a restart and is not the system's fullscreen.
 
@@ -399,11 +403,11 @@ Panels never float over the plan. The plan keeps at least 640 px in Graph and 42
 the sidebar gives way, and on a window under 940 px Details takes the plan's place with Back to graph.
 Details is always docked at 300 px. Giving way writes no preference, and space returning brings the panel
 back. The panel opened last wins: showing the sidebar (Ctrl+B) where there is no room closes Details and
-keeps the selection, and opening Details lets the sidebar give way. Ctrl+\\ moves between the Chat and
-Plan tabs. The chat stays mounted while the Plan tab is shown, so an unsent message survives, and the plan
+keeps the selection, and opening Details lets the sidebar give way. Ctrl+\\ moves between the Conversation and
+Plan tabs. Conversation stays mounted while the Plan tab is shown, so an unsent message survives, and the plan
 header's chip says Question waiting (or 3 questions waiting), Working on the plan or Unsent message and
-opens the Chat tab. Below 800 px of window height the Graph view keeps only warning strips and the
-stopped-planning strip. Request changes opens the Chat tab, leaving Full view, and puts the cursor in its
+opens Conversation. Below 800 px of window height the Graph view keeps only warning strips and the
+stopped-planning strip. Request changes opens Conversation, leaving Full view, and puts the cursor in its
 message box, keeping the selection and the view, at every window size. Menus opened from the graph
 toolbar, Layers from the More menu included, stay whole inside the window.
 
@@ -506,9 +510,9 @@ Live worker view:
 - Tool call detail: every tool call except file reads and edits opens on click into one shared detail, the same in the Conversation, a worker's page and the coordinator's activity. It shows two separately labelled boxes, Input and Output, taken from what the runtime recorded for that call. A box says why it is empty and never claims more than it holds: "Waiting for output…" while the call is pending, "No input was recorded." or "No output was recorded.", "Private or redacted." (private report, draft and result bodies are never shown), "Recorded empty.", or a notice that the recorded value is clipped. Text over 1,000 characters starts as a preview ending in an ellipsis; Show all retained text reveals the whole recorded text (Show preview folds it again) and Copy copies it, then says whether it copied. A file read keeps its path link and a file edit keeps its diff; neither gets a generic Input/Output detail. The runtime's own steps (command status checks, skills, task context, report drafts, questions, access and scope requests and result submissions) stay hidden unless Settings › Tool calls › Show every tool call is on; with it on they are listed and open like any other call. The setting changes visibility only; everything stays recorded either way.
 - Command output on demand: a `command_run` or `outside_command` call recorded by the runtime's command broker carries only a reference (attempt and call identity), never the output. Opening the step asks the local service for a 4,096-byte preview; Load more output fetches further pages of up to 16,384 bytes. The detail shows the exit status or signal, the bytes loaded of the total, and whether capture was complete or truncated, and its Copy copies only the loaded text. The output is the broker's combined stdout and stderr, never separate streams. Bytes that are not text are shown as base64 or labelled as converted. Output that was never captured or has since been removed reads "Command output is unavailable."; a command still running reads "Waiting for output…". A call with no broker reference (an engine's own shell, a coordinator row recorded before the reference existed) shows only what its row recorded and offers no output read. The read exists on the desktop; the phone and remote services refuse it.
 - Live activity: a quiet Working… indicator remains while the task or worker runs. On a worker's page it reads Reading…, Editing… or Running command… only when that worker's recorded activity establishes it. The Conversation's line speaks for the coordinator: while workers run it reads Waiting for and the running worker's role (or the number of running workers), never a worker's step. It stops for terminal or waiting states and respects reduced motion. While the task waits for the owner (Needs you) and no worker runs, the Conversation's last line says Waiting for you, as the header does, with no spinner. The stream arrives at tool boundaries; missing output and clipped previews are explicit.
-- Following: every feed follows one rule, on the desktop and the phone alike: a task's Conversation
-  (including the task that plans a sprint), an earlier sprint's planning chat, a worker's activity and
-  the coordinator's activity. At the very end a feed follows: streamed text, new rows and expanded
+- Following: every feed follows one rule, on the desktop and the phone alike: a task or sprint's
+  Conversation, a worker's activity and the coordinator's activity. At the very end a feed follows:
+  streamed text, new rows and expanded
   Markdown keep the end in view. Once the owner moves away from the end (wheel, keys, touch, a press on
   the feed's own scrollbar or keyboard focus moving up) it stops following, and nothing moves what they
   read: appended content keeps the scroll offset, and a row above the viewport changing height keeps the
@@ -657,7 +661,7 @@ The machine service raises the desktop notifications, so they also arrive while 
 | Task stopped: your decision | the runtime stopped a task and asks the owner; the second line is its headline | the task's Conversation, at that question |
 | Result ready for review | a task has a result the owner has not accepted (not for a sprint in Automatic mode, which accepts it itself) | the task's Conversation, with the result card in view |
 | Task failed | a task failed or could not start, with no question | the task |
-| Planning question waiting | a sprint's planning asks the owner (its planning task's question included, never raised as a task's) | the sprint's planning chat, or its Conversation for a sprint planned by a planning task |
+| Planning question waiting | a sprint's planning asks the owner (its planning task's question included, never raised as a task's) | the sprint's Conversation |
 | Sprint paused | a sprint paused itself; the second line is its reason (not Manual mode's stop after a result, nor the owner's own pause, close or delete). In an Automatic sprint a saved hold that requires the owner raises it, including a blocked acceptance or integration | the sprint |
 | No progress | a working task (not paused, waiting for you or finished) has made no progress for the chosen time, 3 hours unless changed: "<title> has made no progress for 3 h." and a second line with what it spent (time working, turns, tokens or "tokens not reported") and the short reasons its last attempts hit. Again every 3 hours while it stays stuck; the task keeps working and is never paused or changed. Progress is an accepted plan, a worker result, an approving review, passed verification or a passed check (or the runtime's `TASK_PROGRESS` records once it writes them); the clock restarts when the task resumes or you answer, steer or continue it. The runtime records `NO_PROGRESS_NOTIFIED` with the numbers only | the task |
 

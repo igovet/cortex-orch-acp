@@ -59,7 +59,7 @@ describe("a sprint planned by a runtime task", () => {
     await mount(`/m/${M}/p/p/s/sp/planning`);
     expect(tabs()).toEqual(["Conversation", "Workers", "Plan", "Board", "Summary"]);
     expect(conversation()).not.toBeNull();
-    expect($(".sp-conv")).toBeNull();
+    expect(all('section[aria-label="Conversation"]')).toEqual([conversation()]);
     // The sprint's own words head it, never the planning task's instructions.
     expect($(".brief")?.textContent).toContain("Coffee landing page");
     expect(document.body.textContent).not.toContain("sprint_plan_submit");
@@ -88,6 +88,46 @@ describe("a sprint planned by a runtime task", () => {
     expect(payload).toMatchObject({ type: "plan_message", sprintId: "sp", text: "Add a pricing section" });
     // The message reads in the conversation at once.
     expect(conversation()!.textContent).toContain("Add a pricing section");
+  });
+
+  it.each(["message", "said"] as const)("shows saved copies only until the matching runtime %s and answer are visible", async kind => {
+    const text = "Use this pricing sheet";
+    const file = { name: "prices.csv", mimeType: "text/csv", size: 12, sha256: "a".repeat(64) };
+    const state = world({ asking: false, sprint: { planning: "planning",
+      plan: { version: 1, items: [{ key: "first", description: "Plan the landing page", dependsOn: [] }] },
+      conversation: [
+        { kind: "answer", text: "Home buyers" },
+        { kind: "message", text, attachments: [file] },
+        { kind: "message", text, attachments: ["revised-prices.csv"] },
+        { kind: "question", text: "Who should test it?" },
+        { kind: "answer", text: "Home buyers" },
+        { kind: "note", text: "Retained planning note" },
+      ],
+    } });
+    const p = await mount(`/m/${M}/p/p/s/sp/planning`, state);
+    expect(conversation()!.querySelector(".qa")?.textContent).toContain("Home buyers");
+    expect(conversation()!.querySelector(".mine .ws-att")?.textContent).toBe("prices.csv");
+
+    const decisions = [{ ...question, answer: { text: "Home buyers", at: 22 } }];
+    const messages: WorkspaceState["messages"] = [{ id: "m1", taskId: "plan-1", workerId: null, text, attachments: [file],
+      mode: "send_now", delivery: "delivered", at: 23, deliveredAt: 23, failure: null }];
+    const timeline = [...state.sessions[0].timeline, { id: "q1", kind: "decision" as const, decisionId: "d1" },
+      kind === "message" ? { id: "m-row", kind, messageId: "m1" } : { id: "m-row", kind, text: ` ${text} ` }];
+    p.emit(projection("2", { ...state, messages, sessions: [{ ...state.sessions[0], decisions, timeline }] })); await settle();
+
+    const feed = conversation()!;
+    const answers = [...feed.querySelectorAll(".qa")];
+    expect(answers.map(row => row.textContent)).toEqual([
+      expect.stringContaining("Who is the landing page for?"),
+      expect.stringContaining("Who should test it?"),
+    ]);
+    expect(answers.every(row => row.textContent?.includes("Home buyers"))).toBe(true);
+    expect([...feed.querySelectorAll(".mine .ws-att")].map(chip => chip.textContent)).toEqual(["prices.csv", "revised-prices.csv"]);
+    const rows = [...feed.querySelector(".tl-in")!.children];
+    const working = rows.findIndex(row => row.matches(".ws-working"));
+    expect(working).toBeGreaterThan(-1);
+    expect(rows.findIndex(row => row.textContent?.includes("Retained planning note"))).toBeLessThan(working);
+    expect(rows.findIndex(row => row.matches(".sp-plan-line"))).toBe(working - 1);
   });
 
   it("stops planning from the composer while the planner works", async () => {
@@ -171,8 +211,8 @@ describe("a sprint planned by a runtime task", () => {
     const failed = { ...state.sprints[0], planning: "cancelled" as const, planningFailure: { text: "Planning stopped.", step: "run" as const, code: "planning_task_stopped", at: 123 } };
     p.emit(projection("2", { ...state, sprints: [failed] })); await settle();
     expect($(".l-lane [role=alert]")?.textContent).toContain("Planning stopped.");
-    expect($(legacy ? ".sp-conv" : "section.task-panel")?.textContent).toContain("Home buyers");
-    expect($(legacy ? ".sp-conv" : "section.task-panel")?.textContent).toContain("Plan v4 proposed");
+    expect(conversation()?.textContent).toContain("Home buyers");
+    expect(conversation()?.textContent).toContain("Plan v4 proposed");
     expect(field.value).toBe("Include a pricing page");
     all("button").find(b => b.textContent?.trim() === "Change request")!.click(); await settle();
     expect(document.activeElement).toBe(field);
@@ -225,11 +265,72 @@ describe("a sprint planned by a runtime task", () => {
     expect(place.reveal).toBe('[id="decision-d1"]');
   });
 
-  it("keeps an older sprint without a planning task on its own planning chat", async () => {
-    await mount(`/m/${M}/p/p/s/sp/planning`, world({ legacy: true }));
-    expect(tabs()).toEqual(["Chat", "Plan", "Board", "Summary"]);
-    expect($(".sp-conv")).not.toBeNull();
-    expect(conversation()).toBeNull();
-    expect($(".sp-conv")!.textContent).toContain("Here is the plan I propose.");
+  it("keeps saved notes, messages and unanswered questions in Conversation after cancellation", async () => {
+    const state = world({ legacy: true, sprint: { planning: "cancelled", conversation: [
+      { kind: "note", text: "Here is the plan I propose." },
+      { kind: "message", text: "Use the docs too." },
+      { kind: "question", text: "What about the examples?" },
+    ] } });
+    const p = await mount(`/m/${M}/p/p/s/sp/planning`, state);
+    expect(tabs()).toEqual(["Conversation", "Plan", "Board", "Summary"]);
+    expect(conversation()?.textContent).toContain("Here is the plan I propose.");
+    expect(conversation()?.textContent).toContain("Use the docs too.");
+    expect(conversation()?.textContent).toContain("What about the examples?");
+    expect(conversation()?.querySelector(".dc-q")).toBeNull();
+    all<HTMLButtonElement>("button").find(b => b.textContent?.trim() === "Resume planning")!.click();
+    await settle();
+    expect(p.commands.at(-1)?.payload).toMatchObject({ type: "resume_planning", sprintId: "sp" });
+  });
+
+  it.each(["row first", "link first"])("keeps one editor and never lists a planner during split reads (%s)", async order => {
+    const savedNote = "A saved planning note.";
+    const initial = world({ legacy: true, sprint: { planning: "planning", conversation: [{ kind: "note", text: savedNote }] } });
+    const live = world({ asking: false, sprint: { planning: "planning", conversation: initial.sprints[0].conversation }, task: { planningSprintId: "sp" } });
+    const p = await mount(`/m/${M}/p/p/s/sp/planning`, initial);
+    const panel = conversation()!, feed = panel.querySelector(".timeline");
+    const field = panel.querySelector<HTMLTextAreaElement>(".dock textarea")!;
+    expect(tabs()).toEqual(["Conversation", "Plan", "Board", "Summary"]);
+    expect(feed?.textContent).toContain("Coffee landing page");
+    expect(feed?.textContent).toContain("Planning is starting");
+    field.value = "Keep this draft";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    const picker = panel.querySelector<HTMLInputElement>('.dock input[type="file"]')!;
+    Object.defineProperty(picker, "files", { value: [new File(["example"], "brief.txt", { type: "text/plain" })] });
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    expect(panel.querySelector(".dock .ws-att")?.textContent).toContain("brief.txt");
+    field.focus();
+    field.setSelectionRange(3, 3);
+
+    const intermediate = order === "row first" ? { ...initial, tasks: [{ ...live.tasks[0], status: "draft" as const, process: "stopped" as const, executionId: null }, ...initial.tasks] }
+      : { ...initial, sprints: live.sprints };
+    p.emit(projection("2", intermediate)); await settle();
+    expect(conversation()).toBe(panel);
+    expect(panel.querySelector(".timeline")).toBe(feed);
+    expect(feed?.textContent).toContain(order === "row first" ? "Planning is starting" : "Loading the planning conversation");
+    expect($(".sidebar")?.textContent).not.toContain("Sprint planning task");
+    expect($(".sidebar")?.textContent).toContain("Standalone fix");
+    expect(tabs()).not.toContain("Workers");
+
+    live.sessions[0].timeline.push({ id: "mirrored-note", kind: "cortex", text: savedNote });
+    const loading = { ...live, sessions: [{ ...live.sessions[0], historyRead: { state: "loading" as const } }] };
+    p.emit(projection("3", loading)); await settle();
+    expect(feed?.textContent).toContain("Loading the conversation");
+    expect(feed?.textContent).toContain(savedNote);
+    expect(feed?.textContent).not.toContain("I am studying the project");
+
+    p.emit(projection("4", live)); await settle();
+    expect(conversation()).toBe(panel);
+    expect(panel.querySelector(".timeline")).toBe(feed);
+    expect(panel.querySelector(".dock textarea")).toBe(field);
+    expect(document.activeElement).toBe(field);
+    expect(field.selectionStart).toBe(3);
+    expect(field.value).toBe("Keep this draft");
+    expect(panel.querySelector(".dock .ws-att")?.textContent).toContain("brief.txt");
+    expect([...feed!.querySelectorAll(".ai")].filter(row => row.textContent === savedNote)).toHaveLength(1);
+    expect(feed?.textContent).toContain("I am studying the project");
+    expect(tabs()).toEqual(["Conversation", "Workers", "Plan", "Board", "Summary"]);
+    expect($(".sidebar")?.textContent).not.toContain("Sprint planning task");
+    expect(p.commands).toEqual([]);
   });
 });
