@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { capture, emptyWorkspace, LOCAL_MACHINE_ID, routeIdOf, type EngineConnection, type MachineConfig, type Worker, type Message } from "@cortex/workspace-domain";
+import { capture, emptyWorkspace, LOCAL_MACHINE_ID, routeIdOf, type EngineConnection, type MachineConfig, type Worker, type Message, type TaskOverlay } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { createRealPort } from "../src/port/real";
 import { SIDEBAR_DEFAULT, SIDEBAR_MIN } from "../src/prefs";
@@ -18,7 +18,7 @@ const repo = { projectId: "p", remote: "", tree: ["a.txt"], sources: {}, commits
   checkouts: [{ id: "p:main", projectId: "p", kind: "main", branch: "dev", path: "/cedar", taskId: null, label: null, base: "main", ahead: 0, behind: 0, behindOf: {}, draft: "", sources: {}, updateConflict: null, files: [] }] };
 const worker = (patch: Partial<Worker>): Worker => ({ id: "w1", taskId: "task-1", executionId: "e", role: "frontend-dev", status: "working", lane: "execution", goal: "Connect the board", now: null, waitsFor: null, scope: [], route: { model: "opus", effort: "high" }, attempt: { n: 1, of: 1 }, elapsedMs: null, runningSince: null, context: null, usage: null, activity: [{ sequence: 1, text: "Reading the board", kind: "note", at: null }], result: null, ...patch } as Worker);
 
-function machine(tasks = [wireTask({ executionId: "e", phase: "execution", runtimeState: "EXECUTING", executionState: "running" })], workers: Worker[] = [], more: { version?: string; connections?: EngineConnection[]; config?: (config: MachineConfig) => void } = {}) {
+function machine(tasks = [wireTask({ executionId: "e", phase: "execution", runtimeState: "EXECUTING", executionState: "running" })], workers: Worker[] = [], more: { version?: string; connections?: EngineConnection[]; config?: (config: MachineConfig) => void; taskFacts?: Record<string, TaskOverlay> } = {}) {
   const config = structuredClone(emptyWorkspace().machines[0].config);
   config.surfaces.user_defaults = { ...config.surfaces.user_defaults, coordinator: { engine: "claude-agent-acp", model: "opus", effort: "high", parameters: {} }, mode: "auto", language: "ru" };
   config.catalogue["claude-agent-acp"].models = [{ id: "opus", label: "Opus", efforts: ["medium", "high"], observed: true }];
@@ -26,7 +26,7 @@ function machine(tasks = [wireTask({ executionId: "e", phase: "execution", runti
   config.setup["claude-agent-acp"].status = "connected";
   config.surfaces.routing.engines["claude-agent-acp"].enabled = ["opus"];
   more.config?.(config);
-  const product = {tasks:{},sprints:[],messages:[] as Message[]};
+  const product = {tasks:more.taskFacts ?? {},sprints:[],messages:[] as Message[]};
   const history: Record<string,unknown>[] = [];
   const s = scriptedTransport({
     "service.capabilities": () => ({ methods: ["machine.call", "executions.control"], machine: true }),
@@ -734,6 +734,66 @@ describe("task session on real data", () => {
     await open(machine(undefined, workers), `${TASK}/workers/w2`);
     expect($(".livepane .d-title")?.textContent).toContain("code-reviewer");
     expect($(".livepane")?.textContent).toContain("No findings");
+  });
+
+  it("ticks coordinator and task Spend clocks between snapshots, then freezes and resumes from confirmed facts", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    try {
+      const now = Date.parse("2026-11-25T10:00:00Z"), min = 60_000;
+      vi.setSystemTime(now);
+      const taskFacts: Record<string, TaskOverlay> = {};
+      const metrics = (elapsedMs: number | null, runningSince: number | null, workingMs: number, workingSince: number | null, workingObservedAt: number | null) => {
+        taskFacts["task-1"] = { coordinatorMetrics: { elapsedMs, runningSince, usage: 17 }, spend: {
+          workingMs, workingSince, workingObservedAt, lastProgressAt: null, stalledSince: null, sessions: 1, turns: 1,
+          reportedTurns: 1, tokens: 17, engines: [], lastFailures: [],
+        } };
+      };
+      metrics(null, now - 5000, 4 * min - 1000, now - 2 * min, now);
+      const s = machine(undefined, [], { taskFacts });
+      await open(s, `${TASK}/workers/cortex`);
+      const shown = (elapsed: string, spend: string) => {
+        expect($('[role="tab"][aria-selected="true"].wcard .l3')?.textContent).toContain(elapsed);
+        expect($('[aria-label="Coordinator activity"] .d-grid')?.textContent).toContain(`Elapsed${elapsed}`);
+        expect($(".ws-spend")?.textContent).toContain(`Spent ${spend} working`);
+        expect(all(".inspector dt").find(dt => dt.textContent === "Time working")?.nextElementSibling?.textContent).toBe(spend);
+      };
+      const factsReads = () => s.calls.filter(c => c.operation === "machine.call" && (c.message as { op?: string }).op === "product.facts").length;
+      shown("5s", "3 min");
+      const reads = factsReads();
+      await vi.advanceTimersByTimeAsync(1000);
+      shown("6s", "4 min");
+      expect(factsReads()).toBe(reads);
+
+      const refresh = async (version: string, patch: Parameters<typeof wireTask>[0]) => {
+        s.answers["project.snapshot"] = () => snapshot(version, [wireTask({ version, executionId: "e", ...patch })]);
+        s.send({type:"refresh"}); await settled();
+      };
+      metrics(7000, null, 4 * min, null, null);
+      await refresh("5", { phase: "paused", runtimeState: "PAUSED", executionState: "paused" });
+      shown("7s", "4 min");
+      vi.setSystemTime(now + 10 * min);
+      await vi.advanceTimersByTimeAsync(1000);
+      shown("7s", "4 min");
+
+      const resumed = Date.now();
+      metrics(null, resumed - 3000, 5 * min - 1000, resumed - min + 1000, resumed);
+      await refresh("6", { phase: "execution", runtimeState: "EXECUTING", executionState: "running" });
+      shown("3s", "4 min");
+      await vi.advanceTimersByTimeAsync(1000);
+      shown("4s", "5 min");
+
+      // The next push is outside the store's refresh coalescing window.
+      vi.setSystemTime(Date.now() + 4000);
+      metrics(8000, null, 5 * min, null, null);
+      await refresh("7", { phase: "stopped", runtimeState: "CANCELLED", executionState: "stopped" });
+      shown("8s", "5 min");
+      vi.setSystemTime(Date.now() + min);
+      await vi.advanceTimersByTimeAsync(1000);
+      shown("8s", "5 min");
+    } finally {
+      dispose?.(); dispose = undefined;
+      vi.useRealTimers();
+    }
   });
 
   it("keeps following off until the owner returns and folds a failing step", async () => {

@@ -11,6 +11,7 @@ mod config_read;
 mod config_save;
 mod context;
 mod coordinator;
+pub(crate) use coordinator::coordinator_metrics;
 mod engine_connection;
 mod editor;
 pub(crate) use editor::Authority as EditorAuthority;

@@ -14,7 +14,7 @@ import { behindTarget, conflictLine, finishBlocked, mergeControls, taskCheckout 
 import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, externalDoneBlocked, languageLabel, modeLabel, resumeState, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
 import { CHECK_ICON, VERIFICATION } from "./worker";
 import { archiveBlocked, ARCHIVE_STOP_UNCONFIRMED } from "./git-actions-model";
-import { spendRows, StallBadge } from "./task-spend";
+import { spendRows, StallBadge, useLiveSpend } from "./task-spend";
 
 const useModel = (id: () => string) => {
   const ws = useWs();
@@ -139,6 +139,8 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
   const ws = useWs();
   const m = () => props.m;
   const t = () => m().view.task;
+  const spend = useLiveSpend(t);
+  const taskSpendRows = createMemo(() => spendRows(spend()));
   // Rows carry only what is known: a figure nobody reported is left out, and a section with no rows goes with it.
   const usage = (): [string, string][] => {
     const s = m().session, context = contextLine(s.context), rows: [string, string][] = [];
@@ -239,8 +241,8 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
       <Kv rows={[["Coordinator model", ws.route(settings()) ?? ""], ...(ws.store.state().options.modes.length ? [["Access", modeLabel(settings().mode)] as [string, string]] : []), ...(ws.store.state().options.languages.length ? [["Language", languageLabel(settings().language)] as [string, string]] : [])]} />
       <Show when={usesMachineRoute(m()) && ws.route(settings())}><div class="cap faint">What this machine sets for every task.</div></Show></div>
     {/* What the task spent, as its engines reported it (`native_progress`). */}
-    <Show when={spendRows(t().spend).length > 0}>
-      <div class="ins-sec"><div class="ins-h"><span>Spend</span></div><Kv rows={spendRows(t().spend)} /></div>
+    <Show when={taskSpendRows().length > 0}>
+      <div class="ins-sec"><div class="ins-h"><span>Spend</span></div><Kv rows={taskSpendRows()} /></div>
     </Show>
     <Show when={usage().length > 0}>
       <div class="ins-sec"><div class="ins-h"><span>Usage</span></div><Kv rows={usage()} /></div>

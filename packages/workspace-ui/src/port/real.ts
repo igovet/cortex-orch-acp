@@ -1201,8 +1201,9 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
       const { result, reviewActions, integrationFacts } = known, workspaceDigest = (known as { workspaceDigest?: unknown }).workspaceDigest;
       return [id, { ...(result !== undefined ? { result } : {}), ...(reviewActions !== undefined ? { reviewActions } : {}),
         ...(workspaceDigest !== undefined ? { workspaceDigest } : {}), ...(integrationFacts !== undefined ? { integrationFacts } : {}),
-        // The task's spend is a facts read's too.
-        ...(known.spend !== undefined ? { spend: known.spend } : {}), ...saved }];
+        // Timing is also read with task facts, not the saved board.
+        ...(known.spend !== undefined ? { spend: known.spend } : {}),
+        ...(known.coordinatorMetrics !== undefined ? { coordinatorMetrics: known.coordinatorMetrics } : {}), ...saved }];
     }));
     return {...previous,projectId:project.projectId,openBranch:previous?.openBranch ?? "",defaultBranch:previous?.defaultBranch ?? "",
       repo:previous?.repo ?? null,workers:previous?.workers ?? [],reviews:previous?.reviews ?? [],

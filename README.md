@@ -1316,6 +1316,7 @@ scripts/cortex-xtask.sh package stamp            # regenerate the content hash a
 scripts/cortex-xtask.sh package check            # validate the stamp
 scripts/cortex-xtask.sh check-pins               # reviewed dependency pins
 scripts/cortex-xtask.sh test-fast                # bounded no-paid cargo, Vitest and Paseo suites
+scripts/cortex-xtask.sh test-fast --affected BASE # opt-in: only Rust packages changed since BASE; full suite when unsure
 scripts/cortex-paseo-tools.sh acp-smoke          # no-paid startup smoke
 ```
 

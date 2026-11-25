@@ -85,7 +85,13 @@ Run the fixed entry point from the checkout (also supported when tracked files a
 ```
 scripts/cortex-xtask.sh test-fast
 scripts/cortex-xtask.sh test-fast --list
+scripts/cortex-xtask.sh test-fast --affected BASE
+scripts/cortex-xtask.sh test-fast --affected BASE --list
 ```
+
+`--affected BASE` is opt-in; the default plan is unchanged and stays the complete suite. It diffs against the merge base with `BASE` (tracked and non-ignored untracked changes, both sides of renames) and uses locked, offline `cargo metadata` to test only the changed workspace packages and their reverse dependencies. The `build` step always remains, and a change limited to Rust test files omits the JavaScript steps. It falls back to the full plan, announced on stderr, for shared paths (manifests, tooling, non-Rust files), unclassified paths, no observed change, a directly affected package the runner does not test, or any discovery failure. It cannot be combined with `--only` or `--skip`; `--list` previews the selection. Selection logic is covered by unit tests in `crates/cortex-xtask/src/testrun_affected.rs`; no whole-suite timing is claimed.
+
+Two wait tests in `native_runtime.rs` (`pump_tests`) advance Tokio virtual time instead of sleeping, and the former `channel_identity`, `contract` and `native_core` protocol test programs are one `protocol` integration test: filter with `cargo test -p workspace-protocol --test protocol MODULE::TEST`.
 
 `test-fast` is the Rust `cortex-xtask` command. It checks `timeout --version` on the invoking `PATH` and falls back to `gnutimeout --version` if needed. Only a successful GNU coreutils version probe qualifies; the runner uses that exact executable with `--kill-after=5`. No step runs in parallel with another:
 

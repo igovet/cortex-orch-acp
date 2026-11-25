@@ -228,8 +228,8 @@ export const stopLabel = (resumable: boolean) => resumable ? "Stop" : "End run";
 /** A task with no route of its own runs on what its machine sets for every task. */
 export const usesMachineRoute = (m: SessionModel) => !m.view.task.settings.model;
 export const taskSettings = (m: SessionModel): TaskSettings => usesMachineRoute(m) ? machineDefaults(m.view.machine).settings : m.view.task.settings;
-export const elapsedOf = (w: Pick<Worker, "elapsedMs" | "runningSince">, now: number) =>
-  w.elapsedMs === null && w.runningSince === null ? null : (w.elapsedMs ?? 0) + (w.runningSince === null ? 0 : Math.max(0, now - w.runningSince));
+export const elapsedOf = (w: { elapsedMs: number | null; runningSince?: number | null }, now: number) =>
+  w.elapsedMs === null && w.runningSince == null ? null : (w.elapsedMs ?? 0) + (w.runningSince == null ? 0 : Math.max(0, now - w.runningSince));
 export function duration(ms: number | null) {
   if (ms === null || !Number.isFinite(ms)) return "";
   const total = Math.max(0, Math.floor(ms / 1000)), hours = Math.floor(total / 3600), minutes = Math.floor(total / 60) % 60, seconds = total % 60;

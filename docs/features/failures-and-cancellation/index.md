@@ -335,6 +335,16 @@ The controller treats a storage-contention error (`database is locked` or `stora
 
 A coordinator prompt that returned normally is not a failed engine call, even when recording its turn end is contended. Its bookkeeping writes (the `COORDINATOR_TURN_ENDED` event, the authorization-recovered mark, the delivered mark for the claimed events and the context-delivery confirmation) sit outside the prompt's failure handler. On contention they retry in place with the same backoff and one shared 900 s allowance, and the failure handler's own release, turn-end and delivery writes do too. Re-entering the pass instead would prompt the coordinator again. When the allowance is spent, the turn is cancelled or the transport is lost, the error ends the turn without a re-entry; it never becomes `coordinator_prompt_failed`, a `BLOCKED` stop or a sibling cancellation.
 
+### Obstacles: owner actions, decisions and waits
+
+Failures are classified into access, owner decision, external outage and technical (see [task lifecycle](../task-lifecycle/index.md)). What each class does while the task runs, verified against `crates/cortex-core/src/lifecycle/obstacles.rs`, its tests (`crates/cortex-core/tests/obstacles.rs`) and `crates/workspace-service/src/native_runtime.rs`:
+
+- **Owner decision, asked at once.** The classification opens the question itself (`OWNER_DECISION_REQUIRED` plus a node-bound `USER_QUESTION_REQUESTED`) without waiting for unrelated nodes to finish; the task stays `EXECUTING` and independent running nodes continue. The owner's answer retries exactly the blocked node (`ASSIGNMENT_RETRIED`, with the answer attached to that assignment only; a sibling node never receives it).
+- **Access on a review node.** A reviewer blocked only by access is classified like a worker node (`park_review_access_tx`): its review node is parked with an owner action, its result stays attributable to the old assignment, and resolving the action retries that review with a fresh packet rather than pausing the whole task.
+- **Recheck schedule in the store.** The environment recheck of an open owner action is persisted as `OWNER_ACTION_RECHECK_SCHEDULED {id, attempt, next_check_at}` and read back by `claim_environment_rechecks_tx`, so the backoff survives a store reopen or service restart and a second claim at the same instant is empty. External waits keep `next_check_at` in `EXTERNAL_WAIT_STARTED` and `EXTERNAL_WAIT_RECHECKED`.
+- **Terminal closure.** When a task is cancelled, completed or otherwise reaches a terminal state, every open owner action is closed with `OWNER_ACTION_RESOLVED {by: task_terminal, state}`, every open external wait with `EXTERNAL_WAIT_ENDED {reason: task_terminal}` and open `pending_questions` are cancelled. This grants no access and is never recorded as a successful probe; a later environment claim for a terminal task returns nothing.
+- **Service-side rechecks.** `recheck_obstacles` (`native_runtime.rs`) runs due external waits through `probe_external` and the claimed environment actions through one preflight, without any model call. Covered by no-paid tests with a stand-in listener (down, then up) and a private D-Bus bus; no live-engine timer for task or coordinator elapsed time was exercised.
+
 ## 3. Cancellation (`session/cancel`)
 
 `session/cancel` interrupts the current turn, revokes current worker channels,

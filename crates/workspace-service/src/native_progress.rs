@@ -357,6 +357,7 @@ pub(crate) struct Spend {
     pub working: bool,
     pub working_ms: i64,
     pub working_since: Option<i64>,
+    pub working_observed_at: Option<i64>,
     pub last_progress: Option<i64>,
     /// Since when the working task has made no progress; None while it does not work.
     pub stalled_since: Option<i64>,
@@ -384,6 +385,7 @@ impl Spend {
         json!({
             "workingMs": self.working_ms,
             "workingSince": self.working_since,
+            "workingObservedAt": self.working_observed_at,
             "lastProgressAt": self.last_progress,
             "stalledSince": self.stalled_since,
             "sessions": self.sessions(),
@@ -493,6 +495,7 @@ pub(crate) fn compute(state: &str, events: &[Event], usage: &[Usage], now: i64) 
         working,
         working_ms,
         working_since,
+        working_observed_at: working_since.map(|_| now),
         last_progress: last_progress(events),
         reasons: reasons(events, stalled_since),
         stalled_since,
@@ -711,8 +714,13 @@ mod tests {
         assert_eq!((ms, since), (3 * H, Some(6 * H)));
         let spend = compute("EXECUTING", &events, &[], 7 * H);
         assert_eq!(spend.stalled_since, Some(6 * H));
-        let paused = compute("PAUSED", &events, &[], 7 * H);
+        assert_eq!(spend.json()["workingObservedAt"], json!(7 * H));
+        let mut events = events;
+        events.push(state("EXECUTING", "PAUSED", 8 * H));
+        let paused = compute("PAUSED", &events, &[], 10 * H);
         assert_eq!(paused.stalled_since, None);
+        assert_eq!(paused.json()["workingObservedAt"], Value::Null);
+        assert_eq!(paused.working_ms, 4 * H);
     }
 
     #[test]

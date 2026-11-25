@@ -638,7 +638,7 @@ export function WorkerPane(props: { model: Accessor<SessionModel>; pick: string;
     if (props.pick === CORTEX) return <>
       <div class="d-h"><div class="d-title">Coordinator<span class={`st ${m().view.fact.tone}`}>{m().view.fact.text}</span></div>
         <div class="d-goal">Coordinator for this task. Message it from the composer in Conversation.</div>
-        <div class="d-grid"><Figure label="Model" value={coordinatorRoute()} /><Figure label="Elapsed" value={duration(session().coordinator.elapsedMs) || null} /><Figure label="Context" value={contextLine(session().context)} /><Figure label="Usage" value={session().coordinator.usage === null ? null : tokens(session().coordinator.usage!)} /></div></div>
+        <div class="d-grid"><Figure label="Model" value={coordinatorRoute()} /><Figure label="Elapsed" value={duration(elapsedOf(session().coordinator, props.now)) || null} /><Figure label="Context" value={contextLine(session().context)} /><Figure label="Usage" value={session().coordinator.usage === null ? null : tokens(session().coordinator.usage!)} /></div></div>
       <CoordinatorFeed model={props.model} />
     </>;
     if (props.pick === VERIFICATION) return <>

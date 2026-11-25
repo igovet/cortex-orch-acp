@@ -3292,7 +3292,12 @@ service (`gh auth status`, `codex login status`, `claude auth status`, `sudo -n
 true`; exit codes only, output discarded, never creating a native engine home) when
 the owner asks and every 60 seconds while the action is open, and a `sudo` action
 also resolves when a "Password for sudo" prompt of the same task is answered. The
-owner can always dismiss a card; the runtime then retries anyway.
+owner can always dismiss a card; the runtime then retries anyway. The next
+recheck time is stored in the task's event log, so a restart does not reset it,
+and a card is closed (`by: task_terminal`) when its task is cancelled or
+finishes. That closure grants no access and counts as no successful probe. For a
+task still running, the service also raises a desktop notification for an open
+card while no window is open.
 
 **Terminal sign-in.** "Open sign-in in terminal" types the installed CLI's own
 interactive login (`gh auth login`, `codex login`, `claude auth login`) into the

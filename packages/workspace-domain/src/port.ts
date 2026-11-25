@@ -17,6 +17,8 @@ export type ProjectionUpdate = { kind: "projection"; version: string } & ({ scop
 /** What the owner decided about a task. The runtime knows nothing of these, so they come from the machine and sit over its facts. */
 export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptance" | "reviewActions" | "integrationFacts" | "closedAs" | "doneAt" | "archive" | "archiveHold" | "targetBranch" | "sprintId" | "dependencies" | "integration" | "notVerifiedByCortex" | "purgeBlocker" | "work" | "checkout" | "settings" | "result" | "conflict" | "merge" | "resolvedBy" | "writeDenials" | "spend" | "reworkAvailable" | "reworkUnavailableReason" | "reworkWarnings" | "reworkVersion" | "reworkOwnerEpoch" | "reworkExecutionId">> & {
   status?: "ready_to_merge" | "done"; automaticReady?: boolean; planning?: boolean; purged?: boolean; retiredPlanner?: boolean;
+  /** Latest coordinator attempt clock and reported usage, read with task facts. */
+  coordinatorMetrics?: Pick<TaskSession["coordinator"], "elapsedMs" | "runningSince" | "usage">;
   /** Owner reopen generation. An older result's presentation facts cannot cross it. */
   reworkEvent?: string;
 };
@@ -249,7 +251,7 @@ export const projectionKey = (update: ProjectionUpdate) => update.scope === "wor
 export function overlayTask(task: Task, overlay: TaskOverlay | undefined, branch: string): Task {
   const checkout = task.checkout.kind === "main" ? { kind: "main" as const, branch } : task.checkout;
   if (!overlay) return { ...task, checkout };
-  const { status, automaticReady, planning: _planning, purged: _purged, ...facts } = overlay;
+  const { status, automaticReady, planning: _planning, purged: _purged, coordinatorMetrics: _coordinatorMetrics, ...facts } = overlay;
   // Runtime activity supersedes acceptance of an older result, even if a
   // machine-state write failed after durable steering capture.
   const reopened = task.process === "live" && status === "ready_to_merge";
@@ -310,7 +312,9 @@ function withFactEntries(session: TaskSession, facts: ProjectFacts): TaskSession
     const { held: _held, ...open } = d;
     return { ...open, answer: null };
   });
-  return { ...session, decisions, timeline: [...kept, ...entries] };
+  const metrics = facts.overlays[session.taskId]?.coordinatorMetrics;
+  const coordinator = metrics ? { ...session.coordinator, ...metrics } : session.coordinator;
+  return { ...session, coordinator, decisions, timeline: [...kept, ...entries] };
 }
 
 /** One project's records replaced by what its facts say now. When they are the same records in the same order, each stays

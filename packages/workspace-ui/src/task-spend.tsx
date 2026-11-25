@@ -50,8 +50,24 @@ export function spendLine(spend: TaskSpend | undefined): string | null {
   const tokens = spend.tokens === null ? "tokens not reported" : `${tokenText(spend.tokens, spend.reportedTurns, spend.turns)} tokens`;
   return [`${spendDuration(spend.workingMs)} working`, plural(spend.sessions, "session"), plural(spend.turns, "turn"), tokens].join(" · ");
 }
+/** The snapshot total already includes time through its observation, so add only time since then. */
+export function useLiveSpend(task: () => Task) {
+  const ws = useWs();
+  const [now, setNow] = createSignal(ws.store.clock());
+  const anchor = () => {
+    const spend = task().spend;
+    return spend?.workingSince != null && spend.workingObservedAt != null
+      ? Math.max(spend.workingSince, spend.workingObservedAt) : null;
+  };
+  createTicker(() => setNow(ws.store.clock()), 1000, () => anchor() !== null);
+  return () => {
+    const spend = task().spend, at = anchor();
+    return spend && at !== null ? { ...spend, workingMs: spend.workingMs + Math.max(0, now() - at) } : spend;
+  };
+}
 export function SpendLine(props: { task: Task }) {
-  return <Show when={spendLine(props.task.spend)}>{line => <div class="cap muted ws-spend" aria-label="Spend">Spent {line()}</div>}</Show>;
+  const spend = useLiveSpend(() => props.task);
+  return <Show when={spendLine(spend())}>{line => <div class="cap muted ws-spend" aria-label="Spend">Spent {line()}</div>}</Show>;
 }
 
 /** Whole hours a working task has gone without progress, once that reached the owner's threshold; null otherwise or when Off. */

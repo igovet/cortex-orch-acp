@@ -820,6 +820,7 @@ export function WorkersList(props: { m: SessionModel; now: number; pick: string 
   const at = (worker: string): Route => routes.workers(worker);
   const lane = (name: "execution" | "review") => props.m.workers.filter(w => w.lane === name && !isFinished(w));
   const coordinator = () => props.m.session.coordinator;
+  const coordinatorElapsed = () => duration(elapsedOf(coordinator(), props.now));
   const ws = useWs();
   const route = () => ws.route(recordedCoordinatorRoute(props.m, ws.store.mode === "demo"));
   const check = () => verificationFace(props.m);
@@ -838,7 +839,7 @@ export function WorkersList(props: { m: SessionModel; now: number; pick: string 
     <A class="wcard" role="tab" to={at(CORTEX)} aria-selected={props.pick === CORTEX ? "true" : "false"}>
       <span class="l1"><span class="ic"><I n="bot" s={14} /></span>Coordinator<span class={`st ${props.m.view.fact.tone}`}>{props.m.mode === "live" ? "Coordinating" : props.m.view.fact.text}</span></span>
       <Show when={coordinator().note}><span class="l2 trunc" style={{ display: "block" }}>{coordinator().note}</span></Show>
-      <span class="l3"><Show when={route()}><span>{route()}</span></Show><Show when={coordinator().elapsedMs !== null}><span>{duration(coordinator().elapsedMs)}</span></Show><Show when={contextOf(props.m.session.context)}>{c => <span>Context {c().percent}%</span>}</Show><Show when={coordinator().usage !== null}><span>Usage {tokens(coordinator().usage!)}</span></Show></span>
+      <span class="l3"><Show when={route()}><span>{route()}</span></Show><Show when={coordinatorElapsed()}>{elapsed => <span>{elapsed()}</span>}</Show><Show when={contextOf(props.m.session.context)}>{c => <span>Context {c().percent}%</span>}</Show><Show when={coordinator().usage !== null}><span>Usage {tokens(coordinator().usage!)}</span></Show></span>
     </A>
     <Group title="Execution" list={lane("execution")} />
     <Group title="Review" list={lane("review")} />

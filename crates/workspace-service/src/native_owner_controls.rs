@@ -1152,11 +1152,13 @@ impl Runtime {
                 let guidance_floor=if more_queued {oldest} else {None};
                 if !workers_only {product["messages"].as_array_mut().ok_or(CoreError::Refused("state_unreadable"))?.extend(queued);}
                 if !wanted {continue;}
+                let usage = crate::notifier::progress::attempt_tokens(db, &task)?;
                 // What the task spent and since when it has made no progress, for the task page (`native_progress`).
                 if !workers_only && product["tasks"][&draft].is_object() {
                     product["tasks"][&draft]["spend"]=crate::notifier::progress::read(db,&task,crate::notifier::progress::now_ms())?.json();
+                    let (elapsed, running_since, tokens) = crate::machine::coordinator_metrics(db, &task, &usage)?;
+                    product["tasks"][&draft]["coordinatorMetrics"] = json!({"elapsedMs":elapsed,"runningSince":running_since,"usage":tokens});
                 }
-                let usage = crate::notifier::progress::attempt_tokens(db, &task)?;
                 let nodes=db.prepare(&format!("SELECT n.assignment_ref,n.role,n.objective,n.status,p.status,n.scope_json,n.result_json,n.revision,p.attempt_id,n.node_id,{},{} FROM runtime_nodes n
                     JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
                     WHERE n.task_id=? ORDER BY n.rowid DESC LIMIT 1001",ms("p.created_at"),ms("p.updated_at")))?

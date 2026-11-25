@@ -574,7 +574,7 @@ pub(super) fn read(db: &Connection, project: &str, params: &Value) -> CoreResult
         _ => "unknown",
     };
     let (elapsed, running_since, usage) = match e["runtime_task_id"].as_str() {
-        Some(runtime) => coordinator_metrics(db, runtime)?,
+        Some(runtime) => coordinator_metrics(db, runtime, &crate::notifier::progress::attempt_tokens(db, runtime)?)?,
         None => (None, None, None),
     };
     let mut item = json!({"id":params["workerId"],"taskId":task,"executionId":e["execution_id"],"role":"coordinator","lane":"execution",
@@ -601,12 +601,12 @@ pub(super) fn read(db: &Connection, project: &str, params: &Value) -> CoreResult
 }
 /// The coordinator worker page spans coordinator replacement attempts, not
 /// worker or consultant sessions. Elapsed is for its latest provisioned attempt.
-fn coordinator_metrics(
+pub(crate) fn coordinator_metrics(
     db: &Connection,
     task: &str,
+    totals: &std::collections::BTreeMap<String, u128>,
 ) -> CoreResult<(Option<i64>, Option<i64>, Option<u64>)> {
     use crate::notifier::progress;
-    let totals = progress::attempt_tokens(db, task)?;
     let mut query = db.prepare(
         "SELECT attempt_id,status,created_at,updated_at FROM delegation_provisioning
          WHERE task_id=? AND role_id='orchestrator' ORDER BY rowid DESC",
@@ -681,11 +681,11 @@ mod tests {
         assert_eq!(totals.get("co_old"), Some(&0));
         assert_eq!(totals.get("worker"), Some(&32));
         assert!(!totals.contains_key("unknown"));
-        let (elapsed, since, usage) = coordinator_metrics(&db, "task").unwrap();
+        let (elapsed, since, usage) = coordinator_metrics(&db, "task", &totals).unwrap();
         assert_eq!((elapsed, usage), (None, Some(11)));
         assert!(since.is_some());
         db.execute("UPDATE delegation_provisioning SET status='terminated' WHERE attempt_id='co_new'", []).unwrap();
-        assert_eq!(coordinator_metrics(&db, "task").unwrap(), (Some(7000), None, Some(11)));
+        assert_eq!(coordinator_metrics(&db, "task", &totals).unwrap(), (Some(7000), None, Some(11)));
     }
 
     #[test]

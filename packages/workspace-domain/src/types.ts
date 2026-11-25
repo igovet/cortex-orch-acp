@@ -192,6 +192,8 @@ export type Task = {
  * failed attempts since then hit, newest first.
  */
 export type TaskSpend = {
+  /** Time at which workingMs already includes the open stretch. Older services may omit it. */
+  workingObservedAt?: number | null;
   workingMs: number; workingSince: number | null; lastProgressAt: number | null; stalledSince: number | null;
   sessions: number; turns: number; reportedTurns: number; tokens: number | null;
   engines: { engine: string; model: string; modelLabel?: string; sessions: number; turns: number; reportedTurns: number; tokens: number | null }[];
@@ -412,7 +414,7 @@ export type TaskSession = {
   historyEarlier?: { state: "available" | "loading"; since: number | null } | { state: "failed"; reason: string; since: number | null };
   context: { used: number; window: number } | null; tokens: number | null;
   planUsage: { percent: number; observedAt: number } | null;
-  coordinator: { note: string; elapsedMs: number | null; usage: number | null };
+  coordinator: { note: string; elapsedMs: number | null; runningSince?: number | null; usage: number | null };
   verification: string[]; changes: { files: number; add: number; del: number } | null; mock?: true;
 };
 export type GitStatus = "M" | "A" | "D" | "U";
