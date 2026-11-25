@@ -140,10 +140,31 @@ async fn settle(
         "SELECT e.execution_id, json_array(e.execution_id, r.revision, r.state,
             (SELECT max(id) FROM runtime_events v WHERE v.task_id=r.task_id),
             (SELECT max(rowid) FROM runtime_nodes n WHERE n.task_id=r.task_id)),
-            EXISTS(SELECT 1 FROM runtime_events v WHERE v.task_id=r.task_id AND v.type='VERIFICATION_PASSED')
-            AND NOT EXISTS(SELECT 1 FROM runtime_events o WHERE o.task_id=r.task_id AND o.type='OWNER_TASK_RESOLVED')
+            r.task_id, r.revision
          FROM workspace_tasks w JOIN workspace_executions e ON e.execution_id=w.execution_id JOIN runtime_tasks r ON r.task_id=e.runtime_task_id WHERE w.project_id=? AND w.task_id=? AND r.state='COMPLETED'",
-        (project,task), |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?)).map_err(context::core)?;
+        (project,task), |r|Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,r.get::<_, i64>(3)?))).optional()?
+        .map(|(execution, evidence, runtime, revision)| {
+            let control = cortex_core::workspace::control::owner_rework_event(db, &runtime)?;
+            // Without an owner rework the task has one cycle: the runtime passed it.
+            // After one, only the verdict of the current cycle, for the current
+            // revision, counts: an older cycle's pass never settles the new result.
+            let passed: bool = if control.is_none() {
+                db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='VERIFICATION_PASSED')",
+                    [&runtime], |r| r.get(0),
+                )?
+            } else { db.query_row(
+                "SELECT coalesce((SELECT type='VERIFICATION_PASSED'
+                    AND json_extract(payload_json,'$.revision')=?3 FROM runtime_events
+                    WHERE task_id=?1 AND id>?2 AND (type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED')
+                      OR (type='VERIFICATION_REVISED' AND json_extract(payload_json,'$.accepted_unverified') IS NOT NULL))
+                    ORDER BY id DESC LIMIT 1),0)",
+                (&runtime, control.unwrap_or(0), revision), |r| r.get(0),
+            )? };
+            let resolved = cortex_core::workspace::control::owner_resolution_current(db, &runtime)?;
+            Ok::<_, cortex_core::CoreError>((execution, evidence, passed && !resolved))
+        }).transpose()?)).map_err(context::core)?;
     let Some((execution, evidence, verified)) = finished else {
         return Ok(Some(refusal(
             "There is no completed execution for this result.",
@@ -744,6 +765,43 @@ mod native_acceptance_tests {
             std::fs::remove_dir_all(root).unwrap();
         }
     }
+    #[tokio::test]
+    async fn automatic_acceptance_uses_the_reopened_cycles_verification_and_resolution() {
+        for (fresh_pass, current_resolution, expected) in [
+            (false, false, false),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let (root, runtime, draft) = completed().await;
+            let state = automatic_state(&root);
+            let mut product = sprint_product(&draft, "automatic");
+            with_task(&runtime, move |db, task| {
+                let pass: String = db.query_row(
+                    "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='VERIFICATION_PASSED'",
+                    [task], |row| row.get(0),
+                )?;
+                lifecycle::event_tx(db, task, "OWNER_TASK_RESOLVED", json!({}))?;
+                lifecycle::event_tx(db, task, "TASK_REOPENED", json!({"origin":"owner_rework"}))?;
+                if fresh_pass {
+                    lifecycle::event_tx(db, task, "VERIFICATION_PASSED", serde_json::from_str(&pass)?)?;
+                }
+                if current_resolution {
+                    lifecycle::event_tx(db, task, "OWNER_TASK_RESOLVED", json!({}))?;
+                }
+                Ok(())
+            }).await;
+            settings::write_json(&product_path(&state, "project").unwrap(), &product).unwrap();
+            let result = automatic(&root, "project", &draft, &state, &mut product, &mut Git::new())
+                .await
+                .unwrap();
+            assert_eq!(result["accepted"], expected, "{fresh_pass}/{current_resolution}: {result}");
+            assert_eq!(product["tasks"][&draft]["acceptance"].is_object(), expected);
+            runtime.shutdown().await;
+            drop(runtime);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn a_switch_to_manual_before_settling_leaves_the_result_for_the_owner() {
         let (root, runtime, draft) = completed().await;

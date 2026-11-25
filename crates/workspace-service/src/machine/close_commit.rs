@@ -8,6 +8,7 @@ use super::{context, git::Git, integration::REPO_BUSY, settings::Lock};
 use cortex_core::OpenMode;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 /// Paths the task recorded writing or deleting through Cortex's own file tools.
@@ -28,26 +29,54 @@ fn recorded_paths(root: &Path, project: &str, task: &str) -> Vec<String> {
             let Some(runtime) = runtime else {
                 return Ok(Vec::new());
             };
+            let reopened = cortex_core::workspace::control::owner_rework_event(db, &runtime)?
+                .unwrap_or(0);
+            let integrated: i64 = db.query_row(
+                "SELECT coalesce(max(id),0) FROM runtime_events
+                 WHERE task_id=? AND type='TASK_REOPENED'
+                 AND json_extract(payload_json,'$.origin')='owner_rework'
+                 AND json_extract(payload_json,'$.resetChangesBase')=1",
+                [&runtime], |r| r.get(0),
+            )?;
             let rows = db
                 .prepare(
-                    "SELECT DISTINCT json_extract(payload_json,'$.path') FROM runtime_events
-                     WHERE task_id=? AND json_valid(payload_json) AND (type='NATIVE_PROJECT_WRITTEN'
-                        OR (type='NATIVE_PROJECT_CHANGED' AND json_extract(payload_json,'$.operation')='project_delete')
-                        OR (type='TOOL_COMPLETED' AND json_extract(payload_json,'$.operation') IN
-                            ('project_write','project_edit','project_delete')))",
+                    "WITH writes AS (
+                       SELECT id, json_extract(payload_json,'$.path') AS path,
+                         CASE WHEN type='NATIVE_PROJECT_WRITTEN'
+                              THEN json_extract(payload_json,'$.sha256') END AS sha
+                       FROM runtime_events
+                       WHERE task_id=? AND id>? AND json_valid(payload_json) AND (type='NATIVE_PROJECT_WRITTEN'
+                         OR (type='NATIVE_PROJECT_CHANGED' AND json_extract(payload_json,'$.operation')='project_delete')
+                         OR (type='TOOL_COMPLETED' AND json_extract(payload_json,'$.operation') IN
+                             ('project_write','project_edit','project_delete')))
+                     )
+                     SELECT path, id, sha FROM (
+                       SELECT *, row_number() OVER (PARTITION BY path ORDER BY id DESC) AS latest
+                       FROM writes WHERE typeof(path)='text'
+                     ) WHERE latest=1",
                 )?
-                .query_map([&runtime], |r| r.get::<_, Option<String>>(0))?
+                .query_map((&runtime, integrated), |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<String>>(2)?))
+                })?
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows.into_iter().flatten().collect())
+            Ok(rows.into_iter().map(|(path, id, sha)| (path, id > reopened, sha)).collect())
         })
         .unwrap_or_default()
         .into_iter()
-        .filter(|p: &String| {
+        .filter(|(p, _, _): &(String, bool, Option<String>)| {
             !p.is_empty()
                 && !p.starts_with('/')
                 && !p.starts_with('-')
                 && p.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
                 && !matches!(p.split('/').next(), Some(".git" | ".cortex" | ".cortex-dev"))
+        })
+        .filter_map(|(path, current, sha)| {
+            // Unmerged work may be retained in place, but an old path alone
+            // does not prove that the task still owns its dirty bytes.
+            (current || sha.is_some_and(|sha| {
+                super::task_facts::safe_bytes(root, &path, 1024 * 1024)
+                    .is_ok_and(|bytes| format!("{:x}", Sha256::digest(bytes)) == sha)
+            })).then_some(path)
         })
         .collect()
 }
@@ -116,19 +145,6 @@ async fn run(
     if branch.is_empty() {
         return skipped("detached_checkout");
     }
-    // Git-ignored, untracked paths are not deliverable and `git add` refuses them.
-    let mut paths = Vec::new();
-    for path in recorded_paths(root, project, task) {
-        if !git
-            .success(root, &["check-ignore", "-q", "--", &path])
-            .await?
-        {
-            paths.push(path);
-        }
-    }
-    if paths.is_empty() {
-        return skipped("no_recorded_paths");
-    }
     // The same order as every other holder of both: the repository lock is taken
     // here, after the close released the machine lock.
     let _repo = Lock::long(
@@ -145,6 +161,19 @@ async fn run(
     }
     if !same_close(record, &current["tasks"][task]) {
         return skipped("task_close_changed");
+    }
+    // Git-ignored, untracked paths are not deliverable and `git add` refuses them.
+    let mut paths = Vec::new();
+    for path in recorded_paths(root, project, task) {
+        if !git
+            .success(root, &["check-ignore", "-q", "--", &path])
+            .await?
+        {
+            paths.push(path);
+        }
+    }
+    if paths.is_empty() {
+        return skipped("no_recorded_paths");
     }
     let literal: Vec<String> = paths.iter().map(|p| format!(":(literal){p}")).collect();
     let mut status = vec!["status", "--porcelain", "-z", "--"];

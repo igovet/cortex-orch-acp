@@ -1032,7 +1032,13 @@ branch, not the previous task branch. A worktree task gets a fresh owned
 worktree and branch; a project-folder task stays in place and requires that the
 target branch already be checked out. Workspace does not switch that checkout
 or remove its changes. The old integration is not undone: integrate the new
-result separately after review and verification.
+result separately after review and verification. The old owner close does not
+prevent automatic acceptance of a freshly verified result. If the owner closes
+the new result as is in an Automatic sprint, a project-folder commit includes
+only paths attributed to this cycle; after unmerged rework, matching retained
+write bytes may also be included. Previously confirmed pull requests remain in
+history. A new owned branch needs its own confirmed Push and PR; an unresolved
+previous PR attempt still blocks another PR.
 
 ## Recorded data and pending questions
 

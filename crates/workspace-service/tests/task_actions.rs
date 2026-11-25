@@ -535,6 +535,53 @@ async fn close_commit_and_task_draft_do_not_copy_french_task_prose() {
     let closed = f.call(json!({"action":"close","taskId":"t1","choice":"as_is","confirmed":true})).await;
     assert_eq!(closed["result"]["asIsCommit"]["committed"], true, "{closed}");
     assert_eq!(git(&["log", "-1", "--format=%s"]).trim(), "Close task as is (not verified)");
+    assert_eq!(git(&["show", "HEAD:upload.txt"]), "after\n");
+
+    // Same runtime, fresh target: the previous path is history, even if it is
+    // dirty again when the owner closes the second result.
+    fs::write(f.root.join("upload.txt"), "unrelated owner edit\n").unwrap();
+    fs::write(f.root.join("new.txt"), "second cycle only\n").unwrap();
+    let reopen = store.write(|db| {
+        let event = cortex_core::lifecycle::event_tx(db, "r1", "TASK_REOPENED",
+            json!({"origin":"owner_rework","resetChangesBase":true}))?;
+        cortex_core::lifecycle::event_tx(db, "r1", "NATIVE_PROJECT_WRITTEN",
+            json!({"path":"new.txt"}))?;
+        Ok(event)
+    }).unwrap();
+    let mut product: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    product["tasks"]["t1"] = json!({
+        "reworkEvent":reopen.to_string(),"sprintId":"s1","checkout":{"kind":"main"}
+    });
+    fs::write(&path, product.to_string()).unwrap();
+
+    let second = f.call(json!({"action":"close","taskId":"t1","choice":"as_is","confirmed":true})).await;
+    assert_eq!(second["result"]["asIsCommit"]["committed"], true, "{second}");
+    assert_eq!(git(&["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]), "new.txt\n");
+    assert_eq!(git(&["show", "HEAD:upload.txt"]), "after\n");
+    assert_eq!(git(&["status", "--porcelain", "--", "upload.txt"]), " M upload.txt\n");
+
+    // An unmerged restart must retain a prior write only when the retained
+    // bytes still match. Without a hash the old path contributes no authority.
+    use sha2::{Digest, Sha256};
+    fs::write(f.root.join("retained.txt"), "verified retained bytes\n").unwrap();
+    fs::write(f.root.join("changed.txt"), "different author's bytes\n").unwrap();
+    let reopen = store.write(|db| {
+        for (path, recorded) in [
+            ("retained.txt", "verified retained bytes\n"),
+            ("changed.txt", "old task bytes\n"),
+        ] {
+            cortex_core::lifecycle::event_tx(db, "r1", "NATIVE_PROJECT_WRITTEN",
+                json!({"path":path,"sha256":format!("{:x}", Sha256::digest(recorded))}))?;
+        }
+        cortex_core::lifecycle::event_tx(db, "r1", "TASK_REOPENED",
+            json!({"origin":"owner_rework","resetChangesBase":false}))
+    }).unwrap();
+    product["tasks"]["t1"]["reworkEvent"] = json!(reopen.to_string());
+    fs::write(&path, product.to_string()).unwrap();
+    let retained = f.call(json!({"action":"close","taskId":"t1","choice":"as_is","confirmed":true})).await;
+    assert_eq!(retained["result"]["asIsCommit"]["committed"], true, "{retained}");
+    assert_eq!(git(&["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]), "retained.txt\n");
+    assert_eq!(git(&["status", "--porcelain", "--", "changed.txt"]), "?? changed.txt\n");
 }
 
 #[tokio::test]
@@ -873,6 +920,15 @@ async fn owner_rework_uses_the_current_target_and_reopens_sprint_membership() {
             record["status"] = json!("ready_to_merge");
             record["work"] = json!("unmerged");
             record["integration"] = Value::Null;
+            if close == "already_in_target" {
+                record["prAttempt"] = json!({
+                    "state":"confirmed","head":old_tree.as_ref().unwrap().branch,
+                    "target":"main","url":"https://github.com/owner/repo/pull/7"
+                });
+                record["integration"] = json!({
+                    "method":"pr","targetBranch":"main","url":"https://github.com/owner/repo/pull/7"
+                });
+            }
             record["baseRevision"] = json!(initial);
             fs::write(f.path(), serde_json::to_vec(&closed).unwrap()).unwrap();
             let result = f.call(json!({"action":"close","choice":close,"confirmed":true,"taskId":task})).await;
@@ -973,6 +1029,7 @@ async fn owner_rework_uses_the_current_target_and_reopens_sprint_membership() {
         for key in ["status", "doneAt", "acceptance", "integration"] {
             assert!(working[key].is_null(), "{key}: {board}");
         }
+        assert!(working["prAttempt"].is_null(), "{board}");
         assert_eq!(working["reworkAvailable"], false, "{board}");
         assert_eq!(board["result"]["sprints"][0]["queueState"], "paused", "{board}");
         // The durable event also recovers a lost overlay replacement.
@@ -1012,6 +1069,19 @@ async fn owner_rework_uses_the_current_target_and_reopens_sprint_membership() {
             assert_eq!(origin, "owner_rework");
             assert_eq!(integration.as_deref(), (close == "merged").then_some(initial.as_str()));
             assert_eq!(base, advanced);
+            if close == "already_in_target" {
+                let pr: String = db.query_row(
+                    "SELECT json_extract(payload_json,'$.closed.prAttempt.url') FROM runtime_events
+                     WHERE type='TASK_REOPENED' AND task_id=?",
+                    [runtime], |r| r.get(0),
+                )?;
+                assert_eq!(pr, "https://github.com/owner/repo/pull/7");
+                let saved: Value = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
+                // The on-disk pre-reopen overlay was deliberately restored above;
+                // replay must still project the confirmed attempt as historical.
+                assert_eq!(saved["tasks"][&task]["prAttempt"]["url"], pr);
+                assert!(recovered["result"]["tasks"][&task]["prAttempt"].is_null());
+            }
             let source: i64 = db.query_row(
                 "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='USER_STEERING'
                   AND json_extract(payload_json,'$.text')='Do it again.'

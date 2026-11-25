@@ -18,6 +18,12 @@ Returning closed work for rework requires an explicit owner action, current
 task version, and matching execution and owner epoch where an execution exists.
 It does not let an ordinary late message reopen closed work, bypass an
 unconfirmed execution or side effect, or carry acceptance into the new cycle.
+An Automatic close after an integrated restart uses only new-cycle write
+records. If unmerged work was retained in place, a historical path alone does
+not authorize committing it: its bytes must still match a retained write hash.
+A confirmed PR on the previous branch is history once an integrated restart
+creates a replacement owned branch. An unresolved PR attempt still blocks
+another PR; rework is not permission to replay it.
 See [rework admission](docs/cortex-workspace/local-task-execution.md#return-for-rework).
 
 The desktop can offer a fresh close-and-delete confirmation after refresh only

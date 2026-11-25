@@ -292,6 +292,40 @@ fn blocked_review_and_failed_verification_continue_every_task_without_asking() {
     }
 }
 
+#[test]
+fn owner_rework_fences_prior_cycle_failed_checks_but_not_current_ones() {
+    let (_p, s, task, _) = start(true);
+    let failed = |s: &Store| {
+        s.write(|db| {
+            lifecycle::event_tx(db, &task, "VERIFICATION_FAILED", json!({"commands":[["cargo","test"]]}))?;
+            Ok(())
+        })
+        .unwrap()
+    };
+    failed(&s);
+    s.write(|db| {
+        lifecycle::event_tx(db, &task, "TASK_REOPENED", json!({"origin":"owner_rework"}))?;
+        Ok(())
+    })
+    .unwrap();
+    let mut changed = test_plan();
+    changed["verification"] = json!([["cargo", "check"]]);
+    // The failure before the rework does not bind the first plan of the new cycle.
+    s.write(|db| plan::accept_tx(db, &task, "coordinator", "rework", &changed))
+        .unwrap();
+    // A failure of the current cycle still cannot be omitted.
+    failed(&s);
+    s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id=?", [&task])?;
+        Ok(())
+    })
+    .unwrap();
+    let mut other = test_plan();
+    other["verification"] = json!([["cargo", "fmt"]]);
+    let dropped = s.write(|db| plan::accept_tx(db, &task, "coordinator", "repair", &other));
+    assert_eq!(dropped.unwrap_err().code(), "automatic_required_check_missing");
+}
+
 /// No continuation cap: every stop continues on the strategy ladder (repair, escalated
 /// routes, the senior consultant, another role) without pausing for the owner. Once
 /// the same stop used every rung and cannot be disclosed, the runtime asks the owner

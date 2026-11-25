@@ -2643,7 +2643,7 @@ fn outstanding_commands(
     include_retained: bool,
 ) -> CoreResult<Vec<Value>> {
     let mut stmt = db.prepare("SELECT id,type,payload_json FROM runtime_events WHERE task_id=?
-        AND type IN ('VERIFICATION_FAILED','VERIFICATION_REVISED','VERIFICATION_PASSED','USER_QUESTION_REQUESTED','USER_ANSWER_RECEIVED') ORDER BY id")?;
+        AND type IN ('VERIFICATION_FAILED','VERIFICATION_REVISED','VERIFICATION_PASSED','USER_QUESTION_REQUESTED','USER_ANSWER_RECEIVED','TASK_REOPENED') ORDER BY id")?;
     let rows = stmt.query_map([task], |r| {
         Ok((
             r.get::<_, i64>(0)?,
@@ -2658,6 +2658,13 @@ fn outstanding_commands(
         let (id, kind, raw) = row?;
         let v: Value = serde_json::from_str(&raw)?;
         match kind.as_str() {
+            // Explicit owner rework starts a new cycle: checks owed by the closed one do
+            // not bind its first plan.
+            "TASK_REOPENED" => {
+                if v["origin"] == "owner_rework" {
+                    outstanding.clear();
+                }
+            }
             "VERIFICATION_FAILED" if include_retained => {
                 // Older runs may have stopped before every planned argv got a receipt.
                 let planned = if v["unresolved_commands"].is_null() && v["commands"].is_null() {

@@ -32,7 +32,8 @@ Conversation waits explain when decision details are unavailable and point to An
 In Workspace, Changes excludes target-only changes after **Update from target**, including when **Finish merge** confirms an update you committed in Git. For a stopped source merge, Cortex is involved only if you confirm **Hand to the app…**. After a merge finished in Workspace, review the diff and use **Request fresh checks** before confirming integration. For a [saved merge from an earlier version](docs/cortex-workspace/local-task-execution.md#saved-merges-from-an-earlier-version), finish or abort in Git first, then clear the saved record in Workspace; old checks do not carry over. On a separate branch, **Git → Commit…** keeps an accepted result current when the commit contains exactly the accepted files; push it before choosing **Finish → Create a pull request**. Workspace uses a configured model to draft editable commit and squash messages from bounded diffs, and Push summaries from outgoing commit messages and change counts. Manual entry remains available if drafting fails. A confirmed Push summary can prefill the PR description, not the title. See [IDE and Git](docs/cortex-workspace/ide-and-git.md).
 
 In Workspace, **Return for rework** reopens eligible closed tasks with a new
-plan and keeps earlier results in history. Restore archived tasks first. See
+plan and keeps earlier results in history. Old verification and owner close
+decisions do not carry over. Restore archived tasks first. See
 [Return for rework](docs/cortex-workspace/local-task-execution.md#return-for-rework).
 
 In Workspace, you can add a comment to a route choice without changing the selected route. Explicit refusals still apply. See [routing and consent](docs/project/native-incoming-acp.md#native-routing-and-retained-consent).

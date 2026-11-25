@@ -629,6 +629,14 @@ case "$1" in
         sha=$(git --git-dir=../remote.git rev-parse --verify refs/heads/task)
         printf '{"ref":"refs/heads/task","url":"https://api.github.com/repos/Owner/Repo/git/refs/heads/task","object":{"type":"commit","sha":"%s"}}\n' "$sha"
         ;;
+      repos/owner/repo/git/ref/heads/rework)
+        sha=$(git --git-dir=../remote.git rev-parse --verify refs/heads/rework)
+        printf '{"ref":"refs/heads/rework","url":"https://api.github.com/repos/Owner/Repo/git/refs/heads/rework","object":{"type":"commit","sha":"%s"}}\n' "$sha"
+        ;;
+      repos/owner/repo/pulls/8)
+        sha=$(git --git-dir=../remote.git rev-parse --verify refs/heads/rework)
+        printf '{"html_url":"https://github.com/owner/repo/pull/8","state":"open","head":{"ref":"rework","sha":"%s","repo":{"full_name":"Owner/Repo"}},"base":{"ref":"main","repo":{"full_name":"Owner/Repo"}}}\n' "$sha"
+        ;;
       repos/owner/repo/pulls/7)
         sha=$(git --git-dir=../remote.git rev-parse --verify refs/heads/task)
         [ "$CORTEX_TEST_PR_REPOSITORY_SCENARIO" != wrong-readback ] ||
@@ -988,7 +996,9 @@ async fn pull_request_fixture(scenario: &str) {
     let saved = env.overlay();
     assert_eq!(saved["integration"]["method"], "pr");
     assert_eq!(saved["integration"]["title"], "Integrate completed task");
-    assert_eq!(saved["prAttempt"]["state"], "unknown");
+    assert_eq!(saved["prAttempt"]["state"], "confirmed");
+    assert_eq!(saved["prAttempt"]["head"], "task");
+    assert_eq!(saved["prAttempt"]["commit"], head);
     // Status is not "done": a pull request only starts review.
     assert_eq!(saved["status"], "ready_to_merge");
     // Record the address gh printed for the exact origin repository.
@@ -1007,6 +1017,58 @@ async fn pull_request_fixture(scenario: &str) {
     .await
     .unwrap();
     assert_eq!(found, json!({"url":"https://github.com/owner/repo/pull/7"}));
+    // An externally landed PR was closed and the runtime recorded an owned
+    // replacement. Exercise its reconciliation and the real PR effect with the
+    // same fake provider; ordinary integration admission is exercised above.
+    let mut reopened = product(&env.state, "p1").unwrap();
+    let previous = reopened["tasks"]["t1"]["prAttempt"].clone();
+    reopened["tasks"]["t1"]["status"] = json!("done");
+    reopened["tasks"]["t1"]["integration"] = Value::Null;
+    let store = context::open(&env.root, OpenMode::RuntimeValidate).unwrap().unwrap();
+    store.write(|db| {
+        cortex_core::lifecycle::event_tx(db, "r1", "TASK_REOPENED", json!({
+            "origin":"owner_rework","resetChangesBase":true,"worktree":{"branch":"rework"},
+            // This effect fixture has no native worktree row; the service
+            // rework test exercises real owned checkout allocation.
+            "worktreeWitness":{},"closed":{"prAttempt":previous},
+        }))?;
+        Ok(())
+    }).unwrap();
+    let mut unresolved = reopened.clone();
+    unresolved["tasks"]["t1"]["prAttempt"]["state"] = json!("unknown");
+    for value in [&mut reopened, &mut unresolved] {
+        store.read(|db| super::super::task_rework::normalize_on(db, "p1", value, "t1", "r1")).unwrap();
+    }
+    assert!(reopened["tasks"]["t1"]["prAttempt"].is_null());
+    assert_eq!(unresolved["tasks"]["t1"]["prAttempt"]["state"], "unknown");
+    git(&env.root, &["switch", "-qc", "rework"]);
+    fs::write(env.root.join("fresh.txt"), "new result\n").unwrap();
+    git(&env.root, &["add", "--", "fresh.txt"]);
+    git(&env.root, &["commit", "-qm", "Fresh result"]);
+    let new_head = git(&env.root, &["rev-parse", "HEAD"]);
+    git(&env.root, &["push", "origin", "rework"]);
+    for value in [&mut reopened, &mut unresolved] {
+        value["originPushWitnesses"]["refs/heads/rework"] = json!({
+            "ref":"refs/heads/rework","commit":new_head,"repository":"github.com/owner/repo",
+        });
+    }
+    let plan = effects::Plan {
+        root: &env.root, project: "p1", state: &env.state, task: "t1", path: &env.root,
+        source: "rework", target: "main", method: "pr", message: "Fresh PR",
+        params: &params, verified: &Value::Null, pending_paths: vec![], target_tree: None,
+        automatic: false, already_landed: true, owned_worktree: true,
+    };
+    assert_eq!(effects::apply(&plan, &mut unresolved, &mut g).await.unwrap_err().code, "unknown_outcome");
+    assert_eq!(fs::read_to_string(&gh_args).unwrap(), args);
+    fs::write(env.base.join("gh-url"), "https://github.com/owner/repo/pull/8\n").unwrap();
+    assert_eq!(effects::apply(&plan, &mut reopened, &mut g).await.unwrap(), json!({"done":true}));
+    assert_eq!(env.overlay()["prAttempt"]["head"], "rework");
+    assert_eq!(env.overlay()["integration"]["url"], "https://github.com/owner/repo/pull/8");
+    assert_eq!(store.read(|db| Ok(db.query_row(
+        "SELECT json_extract(payload_json,'$.closed.prAttempt.url') FROM runtime_events
+         WHERE task_id='r1' AND type='TASK_REOPENED'", [], |row| row.get::<_, String>(0),
+    )?)).unwrap(), "https://github.com/owner/repo/pull/7");
+
     // Checked again when it is opened: another repository on the same host does not vouch for it.
     git(
         &env.root,

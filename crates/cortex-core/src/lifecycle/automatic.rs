@@ -374,7 +374,7 @@ pub(super) fn require_failed_checks(
     let dropped: bool = db.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM runtime_events e, json_each(e.payload_json,'$.commands') c
-            WHERE e.task_id=?1 AND e.type='VERIFICATION_FAILED'
+            WHERE e.task_id=?1 AND e.type='VERIFICATION_FAILED' AND e.id>?4
               AND NOT EXISTS (SELECT 1 FROM json_each(?2) p WHERE p.value=c.value)
               AND NOT EXISTS (SELECT 1 FROM json_each(?3) a WHERE a.value=c.value)
         )",
@@ -382,6 +382,8 @@ pub(super) fn require_failed_checks(
             task,
             proposed.to_string(),
             json!(owner_accepted_commands(db, task)?).to_string(),
+            // Failures from before an explicit owner rework belong to the closed cycle.
+            crate::workspace::control::owner_rework_event(db, task)?.unwrap_or(0),
         ),
         |r| r.get(0),
     )?;

@@ -265,12 +265,25 @@ pub(super) fn normalize_on(
     let event = control::owner_rework_event(db, runtime)?;
     let record = &mut product["tasks"][task];
     if normalize(record, event) {
-        let (base, target, reset_changes_base): (Option<String>, Option<String>, bool) = db.query_row(
+        let (base, target, reset_changes_base, replacement, previous_pr):
+            (Option<String>, Option<String>, bool, Option<String>, Option<String>) = db.query_row(
             "SELECT json_extract(payload_json,'$.baseRevision'),json_extract(payload_json,'$.targetBranch'),
-                    COALESCE(json_extract(payload_json,'$.resetChangesBase'),0)
+                    COALESCE(json_extract(payload_json,'$.resetChangesBase'),0),
+                    json_extract(payload_json,'$.worktree.branch'),
+                    json_extract(payload_json,'$.closed.prAttempt')
              FROM runtime_events WHERE id=? AND task_id=?",
-            (event, runtime), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            (event, runtime), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?;
+        // Only a durable replacement branch can leave a confirmed PR behind.
+        // An unresolved attempt is never made replayable by rework.
+        let attempt = &record["prAttempt"];
+        if reset_changes_base && attempt["state"] == "confirmed"
+            && previous_pr.and_then(|raw| serde_json::from_str::<Value>(&raw).ok()).as_ref() == Some(attempt)
+            && attempt["head"].as_str().zip(replacement.as_deref())
+                .is_some_and(|(previous, new)| previous != new)
+        {
+            record.as_object_mut().unwrap().remove("prAttempt");
+        }
         if reset_changes_base {
             record.as_object_mut().unwrap().remove("changesBaseRevision");
         }
@@ -455,7 +468,7 @@ pub(crate) fn admit(
     }
     let history = json!({"status":record["status"],"closedAs":record["closedAs"],
         "doneAt":record["doneAt"],"notVerifiedByCortex":record["notVerifiedByCortex"],
-        "acceptance":record["acceptance"],"integration":record["integration"],
+        "acceptance":record["acceptance"],"integration":record["integration"],"prAttempt":record["prAttempt"],
         "alreadyInTargetBranch":record["alreadyInTargetBranch"],
         "worktreeCleanup":record["worktreeCleanup"],"baseRevision":record["baseRevision"]});
     let (mut receipt, b) = if let Some(b) = binding {

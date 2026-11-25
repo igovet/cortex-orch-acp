@@ -412,6 +412,10 @@ async fn pull_request(
     }
     product["tasks"][plan.task]["integration"] = json!({"method":"pr","targetBranch":plan.target,
         "digest":plan.params["digest"],"title":plan.message,"url":url});
+    product["tasks"][plan.task]["prAttempt"] = json!({
+        "state":"confirmed","target":plan.target,"head":plan.source,
+        "commit":source_head,"repository":repo_arg,"url":url,
+    });
     save(plan, product)?;
     Ok(json!({"done":true}))
 }
