@@ -54,6 +54,14 @@ that sprint and keeps report content bounded. File availability is reported
 from recorded write receipts and exact bytes, with unknown evidence retained as
 unknown. This read surface does not change queue ordering or Hybrid acceptance.
 
+In the Workspace desktop the owner can edit a created sprint after approval. The
+sprint page opens on **Live sprint**, which shows every task including drafts
+added later; **Edit links** on the graph (or a task's Details) adds and removes
+dependencies, and **Move up** / **Move down** set priority among ready drafts.
+The approved plan stays read-only. Board and List show Working before Not
+started in the order the queue will use. See [live sprint graph and execution
+order](docs/cortex-workspace/local-task-execution.md#live-sprint-graph-and-execution-order).
+
 Workspace engine limits retain connected engines with an explicit Unavailable state when no provider usage is observed. Coordinator choices exclude switched-off engines. See [desktop engine controls](docs/cortex-workspace/maintenance-and-controls.md).
 
 The incoming Rust ACP-v1 binary in `crates/cortex-acp` is the only entry for

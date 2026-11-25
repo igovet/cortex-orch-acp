@@ -18,6 +18,10 @@ Only a task without any execution identity can change its original request. A ve
 
 Closing a sprint archives it and its member tasks in one Workspace update, and stops its queue. A started member that is not Done, a member with conflicting completion evidence, an open rework or an in-flight merge or pull-request operation blocks closure. Not-started members, including queued drafts, keep their draft status. Done members keep their completion and existing archives are unchanged. Closure does not accept, cancel, run Git or discard work. The closed summary retains its plan; restoring a member returns it to the project without a sprint.
 
+## Live sprint graph (built)
+
+A created sprint keeps two separate records. The approved plan (`plan`, `history`, `materializedVersion`) is what the owner approved. The live-graph actions and the read-only desktop view never edit it after Create tasks; the pre-existing generic sprint patch can still write these fields unless the service is separately hardened. The live graph is the sprint's roster (`taskIds`, stable task identities, later drafts included), the dependencies saved on each task, and a priority sequence stored beside the roster. The owner edits only the second: one direct link at a time on a saved, not-started draft, and the priority among not-started members. A graph revision token names the snapshot an edit was made from. The execution order shown on Board and List is a projection of this graph and the queue state, not stored state. See [live sprint graph and execution order](local-task-execution.md#live-sprint-graph-and-execution-order) and [the decision](adr-live-sprint-graph.md).
+
 ## Local slice identities (built)
 
 The adapter generates public task, execution, decision and result identities. They are distinct from the runtime task identity, the ACP session identity and transcript identities; a generic ACP session identifier is never returned as a task identifier. A runtime plan revision is not a public entity version.

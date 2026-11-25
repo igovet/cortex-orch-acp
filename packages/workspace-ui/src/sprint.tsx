@@ -30,7 +30,8 @@ import { arrange, INLINE_FLOOR, inlineScale, type Opened } from "./sprint-space"
 
 type SprintRoute = Extract<Route, { name: "sprint" }>;
 const useSprint = (id: () => string) => { const ws = useWs(); return createMemo(() => ws.store.state().sprints.find(s => s.id === id()) ?? null); };
-const firstReady = (index: ReturnType<ReturnType<typeof useWs>["store"]["index"]>, sprint: Sprint) => sprintView(index, sprint).next;
+/** The task a Manual sprint's Start control offers: the first suggestion that can start now, never the queue's Next. */
+const firstReady = (index: ReturnType<ReturnType<typeof useWs>["store"]["index"]>, sprint: Sprint) => sprintView(index, sprint).suggested;
 
 const targetOf = (sprint: Sprint, summary: ProjectSummary) => sprint.targetBranch ?? summary.project.defaultBranch;
 /** The branches a sprint can merge to, as menu rows. */

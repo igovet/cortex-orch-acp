@@ -175,6 +175,21 @@ sprint without being its members; they are never adopted. Refusals: `stale_plan`
 operation list; the wire schema is unchanged. See
 [creating a plan's tasks](local-task-execution.md#creating-a-plans-tasks).
 
+**Live sprint graph.** Three further `product.sprint` actions are owner actions of the local desktop:
+`live_graph {sprintId}` (a read), `set_dependency {sprintId, dependentTaskId, predecessorTaskId, present,
+expectedGraphRevision}` and `move_priority {sprintId, taskId, direction, expectedGraphRevision}` with
+`direction` exactly `up` or `down`. The read replies `{contractVersion: 1, sprintId, graphRevision, complete,
+members, priority, order}`; an edit replies `{changed}`; a refusal is `{ok:false, code, message}`. A client that
+does not recognize `contractVersion` 1, or an older service that refuses the action, is read-only. The graph
+revision is an opaque 64-hex snapshot token: an edit names the revision it was made from, a stale one is refused
+with `stale_graph_revision`, and after any change, stale refusal, lost reply or `graph_save_unconfirmed` the client
+reads again before another edit. The actions never write the approved plan, history or `materializedVersion`. The
+live read is routed on the read lane; the edits take the writer lane. Paired remote devices are refused all three,
+the generic sprint `patch` accepts no dependency, revision or priority field, and the ACP wire schema, the model
+tools and the model-facing `sprint_graph` contract are unchanged. Fields, rules and refusal codes:
+[live sprint graph](local-task-execution.md#live-sprint-graph-and-execution-order); rationale:
+[live sprint graph ownership](adr-live-sprint-graph.md).
+
 **Coordinator activity and observed routes.** `history.page` rows optionally include
 typed worker-shaped `activity`; bookkeeping is hidden while continuation still
 consumes its sequence. The machine `workers` helper exposes that same retained

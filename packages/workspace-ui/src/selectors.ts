@@ -333,7 +333,7 @@ function automaticStatusFact(task: Task, sprint: Sprint | null): Fact | undefine
   }
 }
 
-function statusFact(task: Task, filesWait: TaskView["filesWait"], ctx: { target: string; running: number; title: (id: string) => string; sprint: Sprint | null; ready: (id: string) => boolean; next: boolean; pending?: SprintOrderPending | null }): Fact {
+function statusFact(task: Task, filesWait: TaskView["filesWait"], ctx: { target: string; running: number; title: (id: string) => string; sprint: Sprint | null; ready: (id: string) => boolean; pending?: SprintOrderPending | null }): Fact {
   if (task.status === "closed_unverified") return { text: "Closed by you · Not verified", tone: "st-idle", icon: "alert" };
   const handoff = task.merge?.handoff?.state;
   if (task.conflict !== "none" && (task.merge?.gitState === "unknown" || handoff === "unknown" || handoff === "dispatch_unknown"))
@@ -362,7 +362,8 @@ function statusFact(task: Task, filesWait: TaskView["filesWait"], ctx: { target:
       if (ctx.sprint && p) return { text: p.next ? `Next in ${sprintTitle(ctx.sprint)}`
         : p.rank !== null ? `${ctx.sprint.runMode === "manual" ? "Suggested" : "Queued"} ${ordinal(p.rank)} in ${sprintTitle(ctx.sprint)}`
         : `${orderReasonText(p.reason) ?? "Not in the order"} · ${sprintTitle(ctx.sprint)}`, tone: "st-idle", icon: "layers" };
-      if (ctx.sprint) return { text: `${ctx.next ? "Next" : "Queued"} in ${sprintTitle(ctx.sprint)}`, tone: "st-idle", icon: "layers" };
+      // No current order from the service (loading, failed, unsupported or stale): a ready draft is only queued, never Next.
+      if (ctx.sprint) return { text: `Queued in ${sprintTitle(ctx.sprint)}`, tone: "st-idle", icon: "layers" };
       return { text: "Draft, ready to start", tone: "st-idle" };
     }
     case "working": return { text: ctx.running ? `Executing, ${ctx.running} worker${ctx.running === 1 ? "" : "s"}` : "Executing", tone: "st-run", icon: "loader", spin: true };
@@ -425,18 +426,13 @@ export function buildIndex(state: WorkspaceState, now: number, orders: ReadonlyM
   const title = (id: string) => tasks.get(id)?.title ?? "another task";
   // A sprint comes from the project's plan and its tasks from the project's runtime, so a sprint can name tasks that are
   // not loaded yet (the runtime is starting, stopped or refused). The index is read by every screen: it must not throw.
-  // With the service's order a sprint has a Next only when that order names one; without it, the first ready draft.
+  // A sprint has a Next only when the service's current order names one; without that order no ready draft is called Next.
   const pendingOf = new Map<string, SprintOrderPending>();
-  const nextInSprint = new Set(state.sprints.filter(s => !s.archivedAt).flatMap(s => {
+  for (const s of state.sprints) {
+    if (s.archivedAt) continue;
     const order = orderOf({ orders }, s);
-    if (order) {
-      for (const p of order.notStarted) pendingOf.set(p.taskId, p);
-      const next = order.notStarted.find(p => p.next);
-      return next ? [next.taskId] : [];
-    }
-    const next = s.taskIds.map(id => tasks.get(id)).find(t => t?.status === "draft" && t.dependencies.every(id => ready(id, s.runMode)));
-    return next ? [next.id] : [];
-  }));
+    if (order) for (const p of order.notStarted) pendingOf.set(p.taskId, p);
+  }
 
   const views = state.tasks.map((task): TaskView => {
     const project = projects.get(task.projectId)!, machine = machines.get(project.machineId)!;
@@ -475,7 +471,7 @@ export function buildIndex(state: WorkspaceState, now: number, orders: ReadonlyM
       : STATUS_COLUMN[phase === "unknown" ? task.status : phase];
     const fact: Fact = !unknown ? ownerDecision ? { text: ownerDecision.text, tone: "st-warn", icon: ownerDecision.kind === "permission" ? "shield" : "question" }
       : ownerIntegration ? { text: humanStatus(ownerIntegration.reason), tone: "st-warn", icon: "merge" }
-      : automaticFact ?? statusFact(task, filesWait, { target, running, title, sprint, ready: id => ready(id, sprint?.runMode), next: nextInSprint.has(task.id), pending: sprint ? pendingOf.get(task.id) ?? null : null })
+      : automaticFact ?? statusFact(task, filesWait, { target, running, title, sprint, ready: id => ready(id, sprint?.runMode), pending: sprint ? pendingOf.get(task.id) ?? null : null })
       : machine.connection !== "connected" ? { text: `Last known: ${STATUS_WORD[task.status]}`, tone: "st-idle", icon: "help" }
       : task.status === "stopping" ? { text: "Stop not confirmed", tone: "st-warn", icon: "hourglass" }
       : replanStopping(task) ? { text: replanStopping(task)!.replace(/\..*$/, ""), tone: "st-warn", icon: "hourglass" }
@@ -702,8 +698,13 @@ export function sprintView(index: WorkspaceIndex, sprint: Sprint) {
   // The service's order says what runs now (first in start order) and what is next; Manual has no Next, only a suggestion.
   const order = orderOf(index, sprint), byId = (id: string) => views.find(v => v.id === id);
   const now = order ? order.working.map(w => byId(w.taskId)).find(v => v?.task.status === "working") ?? null : views.find(v => v.task.status === "working") ?? null;
-  const next = order ? byId(order.notStarted.find(p => p.next)?.taskId ?? "") ?? null : drafts.find(ready) ?? null;
-  const suggested = order ? sprint.runMode === "manual" ? byId(order.notStarted.find(p => p.rank !== null)?.taskId ?? "") ?? null : null : next;
+  // Next is only the service's own candidate. A Manual sprint has a suggestion instead: the first task in the service's ranked
+  // order that can start now, or before that order is current the first ready draft, so the Start control never depends on the
+  // queue's Next. The ranking simulates earlier work settling, so a ranked task whose prerequisite still runs is passed over.
+  const next = order ? byId(order.notStarted.find(p => p.next)?.taskId ?? "") ?? null : null;
+  const startable = (v: TaskView | undefined): v is TaskView => !!v && v.task.status === "draft" && ready(v);
+  const suggested = sprint.runMode !== "manual" ? null
+    : order ? order.notStarted.filter(p => p.rank !== null).map(p => byId(p.taskId)).find(startable) ?? null : drafts.find(ready) ?? null;
   return {
     sprint, title: sprintTitle(sprint), views, started, missing: sprint.taskIds.length - views.length, usable: sprint.planning === "created",
     now, next, suggested, ordered: !!order, blocked: drafts.filter(v => !ready(v)).length,

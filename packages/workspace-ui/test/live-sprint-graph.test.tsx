@@ -4,7 +4,7 @@ import { emptyWorkspace, LOCAL_MACHINE_ID, parseLiveSprintGraph, type LiveSprint
 import { Workspace } from "../src";
 import { liveModel } from "../src/live-graph";
 import { buildIndex, columnsOf, sprintView } from "../src/selectors";
-import { planRows } from "../src/sprint-model";
+import { planRows, sprintSummary } from "../src/sprint-model";
 import { draftTask, flush, projection, scriptedPort } from "./support";
 
 /*
@@ -63,7 +63,7 @@ function world(s: Sprint, list = tasks()): WorkspaceState {
 }
 
 /** A Workspace on a port whose service has the live graph. Each read answers `answer()`; each edit is recorded. */
-async function open(path: string, s = sprint(), answer: () => LiveSprintGraph | "unsupported" = () => graph(), write: () => SprintGraphWrite = () => ({ outcome: "changed" })) {
+async function open(path: string, s = sprint(), answer: () => LiveSprintGraph | "unsupported" = () => graph(), write: () => SprintGraphWrite = () => ({ outcome: "changed" }), list = tasks()) {
   const port = scriptedPort({ capabilities: { everything: true, operations: [] } });
   const reads: string[] = [], edits: SprintGraphEdit[] = [];
   port.port.sprintGraph = {
@@ -75,7 +75,7 @@ async function open(path: string, s = sprint(), answer: () => LiveSprintGraph | 
   document.body.append(root);
   dispose = render(() => <Workspace port={port.port} />, root);
   await settled();
-  port.emit(projection("1", world(s)));
+  port.emit(projection("1", world(s, list)));
   await settled();
   return { port, reads, edits };
 }
@@ -131,6 +131,84 @@ describe("the live graph contract", () => {
       notStarted: [{ taskId: "t5", rank: 1, reason: null, next: false, conditional: false }, { taskId: "t4", rank: 2, reason: null, next: false, conditional: false }] })]]));
     expect(sprintView(manual, sprint({ runMode: "manual", queueState: "idle" }))).toMatchObject({ next: null, suggested: { id: "t5" } });
     expect(manual.byId.get("t4")!.fact.text).toBe("Suggested 2nd in Data");
+  });
+});
+
+describe("without the service's current order", () => {
+  it("never calls a ready draft Next while the graph is loading, failed, unsupported or stale", () => {
+    const s = sprint(), state = world(s);
+    // Loading, failed and unsupported reads all leave the index with no order for the sprint.
+    const none = buildIndex(state, 0);
+    expect(none.byId.get("t4")!.fact.text).toBe("Queued in Data");
+    expect(sprintView(none, s)).toMatchObject({ next: null, suggested: null, ordered: false });
+    expect(sprintSummary(none, s)).toMatchObject({ next: 0, rows: expect.arrayContaining([expect.objectContaining({ word: expect.objectContaining({ text: "Queued" }) })]) });
+    expect(planRows(none, s, items).some(r => r.word?.text === "Next")).toBe(false);
+    // An order read under another queue state describes another queue.
+    const stale = buildIndex(state, 0, new Map([["sp", order({ queueState: "paused" })]]));
+    expect(stale.byId.get("t4")!.fact.text).toBe("Queued in Data");
+    expect(sprintView(stale, s).next).toBeNull();
+    expect(sprintSummary(stale, s).next).toBe(0);
+    // The current order names its one candidate, and only then.
+    const current = buildIndex(state, 0, new Map([["sp", order()]]));
+    expect(sprintSummary(current, s).next).toBe(1);
+    expect(planRows(current, s, items).some(r => r.word?.text === "Next")).toBe(false);
+    // A Manual sprint with no current order still has its first ready draft to offer, as a suggestion.
+    const m = sprint({ runMode: "manual", queueState: "idle" });
+    expect(sprintView(buildIndex(world(m), 0), m)).toMatchObject({ next: null, suggested: { id: "t4" } });
+  });
+
+  it("shows no Next on the board when the read failed or the service is older", async () => {
+    await open(`/m/${LOCAL_MACHINE_ID}/p/p/s/sp/board`, sprint(), () => { throw new Error("The sprint graph could not be read."); });
+    expect(document.body.textContent).not.toContain("Next in Data");
+    expect(all(".l-fact .lab").map(l => l.textContent)).not.toContain("Next");
+    expect(document.body.textContent).toContain("Queued in Data");
+    dispose?.(); document.body.innerHTML = "";
+    await open(`/m/${LOCAL_MACHINE_ID}/p/p/s/sp/board`, sprint(), () => "unsupported");
+    expect(document.body.textContent).not.toContain("Next in Data");
+    expect(all(".l-fact .lab").map(l => l.textContent)).not.toContain("Next");
+  });
+});
+
+describe("a Manual sprint with the service's order", () => {
+  it("offers Start for the first ready suggestion although the order has no Next", async () => {
+    const manual = sprint({ runMode: "manual", queueState: "idle" });
+    const manualOrder = order({ mode: "manual", queueState: "idle", notStarted: [
+      { taskId: "t5", rank: 1, reason: null, next: false, conditional: false }, { taskId: "t4", rank: 2, reason: null, next: false, conditional: false },
+      { taskId: "t2", rank: null, reason: "dependencies_blocked", next: false, conditional: false }, { taskId: "t3", rank: null, reason: "dependencies_blocked", next: false, conditional: false }] });
+    const { port } = await open(`/m/${LOCAL_MACHINE_ID}/p/p/s/sp/board`, manual, () => graph({ order: manualOrder }));
+    expect(all(".l-fact").map(f => f.textContent)).toContain("SuggestedDocument the format");
+    const start = button("Start task 5");
+    expect(start).toBeDefined();
+    expect(button("Start task 4")).toBeUndefined();
+    start!.click(); await settled();
+    expect(port.commands.at(-1)!.payload).toMatchObject({ type: "start_task", taskId: "t5" });
+  });
+
+  // The service ranks Manual drafts as if earlier work settles, so a ranked task can still wait for a running prerequisite.
+  const manual = sprint({ runMode: "manual", queueState: "idle" });
+  const ranked = (...ids: string[]) => order({ mode: "manual", queueState: "idle",
+    notStarted: ids.map((taskId, i) => ({ taskId, rank: i + 1, reason: null, next: false, conditional: false })) });
+
+  it("passes over a ranked task whose prerequisite still runs and offers the next ready one", async () => {
+    // Task 2 waits for task 1, which is working, but ranks before the independent task 4.
+    const { port } = await open(`/m/${LOCAL_MACHINE_ID}/p/p/s/sp/board`, manual, () => graph({ order: ranked("t2", "t4", "t3", "t5") }));
+    expect(button("Start task 2")).toBeUndefined();
+    const start = button("Start task 4");
+    expect(start).toBeDefined();
+    expect(all(".l-fact").map(f => f.textContent)).toContain("SuggestedAdd the audit log");
+    start!.click(); await settled();
+    expect(port.commands.at(-1)!.payload).toMatchObject({ type: "start_task", taskId: "t4" });
+    const index = buildIndex(world(manual), 0, new Map([["sp", ranked("t2", "t4", "t3", "t5")]]));
+    expect(sprintView(index, manual)).toMatchObject({ next: null, suggested: { id: "t4" } });
+  });
+
+  it("offers no Start while every ranked draft still waits for a running prerequisite", async () => {
+    const waiting = tasks().map(t => t.id === "t4" || t.id === "t5" ? { ...t, dependencies: ["t1"] } : t);
+    const index = buildIndex(world(manual, waiting), 0, new Map([["sp", ranked("t2", "t3", "t4", "t5")]]));
+    expect(sprintView(index, manual)).toMatchObject({ next: null, suggested: null, blocked: 4 });
+    await open(`/m/${LOCAL_MACHINE_ID}/p/p/s/sp/board`, manual, () => graph({ order: ranked("t2", "t3", "t4", "t5") }, { t4: ["t1"], t5: ["t1"] }), undefined, waiting);
+    expect(all("button").some(b => /^Start task \d+$/.test(b.textContent?.trim() ?? ""))).toBe(false);
+    expect(all(".l-fact").some(f => f.textContent?.startsWith("Suggested"))).toBe(false);
   });
 });
 

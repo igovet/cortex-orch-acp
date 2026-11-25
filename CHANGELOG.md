@@ -4,6 +4,8 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Added: Workspace sprints are editable after the plan is approved. A created sprint opens on **Live sprint**, showing every task including drafts added later with their current links; **Approved plan vN** stays read-only. The owner adds or removes a link with **Edit links** on the graph or in Details, and moves ready drafts up or down in priority. Edits name the graph revision they were made from, are validated as a whole graph, touch only not-started drafts and never change the approved plan. A queued start rechecks its choice, so an edit cannot be overtaken by a stale pick. Board and List of a sprint show Working before Not started in the order the queue will use, and **Next** appears only when the service names a task. Older services, offline machines and partly read sprints stay read-only. Paired devices, model tools and the ACP wire are unchanged; `sprint_graph` is unchanged. Verified by focused no-paid tests only; not live-qualified.
+
 - Added: Workspace desktop dictation supports English as well as Russian. Settings → Voice input saves the RU/EN choice for the next recording and shows each model's verification status. Models download separately on demand; audio stays on the machine and text is never sent automatically.
 
 - Changed: Coordinators are reminded to skip plan recaps and keep owner-facing replies, questions and results in the selected language even after English tool output.

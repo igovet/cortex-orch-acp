@@ -93,7 +93,8 @@ describe("Finish chosen on the runtime's stop question", () => {
     s.tasks.push({ ...s.tasks[0], id: "u", title: "Next", status: "draft", executionId: null, closedAs: null, doneAt: null, notVerifiedByCortex: false, observedPhase: undefined, dependencies: ["t"], warnings: [] });
     const summary = sprintSummary(buildIndex(s, Date.now()), sp);
     expect(summary.closed).toBe(1);
-    expect(summary.rows.find(r => r.view.id === "u")!.word.text).toBe("Next");
+    // No current order from the service: the unblocked draft is queued, not called Next.
+    expect(summary.rows.find(r => r.view.id === "u")!.word.text).toBe("Queued");
   });
 });
 

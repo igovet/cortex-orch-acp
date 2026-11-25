@@ -86,20 +86,18 @@ const planVersionOf = (sprint: Sprint, items: PlanItem[]) =>
  */
 export function planRows(index: WorkspaceIndex, sprint: Sprint, items: PlanItem[], version?: number | "tasks" | null, created?: ReadonlyMap<string, string> | null): PlanRow[] {
   const source = version === undefined ? planVersionOf(sprint, items) : version;
-  let views: Map<string, TaskView | null> | null = null, order: (TaskView | null)[] = [];
+  let views: Map<string, TaskView | null> | null = null;
   if (source === "tasks") {
     views = new Map(items.map(i => [i.key, index.byId.get(i.key) ?? null]));
-    order = [...views.values()];
   } else if (source !== null && source === sprint.materializedVersion) {
     const ids = created && created.size ? created : createdByRoster(index, sprint, items);
     if (ids) {
       views = new Map(items.map(i => [i.key, ids.has(i.key) ? index.byId.get(ids.get(i.key)!) ?? null : null]));
-      order = sprint.taskIds.map(id => index.byId.get(id) ?? null);
     }
   }
   const live = orderOf(index, sprint);
-  const nextId = live ? live.notStarted.find(p => p.next)?.taskId
-    : order.find(v => v?.task.status === "draft" && !v.task.dependencies.some(id => { const d = index.byId.get(id); return !d || !dependencyReady(d.task, sprint.runMode); }))?.id;
+  // Next is the service's own candidate; without its current order no ready draft is called Next.
+  const nextId = live ? live.notStarted.find(p => p.next)?.taskId : undefined;
   const numbers = new Map<string, number>();
   items.forEach((i, n) => { if (!numbers.has(i.key)) numbers.set(i.key, n + 1); });
   const no = (key: string) => numbers.get(key) ?? 0;
@@ -193,8 +191,8 @@ export function sprintSummary(index: WorkspaceIndex, sprint: Sprint) {
   const loaded = new Set(views.map(v => v.id));
   const rows = planRows(index, sprint, views.map(v => ({ key: v.id, title: v.task.title, description: v.task.description, dependsOn: v.task.dependencies.filter(d => loaded.has(d)) })), "tasks");
   const order = orderOf(index, sprint);
-  const next = order ? views.find(v => v.id === order.notStarted.find(p => p.next)?.taskId)
-    : views.find(v => v.task.status === "draft" && v.task.dependencies.every(id => { const d = index.byId.get(id); return !!d && dependencyReady(d.task, sprint.runMode); }));
+  // Next only when the service's current order names it; otherwise a ready draft is Queued, never a guessed Next.
+  const next = order ? views.find(v => v.id === order.notStarted.find(p => p.next)?.taskId) : undefined;
   const list: SummaryRow[] = views.map(view => {
     const word = wordOf(view, view.id === next?.id, index);
     return { view, word, checks: checksOf(view.task, word, index, sprint.runMode), branch: view.task.checkout.branch };
