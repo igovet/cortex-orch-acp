@@ -8,7 +8,7 @@ use std::path::Path;
 pub fn supported(action: &str) -> bool {
     matches!(
         action,
-        "merged" | "close" | "archive" | "resolution_started"
+        "merged" | "close" | "resolution_started"
     )
 }
 pub(super) fn unsettled() -> Refused {
@@ -272,15 +272,6 @@ pub async fn apply(
             record["status"] = json!("done");
             record["doneAt"] = json!(at);
         }
-        "archive" => {
-            if record["status"] != "done" {
-                return Err(refuse(
-                    "not_done",
-                    "Only a finished task can go to the Archive.",
-                ));
-            }
-            archive(record, at, "done");
-        }
         "resolution_started" => {
             // Keep the old action an explicit refusal, not a second write path.
             retention::task_path(root, record, git).await?;
@@ -307,7 +298,7 @@ pub(super) fn close_cancelled(record: &mut Value, at: u64) {
     record["doneAt"] = json!(at);
 }
 
-/// Archiving never asks or discards: work, checkout and result stay as they are.
+/// The archive disposition never discards work or changes the result.
 pub(super) fn archive(record: &mut Value, at: u64, previous_status: &str) {
     record["archive"] = json!({"at":at,"previousStatus":previous_status});
     record["archiveQuestion"] = json!(false);

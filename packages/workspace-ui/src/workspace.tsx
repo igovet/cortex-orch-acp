@@ -12,6 +12,7 @@ import { useWs, WsContext, type DemoSlot, type Shell, type WindowChrome, type Ws
 import { FrameMenus, Inspector, Nav, PhoneBar, PhoneConnection, PhoneDrawerHead, Terminal, TitleBar } from "./frame";
 import { onScreen, ScreenActive, UnsentRegistry } from "./freshness";
 import { Home } from "./home";
+import { archiveBlocked } from "./git-actions-model";
 import { I, place } from "./kit";
 import { ReasonTip, Strip } from "./layout";
 import { Tooltip } from "./tooltip";
@@ -334,9 +335,21 @@ export function Workspace(props: WorkspaceProps) {
     unique,
     ok(command, then) { void store.dispatch(command).then(receipt => { if (receipt.ok) then(receipt); }); },
     busy: (work, control) => press.track(work, control),
-    // One command and nothing else: the task goes to the Archive with its work, with no question or dialog.
     archiveTask(taskId) {
-      void store.dispatch({ type: "archive_task", taskId, now: store.clock() });
+      const allowed = () => {
+        const view = store.index().byId.get(taskId);
+        return view && !archiveBlocked(view.task, view.machine) && !gate("archive_task") ? view.task : null;
+      };
+      const task = allowed();
+      if (!task || store.pendingTask("archive_task", taskId)) return;
+      const send = async () => !!allowed() && (await store.dispatch({ type: "archive_task", taskId, now: store.clock() })).ok;
+      if (task.status === "done") void send();
+      else setDialog({
+        kind: "confirm", title: "Archive unfinished task?", action: "Archive",
+        note: "This task is not finished. Move it to the Archive without checking its result? Work and history are kept.",
+        pending: () => store.pendingTask("archive_task", taskId) ? "Archiving task…" : undefined,
+        go: send,
+      });
     },
     stopTask(taskId) {
       void store.dispatch({ type: "stop_task", taskId, confirmed: demo?.stopConfirmed() ?? true, now: store.clock() });

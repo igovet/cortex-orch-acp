@@ -38,18 +38,13 @@ export const DETACHED = "This checkout is not on a branch (detached HEAD)";
 /** What every other Git action says while a pull is stopped in the checkout. */
 export const STOPPED = "A pull is stopped in this checkout. Continue or abort it first.";
 
-/**
- * Why a task cannot go to the Archive, or undefined: the machine archives only a task its own record closed, merged or
- * closed from this app (`task_lifecycle.rs`, "Only a finished task can go to the Archive."). A task the runtime alone ended,
- * Finish on its stop question for one, reads as done but has no such record: its runtime phase is still shown
- * (`overlayTask` clears it only for a recorded status).
- */
-export function archiveBlocked(t: Pick<Task, "status" | "archive" | "observedPhase" | "warnings">): string | undefined {
-  if (t.warnings?.includes("contradictory_evidence")) return "The records disagree. The task and its evidence must stay in place.";
+/** Archive is a non-destructive disposition, independent of runtime and Git state. */
+export function archiveBlocked(t: Pick<Task, "archive">, machine?: TaskView["machine"]): string | undefined {
   if (t.archive) return "Already in the Archive";
-  if (t.status !== "done") return "Available when the task is done";
-  return t.observedPhase === undefined ? undefined : "Only a task merged or closed in this app can go to the Archive. This one was ended by the runtime.";
+  if (machine && machine.connection !== "connected") return `${machine.name} is offline`;
 }
+export const archiveLabel = (t: Pick<Task, "status">) => t.status === "done" ? "Archive" : "Archive…";
+export const ARCHIVE_STOP_UNCONFIRMED = "Process stop was not confirmed.";
 
 /** The checkout has an upstream to pull from and compare with. Its counts are against the target branch otherwise. */
 export function hasUpstream(repo: ProjectRepo | null, c: RepoCheckout): boolean {
@@ -158,7 +153,7 @@ export function gitItems(f: GitFacts): GitItem[] {
   }
   const viewPr = viewPrItem(t, f);
   if (viewPr) items.push(viewPr);
-  items.push({ id: "archive", label: "Archive task", icon: "archive", why: busy ?? archiveBlocked(t) ?? f.gate("archive_task") });
+  items.push({ id: "archive", label: t.status === "done" ? "Archive task" : "Archive task…", icon: "archive", why: archiveBlocked(t, v.machine) ?? f.gate("archive_task") });
   return items;
 }
 

@@ -212,7 +212,7 @@ function Storage() {
   return <Page title="Storage and archive" lead="How long this machine keeps finished work, and what it uses." bar={<SaveBar d={d} />}>
     <SetH title="Archive rules" />
     <div class="surface"><OverviewShown>
-      <Srow t="Auto archive" d="Tasks move from Done to Archive after this many days. Archiving never asks and never deletes work."><Stepper label="Auto archive" value={d.value().autoArchiveDays} suffix="days" min={1} max={3650} disabled={off()} onChange={autoArchiveDays => d.set({ ...d.value(), autoArchiveDays })} /></Srow>
+      <Srow t="Auto archive" d="Tasks move from Done to Archive after this many days. Automatic archiving does not ask or delete work."><Stepper label="Auto archive" value={d.value().autoArchiveDays} suffix="days" min={1} max={3650} disabled={off()} onChange={autoArchiveDays => d.set({ ...d.value(), autoArchiveDays })} /></Srow>
       <Srow t="Retention" d="How long eligible finished tasks stay in Archive before cleanup can delete them, counted from archive time. A Done task archived by closing its sprint counts from its completion time plus the auto-archive days."><Stepper label="Retention" value={d.value().retentionDays} suffix="days" min={1} max={3650} disabled={off()} onChange={retentionDays => d.set({ ...d.value(), retentionDays })} /></Srow>
       <Srow t="Delete expired archives automatically" d="On by default. Only closed tasks with confirmed, settled execution qualify. You can still run cleanup manually.">
         <Sw label="Delete expired archives automatically" checked={d.value().automaticArchivePurge} disabled={off()} onChange={automaticArchivePurge => d.set({ ...d.value(), automaticArchivePurge })} />

@@ -373,6 +373,7 @@ pub(crate) async fn dispatch(
             .as_array()
             .is_some_and(|ids| ids.iter().any(|id| id == task))
         || !record["archive"].is_null()
+        || !record["archiveHold"].is_null()
         || record["purged"] == true
         || record["status"] == "done"
         || record["acceptance"].is_object() && record["acceptance"]["automatic"] != true

@@ -15,7 +15,7 @@ export type ProjectSlice = { project: Project; tasks: Task[]; sessions: TaskSess
 /** A confirmed snapshot. `version` is a decimal string, and a store installs only a newer one. */
 export type ProjectionUpdate = { kind: "projection"; version: string } & ({ scope: "workspace"; state: WorkspaceState } | { scope: "project"; slice: ProjectSlice });
 /** What the owner decided about a task. The runtime knows nothing of these, so they come from the machine and sit over its facts. */
-export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptance" | "reviewActions" | "integrationFacts" | "closedAs" | "doneAt" | "archive" | "targetBranch" | "sprintId" | "dependencies" | "integration" | "notVerifiedByCortex" | "purgeBlocker" | "work" | "checkout" | "settings" | "result" | "conflict" | "merge" | "resolvedBy" | "writeDenials" | "spend" | "reworkAvailable" | "reworkUnavailableReason" | "reworkWarnings" | "reworkVersion" | "reworkOwnerEpoch" | "reworkExecutionId">> & {
+export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptance" | "reviewActions" | "integrationFacts" | "closedAs" | "doneAt" | "archive" | "archiveHold" | "targetBranch" | "sprintId" | "dependencies" | "integration" | "notVerifiedByCortex" | "purgeBlocker" | "work" | "checkout" | "settings" | "result" | "conflict" | "merge" | "resolvedBy" | "writeDenials" | "spend" | "reworkAvailable" | "reworkUnavailableReason" | "reworkWarnings" | "reworkVersion" | "reworkOwnerEpoch" | "reworkExecutionId">> & {
   status?: "ready_to_merge" | "done"; automaticReady?: boolean; planning?: boolean; purged?: boolean; retiredPlanner?: boolean;
   /** Owner reopen generation. An older result's presentation facts cannot cross it. */
   reworkEvent?: string;
@@ -254,12 +254,12 @@ export function overlayTask(task: Task, overlay: TaskOverlay | undefined, branch
   // machine-state write failed after durable steering capture.
   const reopened = task.process === "live" && status === "ready_to_merge";
   const next: Task = { ...task, ...facts, checkout: facts.checkout ?? checkout, status: reopened ? task.status : status ?? task.status };
-  if (reopened) { next.acceptance = null; next.observedPhase = task.observedPhase; return next; }
+  if (reopened) { next.acceptance = null; next.observedPhase = task.observedPhase; }
   // Acceptance stores the wire source version; screens label the result sequence.
   if (next.acceptance && next.result && String(next.acceptance.version) === next.result.sourceVersion && next.acceptance.digest === next.result.digest) {
     next.acceptance = { ...next.acceptance, version: next.result.version };
   }
-  if (status) next.observedPhase = undefined;
+  if (status && !reopened) next.observedPhase = undefined;
   // A recorded automatic finish is settled even if the native read is still catching up.
   if (status === "done" && next.integration?.automatic === true) {
     next.process = "stopped";
@@ -269,10 +269,16 @@ export function overlayTask(task: Task, overlay: TaskOverlay | undefined, branch
     // Older saved presentation must not replace the durable close or imply
     // that an earlier result was accepted for the disputed execution.
     return { ...next, status: "closed_unverified", process: "unknown", observedPhase: task.observedPhase,
-      closedAs: "unconfirmed", doneAt: task.doneAt, notVerifiedByCortex: true, archive: null,
+      closedAs: "unconfirmed", doneAt: task.doneAt, notVerifiedByCortex: true, archive: next.archive,
       acceptance: null, integration: null };
   }
-  if (automaticReady && next.result) next.result = { ...next.result, automaticReady: true };
+  if (next.archive?.stopUnconfirmed) next.process = "unknown";
+  if (!next.archive && next.archiveHold === "unconfirmed" && next.process !== "stopped") {
+    next.status = "paused";
+    next.process = "unknown";
+    next.observedPhase = "unknown";
+  }
+  if (!reopened && automaticReady && next.result) next.result = { ...next.result, automaticReady: true };
   return next;
 }
 

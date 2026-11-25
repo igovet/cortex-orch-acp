@@ -1925,6 +1925,8 @@ async fn check_actions(fixture: &Value) {
         let retained_path = f.base.join("worktree");
         let unbound_handoff = matches!(case["name"].as_str(), Some("resolution-plain" | "resolution-repeat"));
         let mut expected = match case["name"].as_str().unwrap() {
+            // The retained oracle predates non-destructive archiving of unfinished work.
+            "archive-not-done" => json!({"ok":true,"result":{"done":true,"reclamation":null}}),
             "resolution-plain" | "resolution-repeat" => json!({
                 "ok":false,"code":"handoff_required",
                 "message":"Use the owning execution's handoff_merge action."
@@ -2005,6 +2007,9 @@ async fn check_actions(fixture: &Value) {
                     case["after"]["tasks"]["t1"]["archiveAskAfter"].clone();
             }
             let mut expected = if unbound_handoff { case["saved"].clone() } else { case["after"].clone() };
+            if case["name"] == "archive-not-done" {
+                expected["tasks"]["t1"]["archive"] = json!({"at":clock,"previousStatus":"ready_to_merge","unfinished":true});
+            }
             if case.get("delayMs").is_some() {
                 expected["tasks"]["t1"]["archiveAskAfter"] = Value::Null;
             }
@@ -2044,6 +2049,23 @@ async fn check_actions(fixture: &Value) {
             expected_state["tasks"]["t1"]["retainedWorktree"] = json!(retained_path);
             expected_state["tasks"]["t1"]["worktreeCleanup"] = expected["result"]["worktreeCleanup"].clone();
             assert_eq!(fs::read(retained_path.join("a.txt")).ok(), worktree_before);
+        }
+        if case["params"]["action"] == "archive" {
+            // Archive must not depend on Git or refresh its stored observations.
+            let saved = &case["saved"];
+            for key in ["hasGit", "ghAvailable"] {
+                if let Some(value) = saved.get(key) {
+                    expected_state[key] = value.clone();
+                } else {
+                    expected_state.as_object_mut().unwrap().remove(key);
+                }
+            }
+        }
+        if case["name"] == "archive-not-done" {
+            expected_state["tasks"]["t1"]["archive"] = json!({
+                "at": fixture["clock"], "previousStatus":"ready_to_merge","unfinished":true
+            });
+            expected_state["tasks"]["t1"]["archiveQuestion"] = json!(false);
         }
         assert_eq!(after, expected_state, "{} persisted JSON", case["name"]);
         let store = store.or_else(|| {
@@ -2241,14 +2263,18 @@ async fn a_task_the_owner_finished_through_the_runtime_reads_closed_and_archives
         json!({"tasks":{"t1":{"title":"Kept"}}}).to_string(),
     )
     .unwrap();
-    // A run the runtime cancelled by itself is not the owner's close: Archive still refuses.
+    // A run the runtime cancelled by itself can be archived without recording a close.
     let plain = read(&f).await;
     assert!(
         plain["result"]["tasks"]["t1"]["status"].is_null(),
         "{plain}"
     );
-    let refused = f.call(json!({"action":"archive","taskId":"t1"})).await;
-    assert_eq!(refused["code"], "not_done", "{refused}");
+    let archived = f.call(json!({"action":"archive","taskId":"t1"})).await;
+    assert_eq!(archived["ok"], true, "{archived}");
+    let saved: Value = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
+    assert_eq!(saved["tasks"]["t1"]["archive"]["previousStatus"], "cancelled");
+    assert!(saved["tasks"]["t1"]["status"].is_null());
+    assert_eq!(f.call(json!({"action":"restore","taskId":"t1"})).await["ok"], true);
     // Finish chosen on the runtime's stop question.
     store
         .write(|db| {
@@ -2275,6 +2301,23 @@ async fn a_task_the_owner_finished_through_the_runtime_reads_closed_and_archives
     assert_eq!(t["status"], "done");
     assert_eq!(t["closedAs"], "as_is");
     assert_eq!(t["archiveQuestion"], false);
+    assert!(t["archive"]["stopUnconfirmed"].is_null());
+
+    // A consistent owner's closure is still Done with a reserved process.
+    // Done keeps one-click Archive and the closure but cannot prove exit.
+    assert_eq!(f.call(json!({"action":"restore","taskId":"t1"})).await["ok"], true);
+    store.write(|db| {
+        db.execute("INSERT INTO capacity_reservations VALUES
+            ('owner-closed-process','fixture','r1',NULL,'owner-closed-process','worker','reserved','0','0',NULL)", [])?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(read(&f).await["result"]["tasks"]["t1"]["status"], "done");
+    assert_eq!(f.call(json!({"action":"archive","taskId":"t1"})).await["ok"], true);
+    let saved: Value = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
+    let t = &saved["tasks"]["t1"];
+    assert_eq!(t["archive"]["previousStatus"], "done");
+    assert_eq!(t["archive"]["stopUnconfirmed"], true);
+    assert_eq!(t["closedAs"], "as_is");
     // A saved disposition always wins over the runtime's.
     fs::write(
         f.path(),
@@ -2288,6 +2331,302 @@ async fn a_task_the_owner_finished_through_the_runtime_reads_closed_and_archives
     );
     assert_eq!(kept["result"]["tasks"]["t1"]["doneAt"], 7);
     f.service.stop().await.unwrap();
+}
+
+fn start_archivable(f: &Fixture, store: &cortex_core::Store, key: &str) -> (String, Value) {
+    use cortex_core::workspace;
+    let actor = format!("uid:{}", unsafe { libc::geteuid() });
+    let command = |operation: &str, target: &str, key: &str, expected: &str, payload: Value| json!({
+        "protocol":{"major":1,"minor":8},"requestId":key,"projectId":f.id,
+        "actorId":actor,"operation":operation,"target":target,
+        "ownerEpoch":null,"expectedVersion":expected,"payload":payload,
+    });
+    let draft = workspace::create_draft(store, &f.id, &actor, &command(
+        "tasks.create", &f.id, &format!("create-{key}"), "0", json!({"description":"Archive fixture"}),
+    )).unwrap().receipt["target"].as_str().unwrap().to_owned();
+    let start = workspace::start_native(store, &f.id, &actor,
+        &command("tasks.start", &draft, &format!("start-{key}"), "1", json!({})),
+    ).unwrap();
+    (draft, start)
+}
+
+#[tokio::test]
+async fn archive_stops_a_bound_run_and_keeps_a_conflict_without_certifying_it() {
+    let f = Fixture::new().await;
+    let store = f.store();
+    f.service.activate(&f.id).await.unwrap();
+    for (key, running, previous, unconfirmed) in [
+        ("live", "EXECUTING", "working", false),
+        ("stopping", "RECOVERING", "stopping", true),
+        ("unknown", "RECOVERING", "unknown", true),
+    ] {
+        let (draft, start) = start_archivable(&f, &store, key);
+        let task = start["task"].as_str().unwrap();
+        let execution = start["receipt"]["target"].as_str().unwrap();
+        store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state=? WHERE task_id=?", (running, task))?;
+            if unconfirmed {
+                db.execute("INSERT INTO capacity_reservations VALUES (?,'fixture',?,NULL,?,'worker',?,'0','0',NULL)",
+                    (key, task, key, if key == "stopping" { "reserved" } else { "ambiguous" }))?;
+            }
+            Ok(())
+        }).unwrap();
+        let merge = json!({"conflictId":"merge-id","gitState":"retained","finished":false});
+        fs::create_dir_all(f.path().parent().unwrap()).unwrap();
+        let mut saved: Value = fs::read(f.path()).ok().map(|bytes| serde_json::from_slice(&bytes).unwrap())
+            .unwrap_or_else(|| json!({"tasks":{}}));
+        saved["tasks"][&draft] = json!({"conflict":"conflict","merge":merge});
+        fs::write(f.path(), saved.to_string()).unwrap();
+        let contents = f.root.join("work-kept");
+        fs::write(&contents, key).unwrap();
+        let read_saved = || serde_json::from_slice::<Value>(&fs::read(f.path()).unwrap()).unwrap();
+        let archived = f.call(json!({"action":"archive","taskId":draft})).await;
+        assert_eq!(archived["ok"], true, "{archived}");
+        let actual = read_saved();
+        let record = &actual["tasks"][&draft];
+        assert_eq!(record["archive"]["previousStatus"], previous, "{record}");
+        assert_eq!(record["archive"]["stopUnconfirmed"] == true, unconfirmed);
+        assert_eq!(record["merge"], merge);
+        for field in ["doneAt", "closedAs", "acceptance", "discardDigest", "integration"] {
+            assert!(record[field].is_null(), "{field}: {record}");
+        }
+        assert_eq!(fs::read_to_string(&contents).unwrap(), key);
+        assert_eq!(f.call(json!({"action":"archive","taskId":draft})).await["code"], "already_archived");
+        assert_eq!(f.service.control_execution(json!({"projectId":f.id,"executionId":execution,
+            "requestId":format!("resume-{key}"),"action":"resume","expectedVersion":"2"}))
+            .await.unwrap_err().to_string(), "task_archived");
+        let before = authority(&store);
+        let restored = f.call(json!({"action":"restore","taskId":draft})).await;
+        assert_eq!(restored["ok"], true, "{restored}");
+        assert_eq!(authority(&store), before, "Restore may not change the runtime");
+        let actual = read_saved();
+        assert!(actual["tasks"][&draft]["archive"].is_null());
+        assert_eq!(actual["tasks"][&draft]["archiveHold"], if unconfirmed { "unconfirmed" } else { "stopped" });
+        assert_eq!(actual["tasks"][&draft]["merge"], merge);
+        let runtime_state: String = store.read(|db| Ok(db.query_row(
+            "SELECT state FROM runtime_tasks WHERE task_id=?", [task], |row| row.get(0),
+        )?)).unwrap();
+        assert_eq!(runtime_state, "PAUSED");
+    }
+    assert_eq!(f.call(json!({"action":"archive","taskId":"unknown-task"})).await["code"], "invalid_task");
+    f.service.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn restart_does_not_resume_an_unconfirmed_archive_or_its_restored_hold() {
+    let mut f = Fixture::new().await;
+    let store = f.store();
+    f.service.activate(&f.id).await.unwrap();
+    let (archived, a) = start_archivable(&f, &store, "archived");
+    let (restored, b) = start_archivable(&f, &store, "restored");
+    f.service.stop().await.unwrap();
+    let runtime_ids = [a["task"].as_str().unwrap(), b["task"].as_str().unwrap()];
+    store.write(|db| {
+        for task in runtime_ids {
+            db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id=?", [task])?;
+        }
+        Ok(())
+    }).unwrap();
+    // Crash boundary: each exact Pause admission is durable, but no finish exists.
+    let actor = format!("uid:{}", unsafe { libc::geteuid() });
+    for (start, key) in [(&a, "archive-stop-before-crash"), (&b, "restore-stop-before-crash")] {
+        cortex_core::workspace::control::admit_input(&store, &f.id, &actor, &json!({
+            "projectId":f.id,"executionId":start["receipt"]["target"],
+            "requestId":key,"action":"pause"
+        }), None).unwrap();
+        store.write(|db| {
+            db.execute("INSERT INTO capacity_reservations VALUES
+                (?,'fixture',?,NULL,?,'worker','reserved','0','0',NULL)",
+                (key, start["task"].as_str().unwrap(), key))?;
+            Ok(())
+        }).unwrap();
+    }
+    let restarted = Service::bind(Config {
+        runtime_dir: f.base.join("archive-restart"),
+        state_dir: f.state.clone(),
+        allowed_root: f.base.clone(),
+        launch: LaunchSpec::bare(),
+        request_timeout: Duration::from_secs(10),
+        shutdown_timeout: Duration::from_millis(100),
+        event_capacity: 16,
+    }).await.unwrap();
+    f.service = restarted;
+    // The machine is reachable but the project runtime has not been opened yet.
+    for task in [&archived, &restored] {
+        let archive = f.call(json!({"action":"archive","taskId":task})).await;
+        assert_eq!(archive["ok"], true, "{archive}");
+    }
+    assert_eq!(f.call(json!({"action":"restore","taskId":restored})).await["ok"], true);
+    let saved: Value = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
+    assert_eq!(saved["tasks"][&archived]["archive"]["stopUnconfirmed"], true);
+    assert_eq!(saved["tasks"][&restored]["archiveHold"], "unconfirmed");
+
+    f.service.activate(&f.id).await.unwrap();
+    store.read(|db| {
+        for (task, request) in runtime_ids.into_iter().zip(["archive-stop-before-crash", "restore-stop-before-crash"]) {
+            let resumed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events
+                WHERE task_id=? AND type='NATIVE_RECOVERY_RESUMED')", [task], |row| row.get(0))?;
+            assert!(!resumed, "startup must not resume an archived or restored-held task");
+            let receipt: String = db.query_row("SELECT result_json FROM runtime_requests
+                WHERE task_id=? AND request_key=? AND actor='native-desktop-finish'",
+                (task, request), |row| row.get(0))?;
+            let receipt: Value = serde_json::from_str(&receipt).unwrap();
+            assert_eq!(receipt["outcome"], "unknown");
+            assert_eq!(receipt["reason"], "service_restarted");
+        }
+        Ok(())
+    }).unwrap();
+    f.service.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn archive_restore_allows_explicit_rework_of_a_failed_task() {
+    let f = Fixture::with_routes(Some(std::sync::Arc::new(ReworkRoute))).await;
+    let store = f.store();
+    f.service.activate(&f.id).await.unwrap();
+    let (draft, start) = start_archivable(&f, &store, "rework");
+    let task = start["task"].as_str().unwrap();
+    store.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='FAILED' WHERE task_id=?", [task])?;
+        Ok(())
+    }).unwrap();
+
+    assert_eq!(f.call(json!({"action":"archive","taskId":draft})).await["ok"], true);
+    let read_saved = || serde_json::from_slice::<Value>(&fs::read(f.path()).unwrap()).unwrap();
+    assert_eq!(read_saved()["tasks"][&draft]["archive"]["previousStatus"], "failed");
+    let mut request = json!({
+        "action":"rework","taskId":draft,"requestId":"rework-restored","text":"Try again.",
+        "executionId":start["receipt"]["target"],"expectedVersion":"0","ownerEpoch":"1",
+    });
+    assert_eq!(f.call(request.clone()).await["code"], "task_archived");
+    assert_eq!(f.call(json!({"action":"restore","taskId":draft})).await["ok"], true);
+    assert_eq!(read_saved()["tasks"][&draft]["archiveHold"], "stopped");
+    let board = f.service.machine(serde_json::from_value(json!({
+        "op":"product.board","projectId":f.id,"params":{},
+    })).unwrap()).await.unwrap();
+    let projected = &board["result"]["tasks"][&draft];
+    assert_eq!(projected["reworkAvailable"], true, "{projected}");
+    request["expectedVersion"] = projected["reworkVersion"].clone();
+    request["ownerEpoch"] = projected["reworkOwnerEpoch"].clone();
+    let mut stale = request.clone();
+    stale["expectedVersion"] = json!("0");
+    assert_eq!(f.call(stale).await["code"], "stale_version");
+    assert_eq!(read_saved()["tasks"][&draft]["archiveHold"], "stopped");
+
+    let receipt = f.call(request).await;
+    assert_eq!(receipt["ok"], true, "{receipt}");
+    assert!(read_saved()["tasks"][&draft]["archiveHold"].is_null());
+    // This deliberately failing route can only produce a driver stop after it
+    // passes the archive fence. Merely committing TASK_REOPENED is not enough.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let drove = store.read(|db| Ok(db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_events
+                 WHERE task_id=? AND type='NATIVE_DRIVER_STOPPED')",
+                [task], |row| row.get::<_, bool>(0),
+            )?)).unwrap();
+            if drove {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("the admitted rework did not run its driver");
+    f.service.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn archive_restore_resume_waits_for_short_machine_contention_without_committing_when_busy() {
+    use std::os::fd::AsRawFd;
+
+    let f = Fixture::with_routes(Some(std::sync::Arc::new(ReworkRoute))).await;
+    let store = f.store();
+    f.service.activate(&f.id).await.unwrap();
+    let (draft, start) = start_archivable(&f, &store, "resume");
+    let task = start["task"].as_str().unwrap();
+    let execution = &start["receipt"]["target"];
+    let pause = f.service.control_execution(json!({"projectId":f.id,"executionId":execution,
+        "requestId":"pause-before-archive","action":"pause"})).await.unwrap();
+    assert_eq!(pause["state"], "PAUSED", "{pause}");
+    assert_eq!(f.call(json!({"action":"archive","taskId":draft})).await["ok"], true);
+    assert_eq!(f.call(json!({"action":"restore","taskId":draft})).await["ok"], true);
+
+    let read_saved = || serde_json::from_slice::<Value>(&fs::read(f.path()).unwrap()).unwrap();
+    assert_eq!(read_saved()["tasks"][&draft]["archiveHold"], "stopped");
+    let resume = json!({"projectId":f.id,"executionId":execution,
+        "requestId":"resume-restored","action":"resume","expectedVersion":pause["entityVersion"]});
+    let lock = fs::OpenOptions::new().read(true).write(true)
+        .open(f.state.join("machine.lock")).unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+
+    let error = f.service.control_execution(resume.clone()).await.unwrap_err();
+    assert_eq!(error.to_string(), "machine_busy");
+    let state: String = store.read(|db| Ok(db.query_row(
+        "SELECT state FROM runtime_tasks WHERE task_id=?", [task], |row| row.get(0),
+    )?)).unwrap();
+    assert_eq!(state, "PAUSED", "lock contention must not commit Resume");
+    assert_eq!(read_saved()["tasks"][&draft]["archiveHold"], "stopped");
+
+    // Retrying the exact request while the lock is briefly occupied should
+    // wait, then admit once, rather than replay an already committed Resume.
+    let pending = f.service.control_execution(resume.clone());
+    tokio::pin!(pending);
+    tokio::select! {
+        result = &mut pending => panic!("Resume returned while the lock was occupied: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+    }
+    drop(lock);
+    let receipt = pending.await.unwrap();
+    assert_eq!(receipt["outcome"], "recorded", "{receipt}");
+    assert!(read_saved()["tasks"][&draft]["archiveHold"].is_null());
+    let continued = store.read(|db| Ok(db.query_row(
+        "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='NATIVE_TASK_CONTINUED'",
+        [task], |row| row.get::<_, i64>(0),
+    )?)).unwrap();
+    assert_eq!(continued, 1, "Resume must install a continuation");
+    assert_eq!(f.service.control_execution(resume).await.unwrap(), receipt);
+    f.service.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn archive_restore_keeps_a_draft_held_until_fresh_start() {
+    use workspace_service::{connect, read_frame, write_frame};
+
+    let f = Fixture::with_routes(Some(std::sync::Arc::new(ReworkRoute))).await;
+    let _store = f.store();
+    f.service.activate(&f.id).await.unwrap();
+    let server = tokio::spawn(f.service.clone().serve());
+    let mut client = connect(f.service.socket_path()).await.unwrap();
+    let command = |operation: &str, target: &str, version: &str, id: &str, payload: Value| json!({
+        "jsonrpc":"2.0","id":id,"method":"workspace","params":{
+            "protocol":{"major":1,"minor":8},"requestId":id,"projectId":f.id,
+            "actorId":"fixture","operation":operation,"target":target,
+            "ownerEpoch":null,"expectedVersion":version,"payload":payload,
+        }
+    });
+    write_frame(&mut client, &command("tasks.create", &f.id, "0", "create-restored",
+        json!({"description":"Restored draft","checkout":{"kind":"main"}}))).await.unwrap();
+    let created = read_frame(&mut client).await.unwrap();
+    let draft = created["result"]["target"].as_str().unwrap();
+    assert_eq!(f.call(json!({"action":"archive","taskId":draft})).await["ok"], true);
+    assert_eq!(f.call(json!({"action":"restore","taskId":draft})).await["ok"], true);
+    let read_saved = || serde_json::from_slice::<Value>(&fs::read(f.path()).unwrap()).unwrap();
+    assert_eq!(read_saved()["tasks"][draft]["archiveHold"], "draft");
+
+    write_frame(&mut client, &command("tasks.start", draft, "0", "stale-start", json!({})))
+        .await.unwrap();
+    let stale = read_frame(&mut client).await.unwrap();
+    assert!(stale["error"].is_object(), "{stale}");
+    assert_eq!(read_saved()["tasks"][draft]["archiveHold"], "draft");
+    let start = command("tasks.start", draft, "1", "fresh-start", json!({}));
+    write_frame(&mut client, &start).await.unwrap();
+    let started = read_frame(&mut client).await.unwrap();
+    assert_eq!(started["result"]["outcome"], "recorded", "{started}");
+    assert!(read_saved()["tasks"][draft]["archiveHold"].is_null());
+    write_frame(&mut client, &start).await.unwrap();
+    assert_eq!(read_frame(&mut client).await.unwrap(), started);
+    drop(client);
+    f.service.stop().await.unwrap();
+    server.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -2323,7 +2662,6 @@ async fn owner_close_with_conflicting_records_survives_service_restart_without_r
         json!({"action":"rename","taskId":"t1","title":"Other task"}),
         json!({"action":"generate_title","taskId":"t1"}),
         json!({"action":"draft_integration_text","taskId":"t1","method":"commit","targetBranch":"main"}),
-        json!({"action":"archive","taskId":"t1"}),
     ] {
         let refusal = f.call(params.clone()).await;
         assert_eq!(
@@ -2424,6 +2762,11 @@ async fn owner_close_with_conflicting_records_survives_service_restart_without_r
         )
         .await
         .unwrap();
-    assert_eq!(archive["code"], "contradictory_evidence");
+    assert_eq!(archive["ok"], true, "{archive}");
+    let saved = |f: &Fixture| serde_json::from_slice::<Value>(&fs::read(f.path()).unwrap()).unwrap();
+    assert_eq!(saved(&f)["tasks"]["t1"]["archive"]["previousStatus"], "closed_unverified");
+    assert_eq!(saved(&f)["tasks"]["t1"]["archive"]["stopUnconfirmed"], true);
+    assert_eq!(f.call(json!({"action":"restore","taskId":"t1"})).await["ok"], true);
+    assert_eq!(saved(&f)["tasks"]["t1"]["archiveHold"], "unconfirmed");
     restarted.stop().await.unwrap();
 }

@@ -21,6 +21,34 @@ use std::{
 };
 use tokio::sync::{watch, Mutex};
 
+/// A restored hold reserved by an explicit relaunch, not by startup or a queue.
+pub(super) struct ArchiveHold {
+    pub(super) lock: Arc<crate::machine::settings::Lock>,
+    path: PathBuf,
+    draft: String,
+}
+
+impl ArchiveHold {
+    pub(super) async fn release(self) -> CoreResult<()> {
+        tokio::task::spawn_blocking(move || {
+            let mut saved = crate::machine::settings::read_json(&self.path, Value::Null)
+                .map_err(|e| CoreError::Refused(e.code))?;
+            let record = &mut saved["tasks"][&self.draft];
+            if !record["archive"].is_null() {
+                return Err(CoreError::Refused("task_archived"));
+            }
+            if crate::machine::task_rework::remove_archive_hold(record) {
+                crate::machine::settings::write_json(&self.path, &saved)
+                    .map_err(|e| CoreError::Refused(e.code))?;
+            }
+            drop(self.lock);
+            Ok(())
+        })
+        .await
+        .map_err(|_| CoreError::Refused("native_host_closed"))?
+    }
+}
+
 static RETRY_WINDOW: std::sync::Mutex<Option<cortex_core::scheduler::retry::RetryWindow>> =
     std::sync::Mutex::new(None);
 /// Python reads its lost-worker retry window at call time
@@ -2445,6 +2473,17 @@ impl Runtime {
                             &runtime.host.executor, &task, checkout.path(),
                         ).await;
                     }
+                    match runtime.archive_fenced(&task, true).await {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            let _ = send.send(Err(failure("task_archived")));
+                            return;
+                        }
+                        Err(error) => {
+                            let _ = send.send(Err(err(error)));
+                            return;
+                        }
+                    }
                     let (cancel, cancelled) = watch::channel(false);
                     let (done, finished) = watch::channel(false);
                     runtime.install_pump(task.clone(), cancel, finished).await;
@@ -2781,6 +2820,9 @@ a question to the owner (question text and option labels). Write reports, report
         attempt: &mut RouteAttempt,
         merge_handoff: Option<&str>,
     ) -> CoreResult<()> {
+        if self.archive_fenced(task, true).await? {
+            return Err(CoreError::Refused("task_archived"));
+        }
         let assignment = match &role {
             SessionRole::Worker { assignment } => Some(assignment.clone()),
             _ => None,
@@ -3026,6 +3068,9 @@ a question to the owner (question text and option labels). Write reports, report
                 return;
             }
             let code = error.code().to_owned();
+            if code == "task_archived" {
+                return;
+            }
             let gap = code.starts_with("completion_");
             let t = task.to_owned();
             let owner_for_stop = owner.clone();
@@ -3157,6 +3202,9 @@ a question to the owner (question text and option labels). Write reports, report
     ) -> CoreResult<()> {
         if *self.stop.borrow() {
             return Err(CoreError::Refused("native_service_stopped"));
+        }
+        if self.archive_fenced(task, true).await? {
+            return Ok(());
         }
         // Owner messages recorded for the next boundary (for example before a restart
         // or a later message's relaunch), and queued ones, reach this coordinator turn.
@@ -3384,6 +3432,9 @@ a question to the owner (question text and option labels). Write reports, report
         loop {
             if *self.stop.borrow() || *cancelled.borrow() {
                 return Err(CoreError::Refused("native_service_stopped"));
+            }
+            if self.archive_fenced(task, true).await? {
+                return Ok(());
             }
             let t = task.to_owned();
             if self
@@ -4022,6 +4073,83 @@ a question to the owner (question text and option labels). Write reports, report
             other => other,
         }
     }
+    /// A Workspace disposition is private to the service: resolve it by the
+    /// bound runtime identity, never by a client-supplied status.
+    pub(super) async fn archive_fenced(&self, task: &str, include_restored: bool) -> CoreResult<bool> {
+        let Some(state) = self.host.workspace_state.clone() else { return Ok(false); };
+        let task = task.to_owned();
+        self.host.executor.read(move |db| Self::archive_fenced_on(db, &state, &task, include_restored))?
+            .await.map_err(|_| CoreError::Refused("native_host_closed"))?
+    }
+
+    fn archive_binding_on(
+        db: &rusqlite::Connection, state: &Path, task: &str,
+    ) -> CoreResult<Option<(PathBuf, String)>> {
+        use rusqlite::OptionalExtension;
+        let binding = db.query_row(
+            "SELECT w.project_id,w.task_id FROM workspace_tasks w JOIN workspace_executions e
+             ON w.execution_id=e.execution_id AND w.task_id=e.task_id WHERE e.runtime_task_id=?",
+            [task], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).optional()?;
+        binding.map(|(project, draft)| {
+            let path = crate::machine::native::product_path(state, &project)
+                .map_err(|e| CoreError::Refused(e.code))?;
+            Ok((path, draft))
+        }).transpose()
+    }
+
+    pub(super) fn archive_fenced_on(
+        db: &rusqlite::Connection, state: &Path, task: &str, include_restored: bool,
+    ) -> CoreResult<bool> {
+        let Some((path, draft)) = Self::archive_binding_on(db, state, task)? else { return Ok(false); };
+        let saved = crate::machine::settings::read_json(&path, Value::Null)
+            .map_err(|e| CoreError::Refused(e.code))?;
+        let record = &saved["tasks"][draft];
+        Ok(!record["archive"].is_null() || include_restored && !record["archiveHold"].is_null())
+    }
+
+    /// Reserve the hold before Core admits a relaunch. Do not wait for this
+    /// lock on the database executor: its holder may need that same executor.
+    pub(super) async fn prepare_archive_hold(&self, task: &str) -> CoreResult<Option<ArchiveHold>> {
+        use crate::machine::settings::{read_json, Lock};
+        use std::time::Duration;
+
+        let Some(state) = self.host.workspace_state.clone() else { return Ok(None); };
+        let task = task.to_owned();
+        let binding_state = state.clone();
+        let binding = self.host.executor.read(move |db| {
+            Self::archive_binding_on(db, &binding_state, &task)
+        })?.await.map_err(|_| CoreError::Refused("native_host_closed"))??;
+        let Some((path, draft)) = binding else { return Ok(None); };
+        tokio::task::spawn_blocking(move || {
+            let read = || read_json(&path, Value::Null).map_err(|e| CoreError::Refused(e.code));
+            let saved = read()?;
+            let record = &saved["tasks"][&draft];
+            if !record["archive"].is_null() {
+                return Err(CoreError::Refused("task_archived"));
+            }
+            if record["archiveHold"].is_null() {
+                return Ok(None);
+            }
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
+            let lock = loop {
+                if let Some(lock) = Lock::try_new(&state, "machine.lock")
+                    .map_err(|e| CoreError::Refused(e.code))?
+                {
+                    break lock;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(CoreError::Refused("machine_busy"));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            if !read()?["tasks"][&draft]["archive"].is_null() {
+                return Err(CoreError::Refused("task_archived"));
+            }
+            Ok(Some(ArchiveHold { lock: Arc::new(lock), path, draft }))
+        }).await.map_err(|_| CoreError::Refused("native_host_closed"))?
+    }
+
     /// Whether a driver of this task still runs (installed and not finished).
     pub(super) async fn driven(&self, task: &str) -> bool {
         self.pumps

@@ -505,7 +505,7 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
   const self = {
     sends,
     pendingRequest: (command: WorkspaceCommand) => pendingRequests().has(commandKey(command)),
-    pendingTask: (type: "start_task" | "close_task" | "accept_result", taskId: string) =>
+    pendingTask: (type: "start_task" | "close_task" | "accept_result" | "archive_task", taskId: string) =>
       [...pendingRequests().values()].some(c => c.type === type && c.taskId === taskId),
     savedView: (project: Pick<WorkspaceState["projects"][number], "id" | "repository">) => savedProjects().get(project.id) === project.repository,
     mode: port.mode, state, index, ready, readProjects, readIssue, machineLoaded, machineIssue, modelsPending, modelsIssue,

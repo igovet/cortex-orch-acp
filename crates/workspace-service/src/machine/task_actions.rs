@@ -58,6 +58,137 @@ pub(super) fn require_consistent_records(root: &Path, project: &str, task: &str)
     }
     Ok(())
 }
+/// Take the private disposition without depending on Git, worktree availability,
+/// or a consistent runtime projection. Only an existing task can be archived.
+pub(super) async fn run_archive(
+    root: &Path,
+    project: &str,
+    state: &Path,
+    p: &Value,
+    runtime: Option<&std::sync::Arc<crate::native_runtime::Runtime>>,
+) -> Result<Value> {
+    object_params(p)?;
+    let task = task_id(p)?;
+    // Start, Resume and automatic continuation normally serialize here. If a
+    // long control owns the lane, still shelve the task without claiming it stopped.
+    let lane = match runtime {
+        Some(runtime) => tokio::time::timeout(
+            std::time::Duration::from_secs(2), runtime.controls.lock(),
+        ).await.ok(),
+        None => None,
+    };
+    let _lock = Lock::new(state, "machine.lock")?;
+    let mut product = super::native::product(state, project)?;
+    let saved = &product["tasks"][task];
+    if truth(&saved["purged"]) {
+        return Err(refuse("invalid_task", "Unknown task."));
+    }
+    if truth(&saved["archive"]) {
+        return Err(refuse("already_archived", "Already in the Archive."));
+    }
+
+    let mut observed = Value::Null;
+    let mut owner_closed = json!({"tasks":{}});
+    let mut quiet = false;
+    match context::open(root, OpenMode::LiveReadOnly) {
+        Ok(Some(store)) => {
+            if let Ok((fact, stopped)) = store.read(|db| {
+                let fact = cortex_core::projections::task_records(db, project, &root.to_string_lossy(), task)?;
+                let stopped = match runtime_of(db, project, task)? {
+                    Some(runtime) => cortex_core::lifecycle::automatic::require_processes_gone(db, &runtime).is_ok(),
+                    None => !db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM workspace_starts WHERE task_id=?)",
+                        [task], |row| row.get::<_, bool>(0),
+                    )?,
+                };
+                Ok((serde_json::to_value(fact)?, stopped))
+            }) {
+                observed = fact;
+                quiet = stopped;
+            }
+            if saved["status"].is_null() {
+                let _ = context::owner_closed(&store, project, &mut owner_closed);
+            }
+        }
+        // A genuinely absent store has no durable start or execution to stop.
+        // Do not infer that from a failed read or while control may be in flight.
+        Ok(None) => quiet = runtime.is_none() || lane.is_some(),
+        Err(_) => {}
+    }
+    if !saved.is_object() && observed.is_null() {
+        return Err(refuse("invalid_task", "Unknown task."));
+    }
+
+    let warned = |tag: &str| observed["warnings"].as_array()
+        .is_some_and(|items| items.iter().any(|item| item == tag));
+    let owner_closed = &owner_closed["tasks"][task];
+    let status = if warned("owner_closed_unconfirmed") {
+        "closed_unverified"
+    } else if warned("process_exit_pending") && !warned("cancelled_worker_stopping") {
+        "stopping"
+    } else if warned("contradictory_evidence") || warned("process_exit_unconfirmed") {
+        "unknown"
+    } else if let Some(saved) = saved["status"].as_str().or(owner_closed["status"].as_str()) {
+        saved
+    } else {
+        match observed["phase"].as_str() {
+            Some("not_started") => "draft",
+            Some("planning" | "execution" | "review" | "verification" | "finalizing") => "working",
+            Some("waiting" | "blocked") => "needs_you",
+            Some("recovery") if observed["waitReason"].is_string() => "needs_you",
+            Some("paused") => "paused",
+            Some("failed") => "failed",
+            Some("stopped") => "cancelled",
+            Some("result") => "review",
+            _ => "unknown",
+        }
+    };
+    let idle_phase = matches!(observed["phase"].as_str(),
+        Some("not_started" | "paused" | "failed" | "stopped" | "result"));
+    let stop_unconfirmed = if quiet && (status == "done" || idle_phase) {
+        false
+    } else if let (Some(runtime), Some(_), Some(execution)) =
+        (runtime, lane.as_ref(), observed["executionId"].as_str())
+    {
+        !runtime.pause_for_archive(project, execution).await
+    } else {
+        true
+    };
+    let status = status.to_owned();
+    let record = &mut product["tasks"][task];
+    if !record.is_object() {
+        *record = json!({});
+    }
+    if status == "done" && record["status"].is_null() {
+        for (key, value) in owner_closed.as_object().into_iter().flatten() {
+            record[key] = value.clone();
+        }
+    }
+    super::task_lifecycle::archive(record, now_ms(), &status);
+    if status != "done" {
+        // Distinguish a manual archive from a historical sprint-closure archive.
+        record["archive"]["unfinished"] = json!(true);
+    }
+    if stop_unconfirmed {
+        record["archive"]["stopUnconfirmed"] = json!(true);
+    }
+    let reply = json!({"done":true,"reclamation":record["reclamation"]});
+    settings::write_json(&product_path(state, project)?, &product)?;
+    Ok(reply)
+}
+
+fn task_id(p: &Value) -> Result<&str> {
+    p["taskId"]
+        .as_str()
+        .filter(|s| {
+            !s.is_empty()
+                && s.len() <= 128
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_:.-".contains(&b))
+        })
+        .ok_or_else(|| refuse("invalid_task", "Unknown task."))
+}
+
 pub async fn run(
     root: &Path,
     project: &str,
@@ -66,15 +197,7 @@ pub async fn run(
     git: &mut Git,
 ) -> Result<Value> {
     object_params(p)?;
-    let task = p["taskId"]
-        .as_str()
-        .filter(|s| {
-            !s.is_empty()
-                && s.len() <= 128
-                && s.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"_:.-".contains(&b))
-        })
-        .ok_or_else(|| refuse("invalid_task", "Unknown task."))?;
+    let task = task_id(p)?;
     // `params or {}`: falsy params read as an empty request (invalid_task above).
     // Merge finish/abort and file choices change the index: one Git-changing action
     // per repository at a time, taken before the machine lock (the same order as
@@ -187,7 +310,11 @@ pub async fn run(
     }
     // Saved presentation is not authority to change a disputed task. Check
     // before reading the mutable overlay or dispatching any ordinary action.
-    require_consistent_records(root, project, task)?;
+    if p["action"] != "restore"
+        || !truth(&super::native::product(state, project)?["tasks"][task]["archive"])
+    {
+        require_consistent_records(root, project, task)?;
+    }
     let mut product = context::product(root, state, project, git).await?;
     if product["tasks"].get(task).is_none() {
         product["tasks"][task] = json!({});
@@ -409,6 +536,20 @@ pub async fn run(
             }
         }
         "restore" => {
+            if truth(&record["purged"]) {
+                return Err(refuse("invalid_task", "Unknown task."));
+            }
+            if record["archive"]["unfinished"] == true {
+                // Drafts remain manually startable, but are not queue candidates.
+                // If Pause was unconfirmed, keep fencing all automatic relaunch.
+                record["archiveHold"] = json!(if record["archive"]["stopUnconfirmed"] == true {
+                    "unconfirmed"
+                } else if record["archive"]["previousStatus"] == "draft" {
+                    "draft"
+                } else {
+                    "stopped"
+                });
+            }
             if record["archive"].is_object() {
                 // Return to the project, not to an irrevocably closed sprint.
                 // Remove both membership links so a subsequent sprint delete

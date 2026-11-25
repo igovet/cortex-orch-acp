@@ -1,3 +1,4 @@
+import { ARCHIVE_STOP_UNCONFIRMED } from "./git-actions-model";
 import { DAY, purgeBlocker } from "@cortex/workspace-domain";
 import { closedAsIs, type TaskView, type WorkspaceIndex } from "./selectors";
 
@@ -5,16 +6,17 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 export const shortDate = (at: number) => { const d = new Date(at); return `${d.getDate()} ${MONTHS[d.getMonth()]}`; };
 export const sizeText = (mb: number) => mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
 
-export type Outcome = "committed" | "merged" | "as_is" | "cancel" | "external" | "unconfirmed" | "done" | "draft";
+export type Outcome = "committed" | "merged" | "as_is" | "cancel" | "external" | "unconfirmed" | "done" | "draft" | "unfinished";
 const OUTCOMES: Record<Outcome, { text: string; tone: string }> = {
   committed: { text: "Committed", tone: "st-idle" },
   draft: { text: "Not started", tone: "st-idle" },
+  unfinished: { text: "Unfinished", tone: "st-idle" },
   external: { text: "Done outside the app", tone: "st-idle" },
   unconfirmed: { text: "Closed by you · Not verified", tone: "st-idle" },
   merged: { text: "Merged", tone: "st-merge" }, as_is: { text: "Closed as is", tone: "st-idle" }, cancel: { text: "Cancelled", tone: "st-idle" }, done: { text: "Done", tone: "st-idle" },
 };
 export const OUTCOME_FILTERS: { id: Outcome; label: string }[] = [{ id: "committed", label: "Committed" }, { id: "merged", label: "Merged" }, { id: "as_is", label: "Closed as is" }, { id: "cancel", label: "Cancelled" }];
-const outcomeOf = (v: TaskView): Outcome => v.task.archive?.previousStatus === "draft" ? "draft" : v.task.closedAs === "unconfirmed" ? "unconfirmed" : v.task.integration?.method === "commit" ? "committed" : v.task.work === "merged" ? "merged" : v.task.closedAs ?? "done";
+const outcomeOf = (v: TaskView): Outcome => v.task.archive?.previousStatus === "draft" ? "draft" : v.task.closedAs === "unconfirmed" ? "unconfirmed" : v.task.archive?.unfinished ? "unfinished" : v.task.integration?.method === "commit" ? "committed" : v.task.work === "merged" ? "merged" : v.task.closedAs ?? "done";
 
 export type ArchiveRow = {
   view: TaskView; group: "soon" | "later" | "blocked"; left: number; percent: number; outcome: Outcome; outcomeText: string; outcomeTone: string;
@@ -23,6 +25,7 @@ export type ArchiveRow = {
   status: { text: string; icon: string } | null;
 };
 function subline(v: TaskView, outcome: Outcome, blocker: string | null) {
+  if (v.task.archive?.stopUnconfirmed) return ARCHIVE_STOP_UNCONFIRMED;
   if (blocker) return blocker;
   const when = v.task.doneAt === null ? "" : ` ${shortDate(v.task.doneAt)}`;
   if (outcome === "committed") return `Committed to ${v.task.integration!.targetBranch}${when}`;
@@ -32,12 +35,13 @@ function subline(v: TaskView, outcome: Outcome, blocker: string | null) {
   if (outcome === "cancel") return `Cancelled${when}`;
   if (outcome === "unconfirmed") return "The saved records still disagree";
   if (outcome === "draft") return "Archived as a draft; restore it to start work";
+  if (outcome === "unfinished") return "Archived without finishing or checking the result";
   return "Done";
 }
 export function archiveRow(index: WorkspaceIndex, v: TaskView): ArchiveRow {
   const retention = v.machine.retentionDays, archive = v.task.archive, outcome = outcomeOf(v);
   // Sprint archives may include the ordinary auto-archive delay after completion.
-  const left = outcome === "draft" || archive?.retentionAt === null ? Infinity
+  const left = outcome === "draft" || archive?.unfinished || archive?.retentionAt === null ? Infinity
     : Math.ceil(retention - (archive?.retentionAt === undefined
       ? Math.max(0, index.now - (archive?.at ?? index.now)) : index.now - archive.retentionAt) / DAY);
   const stated = v.task.purgeBlocker;

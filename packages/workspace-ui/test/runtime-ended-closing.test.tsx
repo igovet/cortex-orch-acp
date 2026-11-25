@@ -74,8 +74,8 @@ describe("a closed task", () => {
 describe("Finish chosen on the runtime's stop question", () => {
   it("reads as closed as is and archives once the machine presents its close, which it now always does", () => {
     const runtimeOnly = ownerResolved();
-    // Without a saved close (an older machine) the Archive keeps its stated reason, never a silent dead control.
-    expect(archiveBlocked(runtimeOnly)).toMatch(/ended by the runtime/);
+    // A missing saved close no longer prevents a non-destructive archive.
+    expect(archiveBlocked(runtimeOnly)).toBeUndefined();
     // The machine presents the owner's runtime close as a saved close as is (`context::product`).
     const presented = overlayTask(runtimeOnly, { status: "done", closedAs: "as_is", notVerifiedByCortex: true, doneAt: 5 }, "main");
     expect(presented.observedPhase).toBeUndefined();

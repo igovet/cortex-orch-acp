@@ -11,7 +11,7 @@ import { ActionBar, revealWhenCut } from "./layout";
 import { behindTarget, conflictLine, finishBlocked, mergeControls, taskCheckout } from "./review-model";
 import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, externalDoneBlocked, languageLabel, modeLabel, REWORK_LABEL, resumeState, reworkBinding, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
 import { CHECK_ICON, VERIFICATION } from "./worker";
-import { archiveBlocked } from "./git-actions-model";
+import { archiveBlocked, archiveLabel, ARCHIVE_STOP_UNCONFIRMED } from "./git-actions-model";
 import { spendRows, StallBadge } from "./task-spend";
 
 const useModel = (id: () => string) => {
@@ -76,7 +76,7 @@ export function titleBlock(m: SessionModel): string | null {
     return v.project.hasGit !== false ? finishBlocked(t) : closeBlocked(m);
   }
   if (m.mode === "ended") return closeBlocked(m);
-  if (m.mode === "closed") return archiveBlocked(t) ?? null;
+  if (m.mode === "closed") return archiveBlocked(t, v.machine) ?? null;
   return m.mode === "paused" ? closeBlocked(m) : null;
 }
 
@@ -100,7 +100,7 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
   // Continue and the fallback Resume follow the one rule the card, the menu and the palette use.
   const run = createMemo(() => resumeState(props.view));
   const blocked = () => m() ? closeBlocked(m()!) : null;
-  const archiveWhy = () => archiveBlocked(props.view.task);
+  const archiveWhy = () => archiveBlocked(props.view.task, props.view.machine) ?? ws.gate("archive_task");
   const answering = () => mode() === "live" && props.view.task.conflict === "none" && ((m()?.open.length ?? 0) > 0 || (props.view.column === "needs" && props.view.task.observedPhase !== "recovery"));
   const seeNeeded = () => {
     const kind = m() ? unconfirmedState(m()!)?.kind ?? "" : "";
@@ -132,9 +132,9 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
     <Show when={reworkBinding(props.view)}>
       <button class="btn btn-line tb-rework" aria-label={REWORK_LABEL} {...ws.needs("rework_task")} onClick={() => ws.returnForRework(props.view.id)}><I n="message" s={14} /><span>{REWORK_LABEL}</span></button>
     </Show>
-    {/* Archiving keeps the closed task and its work without another prompt. */}
-    <Show when={mode() === "closed"}>
-      <button class="btn btn-line tb-archive" aria-describedby={archiveWhy() ? why() : undefined} aria-disabled={archiveWhy() ? "true" : undefined} data-why={archiveWhy()} {...ws.needs("archive_task")} onClick={() => { if (!archiveWhy()) ws.archiveTask(props.view.id); }}><I n="archive" s={12} />Archive</button>
+    {/* Archive remains available even when the runtime cannot confirm a stop. */}
+    <Show when={!props.view.task.archive}>
+      <button class="btn btn-line tb-archive" aria-label={archiveLabel(props.view.task)} aria-describedby={archiveWhy() ? why() : undefined} aria-disabled={archiveWhy() ? "true" : undefined} data-why={archiveWhy()} {...ws.needs("archive_task")} onClick={() => { if (!archiveWhy()) ws.archiveTask(props.view.id); }}><I n="archive" s={12} /><span>{archiveLabel(props.view.task)}</span></button>
     </Show>
     {/* A queue hold decided for the owner: its actions are on the pinned card above the message box; this brings it into view. */}
     {/* It is offered only where its target is on the page: the pinned card, or (the card stays away while a question or a
@@ -216,7 +216,7 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
     if (t().status === "review") return `Finished. Accepting v${t().result?.version ?? ""} is your decision.`;
     if (t().status === "ready_to_merge") return t().acceptance ? "Waiting for you to confirm." : m().view.project.hasGit === false ? "Review the result before closing the task." : sameBranch(t(), m().view.target) ? "Nothing is committed or closed without your confirmation." : "Nothing merges without your confirmation.";
     if (m().mode === "ended") return resumeState(m().view)?.why || "The run ended. Close task moves it to Done and keeps what was done.";
-    if (m().mode === "closed" && !archiveBlocked(t())) return "Archive moves it to the Archive with its work, without asking anything.";
+    if (m().mode === "closed" && t().status === "done") return "Archive keeps the task and its work without another confirmation.";
     // A pause whose stop or process exit is not confirmed cannot be resumed yet; it says so instead of offering Resume.
     if (m().mode === "paused" && resumeState(m().view)?.kind === "evidence") return resumeState(m().view)!.why;
     return m().mode === "live" && m().view.sprint?.runMode !== "automatic" ? `${open() ? `${open()} question${open() === 1 ? "" : "s"} for you. ` : ""}Next step is Review.` : paused() ? "Resume, or send any message. Nothing was deleted." : "";
@@ -232,7 +232,10 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
       <Show when={note()}><div class="cap muted">{note()}</div></Show>
       <Show when={!note() && !m().view.unknown && m().view.fact.text !== chip().text + (chip().wide ?? "")}><div class="cap muted"><FactLine fact={m().view.fact} /></div></Show>
     </div>
-    <Show when={m().view.task.status === "paused"}>
+    <Show when={t().archive?.stopUnconfirmed || t().archiveHold === "unconfirmed" && t().process === "unknown"}>
+      <div class="cap st-warn">{ARCHIVE_STOP_UNCONFIRMED}</div>
+    </Show>
+    <Show when={m().view.task.status === "paused" && t().process === "stopped"}>
       <div class="ins-sec"><div class="ins-h"><span>Stop effect</span></div>
         <Kv rows={[["Workers", `Stopped${stoppedAt(m()) === null ? "" : ` at ${clock(stoppedAt(m()))}`}`], ["Checkout", "Untouched"], ["Decisions", open() ? `${open()} still open` : "None open"], ["Queue", `${m().queue.length} kept`]]} /></div>
     </Show>

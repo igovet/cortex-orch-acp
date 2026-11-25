@@ -260,7 +260,8 @@ fn load(
                         let current = &projected["tasks"][task];
                         draft = execution.is_none() && !reservation && projected_fact["phase"] == "not_started"
                             && (current["status"].is_null() || matches!(current["status"].as_str(), Some("draft" | "not_started")))
-                            && current["closedAs"].is_null() && current["archive"].is_null();
+                            && current["closedAs"].is_null() && current["archive"].is_null()
+                            && current["archiveHold"].is_null();
                     }
                     fact = Some(projected_fact);
                 } else {
@@ -279,10 +280,10 @@ fn load(
                 let record = &projected["tasks"][task];
                 let (outcome, closed) = crate::native_driver::sprints::member_disposition(record, Some(&value));
                 graph_facts.push(json!([task, status, &dependencies, draft, &value["executionId"],
-                    if draft { &value["version"] } else { &Value::Null }, outcome, closed, &record["archive"]]));
+                    if draft { &value["version"] } else { &Value::Null }, outcome, closed, &record["archive"], &record["archiveHold"]]));
                 // Activity on a skipped member is not an input to the queue
                 // decision (a cancelled runtime may still publish late updates).
-                let skipped = !record["archive"].is_null()
+                let skipped = !record["archive"].is_null() || !record["archiveHold"].is_null()
                     || matches!(closed.as_deref(), Some("cancel" | "unconfirmed"));
                 if !skipped {
                     let exit: Vec<_> = value["warnings"].as_array().into_iter().flatten()

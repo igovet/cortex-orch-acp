@@ -1,11 +1,15 @@
 import { validate } from "@cortex/workspace-contract";
 import type { Task as WireTask } from "@cortex/workspace-contract";
-import { isAutomaticContinuation, isAutomaticQueue, isSprintRunMode, type Sprint, type TaskOverlay } from "@cortex/workspace-domain";
+import { isAutomaticContinuation, isAutomaticQueue, isSprintRunMode, type Sprint, type Task, type TaskOverlay } from "@cortex/workspace-domain";
 import type { ProjectLocator } from "./real";
 
 export type BoardStorage = Pick<Storage, "getItem" | "setItem">;
 export type CachedBoard = { project: ProjectLocator; items: WireTask[]; product: { tasks: Record<string, TaskOverlay>; sprints: Sprint[] } };
 const KEY = "cw.confirmed-board.v1", MAX = 2_000_000;
+type ArchiveStatus = NonNullable<Task["archive"]>["previousStatus"];
+const archiveStatuses: readonly ArchiveStatus[] = ["draft", "working", "needs_you", "stopping", "paused", "review",
+  "ready_to_merge", "done", "closed_unverified", "failed", "cancelled", "unknown"];
+const isArchiveStatus = (status: unknown): status is ArchiveStatus => archiveStatuses.some(s => s === status);
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const text = (v: unknown): v is string => typeof v === "string" && v.length <= 32000;
 const ids = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 1000 && v.every(x => typeof x === "string" && /^[a-zA-Z0-9_:.-]{1,128}$/.test(x));
@@ -29,9 +33,13 @@ function board(raw: unknown, legacy = false): CachedBoard {
     if (value.retiredPlanner === true) overlay.retiredPlanner=true;
     if (text(value.sprintId)) overlay.sprintId=value.sprintId;
     if (object(value.archive) && typeof value.archive.at === "number" && Number.isFinite(value.archive.at)) {
-      const {at, previousStatus, retentionAt} = value.archive;
-      overlay.archive = {at, previousStatus: previousStatus === "draft" ? "draft" : "done",
+      const {at, previousStatus, retentionAt, unfinished, stopUnconfirmed} = value.archive;
+      overlay.archive = {at, previousStatus: isArchiveStatus(previousStatus) ? previousStatus : "unknown",
+        ...(unfinished === true ? {unfinished} : {}), ...(stopUnconfirmed === true ? {stopUnconfirmed} : {}),
         ...("retentionAt" in value.archive ? {retentionAt: typeof retentionAt === "number" && Number.isFinite(retentionAt) ? retentionAt : null} : {})};
+    }
+    if (value.archiveHold === "draft" || value.archiveHold === "stopped" || value.archiveHold === "unconfirmed") {
+      overlay.archiveHold = value.archiveHold;
     }
     // Only the display facts for a recorded automatic finish, never the task result or Git contents.
     const integration = value.integration;

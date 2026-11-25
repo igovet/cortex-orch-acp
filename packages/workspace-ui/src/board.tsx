@@ -10,7 +10,7 @@ import { Page, StatusLane, Strip, Toolbar, type StripItem } from "./layout";
 import { defaultCheckout, repoOf, taskCheckout, unavailableCheckout } from "./review-model";
 import type { ProjectView, Route, Scope } from "./router";
 import { age, automaticAcceptanceHold, awaitsOwner, bySprint, cardFact, clock, columnsOf, COLUMNS, decisionRoute, inScope, nothingToCommit, planningNeedsOwner, projectsOn, rowIcon, sameBranch, sprintRoute, sprintTitle, sprintView, type ColumnId, type GroupedRow, type ProjectSummary, type TaskView } from "./selectors";
-import { archiveBlocked } from "./git-actions-model";
+import { archiveBlocked, archiveLabel } from "./git-actions-model";
 import { closeBlocked, EXTERNAL_DONE_LABEL, externalDoneBlocked, offersExternalDone, REWORK_LABEL, resumeState, reworkBinding, sessionModel } from "./session-model";
 import { KnowledgePage, ProjectSettingsPage } from "./project-pages";
 import { createQueueStrip, QueueButton, QueueHelp, RunMode, SprintTarget, TargetChoices } from "./sprint";
@@ -409,7 +409,7 @@ export function TaskMenu(props: { taskId: string | null; ref: (el: HTMLDivElemen
         disabled={blocked() ?? (!ws.can("workspace.task_worktrees") ? ws.t("noTaskWorktrees") : v().task.process !== "stopped" ? "Stop the task and wait for its workers first."
           : v().task.merge && !v().task.merge!.finished ? "Finish or abort the merge first." : worktreeCleanupBlocker(v().task))}
         onSelect={() => closeWorktree(v().id)} /></Show>
-      <MenuItem icon="archive" label="Archive" disabled={archiveBlocked(v().task)} needs="archive_task" onSelect={() => ws.archiveTask(v().id)} />
+      <MenuItem icon="archive" label={archiveLabel(v().task)} disabled={archiveBlocked(v().task, v().machine)} needs="archive_task" onSelect={() => ws.archiveTask(v().id)} />
       <MenuItem icon="pin" label={ws.panels.pins().includes(v().id) ? "Unpin" : "Pin"} onSelect={() => ws.panels.togglePin(v().id)} />
       <div class="mi-sep"></div>
       <MenuItem icon="external" label={ws.externalLabel()} sub={ws.noOpener("workspace.open_editor", "noExternal") ?? (v().task.checkout.kind === "worktree" && !taskCheckout(ws.store.state(), v().task) ? "This task’s worktree is no longer available. Refresh the project." : undefined)} disabled={ws.noOpener("workspace.open_editor", "noExternal") ?? (v().task.checkout.kind === "worktree" && !taskCheckout(ws.store.state(), v().task) ? "Worktree unavailable" : undefined)} onSelect={() => { const c = taskCheckout(ws.store.state(), v().task); ws.run({ type: "open_editor", projectId: v().project.id, ...(c ? { checkoutId: c.id } : {}) }); }} />

@@ -70,6 +70,9 @@ pub async fn automatic(
     product: &mut Value,
     git: &mut Git,
 ) -> Result<Value> {
+    if !product["tasks"][task]["archive"].is_null() || !product["tasks"][task]["archiveHold"].is_null() {
+        return Ok(json!({"accepted":false}));
+    }
     if product["tasks"][task]["acceptance"].is_object() {
         return Ok(json!({"accepted":true}));
     }

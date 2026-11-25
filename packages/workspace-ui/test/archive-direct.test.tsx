@@ -4,7 +4,7 @@ import { emptyWorkspace, LOCAL_MACHINE_ID, type WorkspaceState } from "@cortex/w
 import { Workspace } from "../src";
 import { flush, projection, scriptedPort, withTask } from "./support";
 
-// Archiving is one command: the task goes to the Archive with its work and nothing asks.
+// All archive controls use the same confirmation and send one non-destructive command.
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ""; localStorage.clear(); sessionStorage.clear(); });
 const settle = async () => { for (let i = 0; i < 8; i++) await flush(); };
@@ -36,6 +36,46 @@ it("Archive on a done task with unmerged work sends one command and opens no dia
   expect(p.commands).toHaveLength(1);
   expect(document.querySelector("dialog[open]")).toBeNull();
   expect(text()).not.toMatch(/has unmerged work|Keep the work|Delete the work and archive/);
+});
+
+it("confirms an unfinished task from the title band and sends nothing on Cancel", async () => {
+  const s = done();
+  Object.assign(s.tasks[0], { status: "working", process: "live", doneAt: null });
+  const p = await mount(s, `/m/${LOCAL_MACHINE_ID}/t/t`);
+  const archive = document.querySelector<HTMLButtonElement>(".tb-archive")!;
+  expect(archive.textContent).toContain("Archive…");
+  archive.click(); await settle();
+  let dialog = document.querySelector<HTMLDialogElement>("dialog[open]")!;
+  expect(dialog.textContent).toContain("Move it to the Archive without checking its result?");
+  expect(p.commands).toHaveLength(0);
+  [...dialog.querySelectorAll("button")].find(b => b.textContent?.trim() === "Cancel")!.click();
+  await settle();
+  expect(p.commands).toHaveLength(0);
+  archive.click(); await settle();
+  dialog = document.querySelector<HTMLDialogElement>("dialog[open]")!;
+  [...dialog.querySelectorAll("button")].find(b => b.textContent?.trim() === "Archive")!.click();
+  await settle();
+  expect(p.commands.map(c => c.payload)).toEqual([expect.objectContaining({ type: "archive_task", taskId: "t" })]);
+  p.receipt(); await settle();
+  expect(document.querySelector("dialog[open]")).toBeNull();
+});
+
+it("shows an unfinished outcome and the unconfirmed stop in Archive", async () => {
+  const s = done();
+  Object.assign(s.tasks[0], { status: "working", doneAt: null, process: "unknown",
+    archive: { at: 1000, previousStatus: "working", unfinished: true, stopUnconfirmed: true } });
+  await mount(s, `/m/${LOCAL_MACHINE_ID}/archive`);
+  expect(text()).toContain("Unfinished");
+  expect(text()).toContain("Process stop was not confirmed.");
+});
+
+it("shows a closed-unverified task in the Archive rather than the board", async () => {
+  const s = done();
+  Object.assign(s.tasks[0], { status: "closed_unverified", closedAs: "unconfirmed", process: "unknown",
+    archive: { at: 1000, previousStatus: "closed_unverified", unfinished: true } });
+  await mount(s, `/m/${LOCAL_MACHINE_ID}/archive`);
+  expect(text()).toContain("Closed by you · Not verified");
+  expect(document.querySelector('[aria-label="Select Finished"]')).not.toBeNull();
 });
 
 it("a saved record that still carries the retired question shows no question anywhere", async () => {

@@ -23,6 +23,11 @@ In Workspace, open [Board](docs/cortex-workspace/SCREENS.md#conversation-adoptio
 
 In Workspace Code, the [File actions menu](docs/cortex-workspace/ide-and-git.md#code-file-actions) opens the file palette, opens the current file in an external editor, or shows it in the file manager.
 
+In Workspace, [Archive](docs/cortex-workspace/local-task-execution.md#archive-and-service-owned-work)
+can put away any retained task on a reachable machine without deleting its work.
+Unfinished tasks ask first. A note shows if stopping could not be confirmed, even for a Done task.
+Restore does not start or resume work.
+
 A Workspace task waiting for another task’s files shows the holder’s board title on its card and the wait reason on its opened page.
 
 Workspace desktop shows [selective tooltips](docs/cortex-workspace/SCREENS.md#desktop-tooltip-inventory) after hover or keyboard focus. Press Esc to dismiss them.
@@ -708,9 +713,10 @@ durable owner decision is not acceptance, merging or passing checks; sprint depe
 Ordinary run closures without acceptance have a closing step: a failed or cancelled run offers
 Close task… in its title band, a runtime result that can never be accepted offers Close as is…, and
 Finish on a runtime stop question an earlier version stored counts as the owner's close as is (not verified), so it archives
-and settles its sprint. Ordinary closed tasks offer Archive without another confirmation. The separate
-close for conflicting records does not enable Archive or satisfy a dependency. See
-[local review and Git behavior](docs/cortex-workspace/local-task-execution.md).
+and settles its sprint. Done tasks offer Archive without another confirmation. Other retained tasks,
+including those with conflicting records, can be archived after confirmation without satisfying a
+dependency. Restore does not start work; use Start, Resume or Return for rework as applicable.
+See [Archive and service-owned work](docs/cortex-workspace/local-task-execution.md#archive-and-service-owned-work).
 Pointer and keyboard focus keep their behavior without adding decorative outlines or shifting controls.
 
 A sprint is planned by its own read-only planning task in the project folder,

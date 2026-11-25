@@ -1121,6 +1121,7 @@ fn recover_task_tx(
     legacy: bool,
     interrupted: bool,
     boot: Option<&str>,
+    archive_fenced: bool,
 ) -> CoreResult<Option<(String, OwnerEpoch, TaskState)>> {
     let state: TaskState = state.parse().map_err(CoreError::Refused)?;
     let owner = if legacy {
@@ -1257,6 +1258,11 @@ fn recover_task_tx(
                         "reason":"service_restarted","revision":revision,
                         "settledAt":cortex_core::now()}).to_string()))?;
         }
+    }
+    // Startup must reconcile old authority and receipts even when the task is
+    // shelved. Do not change its lifecycle into a continuation or resume it.
+    if archive_fenced {
+        return Ok(None);
     }
     let outside_unknown:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=?
             AND operation IN ('outside_command','outside_write','command_run','project_write','project_edit','project_mkdir','project_delete','project_skill_link','draft_write','external_call') AND json_extract(result_json,'$.complete') IS NOT 1 AND json_extract(result_json,'$.status') IS NOT 'complete' AND json_extract(result_json,'$.settled') IS NOT 1)",
@@ -1554,6 +1560,7 @@ impl Runtime {
             })?
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        let workspace_state = self.host.workspace_state.clone();
         let (tasks, failures) = self
             .host
             .executor
@@ -1586,6 +1593,18 @@ impl Runtime {
                 let mut ready = Vec::new();
                 let mut unrecovered = Vec::new();
                 for (task, state, owner, epoch, legacy) in rows {
+                    let fenced = if let Some(workspace) = &workspace_state {
+                        match Self::archive_fenced_on(db, workspace, &task, true) {
+                            Ok(fenced) => fenced,
+                            Err(error) => {
+                                // An unreadable disposition is not permission to relaunch.
+                                failures.push((task.clone(), error.code().to_owned()));
+                                true
+                            }
+                        }
+                    } else {
+                        false
+                    };
                     // One task's recovery never fails the project: its writes roll back alone.
                     let held = interrupted.contains(&task);
                     match isolated(db, || {
@@ -1598,10 +1617,12 @@ impl Runtime {
                             legacy,
                             held,
                             boot.as_deref(),
+                            fenced,
                         )
                     }) {
                         Ok(Some(driven)) => ready.push(driven),
                         Ok(None) => {}
+                        Err(error) if fenced => failures.push((task, error.code().to_owned())),
                         Err(error) => unrecovered.push((task, error.code().to_owned())),
                     }
                 }
@@ -1646,6 +1667,11 @@ impl Runtime {
             eprintln!("workspace-service: recovery left task {task} unsettled ({code})");
         }
         for (task, owner, state) in tasks {
+            // Recovery can settle old evidence, but an archived or restored-held
+            // Workspace task must not be driven on startup.
+            if !matches!(self.archive_fenced(&task, true).await, Ok(false)) {
+                continue;
+            }
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
             let (done, finished) = tokio::sync::watch::channel(false);
             self.install_pump(task.clone(), cancel, finished).await;
@@ -2260,6 +2286,7 @@ mod restart_tests {
                     false,
                     true,
                     Some("boot"),
+                    false,
                 )
             })
         };
@@ -2399,6 +2426,7 @@ mod restart_tests {
                     false,
                     true,
                     Some("boot-after-interruption"),
+                    false,
                 )?;
                 assert_eq!(domain::task_tx(db, "t")?, (TaskState::WaitingUser, 4));
                 assert!(automatic::owed(db, "t")?.is_none());
@@ -2464,6 +2492,7 @@ mod restart_tests {
                     false,
                     false,
                     Some("boot"),
+                    false,
                 )
             })
             .unwrap();

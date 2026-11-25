@@ -272,8 +272,7 @@ target/reopen/restore changes neither start work nor certify a result. The uncha
 `crates/workspace-service/tests/task_actions.rs`, captured by the former generator `generate_task_action_fixture` (removed with the Python runtime). Legacy unmaterialized checkout
 projections, and structured or floating-point rename titles outside the native text-title surface, still delegate before any effect. Owner `close` (including external/already-in-target),
 `archive` and `merged` run in Rust as private presentation actions. External closure preserves the confirmation/conflict/settlement/containment refusal order,
-checks session/root/epoch, unknown launches and live workers, and rechecks settlement under the Core immediate transaction through overlay replacement. Archive preserves the unmerged-work
-question, including dirty/changed-head and missing/removed worktree cases. These presentation actions never transition the scheduler, certify checks or mutate Git/user files.
+checks session/root/epoch, unknown launches and live workers, and rechecks settlement under the Core immediate transaction through overlay replacement. Archive keeps the saved work and checks as they were; for unfinished work it can request the existing runtime Pause without closing or certifying the result. See [Archive and service-owned work](#archive-and-service-owned-work).
 The old unbound `resolution_started` action is refused; use the conflict-bound owner control described in [Integration and conflicts](#integration-and-conflicts).
 The lifecycle fixture in `crates/workspace-service/tests/task_actions.rs` was captured by the former generator `generate_task_lifecycle_fixture` (removed with the Python runtime). Owner acceptance and archive-discard answers now also
 run in Rust within the native evidence/materialized-checkout boundary described below. Manual file choices and merge finish/abort now use Rust as described below; integration
@@ -296,7 +295,7 @@ checkout digest. Informational answers need no invented verification.
 The machine lock protects the overlay. Acceptance revalidates under Core's
 immediate writer transaction through the private JSON replacement, preventing
 Start/owner-state changes between validation and save. It neither completes the
-runtime nor creates a check receipt. Archiving never asks and never discards. `confirm_discard` is allowed only on an
+runtime nor creates a check receipt. Archiving never records discard consent. `confirm_discard` is allowed only on an
 archived task and binds the owner's consent to delete its work at cleanup to the
 exact legacy checkout digest; it deletes no files or task.
 Unobservable source records no consent; later purge still rechecks the digest,
@@ -1011,7 +1010,8 @@ Git output overflow; such refusals are not successful observations.
 
 The owner can return closed work for rework, including accepted, closed-as-is
 (including unverified), integrated, cancelled and failed work. Restore archived
-items first. Closing without verification does not itself prevent rework, but
+items first. Restore does not run them; a successful Return for rework lifts the restored hold.
+Closing without verification does not itself prevent rework, but
 the service must confirm the exact execution and owner. A conflicting binding,
 an unconfirmed worker termination or an unresolved external effect still blocks
 the operation. A draft closed before its first run can start through this action.
@@ -1250,7 +1250,7 @@ A task that has never started offers **Edit task…** in its title bar and board
 
 **Close sprint…** is visible beside the sprint actions (in the sprint's actions menu when the title band is narrow) and asks for confirmation. It stops the queue and planner and moves the sprint and its member tasks to the Archive together. A task that has started must be Done; conflicting completion records or a merge or pull-request operation still running also block closure. The refusal names the blocking tasks, and nothing moves to the Archive until the blockers are resolved. Not-started tasks, including queued slots, are archived as drafts. Done tasks keep their completion, and already archived members stay archived. Closure does not accept, cancel, merge, delete or discard work.
 
-The closed sprint leaves active lists and appears under **Archive → Closed sprints** with its retained Summary. Restore returns an archived member to its previous task status in the project without a sprint. A closed sprint cannot be reopened, restart its queue or accept new members. Sprints closed on older versions are not retroactively archived with their tasks.
+The closed sprint leaves active lists and appears under **Archive → Closed sprints** with its retained Summary. Restore returns an archived member to the project without a sprint; restoring an unfinished task never starts it. A closed sprint cannot be reopened, restart its queue or accept new members. Sprints closed on older versions are not retroactively archived with their tasks.
 
 Age-based cleanup of a Done task newly archived by sprint closure counts from that task's completion: add the normal auto-archive delay configured at closure, then the machine's archive retention period. Closing the sprint does not reset that clock or cut out the normal auto-archive delay. If completion is unknown, age-based cleanup is unavailable. Archived drafts have no age-based cleanup; explicit deletion still requires the existing checkout and unmerged-work safeguards. Archiving never removes a worktree or a branch.
 
@@ -1732,6 +1732,28 @@ The service reserves separate bounded helper lanes for task reads, expensive ins
 
 ## Archive and service-owned work
 
+When the machine is reachable, **Archive** is available for any retained task that
+isn't already archived, even if its state is unconfirmed or a merge is in
+progress. Done tasks move with one click. For other tasks, confirm **Archive**
+to put away the work without checking its result, or choose **Cancel** to leave
+it in place. If work may still be running, the service attempts the existing
+Stop (Pause) action. It still archives the task if it can't confirm the stop,
+and the Archive shows **Process stop was not confirmed**, even for Done work.
+Done is a disposition, not evidence that the task’s processes exited.
+
+The archive record keeps the pre-stop status. Archiving doesn't accept or close
+an unfinished result, modify the retained merge or Git checkout, remove files,
+or grant permission to discard anything. Hybrid and Automatic skip archived
+and restored-held work for dispatch and background settlement without treating
+unfinished work as a completed prerequisite. Restore
+doesn't start or resume work: an unstarted task remains a draft; other unfinished
+work returns stopped or held if its stop couldn't be confirmed. The queue does
+not start it on restore. Use Start for a restored draft, Resume for a paused
+run, or [Return for rework](#return-for-rework) for eligible ended work. If a
+restored task's Resume reports that the machine is busy, the request has not
+resumed it; try again when the machine is free. Automatic retention still
+applies only to eligible Done tasks.
+
 On activation, a saved materialized sprint whose members are missing from the selected channel store can restore those members as drafts. The saved plan version, original task identities, dependency order and task overlays must match exactly. Existing rows and explicitly purged members are not replaced. The queue pauses before restoration and explains that previous execution history is unavailable in this channel; nothing starts automatically, and no old execution/result is inferred or read from another channel. An ambiguous or missing plan stays paused for attention.
 
 Retracted worker checks (withdrawn probes or invocation errors) are rederived from the persisted result, exact provisioning and command receipts, not the reviewer-only `current_outcome` field. Valid retractions are omitted from the active result checks and worker overview counts, as in the runtime's own completion gate. They neither block Accept/Ready to merge nor count as passes. Other failures, missing receipts and current runtime verification requirements remain blocking.
@@ -1798,7 +1820,7 @@ cannot be waived by that acknowledgement.
 
 <a id="storage-retention"></a>
 Maintenance runs once when a local project is activated and then every 60 minutes while the service runs (a service-owned loop, separate from sprint execution; passes are coalesced and never overlap). Done records are eligible for archive after the machine's
-auto-archive interval `autoArchiveDays` (default seven days). A done record is archived without a question, with its work kept; a record saved with the retired archive-question fields loads as an ordinary Done or archived task and shows no question. Archive retention `retentionDays` defaults to 30 days, counted from the archive time (except a Done task newly archived by sprint closure, which counts from its completion time plus the auto-archive delay; see [closing sprints](#editing-saved-tasks-and-closing-sprints)), and is machine-configurable. The background purge is on by default (`automaticArchivePurge`: `true`) and can be switched off; the manual "Run cleanup now" is independent of that switch. Purge requires archived state (previously Done), an affirmative closure (merged, closed as-is by the owner, cancelled or closed externally) and a verified linked execution whose runtime state is COMPLETED, FAILED or CANCELLED. Paused, blocked, executing, awaiting-decision, unclosed, unlinked or ambiguous records, loaded sessions and unsettled attempts, processes or reservations are never purged, and eligibility and age are rechecked at the deletion fence. A scheduled pass never forces, and a transient refusal is retried at a later pass without writing a blocker. Unreferenced attachment files are swept by the same pass after `unreferencedAttachmentRetentionDays` (default 1). Runtime deletion reuses the existing exclusive-lock,
+auto-archive interval `autoArchiveDays` (default seven days). A done record is archived without a question, with its work kept; a record saved with the retired archive-question fields loads as an ordinary Done or archived task and shows no question. Archive retention `retentionDays` defaults to 30 days, counted from the archive time (except a Done task newly archived by sprint closure, which counts from its completion time plus the auto-archive delay; see [closing sprints](#editing-saved-tasks-and-closing-sprints)), and is machine-configurable. The background purge is on by default (`automaticArchivePurge`: `true`) and can be switched off; the manual "Run cleanup now" is independent of that switch. Scheduled purge requires archived state (previously Done), an affirmative closure (merged, closed as-is by the owner, cancelled or closed externally) and a verified linked execution whose runtime state is COMPLETED, FAILED or CANCELLED. Paused, blocked, executing, awaiting-decision, unclosed, unlinked or ambiguous records, loaded sessions and unsettled attempts, processes or reservations are never purged, and eligibility and age are rechecked at the deletion fence. A scheduled pass never forces, and a transient refusal is retried at a later pass without writing a blocker. Unreferenced attachment files are swept by the same pass after `unreferencedAttachmentRetentionDays` (default 1). Runtime deletion reuses the existing exclusive-lock,
 journaled retention cleanup and reports SQLite checkpoint/VACUUM outcomes. Storage shows a persistent count of purged records with failed space reclamation, including explicit purges, and a per-maintenance-run count.
 Dirty worktrees explicitly allowed for discard can still be retained rather than
 force-removed; their Git branch and files remain available. Owner queue/comment

@@ -4753,6 +4753,100 @@ pub(crate) mod sprints {
             service.stop().await.unwrap();
         }
 
+        #[tokio::test]
+        async fn archive_slow_driver_records_an_unknown_pause() {
+            let (_scratch, _folder, service, runtime, project, _id, tasks) =
+                automatic_fixture("dev", "main", "main").await;
+            service.sprint_pass(&project, &runtime, &mut Jobs::default(), false).await.unwrap();
+            let draft = &tasks[0];
+            let task = settled_peer(&runtime, draft).await;
+            let (cancel, cancelled) = tokio::sync::watch::channel(false);
+            let (done, finished) = tokio::sync::watch::channel(false);
+            runtime.install_pump(task.clone(), cancel, finished).await;
+
+            // Keep the driver alive through the entire stop budget.
+            tokio::time::timeout(Duration::from_secs(9), call(
+                &service, "product.task", &project, json!({"action":"archive","taskId":draft}),
+            )).await.expect("archive waits only a bounded time for the driver");
+            assert!(*cancelled.borrow(), "the admitted Pause asked the driver to stop");
+            assert!(!*done.borrow());
+            let board = call(&service, "product.board", &project, json!({})).await;
+            assert_eq!(board["tasks"][draft]["archive"]["stopUnconfirmed"], true);
+            runtime.host.executor.read(move |db| {
+                let (state, outcome, reason): (String, String, String) = db.query_row(
+                    "SELECT t.state,json_extract(f.result_json,'$.outcome'),json_extract(f.result_json,'$.reason')
+                     FROM runtime_tasks t JOIN runtime_requests i USING(task_id)
+                     JOIN runtime_requests f USING(task_id,request_key)
+                     WHERE t.task_id=? AND i.operation='native_desktop_control'
+                     AND i.request_key LIKE 'archive-stop-%' AND f.actor='native-desktop-finish'",
+                    [&task], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?;
+                assert_eq!(state, "PAUSED");
+                assert_eq!(outcome, "unknown");
+                assert_eq!(reason, "archive_stop_timeout");
+                Ok(())
+            }).unwrap().await.unwrap().unwrap();
+            done.send_replace(true);
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn archived_then_restored_result_refuses_stale_repair_dispatch() {
+            use crate::machine::task_auto_repair::{Dispatch, RepairPlan, dispatch};
+            let (_scratch, _folder, service, runtime, project, id, tasks) =
+                automatic_fixture("dev", "main", "main").await;
+            service.sprint_pass(&project, &runtime, &mut Jobs::default(), false).await.unwrap();
+            let draft = &tasks[0];
+            let task = settled_peer(&runtime, draft).await;
+            verified_fixture(&runtime, task.clone(), true).await;
+            let accepted = call(&service, "product.task", &project,
+                json!({"action":"auto_ready","taskId":draft})).await;
+            assert_eq!(accepted["accepted"], true, "{accepted}");
+            let selected = call(&service, "product.read", &project, json!({"taskIds":[draft]})).await;
+            let version = selected["tasks"][draft]["result"]["sourceVersion"].as_str().unwrap();
+            let execution = service.native_tasks(&project).await.unwrap()[draft]["executionId"].clone();
+            let expected = sprint(&service, &project, &id).await;
+            for action in ["archive", "restore"] {
+                call(&service, "product.task", &project, json!({"action":action,"taskId":draft})).await;
+            }
+            let state = &service.config.state_dir;
+            let before = crate::machine::native_product(state, &project).unwrap();
+            assert_eq!(before["tasks"][draft]["archiveHold"], "stopped");
+            assert_eq!(before["tasks"][draft]["acceptance"]["automatic"], true);
+            assert_eq!(sprint(&service, &project, &id).await, expected);
+            let admission = dispatch(state, &runtime, &project, &expected, draft,
+                execution.as_str().unwrap(), Some(version),
+                RepairPlan { prompt: "stale repair".into(), fingerprint: "stale-archive-fixture".into() },
+                false).await.unwrap();
+            assert!(matches!(admission, Dispatch::Refused(None)));
+            assert_eq!(crate::machine::native_product(state, &project).unwrap(), before);
+            assert_eq!(repairs_of(&runtime, &task).await, 0);
+            assert_eq!(service.native_tasks(&project).await.unwrap()[draft]["phase"], "result");
+            service.stop().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn archived_and_restored_hybrid_members_leave_a_paused_sprint_idle() {
+            let (_scratch, _folder, service, runtime, project, id, tasks) =
+                automatic_fixture("dev", "main", "main").await;
+            call(&service, "product.sprint", &project, json!({"action":"patch","sprintId":id,
+                "patch":{"runMode":"hybrid","queueState":"paused"}})).await;
+            let mut jobs = Jobs::default();
+            // The fixture has poll candidates before they are shelved.
+            assert!(service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap());
+            for draft in &tasks {
+                call(&service, "product.task", &project,
+                    json!({"action":"archive","taskId":draft})).await;
+            }
+            call(&service, "product.task", &project,
+                json!({"action":"restore","taskId":tasks[1]})).await;
+            let current = sprint(&service, &project, &id).await;
+            assert_eq!(current["queueState"], "paused");
+            assert_eq!(current["runMode"], "hybrid");
+            assert!(!service.sprint_pass(&project, &runtime, &mut jobs, false).await.unwrap());
+            service.stop().await.unwrap();
+        }
+
         async fn repairs_of(runtime: &Runtime, task: &str) -> i64 {
             let task = task.to_owned();
             runtime.host.executor.read(move |db| {
@@ -7420,6 +7514,7 @@ pub(crate) mod sprints {
     fn automatic_skip(record: &Value, disposition: Option<&(String, Option<String>)>) -> bool {
         record["purged"] == true
             || !record["archive"].is_null()
+            || !record["archiveHold"].is_null()
             || disposition.is_some_and(|(_, closed)| {
                 matches!(closed.as_deref(), Some("cancel" | "unconfirmed"))
             })
@@ -7445,10 +7540,24 @@ pub(crate) mod sprints {
             "dependent":{"dependencies":["archived"]},
             "independent":{}
         });
-        assert!(matches!(
-            automatic_queue_step(&members, &tasks, &records, &HashMap::new(), false),
-            QueueStep::Start("independent")
-        ));
+        let mut records = records;
+        let disposition = HashMap::from([("archived".into(), ("ready_to_merge".into(), None))]);
+        records["archived"]["archive"]["unfinished"] = json!(true);
+        for hybrid in [false, true] {
+            assert!(matches!(
+                automatic_queue_step(&members, &tasks, &records, &disposition, hybrid),
+                QueueStep::Start("independent")
+            ));
+        }
+        // Even a restored draft must not return to either automatic queue.
+        records["archived"]["archive"] = Value::Null;
+        records["archived"]["archiveHold"] = json!("draft");
+        for hybrid in [false, true] {
+            assert!(matches!(
+                automatic_queue_step(&members, &tasks, &records, &disposition, hybrid),
+                QueueStep::Start("independent")
+            ));
+        }
     }
 
     #[cfg(test)]
@@ -7566,6 +7675,8 @@ pub(crate) mod sprints {
             (status == "done" || hybrid && status == "ready_to_merge")
                 && !matches!(closed.as_deref(), Some("cancel" | "unconfirmed"))
                 && records[id]["purged"] != true
+                && records[id]["archive"]["unfinished"] != true
+                && records[id]["archiveHold"].is_null()
         })
     }
 
@@ -8571,7 +8682,7 @@ pub(crate) mod sprints {
                 .filter(|(_, record)| {
                     automatic.contains(&&record["sprintId"])
                         && record["acceptance"].is_null()
-                        && record["purged"] != true
+                        && !automatic_skip(record, None)
                         && record["status"] != "done"
                 })
                 .map(|(task, _)| task)

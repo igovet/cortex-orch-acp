@@ -1771,6 +1771,11 @@ impl Runtime {
                 .map_err(|_| rework::error("native_host_closed"))?
                 .map_err(|e| rework::error(e.code()))??;
             if let Some(b) = binding {
+                // Admission clears a restored hold under the lock it already
+                // owns. Still respect an archive recorded after admission.
+                if runtime.archive_fenced(&b.task, true).await.map_err(|e| rework::error(e.code()))? {
+                    return Err(rework::error("task_archived"));
+                }
                 if let Some(pin) = pin {
                     let task = b.task.clone();
                     if let Ok(saved) = runtime.host.executor.write(move |db| {
@@ -1874,7 +1879,7 @@ impl Runtime {
         }
         let execution = request["executionId"].as_str().unwrap_or_default().to_owned();
         let settle = matches!(request["action"].as_str(), Some("pause" | "stop" | "close_task" | "mark_resolved"));
-        let result = self.apply_runtime_control(project.clone(), request, capture, None).await;
+        let result = self.apply_runtime_control(project.clone(), request, capture, None, None).await;
         if settle {
             // Core's checked Stop receipt, not a UI action or a cancelled future,
             // decides whether the merge's writers are gone.
@@ -1889,6 +1894,7 @@ impl Runtime {
         request: Value,
         capture: Option<cortex_core::input::Capture>,
         merge: Option<&MergeDispatch<'_>>,
+        stop_wait: Option<std::time::Duration>,
     ) -> io::Result<Value> {
         if request.as_object().is_none_or(|m| {
             m.keys().any(|k| {
@@ -1935,20 +1941,30 @@ impl Runtime {
             request["action"].as_str(),
             Some("retry" | "prompt" | "incoming_prompt")
         );
+        let relaunch_task = if resume || restart {
+            Some(self.control_task(&project, &request).await.map_err(err)?)
+        } else {
+            None
+        };
+        let archive_hold = match relaunch_task.as_deref() {
+            Some(task) => self.prepare_archive_hold(task).await.map_err(err)?,
+            None => None,
+        };
+        let held_lock = archive_hold.as_ref().map(|hold| hold.lock.clone());
         if message {
             if let Some(state) = self.host.workspace_state.clone() {
+                let lock = held_lock.clone();
                 let project = project.clone();
                 let execution = request["executionId"].as_str().unwrap_or_default().to_owned();
                 self.host.executor.publication(move |store| {
                     crate::machine::task_rework::with_plain_prompt_guard(
-                        store, &state, &project, &execution, || Ok(()),
+                        store, &state, &project, &execution, lock.as_deref(), || Ok(()),
                     )
                 }).map_err(err)?.await.map_err(|_| failure("native_host_closed"))?.map_err(err)?;
             }
         }
-        let route = if restart {
-            let task = self.control_task(&project, &request).await.map_err(err)?;
-            Some(self.coordinator_route(&task, None).await.map_err(err)?)
+        let route = if let Some(task) = relaunch_task.as_ref().filter(|_| restart) {
+            Some(self.coordinator_route(task, None).await.map_err(err)?)
         } else {
             None
         };
@@ -1962,7 +1978,8 @@ impl Runtime {
                 let admit = || control::admit_input(s, &p, &actor(), &r, capture.as_ref());
                 if let Some(state) = workspace_state.as_ref().filter(|_| message) {
                     crate::machine::task_rework::with_plain_prompt_guard(
-                        s, state, &p, r["executionId"].as_str().unwrap_or_default(), admit,
+                        s, state, &p, r["executionId"].as_str().unwrap_or_default(),
+                        held_lock.as_deref(), admit,
                     )
                 } else {
                     admit()
@@ -1993,7 +2010,15 @@ impl Runtime {
                 };
             // The running driver, its workers, review and verification keep going.
             if !boundary {
-                self.settle_task(&b.task).await?;
+                let settle = self.settle_task(&b.task);
+                if let Some(budget) = stop_wait {
+                    // Bound the driver wait, not the admission or its finish slot.
+                    tokio::time::timeout(budget, settle)
+                        .await
+                        .map_err(|_| CoreError::Refused("archive_stop_timeout"))??;
+                } else {
+                    settle.await?;
+                }
             }
             // Continue on a task held for recovery (a restart left an outcome unknown
             // while it was paused) has nothing to resume: no driver would run it. Every
@@ -2035,19 +2060,33 @@ impl Runtime {
                 return Err(err(error));
             }
         };
-        let merge_receipt = match merge {
-            Some(merge) if !boundary && route.is_some() && result["outcome"] == "recorded" => {
-                Some(merge.task.confirmed(merge.owner_request, merge.handoff).map_err(|e| failure(e.code))?)
+        if merge.is_some() && (boundary || route.is_none() || result["outcome"] != "recorded") {
+            return Err(failure("merge_dispatch_unconfirmed"));
+        }
+        if let Some(hold) = archive_hold {
+            if !boundary {
+                hold.release().await.map_err(err)?;
             }
-            Some(_) => return Err(failure("merge_dispatch_unconfirmed")),
-            None => None,
-        };
+        }
+        // Merge confirmation takes its own machine lock. Do not hold the
+        // restore guard across that step.
+        let merge_receipt = merge
+            .map(|merge| merge.task.confirmed(merge.owner_request, merge.handoff))
+            .transpose()
+            .map_err(|e| failure(e.code))?;
+        if let Some(task) = relaunch_task {
+            if self.archive_fenced(&task, !boundary).await.map_err(err)? {
+                return Err(failure("task_archived"));
+            }
+        }
         if boundary {
             // The running driver can start a steering turn during execution.
             // Only when no driver runs do we start one; never replace a live driver.
             if request["action"] != "allow_write" {
                 self.wake.notify_waiters();
-                if !self.driven(&b.task).await {
+                if !self.driven(&b.task).await
+                    && !self.archive_fenced(&b.task, true).await.map_err(err)?
+                {
                     self.resume_task(b.task, b.owner).await.map_err(err)?;
                 }
             }
@@ -2191,7 +2230,7 @@ impl Runtime {
         let input = json!({"projectId":project,"executionId":execution,"requestId":runtime_key,
             "action":"incoming_prompt","text":text,"attachments":[]});
         let dispatch = MergeDispatch { task, owner_request: request, handoff, initial_goal };
-        let result = self.apply_runtime_control(project.to_owned(), input, capture, Some(&dispatch)).await;
+        let result = self.apply_runtime_control(project.to_owned(), input, capture, Some(&dispatch), None).await;
         if result.is_err() {
             // A route/admission refusal need not strand the owner. A recorded but
             // unconfirmed input stays unknown instead of launching it again.
@@ -2236,7 +2275,9 @@ impl Runtime {
             ).optional()?)
         }) else { return; };
         if let Ok(Ok(Some((project, execution)))) = read.await {
-            let _ = self.reconcile_merge_execution(&project, &execution, None, true).await;
+            if matches!(self.archive_fenced(runtime, false).await, Ok(false)) {
+                let _ = self.reconcile_merge_execution(&project, &execution, None, true).await;
+            }
         }
     }
 
@@ -2622,6 +2663,9 @@ impl Runtime {
         if *self.stop.borrow() {
             return Ok(Continuation::Done);
         }
+        if self.archive_fenced(task, true).await? {
+            return Ok(Continuation::Done);
+        }
         if self.driven(task).await {
             return Ok(Continuation::Later);
         }
@@ -2679,6 +2723,9 @@ impl Runtime {
         }
         if self.driven(task).await {
             return Ok(Continuation::Later);
+        }
+        if self.archive_fenced(task, true).await? {
+            return Ok(Continuation::Done);
         }
         // A plan parked behind an obstacle continues where it stopped, on the runtime's
         // own driver: the parked nodes are retried, and no coordinator turn is needed.
@@ -2887,6 +2934,9 @@ impl Runtime {
         Ok(())
     }
     async fn continue_owed(self: &Arc<Self>, task: String) -> CoreResult<()> {
+        if self.archive_fenced(&task, true).await? {
+            return Ok(());
+        }
         // The stop already ended its driver; never run two drivers for one task.
         self.settle_task(&task).await?;
         let route = self.coordinator_route(&task, None).await;
@@ -2954,6 +3004,20 @@ impl Runtime {
         }
         Ok(())
     }
+    /// Use the same Pause admission and stop evidence as the desktop Stop control.
+    /// The archive caller owns the control lane. Do not reconcile or change Git merge state.
+    pub(crate) async fn pause_for_archive(self: &Arc<Self>, project: &str, execution: &str) -> bool {
+        let Ok(key) = crate::identity() else { return false; };
+        let request = json!({"projectId":project,"executionId":execution,
+            "requestId":format!("archive-stop-{key}"),"action":"pause"});
+        matches!(
+            self.apply_runtime_control(
+                project.to_owned(), request, None, None, Some(std::time::Duration::from_secs(5)),
+            ).await,
+            Ok(receipt) if receipt["outcome"] == "recorded" && receipt["state"] == "PAUSED"
+        )
+    }
+
     pub(crate) async fn stop_execution(
         self: &Arc<Self>,
         project: String,

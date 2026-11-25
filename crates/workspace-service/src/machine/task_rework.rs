@@ -308,9 +308,14 @@ pub(crate) fn with_plain_prompt_guard<T>(
     state: &Path,
     project: &str,
     execution: &str,
+    held_lock: Option<&Lock>,
     action: impl FnOnce() -> CoreResult<T>,
 ) -> CoreResult<T> {
-    let _lock = Lock::new(state, "machine.lock").map_err(|e| CoreError::Refused(e.code))?;
+    let _lock = if held_lock.is_none() {
+        Some(Lock::new(state, "machine.lock").map_err(|e| CoreError::Refused(e.code))?)
+    } else {
+        None
+    };
     let mut product = product(state, project).map_err(|e| CoreError::Refused(e.code))?;
     store.read(|db| {
         let root = store.key().root().to_string_lossy();
@@ -330,25 +335,36 @@ pub(crate) fn with_plain_prompt_guard<T>(
     action()
 }
 
-pub(crate) fn with_plain_start_guard<T>(
+pub(crate) fn with_plain_start_guard(
     state: &Path,
     project: &str,
     request: &Value,
     queued: Option<(&Store, &super::sprint_live::Expectation)>,
-    start: impl FnOnce() -> CoreResult<T>,
-) -> CoreResult<T> {
+    start: impl FnOnce() -> CoreResult<Value>,
+) -> CoreResult<Value> {
     let _lock = Lock::new(state, "machine.lock").map_err(|e| CoreError::Refused(e.code))?;
     let task = request["target"]
         .as_str()
         .ok_or(CoreError::Refused("invalid_task"))?;
-    let saved = product(state, project).map_err(|e| CoreError::Refused(e.code))?;
+    let mut saved = product(state, project).map_err(|e| CoreError::Refused(e.code))?;
     if let Some((store, expected)) = queued {
         super::sprint_live::check_start(store, &saved, project, expected, task)?;
     }
     if closed(&saved["tasks"][task]) || archived(&saved["tasks"][task]) {
         return Err(CoreError::Refused("task_not_resumable"));
     }
-    start()
+    let admitted = start()?;
+    // A rejected or replayed Start never lifts a hold. Fresh Start already
+    // owns the machine lock for admission, including the worktree path.
+    if admitted["fresh"] == true && remove_archive_hold(&mut saved["tasks"][task]) {
+        let path = product_path(state, project).map_err(|e| CoreError::Refused(e.code))?;
+        settings::write_json(&path, &saved).map_err(|e| CoreError::Refused(e.code))?;
+    }
+    Ok(admitted)
+}
+
+pub(crate) fn remove_archive_hold(record: &mut Value) -> bool {
+    record.as_object_mut().is_some_and(|record| record.remove("archiveHold").is_some())
 }
 
 pub(crate) fn preflight(
@@ -546,7 +562,10 @@ pub(crate) fn admit(
     let saved = store
         .read(|db| normalize_on(db, project, &mut product, &b.draft, &b.task))
         .map_err(context::core)
-        .and_then(|()| product_path(state, project))
+        .and_then(|()| {
+            remove_archive_hold(&mut product["tasks"][&b.draft]);
+            product_path(state, project)
+        })
         .and_then(|path| settings::write_json(&path, &product));
     if saved.is_err() {
         receipt["overlayPending"] = json!(true);

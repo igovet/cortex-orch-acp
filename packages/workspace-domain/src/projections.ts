@@ -7,8 +7,8 @@ export function targetBranch(state: WorkspaceState, task: Task): string {
 }
 export function boardPhase(state: WorkspaceState, taskId: string) {
   const task = entity(state.tasks, taskId);
-  if (task.closedAs === "unconfirmed") return "closed_unverified";
   if (task.archive) return "archive";
+  if (task.closedAs === "unconfirmed") return "closed_unverified";
   if (machineFor(state, task).connection !== "connected" || task.process === "unknown") return "unknown";
   // While Cortex works on a conflict nothing waits for the owner, so the task sits in Working.
   if (task.conflict === "conflict" || task.conflict === "failed") return "needs_you";

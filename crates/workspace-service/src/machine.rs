@@ -243,7 +243,7 @@ impl crate::Service {
         // Owner Git mutations share the execution control lane: a Resume or
         // Request changes cannot start a new writer between the quiet check and Git.
         let runtime = if call.op == "product.task" && matches!(
-            call.params["action"].as_str(), Some("finish_merge" | "abort_merge" | "resolve_block")
+            call.params["action"].as_str(), Some("finish_merge" | "abort_merge" | "resolve_block" | "restore")
         ) {
             let state = self.state.lock().await;
             call.project_id.as_ref().and_then(|project| state.native.get(project)).cloned()
@@ -304,6 +304,8 @@ impl crate::Service {
                 self.sprint_wake.project(project);
                 if graph_write {
                     let _ = self.events.send(json!({"projectId":project,"type":"invalidation"}));
+                } else if matches!(call_action.as_deref(), Some("archive" | "restore")) {
+                    self.project_changed(project);
                 }
             }
         }
@@ -657,7 +659,7 @@ impl crate::Service {
             return Err(failure("unsupported_operation"));
         }
         let scoped = PROJECT_OPERATIONS.contains(&call.op.as_str());
-        let (root, projects) = {
+        let (root, projects, archive_runtime) = {
             let state = self.state.lock().await;
             let root = if scoped {
                 let id = call
@@ -681,7 +683,12 @@ impl crate::Service {
                 .iter()
                 .map(|p| json!({"id":p.project_id,"root":p.canonical_root,"name":p.display_name}))
                 .collect::<Vec<_>>());
-            (root, projects)
+            let archive_runtime = if call.op == "product.task" && call.params["action"] == "archive" {
+                call.project_id.as_ref().and_then(|id| state.native.get(id)).cloned()
+            } else {
+                None
+            };
+            (root, projects, archive_runtime)
         };
         if let Some(root) = &root {
             crate::project_guard::check(root)?;
@@ -727,6 +734,9 @@ impl crate::Service {
                             if editor::handles(&call.op) {
                                 let root = root.as_deref().ok_or_else(|| native::refuse("project_required", "Unknown project."))?;
                                 editor::run(&editor, &call.op, root, &state, project, &call.params, &mut git::Git::for_service(&config)).await
+                            } else if call.op == "product.task" && call.params["action"] == "archive" {
+                                let root = root.as_deref().ok_or_else(|| native::refuse("project_required", "Unknown project."))?;
+                                task_actions::run_archive(root, project, &state, &call.params, archive_runtime.as_ref()).await
                             } else {
                                 native::run(&call.op, root.as_deref(), project, &state, &call.params, &projects, &config, None, deadline.into_std()).await
                             }

@@ -57,7 +57,7 @@ describe("the title band's Git action for each state", () => {
     expect(items.map(i => i.id)).toEqual(["commit", "fetch", "pull", "push", "pull_push", "update", "merge", "pr", "archive"]);
     expect(Object.fromEntries(items.map(i => [i.id, i.why]))).toEqual({
       commit: "Nothing to commit", fetch: undefined, pull: "Nothing to pull in the last fetched state. Fetch to check the upstream.", push: "Nothing to push", pull_push: "Nothing to pull in the last fetched state. Fetch to check the upstream.",
-      update: undefined, merge: "Result not accepted yet", pr: "Result not accepted yet", archive: "Available when the task is done",
+      update: undefined, merge: "Result not accepted yet", pr: "Result not accepted yet", archive: undefined,
     });
     expect(items.find(i => i.id === "update")?.label).toBe("Update from main…");
     const noGh = world(checkout({ id: "p:wt", kind: "worktree", branch: "task/fix", taskId: "t" }), ready);
@@ -71,10 +71,12 @@ describe("the title band's Git action for each state", () => {
     expect(ids).toEqual(["commit", "merge", "archive"]);
   });
 
-  it("turns every item off with the same reason while one of its actions runs, and shows that action's progress", () => {
+  it("turns Git actions off while one runs, but leaves Archive available", () => {
     const f = facts(world(checkout({ files: [file("a.ts")], ahead: 1, behind: 1 }), { status: "done" }), { running: "pull_push", progress: "Pushing…" });
-    expect(gitItems(f).length).toBeGreaterThan(4);
-    expect(gitItems(f).every(i => i.why === RUNNING)).toBe(true);
+    const items = gitItems(f);
+    expect(items.length).toBeGreaterThan(4);
+    expect(items.filter(i => i.id !== "archive").every(i => i.why === RUNNING)).toBe(true);
+    expect(items.find(i => i.id === "archive")).toMatchObject({ label: "Archive task", why: undefined });
     expect(gitPrimary(f)).toMatchObject({ id: "pull_push", label: "Pushing…", icon: "loader", why: RUNNING });
   });
 
@@ -461,7 +463,7 @@ describe("the band on screen", () => {
     expect(primary.classList.contains("btn-primary")).toBe(true);
     expect([...band(root).querySelectorAll("button")].filter(b => b.textContent === "Merge…")).toHaveLength(1);
     // This port offers every command, so Update from main is listed too; the real service does not offer it today.
-    expect(menuLabels(root)).toEqual(["Commit…", "Fetch", "Pull", "Push", "Pull and push", "Update from main…", "Merge locally…", "Create PR…", "Archive task"]);
+    expect(menuLabels(root)).toEqual(["Commit…", "Fetch", "Pull", "Push", "Pull and push", "Update from main…", "Merge locally…", "Create PR…", "Archive task…"]);
     primary.click(); await settle();
     expect(root.querySelector("dialog[open]")?.getAttribute("data-dialog")).toBe("Finish task");
   });

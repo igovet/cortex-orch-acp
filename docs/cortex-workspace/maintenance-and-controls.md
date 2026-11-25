@@ -180,6 +180,13 @@ explicit, and normal runtime permissions/review apply.
 | `cortex_commands list` | Task → Workers → selected worker activity and retained command rows |
 | `cortex_commands stop` | Stop command on that exact row, with a reason; native engine shell actions without a Cortex receipt remain unavailable |
 
+Manual [Archive](local-task-execution.md#archive-and-service-owned-work) is not
+cleanup. Use it to put away any retained task on a connected machine, including
+unfinished or unconfirmed work. Archive asks for confirmation before moving
+unfinished work and shows a note if the service could not confirm the stop.
+Restore does not start or resume the task. Archiving keeps worktrees, branches
+and history, and does not alter cleanup or discard eligibility.
+
 Desktop Clear old tasks is intentionally narrower than legacy cortex-clear:
 only shown finished tasks without unmerged work are eligible; archived tasks use
 Archive deletion. Live/unknown runtime protection is never bypassed, including

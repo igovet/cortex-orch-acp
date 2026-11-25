@@ -162,8 +162,10 @@ export type Task = {
   integrationFacts?: { targetBranch: string; alreadyInTarget: boolean; sameBranch?: boolean; commitAvailable?: boolean; noChanges?: boolean; pendingPaths?: string[]; otherUncommitted?: boolean; deleteWorktree?: { available: boolean; default: boolean; reason?: string }; reason?: string | null; pushStatus: "pushed" | "not_pushed" | "unknown" | null; pending?: boolean; refreshing?: boolean };
   closedAs: "as_is" | "cancel" | "external" | "unconfirmed" | null; notVerifiedByCortex: boolean;
   doneAt: number | null;
-  /** A sprint archive may preserve a draft or carry a separate completion-based cleanup clock. */
-  archive: { at: number; previousStatus: "draft" | "done"; retentionAt?: number | null; sizeMb?: number | null } | null;
+  /** Archiving keeps the pre-stop state and never certifies an unfinished result. */
+  archive: { at: number; previousStatus: TaskStatus | "unknown"; unfinished?: boolean; stopUnconfirmed?: boolean; retentionAt?: number | null; sizeMb?: number | null } | null;
+  /** A restored unfinished task does not rejoin automatic execution. */
+  archiveHold?: "draft" | "stopped" | "unconfirmed";
   reworkEvent?: string;
   /** What unmerged work there is, when the worktree was read. Absent facts stay absent. */
   workFacts?: { commits: number; files: number; sizeMb: number } | null;

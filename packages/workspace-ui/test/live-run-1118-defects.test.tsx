@@ -48,11 +48,14 @@ describe("a diverged checkout in the title band", () => {
 });
 
 describe("archiving follows the machine's own rule", () => {
-  it("offers Archive only for a task its record closed, never one the runtime alone ended", () => {
-    expect(archiveBlocked({ status: "done", archive: null, observedPhase: undefined })).toBeUndefined();
-    expect(archiveBlocked({ status: "done", archive: null, observedPhase: "stopped" })).toMatch(/merged or closed in this app/);
-    expect(archiveBlocked({ status: "cancelled", archive: null, observedPhase: "stopped" })).toBe("Available when the task is done");
-    expect(archiveBlocked({ status: "done", archive: { at: 1, previousStatus: "done" }, observedPhase: undefined })).toBe("Already in the Archive");
+  it("offers Archive independently of task, runtime and conflict state", () => {
+    for (const status of ["draft", "working", "needs_you", "stopping", "paused", "cancelled", "closed_unverified", "done"]) {
+      const task = { status, archive: null, observedPhase: "unknown", warnings: ["contradictory_evidence"] };
+      expect(archiveBlocked(task)).toBeUndefined();
+    }
+    expect(archiveBlocked({ archive: { at: 1, previousStatus: "working" } })).toBe("Already in the Archive");
+    const machine = world(checkout()).machines[0];
+    expect(archiveBlocked({ archive: null }, { ...machine, connection: "disconnected" })).toMatch(/offline/i);
   });
 
   it("never shows more days left than the machine keeps an archived task", () => {

@@ -1175,8 +1175,8 @@ button.step-t { text-align: left; font: inherit; }
   .tb-actions > .tb-state, .tb-fixed > .ws-hide, .tb-main > .tb-facts { display: none; }
   .tb-actions { gap: 4px; }
   .crumbs > .cur { min-width: 48px; }
-  .tb-actions > .tb-rework { width: 28px; padding-inline: 0; }
-  .tb-rework > span { display: none; }
+  .tb-actions > .tb-rework, .tb-actions > .tb-archive { width: 28px; padding-inline: 0; }
+  .tb-rework > span, .tb-archive > span { display: none; }
 }
 @container tb (max-width: 420px) {
   .tb-rework + .tb-archive { display: none; }

@@ -175,6 +175,7 @@ fn automatic_member(saved: &Value, task: &str, expected_sprint: &Value, recheck:
     let record = &saved["tasks"][task];
     record["sprintId"] == *expected_sprint
         && record["archive"].is_null()
+        && record["archiveHold"].is_null()
         && record["purged"] != true
         && !matches!(
             record["conflict"].as_str(),

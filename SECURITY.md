@@ -925,8 +925,15 @@ version and required literal acknowledgement. Its immediate Core writer transact
 private overlay replacement; it does not complete the scheduler, authorize a different owner or
 manufacture receipts. Pending review facts are for display only: an early check observation does not
 establish final result identity or authorize acceptance. Acceptance captures the exact legacy checkout
-digest. Archiving (manual or
-automatic) never asks and never discards; a task with no saved disposition whose bound, consistent runtime
+digest. Archiving is not permission to discard, change Git, or certify work.
+The Workspace asks before manually archiving an unfinished task and uses the
+existing task-bound Pause control when work may still be live. An unconfirmed
+stop remains visible even for a Done task and does not relax deletion fences.
+A timed-out driver wait settles its admitted Pause as unknown, not as stopped.
+Startup reconciles interrupted control and delivery evidence without relaunching
+archived or restored-held work. Restore does not start work. An eligible
+owner Start, Resume or Return for rework must pass the existing admission
+checks before it can lift a restored hold. A task with no saved disposition whose bound, consistent runtime
 record is the owner's force-finish (`CANCELLED` with `owner_resolved_without_certification`) is presented
 as closed as is with `notVerifiedByCortex`, never as accepted or verified, and a saved disposition always
 wins; `confirm_discard` on an archived task records digest-bound consent to delete its work at cleanup and
