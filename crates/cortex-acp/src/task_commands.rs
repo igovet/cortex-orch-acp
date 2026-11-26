@@ -24,30 +24,33 @@ pub(crate) fn available() -> Value {
         {"name":"skill-management","description":"Create, revise, or import a project skill. Use only when the user explicitly invokes this command.","input":{"hint":"<request>"}}
     ])
 }
+pub(crate) struct ReplyCopy(pub &'static str, pub &'static str);
 
-pub(crate) const CLEAR_USAGE: &str = "Usage: /cortex-clear <N|Nd|days N|before YYYY-MM-DD|YYYY-MM-DD> [force] [confirm] (N: 0..36500; date: non-future, 00:00 UTC). Omit confirm to preview.";
+impl ReplyCopy {
+    pub(crate) fn text(&self, ru: bool) -> &'static str {
+        if ru { self.1 } else { self.0 }
+    }
+}
+
+
+pub(crate) const CLEAR_USAGE: ReplyCopy = ReplyCopy("Usage: /cortex-clear <N|Nd|days N|before YYYY-MM-DD|YYYY-MM-DD> [force] [confirm] (N: 0..36500; date: non-future, 00:00 UTC). Omit confirm to preview.", "Использование: /cortex-clear <N|Nd|days N|before YYYY-MM-DD|YYYY-MM-DD> [force] [confirm] (N: 0..36500; дата не в будущем, 00:00 UTC). Для предварительного просмотра не указывайте confirm.");
 pub(crate) const CLEAR_BUSY: &str = "Cortex cleanup requires an idle session; no deletion started.";
-pub(crate) const CLEAR_REFUSED: &str = "Cortex cleanup refused or incomplete: store busy, active-task conflict, or storage failure. No success is claimed; retry only after activity is idle and storage is healthy.";
+pub(crate) const CLEAR_REFUSED: ReplyCopy = ReplyCopy("Cortex cleanup refused or incomplete: store busy, active-task conflict, or storage failure. No success is claimed; retry only after activity is idle and storage is healthy.", "Очистка Cortex отклонена или не завершена: хранилище занято, есть конфликт с активной задачей или произошла ошибка хранения. Успех не подтверждён. Повторите попытку после завершения работы и восстановления хранилища.");
 /// This host's own truthful refusal: it previews retention but does not yet
 /// delete task stores, sessions or reclaim space.
-pub(crate) const CLEAR_DELETE_UNAVAILABLE: &str = "Cortex cleanup refused: this Rust ACP host previews retention but cannot delete tasks or sessions yet; no deletion started. Omit confirm to preview.";
-pub(crate) const KILL_USAGE: &str = "Usage: /cortex-kill <command-ref> <reason>";
-pub(crate) const KILL_REQUESTED: &str =
-    "Stop requested. The runner will confirm whether it stopped the command; the worker continues.";
-pub(crate) const FINISH_USAGE: &str = "Usage: /cortex-finish (no arguments)";
-pub(crate) const STOP_NONE: &str = "There is no active task on this session to stop.";
-pub(crate) const FINISH_NONE: &str = "There is no active task on this session to close.";
-/// Python `messages.render(..., "en")`: these commands select the language
-/// with `select_language(None, [])`, which is always English.
-pub(crate) const STOP_CONFIRMED: &str =
-    "Stopped this task: every assignment, queued open, and pending question was cancelled.";
-pub(crate) const FINISH_CONFIRMED: &str = "Closed this task at your request. Active work was cancelled; unfinished review, verification, and synthesis are not certified as passed.";
-pub(crate) const ANSWER_USAGE: &str = "Usage: /cortex-answer <question-number> <answer text>";
-pub(crate) const ANSWER_NONE_OPEN: &str = "There is no open question to answer right now.";
-pub(crate) const ANSWER_UNKNOWN_INDEX: &str =
-    "No open question with that number. Use /cortex-status or check the open questions listed above.";
-pub(crate) const NEW_TASK_USAGE: &str = "Usage: /cortex-new-task <task text>";
-pub(crate) const SKILL_USAGE: &str = "Usage: /skill-management <request>";
+pub(crate) const CLEAR_DELETE_UNAVAILABLE: ReplyCopy = ReplyCopy("Cortex cleanup refused: this Rust ACP host previews retention but cannot delete tasks or sessions yet; no deletion started. Omit confirm to preview.", "Очистка Cortex отклонена: этот сервер ACP на Rust поддерживает предварительный просмотр, но пока не удаляет задачи и сеансы. Удаление не начато. Для просмотра не указывайте confirm.");
+pub(crate) const KILL_USAGE: ReplyCopy = ReplyCopy("Usage: /cortex-kill <command-ref> <reason>", "Использование: /cortex-kill <command-ref> <reason>");
+pub(crate) const KILL_REQUESTED: ReplyCopy = ReplyCopy("Stop requested. The runner will confirm whether it stopped the command; the worker continues.", "Запрошена остановка команды. Среда выполнения подтвердит, удалось ли её остановить. Исполнитель продолжает работу.");
+pub(crate) const FINISH_USAGE: ReplyCopy = ReplyCopy("Usage: /cortex-finish (no arguments)", "Использование: /cortex-finish (без аргументов)");
+pub(crate) const STOP_NONE: ReplyCopy = ReplyCopy("There is no active task on this session to stop.", "В этом сеансе нет активной задачи, которую можно остановить.");
+pub(crate) const FINISH_NONE: ReplyCopy = ReplyCopy("There is no active task on this session to close.", "В этом сеансе нет активной задачи, которую можно закрыть.");
+pub(crate) const STOP_CONFIRMED: ReplyCopy = ReplyCopy("Stopped this task: every assignment, queued open, and pending question was cancelled.", "Задача остановлена: все задания, открытия в очереди и ожидающие ответа вопросы отменены.");
+pub(crate) const FINISH_CONFIRMED: ReplyCopy = ReplyCopy("Closed this task at your request. Active work was cancelled; unfinished review, verification, and synthesis are not certified as passed.", "Задача закрыта по вашему запросу. Активная работа отменена. Незавершённые ревью, проверка и подготовка итогов не считаются успешно пройденными.");
+pub(crate) const ANSWER_USAGE: ReplyCopy = ReplyCopy("Usage: /cortex-answer <question-number> <answer text>", "Использование: /cortex-answer <question-number> <answer text>");
+pub(crate) const ANSWER_NONE_OPEN: ReplyCopy = ReplyCopy("There is no open question to answer right now.", "Сейчас нет открытых вопросов для ответа.");
+pub(crate) const ANSWER_UNKNOWN_INDEX: ReplyCopy = ReplyCopy("No open question with that number. Use /cortex-status or check the open questions listed above.", "Нет открытого вопроса с таким номером. Воспользуйтесь /cortex-status или проверьте список открытых вопросов выше.");
+pub(crate) const NEW_TASK_USAGE: ReplyCopy = ReplyCopy("Usage: /cortex-new-task <task text>", "Использование: /cortex-new-task <task text>");
+pub(crate) const SKILL_USAGE: ReplyCopy = ReplyCopy("Usage: /skill-management <request>", "Использование: /skill-management <request>");
 pub(crate) const BUSY: &str = "A prompt is already in flight for this session.";
 /// Python `_session_prompt` refusals of typed answers on a busy session.
 pub(crate) const BUSY_ANSWER_USAGE: &str = "Use /cortex-answer <question-number> <answer text>.";
@@ -194,52 +197,55 @@ pub(crate) fn parse_clear(argument: &str, now: i64) -> Option<Clear> {
         confirm_command: format!("/cortex-clear before {}{suffix} confirm", &m[1]),
     })
 }
-fn force_text(c: &Clear) -> &'static str {
-    if c.force {
+fn force_text(c: &Clear, ru: bool) -> &'static str {
+    if c.force && ru {
+        "; force=true (предполагается, что зависшие процессы завершились; процессы ОС не остановлены)"
+    } else if c.force {
         "; force=true (assumes stale processes are dead; no OS processes killed)"
     } else {
         ""
     }
 }
 /// Python's dry-run reply.
-pub(crate) fn dry_run(c: &Clear, tasks: u64, sessions: u64, skipped: u64) -> String {
+pub(crate) fn dry_run(c: &Clear, tasks: u64, sessions: u64, skipped: u64, ru: bool) -> String {
+    let (heading, confirm) = if ru { ("Предварительный просмотр", "Подтверждение") } else { ("Dry run", "Confirm") };
     format!(
-        "Dry run: cutoff={}; would_delete_tasks={tasks}; would_delete_orphan_sessions={sessions}; skipped_protected={skipped}{}\nConfirm: {}",
+        "{heading}: cutoff={}; would_delete_tasks={tasks}; would_delete_orphan_sessions={sessions}; skipped_protected={skipped}{}\n{confirm}: {}",
         c.cutoff,
-        force_text(c),
+        force_text(c, ru),
         c.confirm_command
     )
 }
 /// Python's confirmed reply when nothing was removed (no vacuum is needed).
-pub(crate) fn confirmed_nothing(c: &Clear, skipped: u64) -> String {
+pub(crate) fn confirmed_nothing(c: &Clear, skipped: u64, ru: bool) -> String {
     format!(
         "cutoff={}; deleted_tasks=0; deleted_orphan_sessions=0; skipped_protected={skipped}{}; vacuum=not_needed; reclaimed_bytes=0",
         c.cutoff,
-        force_text(c)
+        force_text(c, ru)
     )
 }
 
 /// Python `validate_stop` after `argument.split(None, 1)`: the stop request
 /// `(ref, reason)`, or the exact refusal/usage reply.
-pub(crate) fn kill(argument: &str) -> Result<(String, String), String> {
+pub(crate) fn kill(argument: &str, ru: bool) -> Result<(String, String), String> {
     let Some((reference, reason)) = head(argument) else {
-        return Err(KILL_USAGE.into());
+        return Err(KILL_USAGE.text(ru).into());
     };
     let valid_ref = Regex::new(r"^gateway:[0-9a-f]{32}$")
         .map(|r| r.is_match(reference))
         .unwrap_or(false);
     if !valid_ref {
-        return Err(refused("command_stop_invalid_ref"));
+        return Err(refused("command_stop_invalid_ref", ru));
     }
     let trimmed = reason.trim_matches(space);
     if trimmed.is_empty() || reason.chars().count() > 2000 {
-        return Err(refused("command_stop_invalid_reason"));
+        return Err(refused("command_stop_invalid_reason", ru));
     }
     Ok((reference.into(), trimmed.into()))
 }
 /// Python `f"Command stop refused: {error}. {error.correction or ''}".rstrip()`.
-pub(crate) fn refused(code: &str) -> String {
-    format!("Command stop refused: {code}.")
+pub(crate) fn refused(code: &str, ru: bool) -> String {
+    if ru { format!("Остановка команды отклонена: {code}.") } else { format!("Command stop refused: {code}.") }
 }
 /// Python `parse_answer_argument`: a 1-based `(index, text)` pair.
 pub(crate) fn answer(argument: &str) -> Option<(usize, String)> {
@@ -288,9 +294,12 @@ pub(crate) fn skill_management(argument: &str) -> Option<String> {
     let request = argument.trim_matches(space);
     (!request.is_empty()).then(|| format!("{request}\n\nThe user explicitly invoked /skill-management. Read the coordinator-only shared skill skill-management using read_skill before planning. Treat the supplied request as the complete skill-management request. This workflow is active only because the user invoked the registered command; ordinary prose does not activate it."))
 }
-/// Python `messages.render("new_task_created", "en", task_id=...)`.
-pub(crate) fn new_task_created(task: &str) -> String {
-    format!("Started a new, separate task ({task}); the active task is unaffected.")
+pub(crate) fn new_task_created(task: &str, ru: bool) -> String {
+    if ru {
+        format!("Создана отдельная задача ({task}); активная задача не изменилась.")
+    } else {
+        format!("Started a new, separate task ({task}); the active task is unaffected.")
+    }
 }
 
 #[cfg(test)]
@@ -331,18 +340,18 @@ mod tests {
     }
     #[test]
     fn kill_answer_and_harvest_text_match_python() {
-        assert_eq!(kill("only").unwrap_err(), KILL_USAGE);
+        assert_eq!(kill("only", false).unwrap_err(), KILL_USAGE.text(false));
         assert_eq!(
-            kill("a b").unwrap_err(),
+            kill("a b", false).unwrap_err(),
             "Command stop refused: command_stop_invalid_ref."
         );
         let r = format!("gateway:{}", "a".repeat(32));
         assert_eq!(
-            kill(&format!("{r} {}", "x".repeat(2001))).unwrap_err(),
+            kill(&format!("{r} {}", "x".repeat(2001)), false).unwrap_err(),
             "Command stop refused: command_stop_invalid_reason."
         );
         assert_eq!(
-            kill(&format!("{r}\t two words")).unwrap(),
+            kill(&format!("{r}\t two words"), false).unwrap(),
             (r.clone(), "two words".into())
         );
         assert_eq!(answer("2 yes please"), Some((2, "yes please".into())));
@@ -354,6 +363,24 @@ mod tests {
         assert!(harvest(false, "api", "ru", true)
             .starts_with("Пользователь явно запросил сбор знаний (api)."));
         assert!(skill_management(" ").is_none());
+    }
+    #[test]
+    fn runtime_command_copy_keeps_command_tokens_and_receipt_codes() {
+        let clear = parse_clear("7d force", NOW).unwrap();
+        for (ru, preview, reason, created) in [
+            (false, "Dry run:", "Command stop refused", "Started a new, separate task"),
+            (true, "Предварительный просмотр:", "Остановка команды отклонена", "Создана отдельная задача"),
+        ] {
+            let dry = dry_run(&clear, 3, 2, 1, ru);
+            assert!(dry.starts_with(preview));
+            assert!(dry.contains("would_delete_tasks=3"));
+            assert!(dry.ends_with("/cortex-clear days 7 force confirm"));
+            assert!(confirmed_nothing(&clear, 1, ru).contains("vacuum=not_needed"));
+            assert_eq!(kill("bad reason", ru).unwrap_err(), format!("{reason}: command_stop_invalid_ref."));
+            let new_task = new_task_created("task-1", ru);
+            assert!(new_task.starts_with(created));
+            assert!(new_task.contains("(task-1)"));
+        }
     }
     #[test]
     fn typed_choice_matches_python_card_answers() {

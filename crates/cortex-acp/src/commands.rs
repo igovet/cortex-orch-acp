@@ -85,19 +85,21 @@ fn count(states: &[String], state: &str) -> usize {
     states.iter().filter(|s| *s == state).count()
 }
 /// Python `_connection_setup_summary`.
-pub(crate) fn connection_summary(states: &[String]) -> String {
+pub(crate) fn connection_summary(states: &[String], ru: bool) -> String {
     if states.is_empty() {
-        return "no connection registered yet; see /cortex-setup".into();
+        return (if ru { "нет зарегистрированных подключений; см. /cortex-setup" } else { "no connection registered yet; see /cortex-setup" }).into();
     }
-    let mut details = vec![format!(
-        "{}/{} connection(s) configured",
-        count(states, "configured"),
-        states.len()
-    )];
+    let configured = count(states, "configured");
+    let total = states.len();
+    let mut details = vec![if ru {
+        format!("настроено подключений: {configured}/{total}")
+    } else {
+        format!("{configured}/{total} connection(s) configured")
+    }];
     for (state, text) in [
-        ("authorization_required", "awaiting authorization"),
-        ("unavailable", "unavailable"),
-        ("invalid", "invalid"),
+        ("authorization_required", if ru { "ожидает авторизации" } else { "awaiting authorization" }),
+        ("unavailable", if ru { "недоступно" } else { "unavailable" }),
+        ("invalid", if ru { "с ошибками конфигурации" } else { "invalid" }),
     ] {
         let n = count(states, state);
         if n > 0 {
@@ -107,10 +109,18 @@ pub(crate) fn connection_summary(states: &[String]) -> String {
     details.join("; ")
 }
 /// Python `build_status_text`. The execution line states this host truthfully:
-/// it does not run Python's engine jail.
-pub(crate) fn status(options: &Value, summary: &str) -> String {
-    let mut lines = vec!["Cortex configuration status:".to_owned()];
+/// it does not run Python's engine jail. A Russian reply renders built-in option
+/// prose and choice names in Russian; IDs, route labels and model names stay verbatim.
+pub(crate) fn status(options: &Value, summary: &str, ru: bool) -> String {
+    let mut lines = vec![(if ru { "Настройки Cortex:" } else { "Cortex configuration status:" }).to_owned()];
     for option in options.as_array().into_iter().flatten() {
+        let id = option["id"].as_str().unwrap_or_default();
+        let local = |english: &str| -> String {
+            ru.then(|| workspace_service::incoming::russian_option_text(id, english))
+                .flatten()
+                .unwrap_or(english)
+                .to_owned()
+        };
         let current = &option["currentValue"];
         let label = option["options"]
             .as_array()
@@ -126,33 +136,110 @@ pub(crate) fn status(options: &Value, summary: &str) -> String {
         lines.push(format!(
             "- {}: {}{}",
             text(&option["id"]),
-            text(&label),
-            note.map(|n| format!(" {n}")).unwrap_or_default()
+            label.as_str().map(local).unwrap_or_else(|| text(&label)),
+            note.map(|n| format!(" {}", local(n))).unwrap_or_default()
         ));
     }
-    lines.push(format!("- connections: {summary}"));
-    lines.push("- execution: Rust native host; engine processes are not jailed (not hostile-code isolation)".into());
+    let connections = if ru { "подключения" } else { "connections" };
+    lines.push(format!("- {connections}: {summary}"));
+    lines.push((if ru { "- выполнение: сервер на Rust; процессы движков не изолированы от выполнения недоверенного кода" } else { "- execution: Rust native host; engine processes are not jailed (not hostile-code isolation)" }).into());
     lines.join("\n")
 }
 const SETUP_GUIDANCE: &str = "No model is selectable yet for this project. To connect an engine:\n1. Install the pinned engine adapter with `cortex-paseo-tools install-engine --engine ENGINE`, then register its native account with `cortex-paseo-tools add-connection --engine ENGINE`.\n2. Complete the engine's native login in the isolated directory shown by setup.\n3. Run `cortex-paseo-tools validate-connection --connection ID` using the ID returned by setup. Once it reports 'configured', start a new Cortex session to refresh models.\nThis message never contains a secret and never mutates any connection.";
 /// Python `build_setup_text`.
-pub(crate) fn setup(states: &[String]) -> &'static str {
+pub(crate) fn setup(states: &[String], ru: bool) -> &'static str {
     if count(states, "authorization_required") > 0 {
-        return "A connection is already registered but is awaiting authorization.\n1. Complete that engine's native login in the isolated engine directory shown during connection setup.\n2. Run `cortex-paseo-tools validate-connection --connection ID` using its existing ID until it reports 'configured'.\n3. Once configured, its models will start appearing in the model selector (or /cortex-model).\nDo not register another connection for the same engine and account. This message never contains a secret and never mutates any connection.";
+        return if ru { "Подключение уже зарегистрировано, но ждёт авторизации.\n1. Войдите в учётную запись средствами движка в изолированном каталоге, указанном при настройке.\n2. Запускайте `cortex-paseo-tools validate-connection --connection ID` с текущим ID, пока команда не выдаст 'configured'.\n3. После настройки модели появятся в списке выбора и в /cortex-model.\nНе регистрируйте повторно тот же движок с той же учётной записью. Это сообщение не раскрывает секреты и не меняет подключения." } else { "A connection is already registered but is awaiting authorization.\n1. Complete that engine's native login in the isolated engine directory shown during connection setup.\n2. Run `cortex-paseo-tools validate-connection --connection ID` using its existing ID until it reports 'configured'.\n3. Once configured, its models will start appearing in the model selector (or /cortex-model).\nDo not register another connection for the same engine and account. This message never contains a secret and never mutates any connection." };
     }
     if count(states, "unavailable") > 0 {
-        return "A registered connection is currently unavailable.\nCheck that the configured engine is installed and reachable, then run `cortex-paseo-tools validate-connection --connection ID`. If the connection is no longer usable, repair or remove that registration before adding a replacement.\nThis message never contains a secret and never mutates any connection.";
+        return if ru { "Зарегистрированное подключение сейчас недоступно.\nПроверьте, установлен ли движок и доступен ли он, затем выполните `cortex-paseo-tools validate-connection --connection ID`. Если подключение больше нельзя использовать, исправьте или удалите его перед добавлением нового.\nЭто сообщение не раскрывает секреты и не меняет подключения." } else { "A registered connection is currently unavailable.\nCheck that the configured engine is installed and reachable, then run `cortex-paseo-tools validate-connection --connection ID`. If the connection is no longer usable, repair or remove that registration before adding a replacement.\nThis message never contains a secret and never mutates any connection." };
     }
     if count(states, "invalid") > 0 {
-        return "A registered connection has invalid configuration.\nReview its engine, provider, and authentication settings, repair the existing registration, then run `cortex-paseo-tools validate-connection --connection ID` again.\nThis message never contains a secret and never mutates any connection.";
+        return if ru { "В настройках зарегистрированного подключения есть ошибка.\nПроверьте настройки движка, провайдера и авторизации. Исправьте существующее подключение, затем повторите `cortex-paseo-tools validate-connection --connection ID`.\nЭто сообщение не раскрывает секреты и не меняет подключения." } else { "A registered connection has invalid configuration.\nReview its engine, provider, and authentication settings, repair the existing registration, then run `cortex-paseo-tools validate-connection --connection ID` again.\nThis message never contains a secret and never mutates any connection." };
     }
-    SETUP_GUIDANCE
+    if ru { "Для этого проекта пока нет доступных моделей. Чтобы подключить движок:\n1. Установите закреплённую версию адаптера командой `cortex-paseo-tools install-engine --engine ENGINE`, затем зарегистрируйте учётную запись движка командой `cortex-paseo-tools add-connection --engine ENGINE`.\n2. Войдите в учётную запись средствами движка в изолированном каталоге, указанном при настройке.\n3. Выполните `cortex-paseo-tools validate-connection --connection ID` с полученным ID. Когда команда выдаст 'configured', начните новый сеанс Cortex, чтобы обновить список моделей.\nЭто сообщение не раскрывает секреты и не меняет подключения." } else { SETUP_GUIDANCE }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn owner_status_and_setup_use_the_requested_language() {
+        let states = ["configured".into(), "authorization_required".into()];
+        for (ru, title, summary, setup_title) in [
+            (false, "Cortex configuration status:", "1/2 connection(s) configured; 1 awaiting authorization", "A connection is already registered"),
+            (true, "Настройки Cortex:", "настроено подключений: 1/2; 1 ожидает авторизации", "Подключение уже зарегистрировано"),
+        ] {
+            assert_eq!(connection_summary(&states, ru), summary);
+            let status = status(&json!([{"id":"model","currentValue":"route-1"}]), summary, ru);
+            assert!(status.starts_with(title));
+            assert!(status.contains("- model: route-1"));
+            assert!(status.contains(summary));
+            let setup = setup(&states, ru);
+            assert!(setup.starts_with(setup_title));
+            assert!(setup.contains("`cortex-paseo-tools validate-connection --connection ID`"));
+        }
+    }
+    /// The status options a real session presents: the host's own language and
+    /// access options, plus route rows carrying the route-state notes.
+    fn presented(mode: &str) -> Value {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut options = runtime
+            .block_on(workspace_service::incoming::presentation(
+                std::sync::Arc::new(workspace_service::native_runtime::UnqualifiedRoutes),
+                std::env::temp_dir(),
+                json!({"language":"ru","mode":mode}),
+            ))
+            .unwrap();
+        let routes = json!([
+            {"id":"model","name":"Model","category":"model","type":"select","currentValue":"fixture-model",
+                "description":"(pending — applies to the next run)",
+                "options":[{"value":"fixture-model","name":"Fixture Model","description":"codex"}]},
+            {"id":"thought_level","name":"Thought level","category":"thought_level","type":"select",
+                "currentValue":"high","description":"Depends on an unavailable route — choose a route",
+                "options":[{"value":"high","name":"high"}]}]);
+        let mut all = routes.as_array().unwrap().clone();
+        all.append(options.as_array_mut().unwrap());
+        Value::Array(all)
+    }
+    #[test]
+    fn russian_status_localizes_built_in_option_prose() {
+        for mode in cortex_core::access::MODES {
+            let options = presented(mode);
+            let access = options.as_array().unwrap().iter().find(|o| o["id"] == "access_mode").unwrap();
+            let (en_name, en_description) = workspace_service::incoming::access_label(mode);
+            assert_eq!(access["description"], en_description, "config options stay English");
+            let english = status(&options, "s", false);
+            assert!(english.contains("- language: Russian Language for Cortex's own status/question/stop lines; auto detects from your messages."), "{english}");
+            assert!(english.contains(&format!("- access_mode: {en_name} {en_description}")), "{english}");
+            assert!(english.contains("- model: Fixture Model (pending — applies to the next run)"), "{english}");
+            assert!(english.contains("- thought_level: high Depends on an unavailable route — choose a route"), "{english}");
+            let russian = status(&options, "s", true);
+            assert!(russian.contains("- language: Русский Язык собственных строк Cortex"), "{russian}");
+            assert!(russian.contains("- model: Fixture Model (ожидает — применится при следующем запуске)"), "{russian}");
+            assert!(russian.contains("- thought_level: high Зависит от недоступного маршрута"), "{russian}");
+            let (ru_name, ru_opening) = match mode {
+                "development" => ("Режим разработки", "Работники могут работать в любом месте этого компьютера."),
+                "auto" => ("Автоматический режим", "Работники могут работать в любом месте этого компьютера, и ничто"),
+                _ => ("Защищённый режим", "Работники пишут только внутри проекта."),
+            };
+            assert!(russian.contains(&format!("- access_mode: {ru_name} {ru_opening}")), "{russian}");
+            // No built-in English sentence or choice name survives in the Russian reply.
+            for english_text in [
+                en_name,
+                en_description,
+                "Russian",
+                "Language for Cortex",
+                "(pending",
+                "Depends on an unavailable route",
+            ] {
+                assert!(!russian.contains(english_text), "{english_text}: {russian}");
+            }
+        }
+    }
     #[test]
     fn recognition_matches_python_shapes() {
         let one = |t: &str| json!([{"type":"text","text":t}]);
@@ -190,11 +277,11 @@ mod tests {
         assert_eq!(model("other", &entries).as_deref(), Some("xr_c"));
         assert_eq!(model("", &entries), None);
         assert_eq!(
-            connection_summary(&[]),
+            connection_summary(&[], false),
             "no connection registered yet; see /cortex-setup"
         );
         assert_eq!(
-            connection_summary(&["configured".into(), "invalid".into()]),
+            connection_summary(&["configured".into(), "invalid".into()], false),
             "1/2 connection(s) configured; 1 invalid"
         );
     }

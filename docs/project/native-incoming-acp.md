@@ -603,7 +603,10 @@ text is a trigger alone or followed by whitespace. Status lists every option wit
 its description, the connection summary and a truthful Rust execution line (no
 engine jail); setup returns state-aware guidance; `/cortex-model` resolves
 an exact route id, one label or one model id across accounts; `/cortex-effort`
-and `/cortex-language` validate and reply with fixed wording. Typed commands and
+and `/cortex-language` validate and reply with fixed wording. Task-bound replies
+use the session's effective language (English or Russian); unbound sessions keep
+English, and command syntax, output keys, config IDs and diagnostic codes are
+not translated. Typed commands and
 replies are recorded for replay with stable message ids. Other text, including
 unknown `/cortex-*` names, is an ordinary prompt.
 
@@ -1166,6 +1169,7 @@ unbound intents remain unknown. Reconciliation itself grants no read coverage.
 New-file installation uses an atomic no-replace rename, not a temporary hardlink. Text reads have no image-size cap;
 images still refuse above 10 MiB. Delivery remains line-bounded. Text processing
 still buffers the file, so this is not a bounded-memory large-file guarantee.
+Project file tools read and write a hard-linked regular file inside the project: reads use the descriptor, and writes publish a temporary file by rename, which replaces only the directory entry and leaves the shared inode (and any link outside the project) unchanged. `project_write` accepts `encoding: "base64"` (default `utf8`) for exact bytes, with the same path policy, SHA-256 receipts and request-key retention; reads of non-UTF-8 files return identity only. `project_edit` returns `outcome:"unchanged"` when nothing differs, applies without a prior read when each `old_string` still matches uniquely, and on a failed match returns the current page (`current_read`) which counts as a read.
 
 Command/Git output is spooled whole to private channel-owned files, with
 64 KiB inline prefixes and byte paging through read_large_output. A clipped
@@ -1359,7 +1363,7 @@ at launch, periodically and at settlement. Removals add a generic notice without
 atomic nor persistent. Narrow live grants never reopen Git data and default
 LFS storage to disposable scratch.
 
-Main-checkout `project_git` instead runs fixed status/diff observations with
+Main-checkout `project_git` instead runs fixed read-only status, diff and history observations with
 global/system configuration, optional locks, hooks and fsmonitor disabled.
 Diff disables external diff and textconv. The broker probes for repository
 filter keys and disables discovered drivers; it does not use the live-command
@@ -1374,7 +1378,7 @@ internal writable aliases remain usable, and denied/private aliases are not
 detached. Preparation is bounded and rechecks authority before launch.
 
 Runtime verification and program preflight use the live read-only profile with
-networking disabled, the owner's tool path and baseline writable grants for
+the host network shared, the owner's tool path and baseline writable grants for
 eligible existing ignored checkout directories and allowed caches. Private
 scratch and masks still apply; this is not a host-read policy or an engine
 boundary. Output capture and cancellation remain separate from containment. See

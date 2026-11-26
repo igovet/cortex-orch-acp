@@ -586,6 +586,34 @@ done
             .await.unwrap().unwrap()
     }
 
+    // A stored task route that is no longer allowed never stops the task: it runs
+    // on the default coordinator and a single quiet fallback event is recorded.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stored_route_with_removed_model_falls_back_to_default_coordinator() {
+        let (runtime, _owner, task, root) = fixture_with_routes(Arc::new(CapacityPeer)).await;
+        runtime
+            .host
+            .executor
+            .write(|db| {
+                cortex_core::lifecycle::event_tx(db, "t", "NATIVE_TASK_SETTINGS",
+                    json!({"settings":{"model":"xr_removed","effort":"high","mode":"auto","language":"en"}}))?;
+                Ok(())
+            })
+            .unwrap().await.unwrap().unwrap();
+        for _ in 0..2 {
+            let route = runtime.coordinator_route(&task, None).await.unwrap();
+            assert_eq!(route.model, "fixture-model");
+        }
+        let fallbacks: i64 = runtime.host.executor
+            .read(|db| Ok(db.query_row(
+                "SELECT count(*) FROM runtime_events WHERE task_id='t' AND type='NATIVE_ROUTE_FALLBACK'", [], |r| r.get(0))?))
+            .unwrap().await.unwrap().unwrap();
+        assert_eq!(fallbacks, 1);
+        let (route, _) = start_coordinator(&CapacityPeer, &root,
+            Some(&json!({"model":"xr_removed","effort":"high"}))).unwrap();
+        assert_eq!(route.model, "fixture-model");
+    }
+
     // The fixture drives the real coordinator session path and inspects what the
     // fake Codex peer receives on each prompt. Seed checkpoints in the disposable
     // store so no project command or worker namespace is required.
@@ -2031,6 +2059,28 @@ pub fn seed_default_profile(
     crate::machine::seed_default_profile(bytes, now)
 }
 
+/// The coordinator route and pin a task starts on. A saved choice that is no
+/// longer allowed (model removed from the coordinator list, unknown route or
+/// an unsupported effort) never stops the start: the configured default
+/// coordinator is used instead (a quiet `NATIVE_ROUTE_FALLBACK` event is
+/// recorded by the first coordinator turn).
+pub(crate) fn start_coordinator(
+    routes: &dyn NativeRoutes,
+    root: &Path,
+    settings: Option<&Value>,
+) -> CoreResult<(SessionRoute, Option<Value>)> {
+    let stored = match settings {
+        Some(s) => routes.task_route(root, s).and_then(|r| Ok((r, routes.coordinator_pin(root, s)?))),
+        None => routes.route(root, "orchestrator").and_then(|r| Ok((r, routes.coordinator_pin(root, &json!({}))?))),
+    };
+    match stored {
+        Err(e) if matches!(e.code(), "native_task_route_unavailable" | "unsupported_dependent_setting") => {
+            let route = routes.fallback_coordinator(root, settings.unwrap_or(&Value::Null)).map_err(|_| e)?;
+            Ok((route, routes.coordinator_pin(root, &json!({}))?))
+        }
+        other => other,
+    }
+}
 pub trait NativeRoutes: Send + Sync {
     #[doc(hidden)]
     fn active_steering_timeout(&self, _root: &Path) -> std::time::Duration {
@@ -2059,6 +2109,12 @@ pub trait NativeRoutes: Send + Sync {
         Ok(false)
     }
     fn route(&self, root: &Path, role: &str) -> CoreResult<SessionRoute>;
+    /// The nearest allowed coordinator route for a stored task choice that is no
+    /// longer allowed: the same model with its effort moved into the allowed range
+    /// when the model is still listed, else the default coordinator.
+    fn fallback_coordinator(&self, root: &Path, _stored: &Value) -> CoreResult<SessionRoute> {
+        self.route(root, "orchestrator")
+    }
     /// The automatic route of a sprint task of `complexity` (low, normal, high),
     /// from the owner's routing profile (`RouteResolver::sprint_route`); None
     /// leaves the owner's default coordinator.
@@ -2588,16 +2644,7 @@ impl Runtime {
         let pin_settings = saved
             .clone()
             .or_else(|| client.as_ref().map(|(_, settings, _)| settings.clone()));
-        let coordinator = match &pin_settings {
-            Some(settings) => self.routes.task_route(&host.root, settings),
-            None => self.routes.route(&host.root, "orchestrator"),
-        }
-        .map_err(err)?;
-        let pin = match &pin_settings {
-            Some(settings) => self.routes.coordinator_pin(&host.root, settings),
-            None => self.routes.coordinator_pin(&host.root, &json!({})),
-        }
-        .map_err(err)?;
+        let (coordinator, pin) = start_coordinator(&*self.routes, &host.root, pin_settings.as_ref()).map_err(err)?;
         let mut jobs = self.jobs.lock().await;
         if *self.stop.borrow() {
             return Err(failure("service_stopping"));
@@ -2942,13 +2989,11 @@ impl Runtime {
             .write(move |db| cortex_core::assignment_brief::record_language_tx(db, &t))?
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        route.instructions.push('\n');
         route.instructions.push_str(&if coordinator {
-            format!("\nOwner-selected response language: {language}. Write in it everything the owner reads directly: \
-your messages and questions to the owner (question text and option labels), the final result text and its not_verified entries. \
-Write plans, objectives and every instruction to workers in English; worker reports stay English, so compose the owner-facing text \
-from them in {language}.")
+            crate::native_instructions::coordinator_language_directive(language)
         } else {
-            format!("\nOwner-selected response language: {language}. user_question_language: {language}. It applies only to \
+            format!("Owner-selected response language: {language}. user_question_language: {language}. It applies only to \
 a question to the owner (question text and option labels). Write reports, report headings, summaries and every other message in English.")
         });
         let mut prompt = prompt.to_owned();

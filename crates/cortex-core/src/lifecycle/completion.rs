@@ -1759,7 +1759,23 @@ pub fn record_result_tx(
         if same_attempt {
             return refuse("review_not_independent");
         }
-        match review_independence_tx(db, task, assignment, revision)? {
+        // A plan review judges a plan, never executed work: it has no execution routes
+        // to be independent of, so no independence is recorded or warned about (a null
+        // field reads as no warning).
+        let plan_review = super::sprint_planning::is_plan_review(
+            &db.query_row(
+                "SELECT node_id FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
+                (task, assignment),
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_default(),
+        );
+        match if plan_review {
+            Independence::Independent(Value::Null)
+        } else {
+            review_independence_tx(db, task, assignment, revision)?
+        } {
             Independence::Independent(facts) => {
                 result["review_independence"] = facts;
             }
@@ -2259,7 +2275,7 @@ fn verification_environment_question_tx(
         String::new()
     };
     let text = if ru {
-        format!("{again}Задача «{name}»: итоговая проверка `{command}` не может выполниться в среде проверки: {words}. Runtime сам повторил её через 1, 2, 5 и 10 минут с тем же результатом; ошибка в самой работе не установлена. Как продолжить?")
+        format!("{again}Задача «{name}»: итоговая проверка `{command}` не может выполниться в среде проверки: {words}. Среда выполнения автоматически повторила проверку через 1, 2, 5 и 10 минут с тем же результатом; ошибка в самой работе не установлена. Как продолжить?")
     } else {
         format!("{again}Task \"{name}\": the final check `{command}` cannot run in the verifier's environment: {words}. The runtime itself ran it again after 1, 2, 5 and 10 minutes with the same result; nothing shows the work itself is at fault. How should it continue?")
     };
@@ -3041,12 +3057,22 @@ pub fn complete_tx(
             return refuse("completion_answer_missing");
         }
     } else {
-        let nodes=db.prepare("SELECT status,result_json,assignment_ref FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid")?
-            .query_map((task,revision),|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?)))?.collect::<Result<Vec<_>,_>>()?;
+        let mut nodes=db.prepare("SELECT status,result_json,assignment_ref,node_id FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid")?
+            .query_map((task,revision),|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,String>(3)?)))?.collect::<Result<Vec<_>,_>>()?;
+        // A plan is judged by its newest review: every earlier plan review was
+        // superseded by the revision that followed it, so its node and checks no
+        // longer decide completion.
+        let newest_plan_review = nodes.iter().rposition(|n| super::sprint_planning::is_plan_review(&n.3));
+        let mut position = 0;
+        nodes.retain(|n| {
+            let keep = !super::sprint_planning::is_plan_review(&n.3) || Some(position) == newest_plan_review;
+            position += 1;
+            keep
+        });
         if nodes.is_empty()
             || nodes
                 .iter()
-                .any(|(s, r, _)| s != "completed" || r.is_none())
+                .any(|(s, r, _, _)| s != "completed" || r.is_none())
         {
             return refuse("completion_nodes_incomplete");
         }
@@ -3061,7 +3087,7 @@ pub fn complete_tx(
                 return refuse("completion_answer_missing");
             }
         }
-        for (_, r, assignment) in nodes {
+        for (_, r, assignment, _) in nodes {
             let v: Value = serde_json::from_str(&r.unwrap())?;
             if let Some(checks) = v["checks"].as_array() {
                 let channel: Option<String> = db.query_row(
@@ -3073,12 +3099,15 @@ pub fn complete_tx(
                 };
                 super::worker_checks::observe_outputs(db, task, &mut runs, &snapshot.artifacts)?;
                 super::worker_checks::accept_recorded_bindings(db, task, checks, &mut runs)?;
-                let current =
+                let mut current =
                     super::worker_checks::evaluate(checks, &runs, v["project_digest"].as_str())?;
+                if let Some(a) = assignment.as_deref() {
+                    super::worker_checks::attribute_foreign(db, task, a, &mut current, &runs)?;
+                }
                 for (check, now) in checks.iter().zip(&current) {
                     if super::worker_checks::resolved(check) {
                         if !super::worker_checks::resolved(now)
-                            || ["closed_by", "retracted_by", "superseded_by"]
+                            || ["closed_by", "retracted_by", "superseded_by", "attributed_to"]
                                 .iter()
                                 .any(|k| check[*k] != now[*k])
                         {

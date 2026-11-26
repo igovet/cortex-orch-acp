@@ -478,7 +478,14 @@ words are preserved. Workspace interface labels are independent of this
 setting; its permission buttons still use their existing English labels. Every turn's route instructions state it per role
 (`Owner-selected response language: <lang>.` with the coordinator's owner-facing
 scope, or with the worker's `user_question_language: <lang>.` and its English
-rule), and every worker brief carries `user_question_language`. The coordinator
+rule), and every worker brief carries `user_question_language`. For Claude and
+Codex the coordinator paragraph is also repeated in the text of every coordinator
+turn (after an answer, worker result, review, verification, recovery and live
+steering); OpenCode gets it once through its per-prompt instructions, and worker
+turns never get it. Texts the runtime itself writes in the coordinator chat (ACP
+slash-command replies, provider-limit, connection-slot and file-wait notices, and
+the verification retry question) use the task's recorded language, while command
+syntax, codes and identifiers stay unchanged. The coordinator
 composes the owner-facing result from English reports in the owner's language. The
 same question strings reach a form or text fallback verbatim. Only genuine user
 decisions belong in that question tool; missing project access goes to runtime

@@ -994,57 +994,57 @@ async fn command(
     known: &[String],
 ) -> io::Result<Command> {
     let host = &session.host;
+    let binding = host.session(sid).await?;
+    let ru = binding["language"] == "ru";
+    let has_task = binding["task"].is_string();
     let options = || async { Ok::<_, io::Error>(session.config_options(sid).await?) };
-    let task = || async {
-        Ok::<_, io::Error>(host.session(sid).await?["task"].as_str().map(str::to_owned))
-    };
     let reply = match command {
         "cortex-kill" => {
-            let (reference, reason) = match task_commands::kill(&argument) {
+            let (reference, reason) = match task_commands::kill(&argument, ru) {
                 Ok(stop) => stop,
                 Err(text) => return reply_text(text),
             };
-            if task().await?.is_none() {
-                return reply_text(task_commands::refused("command_stop_no_task"));
+            if !has_task {
+                return reply_text(task_commands::refused("command_stop_no_task", ru));
             }
             let key = format!("slash:{}", wp_identity()?);
             let request = json!({"action":"command_stop","toolCallRef":reference,"reason":reason,"requestId":key});
             return reply_text(match host.control(sid, request).await {
-                Ok(_) => task_commands::KILL_REQUESTED.into(),
-                Err(e) => task_commands::refused(&e.to_string()),
+                Ok(_) => task_commands::KILL_REQUESTED.text(ru).into(),
+                Err(e) => task_commands::refused(&e.to_string(), ru),
             });
         }
         "cortex-clear" => {
             let Some(clear) = task_commands::parse_clear(&argument, task_commands::now_micros())
             else {
-                return reply_text(task_commands::CLEAR_USAGE);
+                return reply_text(task_commands::CLEAR_USAGE.text(ru));
             };
             let Ok(found) = host
                 .clear_preview(sid, clear.cutoff.clone(), clear.force, known.to_vec())
                 .await
             else {
-                return reply_text(task_commands::CLEAR_REFUSED);
+                return reply_text(task_commands::CLEAR_REFUSED.text(ru));
             };
             let count = |k: &str| found[k].as_u64().unwrap_or_default();
             let (tasks, sessions, skipped) = (count("tasks"), count("sessions"), count("skipped"));
             return reply_text(if !clear.confirm {
-                task_commands::dry_run(&clear, tasks, sessions, skipped)
+                task_commands::dry_run(&clear, tasks, sessions, skipped, ru)
             } else if tasks == 0 && sessions == 0 {
-                task_commands::confirmed_nothing(&clear, skipped)
+                task_commands::confirmed_nothing(&clear, skipped, ru)
             } else {
-                task_commands::CLEAR_DELETE_UNAVAILABLE.into()
+                task_commands::CLEAR_DELETE_UNAVAILABLE.text(ru).into()
             });
         }
         "cortex-stop" | "cortex-finish" => {
             let finish = command == "cortex-finish";
             if finish && !argument.is_empty() {
-                return reply_text(task_commands::FINISH_USAGE);
+                return reply_text(task_commands::FINISH_USAGE.text(ru));
             }
-            if task().await?.is_none() {
+            if !has_task {
                 return reply_text(if finish {
-                    task_commands::FINISH_NONE
+                    task_commands::FINISH_NONE.text(ru)
                 } else {
-                    task_commands::STOP_NONE
+                    task_commands::STOP_NONE.text(ru)
                 });
             }
             let request = if finish {
@@ -1065,15 +1065,15 @@ async fn command(
                 }
             }
             return reply_text(if finish {
-                task_commands::FINISH_CONFIRMED
+                task_commands::FINISH_CONFIRMED.text(ru)
             } else {
-                task_commands::STOP_CONFIRMED
+                task_commands::STOP_CONFIRMED.text(ru)
             });
         }
         "cortex-answer" => {
             let parsed = task_commands::answer(&argument);
-            let (Some((index, text)), Some(_)) = (parsed, task().await?) else {
-                return reply_text(task_commands::ANSWER_USAGE);
+            let (Some((index, text)), true) = (parsed, has_task) else {
+                return reply_text(task_commands::ANSWER_USAGE.text(ru));
             };
             let decisions = host.decisions(sid).await?;
             let open: Vec<_> = decisions["items"]
@@ -1084,16 +1084,16 @@ async fn command(
                 .filter_map(|d| d["questionId"].as_str())
                 .collect();
             if open.is_empty() {
-                return reply_text(task_commands::ANSWER_NONE_OPEN);
+                return reply_text(task_commands::ANSWER_NONE_OPEN.text(ru));
             }
             return match open.get(index - 1) {
                 Some(question) => Ok(Command::Answer((*question).into(), text)),
-                None => reply_text(task_commands::ANSWER_UNKNOWN_INDEX),
+                None => reply_text(task_commands::ANSWER_UNKNOWN_INDEX.text(ru)),
             };
         }
         "cortex-new-task" => {
             return Ok(if argument.is_empty() {
-                Command::Unrecorded(task_commands::NEW_TASK_USAGE.into())
+                Command::Unrecorded(task_commands::NEW_TASK_USAGE.text(ru).into())
             } else {
                 Command::NewTask(argument)
             })
@@ -1101,7 +1101,7 @@ async fn command(
         "skill-management" => {
             return match task_commands::skill_management(&argument) {
                 Some(text) => Ok(Command::Turn(text)),
-                None => reply_text(task_commands::SKILL_USAGE),
+                None => reply_text(task_commands::SKILL_USAGE.text(ru)),
             }
         }
         "harvest" | "harvest-refresh" => {
@@ -1111,46 +1111,49 @@ async fn command(
                 command == "harvest-refresh",
                 &argument,
                 language,
-                task().await?.is_some(),
+                has_task,
             )));
         }
         "cortex-status" => {
             let states = host.connection_states().await?;
             return reply_text(commands::status(
                 &options().await?,
-                &commands::connection_summary(&states),
+                &commands::connection_summary(&states, ru),
+                ru,
             ));
         }
-        "cortex-setup" => return reply_text(commands::setup(&host.connection_states().await?)),
+        "cortex-setup" => return reply_text(commands::setup(&host.connection_states().await?, ru)),
         "cortex-language" => match commands::language(&argument) {
             Some(value) => ("language", value),
-            None => return reply_text("Usage: /cortex-language auto|en|ru"),
+            None => return reply_text(if ru { "Использование: /cortex-language auto|en|ru" } else { "Usage: /cortex-language auto|en|ru" }),
         },
         "cortex-model" => {
             let entries = host.listing().await?;
             if entries.is_empty() {
-                return reply_text("No model is selectable yet. Use /cortex-setup to configure an authorized engine connection.");
+                return reply_text(if ru { "Пока нет доступных моделей. Воспользуйтесь /cortex-setup, чтобы настроить авторизованное подключение к движку." } else { "No model is selectable yet. Use /cortex-setup to configure an authorized engine connection." });
             }
             match commands::model(&argument, &entries) {
                 Some(route) => ("route", route),
                 None => {
-                    return reply_text(format!(
-                        "No matching model for {}. Use /cortex-status to see the current options.",
-                        startup::repr(&json!(argument))
-                    ))
+                    let model = startup::repr(&json!(argument));
+                    return reply_text(if ru {
+                        format!("Модель {model} не найдена. Текущие варианты можно посмотреть через /cortex-status.")
+                    } else {
+                        format!("No matching model for {model}. Use /cortex-status to see the current options.")
+                    })
                 }
             }
         }
         "cortex-effort" => {
             if argument.is_empty() {
-                return reply_text("/cortex-effort requires a value. Use /cortex-status to see the current options.");
+                return reply_text(if ru { "Укажите значение для /cortex-effort. Текущие варианты можно посмотреть через /cortex-status." } else { "/cortex-effort requires a value. Use /cortex-status to see the current options." });
             }
             if !options()
                 .await?
                 .as_array()
                 .is_some_and(|a| a.iter().any(|o| o["id"] == "thought_level"))
             {
-                return reply_text("No thought level is selectable for the current model. Use /cortex-status to inspect options, or /cortex-setup if no model is available.");
+                return reply_text(if ru { "Для текущей модели нельзя выбрать уровень рассуждения. Посмотрите варианты через /cortex-status. Если модель недоступна, воспользуйтесь /cortex-setup." } else { "No thought level is selectable for the current model. Use /cortex-status to inspect options, or /cortex-setup if no model is available." });
             }
             ("thought_level", argument)
         }
@@ -1177,16 +1180,22 @@ async fn command(
     .await
     .map_err(|_| invalid("client_closed"))?;
     reply_text(match result {
-        Ok(_) => format!(
-            "{command} set to {} (pending — applies to the next run).",
-            startup::repr(&json!(value))
-        ),
+        Ok(_) => {
+            let value = startup::repr(&json!(value));
+            if ru {
+                format!("Для {command} выбрано значение {value} (вступит в силу при следующем запуске).")
+            } else {
+                format!("{command} set to {value} (pending — applies to the next run).")
+            }
+        }
         Err(e) => {
             let key = if id == "route" { "model" } else { id };
-            format!(
-                "Could not apply {command}: {}",
-                python_protocol::config_message(&e.to_string(), false, key, &value)
-            )
+            let detail = python_protocol::command_config_message(&e.to_string(), key, &value, ru);
+            if ru {
+                format!("Не удалось применить {command}: {detail}")
+            } else {
+                format!("Could not apply {command}: {detail}")
+            }
         }
     })
 }
@@ -1375,7 +1384,7 @@ async fn new_task(
     let task = state["task"].as_str().unwrap_or_default();
     out.send(update_chunk(
         sid,
-        &task_commands::new_task_created(task),
+        &task_commands::new_task_created(task, state["language"] == "ru"),
         message,
     ))
     .await

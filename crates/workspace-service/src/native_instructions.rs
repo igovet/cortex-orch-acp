@@ -6,6 +6,15 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::OnceLock};
 
+/// Used both in the session instructions and, where those are not sent with
+/// each request, in the text of the coordinator's turn.
+pub(crate) fn coordinator_language_directive(language: &str) -> String {
+    format!("Owner-selected response language: {language}. Write in it everything the owner reads directly: \
+your messages and questions to the owner (question text and option labels), the final result text and its not_verified entries. \
+Write plans, objectives and every instruction to workers in English; worker reports stay English, so compose the owner-facing text \
+from them in {language}.")
+}
+
 #[derive(Deserialize)]
 struct Profile {
     kind: String,

@@ -233,6 +233,23 @@ pub(crate) fn config_message(native: &str, set_mode: bool, key: &str, value: &st
         other => other.into(),
     }
 }
+/// Human-readable configuration detail for a slash-command chat reply only.
+pub(crate) fn command_config_message(native: &str, key: &str, value: &str, ru: bool) -> String {
+    if !ru {
+        return config_message(native, false, key, value);
+    }
+    match native {
+        "unknown_session" => "Сеанс не найден.".into(),
+        "selected_route_unavailable" => "Выбранный маршрут больше недоступен.".into(),
+        "unknown_config_option" => format!("Неизвестный configId {}.", repr(key)),
+        "unsupported_config_value" => format!(
+            "{} — недопустимое значение для configId {}.",
+            repr(value),
+            repr(key)
+        ),
+        other => other.into(),
+    }
+}
 /// Python `_run_prompt_body`/`_run_cortex_new_task` error envelopes.
 ///
 /// A prompt no native route can serve is the state Python reports as

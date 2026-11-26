@@ -1121,12 +1121,20 @@ fn command_reply(c: &Client, sid: &str, id: i64) -> String {
         .collect()
 }
 /// Python's task commands on a session whose turn is running, then bound.
-async fn task_commands() {
+async fn task_commands(language: &str) {
+    let ru = language == "ru";
     let f = Fixture::new("task-commands");
     std::fs::write(f.0.join("scenario.txt"), "hold").unwrap();
     let mut c = Client::new();
     let sid = c.open(&f.0).await;
     let prompt = |text: &str| json!({"sessionId":sid,"prompt":[{"type":"text","text":text}]});
+    c.send(
+        20,
+        "session/set_config_option",
+        json!({"sessionId":sid,"configId":"language","value":language}),
+    )
+    .await;
+    assert!(c.response(20).await.get("error").is_none());
     c.send(3, "session/prompt", prompt("hold worker")).await;
     tokio::time::timeout(Duration::from_secs(15), async {
         while !f.0.join("worker-entered").exists() {
@@ -1140,10 +1148,8 @@ async fn task_commands() {
     c.send(4, "session/prompt", prompt(&kill)).await;
     assert_eq!(c.response(4).await["result"]["stopReason"], "end_turn");
     let reply = command_reply(&c, &sid, 4);
-    assert!(
-        reply.starts_with("Command stop refused: ") && reply.ends_with('.'),
-        "{reply}"
-    );
+    let refusal = if ru { "Остановка команды отклонена: " } else { "Command stop refused: " };
+    assert_eq!(reply, format!("{refusal}native_command_not_live."));
     for (id, text, message) in [
         (
             5,
@@ -1184,15 +1190,37 @@ async fn task_commands() {
     assert_eq!(done[&7]["result"]["stopReason"], "end_turn", "{}", done[&7]);
     assert_eq!(
         command_reply(&c, &sid, 7),
-        "Stopped this task: every assignment, queued open, and pending question was cancelled."
+        if ru {
+            "Задача остановлена: все задания, открытия в очереди и ожидающие ответа вопросы отменены."
+        } else {
+            "Stopped this task: every assignment, queued open, and pending question was cancelled."
+        }
     );
     assert_eq!(
         f.query("SELECT count(*) FROM runtime_tasks WHERE state='PAUSED'"),
         1
     );
+    // The task-bound status reply renders the host's own option prose in the task language.
+    c.send(13, "session/prompt", prompt("/cortex-status")).await;
+    assert_eq!(c.response(13).await["result"]["stopReason"], "end_turn");
+    let status = command_reply(&c, &sid, 13);
+    if ru {
+        assert!(status.starts_with("Настройки Cortex:"), "{status}");
+        assert!(status.contains("- language: Русский Язык собственных строк Cortex"), "{status}");
+        assert!(status.contains("- access_mode: "), "{status}");
+        for english in ["Language for Cortex", "Workers ", " mode "] {
+            assert!(!status.contains(english), "{english}: {status}");
+        }
+    } else {
+        assert!(status.starts_with("Cortex configuration status:"), "{status}");
+        assert!(status.contains("- language: English Language for Cortex's own status/question/stop lines; auto detects from your messages."), "{status}");
+        assert!(status.contains("- access_mode: ") && status.contains(" mode Workers "), "{status}");
+    }
     for (id, text, reply) in [
-        (8, "/cortex-answer 1 yes", "There is no open question to answer right now."),
-        (9, "/cortex-finish", "Closed this task at your request. Active work was cancelled; unfinished review, verification, and synthesis are not certified as passed."),
+        (8, "/cortex-answer 1 yes", if ru { "Сейчас нет открытых вопросов для ответа." } else { "There is no open question to answer right now." }),
+        (11, "/cortex-language xx", if ru { "Использование: /cortex-language auto|en|ru" } else { "Usage: /cortex-language auto|en|ru" }),
+        (12, "/cortex-new-task", if ru { "Использование: /cortex-new-task <task text>" } else { "Usage: /cortex-new-task <task text>" }),
+        (9, "/cortex-finish", if ru { "Задача закрыта по вашему запросу. Активная работа отменена. Незавершённые ревью, проверка и подготовка итогов не считаются успешно пройденными." } else { "Closed this task at your request. Active work was cancelled; unfinished review, verification, and synthesis are not certified as passed." }),
     ] {
         c.send(id, "session/prompt", prompt(text)).await;
         assert_eq!(c.response(id).await["result"]["stopReason"], "end_turn");
@@ -1210,6 +1238,13 @@ async fn task_commands() {
     let sid = c.open(&g.0).await;
     let prompt = |text: &str| json!({"sessionId":sid,"prompt":[{"type":"text","text":text}]});
     c.send(
+        20,
+        "session/set_config_option",
+        json!({"sessionId":sid,"configId":"language","value":language}),
+    )
+    .await;
+    assert!(c.response(20).await.get("error").is_none());
+    c.send(
         3,
         "session/prompt",
         prompt("/cortex-new-task Implement fixture"),
@@ -1219,11 +1254,12 @@ async fn task_commands() {
     assert_eq!(r["result"]["stopReason"], "end_turn", "{r}");
     let reply = command_reply(&c, &sid, 3);
     // The coordinator's streamed text, then the separate task's identity.
-    assert!(
-        reply.contains("Started a new, separate task (t_")
-            && reply.ends_with("); the active task is unaffected."),
-        "{reply}"
-    );
+    let (prefix, suffix) = if ru {
+        ("Создана отдельная задача (t_", "); активная задача не изменилась.")
+    } else {
+        ("Started a new, separate task (t_", "); the active task is unaffected.")
+    };
+    assert!(reply.contains(prefix) && reply.ends_with(suffix), "{reply}");
     assert_eq!(
         g.query("SELECT count(*) FROM runtime_tasks WHERE state='COMPLETED'"),
         1
@@ -2817,12 +2853,21 @@ fn main() {
         println!("incoming ACP: owner consent and access mode recovery passed");
         return;
     }
+    if arg == "owner-chat-language" {
+        rt.block_on(async {
+            task_commands("en").await;
+            task_commands("ru").await;
+        });
+        println!("incoming ACP: English and Russian runtime chat passed");
+        return;
+    }
     if arg == "separate-task" {
         rt.block_on(async {
             guarded_new_task().await;
             separate_task_cancel_preserves_parent().await;
             cancel().await;
-            task_commands().await;
+            task_commands("en").await;
+            task_commands("ru").await;
         });
         println!("incoming ACP: separate-task authority, cancellation ownership and explicit stop passed");
         return;
@@ -2858,7 +2903,8 @@ fn main() {
         configured_mcp_ingress().await;
         journey().await;
         cancel().await;
-        task_commands().await;
+        task_commands("en").await;
+            task_commands("ru").await;
         permission().await;
         stale_permission_and_eof().await;
         skill_proposals().await;

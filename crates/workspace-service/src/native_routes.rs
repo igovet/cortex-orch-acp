@@ -10,6 +10,7 @@ mod grammar_data;
 mod policy;
 pub(crate) use policy::{coordinator_models_valid, tier_efforts_valid, COORDINATOR_MODELS};
 mod presentation;
+pub(crate) use presentation::russian_note;
 mod quota;
 pub mod short_text;
 #[allow(dead_code)]
@@ -1326,6 +1327,23 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
         let key = super::native_runtime::key(root)?;
         let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
         self.session(root, resolver.task_coordinator(settings)?)
+    }
+    fn fallback_coordinator(
+        &self,
+        root: &Path,
+        stored: &Value,
+    ) -> CoreResult<crate::native_sessions::SessionRoute> {
+        let key = super::native_runtime::key(root)?;
+        let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+        let mut same_model = stored.clone();
+        if same_model["model"].as_str().is_some_and(|m| !m.is_empty()) {
+            // Same model, effort moved to the nearest level its range allows.
+            same_model["effort"] = json!("");
+            if let Ok(selected) = resolver.task_coordinator(&same_model) {
+                return self.session(root, selected);
+            }
+        }
+        self.session(root, resolver.coordinator()?)
     }
     fn alternate_coordinator_pin(
         &self,

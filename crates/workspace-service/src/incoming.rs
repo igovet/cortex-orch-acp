@@ -12,12 +12,47 @@ use std::{collections::HashMap, io, path::Path, sync::Arc};
 
 const LANGUAGE_DESCRIPTION: &str =
     "Language for Cortex's own status/question/stop lines; auto detects from your messages.";
+const LANGUAGE_AUTO: &str = "Auto (detect from your messages)";
+const LANGUAGE_EN: &str = "English";
+const LANGUAGE_RU: &str = "Russian";
 /// Python `configuration.access_mode.LABELS`/`DESCRIPTIONS`.
 pub fn access_label(mode: &str) -> (&'static str, &'static str) {
     match mode {
         "development" => ("Development mode", "Workers can work anywhere on this computer. Engine file tools read outside the project without asking; a deletion, an engine write outside the project, credential or key files, Git control files and engine or Cortex settings ask you first. A writing worker's commands read and write anywhere your account can without asking; other roles' commands read anywhere and write nowhere. Docker and arbitrary code can bypass filesystem masks."),
         "auto" => ("Auto mode", "Workers can work anywhere on this computer and nothing asks you, deletions, credential files and Git or engine settings included; every such step is recorded. Commands read and write anywhere your account can. Cortex private state stays off limits and read-only roles and reviewers stay read-only. The engine process itself is not sandboxed."),
         _ => ("Guarded mode", "Workers write only inside the project. Engine file tools ask you before a read or write outside the project, a deletion, credential or key files, Git control files and engine or Cortex settings, and a web fetch; a command outside the sandbox asks too. Commands in the sandbox can read, but not write, anything your account can read, outside the project included, without asking."),
+    }
+}
+/// Russian name and description of an access mode, for a Russian chat reply.
+fn russian_access_label(mode: &str) -> (&'static str, &'static str) {
+    match mode {
+        "development" => ("Режим разработки", "Работники могут работать в любом месте этого компьютера. Файловые инструменты движка читают за пределами проекта без вопроса; удаление, запись движка за пределами проекта, файлы учётных данных и ключей, служебные файлы Git и настройки движка или Cortex сначала требуют вашего согласия. Команды пишущего работника читают и пишут везде, куда есть доступ у вашей учётной записи, без вопроса; команды других ролей читают везде и ничего не пишут. Docker и произвольный код могут обойти файловые ограничения."),
+        "auto" => ("Автоматический режим", "Работники могут работать в любом месте этого компьютера, и ничто не требует вашего согласия, включая удаление, файлы учётных данных и настройки Git или движка; каждый такой шаг записывается. Команды читают и пишут везде, куда есть доступ у вашей учётной записи. Закрытое состояние Cortex остаётся недоступным, а роли только для чтения и рецензенты остаются только для чтения. Сам процесс движка не изолирован."),
+        _ => ("Защищённый режим", "Работники пишут только внутри проекта. Файловые инструменты движка спрашивают вас перед чтением или записью за пределами проекта, удалением, доступом к файлам учётных данных и ключей, служебным файлам Git и настройкам движка или Cortex, а также перед загрузкой веб-страниц; команда вне песочницы тоже спрашивает. Команды в песочнице без вопроса читают, но не пишут всё, что может читать ваша учётная запись, в том числе за пределами проекта."),
+    }
+}
+/// Russian wording of the built-in presentation text of the option `option_id`
+/// (its description or a choice name), for a Russian chat reply such as
+/// `/cortex-status`. `None` for anything else, so option IDs, route labels and
+/// engine model names stay verbatim; the ACP config options keep their English.
+pub fn russian_option_text(option_id: &str, english: &str) -> Option<&'static str> {
+    match option_id {
+        "language" => match english {
+            LANGUAGE_DESCRIPTION => Some("Язык собственных строк Cortex о статусе, вопросах и остановке; в режиме auto определяется по вашим сообщениям."),
+            LANGUAGE_AUTO => Some("Авто (по вашим сообщениям)"),
+            LANGUAGE_EN => Some("Английский"),
+            LANGUAGE_RU => Some("Русский"),
+            _ => None,
+        },
+        "access_mode" => cortex_core::access::MODES.iter().find_map(|m| {
+            let (name, description) = access_label(m);
+            let (ru_name, ru_description) = russian_access_label(m);
+            (english == name)
+                .then_some(ru_name)
+                .or((english == description).then_some(ru_description))
+        }),
+        "provider" | "model" | "thought_level" => crate::native_routes::russian_note(english),
+        _ => None,
     }
 }
 /// Python `access_mode_state`: the ACP `modes` a Paseo client shows.
@@ -49,8 +84,8 @@ pub async fn presentation(
     a.push(
         json!({"id":"language","name":"Language","type":"select","category":"other",
         "currentValue":language,"description":LANGUAGE_DESCRIPTION,"options":[
-            {"value":"auto","name":"Auto (detect from your messages)"},
-            {"value":"en","name":"English"},{"value":"ru","name":"Russian"}]}),
+            {"value":"auto","name":LANGUAGE_AUTO},
+            {"value":"en","name":LANGUAGE_EN},{"value":"ru","name":LANGUAGE_RU}]}),
     );
     let mode = settings["mode"]
         .as_str()

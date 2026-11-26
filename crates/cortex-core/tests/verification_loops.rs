@@ -294,10 +294,11 @@ fn exhaust_environment_waits(s: &Store) -> String {
         "{text}"
     );
     if ru {
-        assert!(text.contains("итоговая проверка") && text.contains("1, 2, 5 и 10 минут"), "{text}");
+        assert!(text.contains("итоговая проверка"), "{text}");
+        assert!(text.contains("Среда выполнения автоматически повторила проверку через 1, 2, 5 и 10 минут"), "{text}");
     } else {
         assert!(text.contains("its output never reached its end"), "{text}");
-        assert!(text.contains("1, 2, 5 and 10 minutes"), "{text}");
+        assert!(text.contains("The runtime itself ran it again after 1, 2, 5 and 10 minutes"), "{text}");
     }
     assert_eq!(
         serde_json::from_str::<Value>(&options).unwrap(),

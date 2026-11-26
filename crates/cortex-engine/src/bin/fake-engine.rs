@@ -421,8 +421,11 @@ pub async fn main() {
                     let scenario = std::fs::read_to_string("scenario.txt").unwrap_or_default();
                     if (!scenario.contains("hold")
                         && !matches!(scenario.trim(), "rolling" | CHECKPOINT_SCENARIO))
+                            && scenario != "owner-language-probe"
                         || (scenario.trim() == "active-steering-regression-hold"
                             && std::path::Path::new(".git/steer-regression-release-workers").exists())
+                        || (scenario == "owner-language-probe"
+                            && std::path::Path::new(".git/owner-language-release").exists())
                     {
                         for (sid, mut frame) in releasable.drain() {
                             held.remove(&sid);
@@ -849,6 +852,54 @@ pub async fn main() {
                     *n += 1;
                 }
                 let full_scenario = std::fs::read_to_string("scenario.txt").unwrap_or_default();
+                let language_fixture = full_scenario == "owner-language-probe";
+                if language_fixture && !replayed {
+                    // Report only what came over session/prompt, not the base instructions.
+                    let directives: Vec<_> = raw.lines()
+                        .filter_map(|line| line.strip_prefix("Owner-selected response language: "))
+                        .map(|line| line.split_once('.').unwrap_or((line, "")).0)
+                        .collect();
+                    let capsule = raw.lines()
+                        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                        .find(|value| value["recipient"].is_object())
+                        .unwrap_or_default();
+                    let has_event = |kind: &str| capsule["retained_decisions"].as_array()
+                        .is_some_and(|events| events.iter().any(|event| event["type"] == kind));
+                    let phase = if mode != "desktop-coordinator" {
+                        if mode == "desktop-reviewer" { "reviewer" } else { "worker" }
+                    } else if raw.contains("\n\nLive steering snapshot") {
+                        "steering"
+                    } else if raw.contains("Coordinator recovery on a new engine session.") {
+                        "recovery"
+                    } else if capsule["state"] == "RECONCILING" && has_event("VERIFICATION_PASSED") {
+                        "verification"
+                    } else if raw.contains("The independent review approved the stage, but these goal outcomes are not delivered:") {
+                        "review"
+                    } else if raw.contains("Previously failed worker reports:") {
+                        "worker-result"
+                    } else if raw.contains("Recorded owner answer: Language fixture answer")
+                        || has_event("USER_ANSWER_RECEIVED") && raw.contains("Language fixture answer") && capsule["revision"] == 0
+                    {
+                        "answer"
+                    } else {
+                        "initial"
+                    };
+                    let observation = format!("Owner language prompt: {phase}:{}", directives.join(","));
+                    if phase == "recovery" {
+                        // This retained checkpoint has no Workspace transcript binding.
+                        std::fs::write(".git/owner-language-recovery", &observation).unwrap();
+                        held.insert(sid, id);
+                        continue;
+                    }
+                    wire::write_frame(&mut output, &json!({"jsonrpc":"2.0","method":"session/update",
+                        "params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk",
+                            "content":{"type":"text","text":observation}}}})).await.unwrap();
+                    if mode == "desktop-worker" && assignment["node"] == "first" {
+                        releasable.insert(sid.clone(), r.clone());
+                        held.insert(sid, id);
+                        continue;
+                    }
+                }
                 let steering_regression = full_scenario.trim() == "active-steering-regression-hold";
                 let active_steering = full_scenario.trim() == "active-steering-hold";
                 if let Some((_, snapshot)) = raw.rsplit_once("\n\nLive steering snapshot (runtime facts; targets may settle before tool use):\n") {
@@ -891,7 +942,10 @@ pub async fn main() {
                     }
                     // Owner task settings changed during execution reach the next coordinator
                     // session, here the live steering session that takes the owner's prompt.
-                    let text = if full_scenario.trim() == "settings-ru" {
+                    let text = if language_fixture {
+                        assert_eq!(snapshot["owner_messages"][0]["text"], "Language fixture steering");
+                        "Steering reply observed.".to_owned()
+                    } else if full_scenario.trim() == "settings-ru" {
                         assert!(base.contains("Owner-selected response language: ru."));
                         assert_eq!(models.get(&sid).map(String::as_str), Some("fixture-other"));
                         "Observed owner task model and language.".to_owned()
@@ -1157,7 +1211,25 @@ pub async fn main() {
                 }
                 let automatic = if mode.starts_with("desktop-") {
                     let proposal = std::fs::read_to_string("proposal.json").ok();
-                    let params = if let Some(params) =
+                    let params = if language_fixture && mode == "desktop-coordinator" {
+                        match (context["state"].as_str(), context["revision"].as_u64()) {
+                            (Some("RECONCILING"), _) => json!({"name":"synthesis_submit","arguments":{
+                                "text":"Language fixture complete.","request_key":"language-synthesis"}}),
+                            (Some("PLANNING"), Some(0)) if !raw.contains("Language fixture answer") =>
+                                json!({"name":"user_question_request","arguments":{"question":"Which option?",
+                                    "options":["Language fixture answer","Other option"],"recommended":1,"request_key":"language-question"}}),
+                            (Some("PLANNING"), Some(revision @ 0..=2)) => {
+                                let node = ["first", "second", "third"][revision as usize];
+                                if raw.contains("The independent review approved the stage, but these goal outcomes are not delivered:") {
+                                    std::fs::write(".git/owner-language-final-stage", "").unwrap();
+                                }
+                                json!({"name":"plan_submit","arguments":{"request_key":node,"plan":{
+                                    "tasks":[{"id":node,"role":"backend-dev","objective":"Exercise a fixture stage","dependencies":[],"scope":["work.txt"],"model":"auto"}],
+                                    "verification":[["/usr/bin/cmp","/dev/null","/dev/null"]]}}})
+                            }
+                            _ => panic!("unexpected language fixture phase: {context}"),
+                        }
+                    } else if let Some(params) =
                         reconciliation_fixture(mode, &full_scenario, &context)
                     {
                         params
@@ -1333,7 +1405,10 @@ pub async fn main() {
                         if consultant {
                             assert!(raw.contains("CONSULTATION_REQUIRED"));
                         }
-                        if mode == "desktop-worker" && !consultant {
+                        if language_fixture && mode == "desktop-worker" && assignment["node"] != "first" {
+                            // A material change is needed to exercise independent review, not its no-change waiver.
+                            std::fs::write("work.txt", assignment["node"].as_str().unwrap()).unwrap();
+                        } else if mode == "desktop-worker" && !consultant && !language_fixture {
                             std::fs::write(
                                 if is_second {
                                     "other.txt"
@@ -1406,9 +1481,18 @@ pub async fn main() {
                         {
                             arguments["checks"] = json!([{"name":"Live behavior","outcome":"not_run","blocker":"paid live check not requested by the owner"}]);
                         }
+                        if language_fixture && mode == "desktop-worker" && assignment["node"] == "first" {
+                            arguments["assignment_outcome"] = json!("failed");
+                            arguments["objective_status"] = json!("partial");
+                            arguments["blocker"] = json!({"kind":"other_role_work","detail":"Fixture technical failure"});
+                            arguments["remaining"] = json!(["Deliver fixture work"]);
+                        }
                         if mode == "desktop-reviewer" {
                             arguments["verdict"] = json!("APPROVE");
                             arguments["findings"] = json!([]);
+                            if language_fixture && !std::path::Path::new(".git/owner-language-final-stage").exists() {
+                                arguments["goal_coverage"] = json!([{"id":"goal","delivered":false}]);
+                            }
                         }
                         json!({"name":"result_submit","arguments":arguments})
                     };
@@ -1818,7 +1902,7 @@ pub async fn main() {
                     // A refused call (a JSON-RPC refusal or a structured tool error) opened nothing.
                     let accepted =
                         reply.get("error").is_none() && reply["result"]["isError"] != true;
-                    if active_steering && !accepted {
+                    if (active_steering || language_fixture) && !accepted {
                         let code = reply.pointer("/error/data/code")
                             .or_else(|| reply.pointer("/result/structuredContent/code"))
                             .and_then(Value::as_str).unwrap_or("unclassified");

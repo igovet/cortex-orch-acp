@@ -727,8 +727,8 @@ async fn sprint_cross_task_gateway() -> CoreResult<()> {
 /// chosen model/effort (`native_start_options_unavailable`). A saved Claude
 /// `claude-sonnet-5` or Codex `gpt-6.1-sol` choice with a valid effort now
 /// starts through the production route provider, and its coordinator is
-/// configured with exactly that model and effort; invalid choices are refused
-/// with their own reason before anything is admitted.
+/// configured with exactly that model and effort; stale choices start on the
+/// nearest allowed route (no blocker).
 async fn saved_settings_start(route: &str, sprint: bool) {
     let f = Fixture::new();
     let routes = owner_routes(&f);
@@ -782,36 +782,6 @@ async fn saved_settings_start(route: &str, sprint: bool) {
     let mut events = service.subscribe();
     let runner = tokio::spawn(service.clone().serve());
     if !sprint {
-        for (n, (model, effort, reason)) in [
-            ("claude-retired-9", "high", "native_task_route_unavailable"),
-            (route, "ultra", "unsupported_dependent_setting"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let mut invalid = settings.clone();
-            invalid["model"] = json!(model);
-            invalid["effort"] = json!(effort);
-            let target = draft(
-                service
-                    .workspace(create(&format!("create-invalid-{n}"), &invalid))
-                    .await
-                    .unwrap(),
-            );
-            let refused = service
-                .workspace(command(
-                    &id,
-                    "tasks.start",
-                    json!(target),
-                    &format!("start-invalid-{n}"),
-                    json!({}),
-                ))
-                .await
-                .unwrap_err()
-                .to_string();
-            assert_eq!(refused, reason, "{model}/{effort}");
-            assert_eq!(runtime_tasks(), 0, "refused Start admitted a task");
-        }
         let target = draft(
             service
                 .workspace(create("create", &settings))
@@ -931,6 +901,54 @@ async fn saved_settings_start(route: &str, sprint: bool) {
         assert_eq!(recorded, route);
         Ok(())
     }).unwrap();
+    if !sprint {
+        // A saved choice that is no longer allowed never blocks Start: the task is admitted
+        // and its coordinator runs on the nearest allowed route, recorded as a quiet
+        // NATIVE_ROUTE_FALLBACK event (an unlisted model, or an effort the model lacks).
+        for (n, (model, effort)) in [("claude-retired-9", "high"), (route, "ultra")]
+            .into_iter()
+            .enumerate()
+        {
+            let mut stale = settings.clone();
+            stale["model"] = json!(model);
+            stale["effort"] = json!(effort);
+            let target = draft(
+                service
+                    .workspace(create(&format!("create-stale-{n}"), &stale))
+                    .await
+                    .unwrap(),
+            );
+            let receipt = service
+                .workspace(command(
+                    &id,
+                    "tasks.start",
+                    json!(target),
+                    &format!("start-stale-{n}"),
+                    json!({}),
+                ))
+                .await
+                .unwrap_or_else(|e| panic!("stale {model}/{effort} Start refused: {e}"));
+            assert_eq!(receipt["outcome"], "recorded", "{model}/{effort}");
+            tokio::time::timeout(Duration::from_secs(25), async {
+                while store
+                    .read(|db| {
+                        Ok(db.query_row(
+                            "SELECT count(*) FROM runtime_events WHERE type='NATIVE_ROUTE_FALLBACK'",
+                            [],
+                            |r| r.get::<_, i64>(0),
+                        )?)
+                    })
+                    .unwrap()
+                    < n as i64 + 1
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("no route fallback recorded for {model}/{effort}"));
+            assert_eq!(runtime_tasks(), n as i64 + 2);
+        }
+    }
     service.stop().await.unwrap();
     runner.await.unwrap().unwrap();
     drop(store);
@@ -1804,6 +1822,19 @@ async fn controls(scenario: &str, action: &str) {
                 Ok(())
             }).unwrap();
         }
+        if !granted {
+            // A held path never ends in a refusal: the reservation stays queued past
+            // the old two-retry limit and the worker is neither resumed nor denied.
+            while count("SELECT count(*) FROM runtime_events WHERE type='WORKER_WAIT_CHANGED'
+                AND json_extract(payload_json,'$.status')='open' AND json_extract(payload_json,'$.retry_attempt')=3")==0 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='ACCESS_DECIDED'"), 0);
+            assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='WORKER_CONTINUATION_STARTED'"), 0);
+            service.stop().await.unwrap();
+            let _ = runner.await;
+            return;
+        }
         while count(
             "SELECT count(*) FROM runtime_events WHERE type='WORKER_WAIT_CHANGED' AND json_extract(payload_json,'$.status')='resumed'",
         ) == 0
@@ -1852,24 +1883,27 @@ async fn controls(scenario: &str, action: &str) {
         let command_started = "SELECT count(*) FROM runtime_events t JOIN runtime_events e ON t.task_id=e.task_id AND t.id>e.id
             WHERE t.type='NATIVE_TURN_SETTLED' AND e.type='NATIVE_COMMAND_PENDING_REPLY'
             AND json_extract(t.payload_json,'$.channel_id')=json_extract(e.payload_json,'$.channel_id')";
-        while count(if action == "pending-end-turn" {
-            command_started
-        } else {
-            refusal
-        }) == 0
-        {
-            tokio::time::sleep(Duration::from_millis(25)).await;
+        if action == "pending-end-turn" {
+            while count(command_started) == 0 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            std::fs::write(f.0.join("project/release-command"), "ready").unwrap();
         }
-        std::fs::write(f.0.join("project/release-command"), "ready").unwrap();
         while count("SELECT count(*) FROM runtime_events WHERE type='WORKER_COMPLETED'") == 0 {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        assert_eq!(
-            count(
-                "SELECT count(*) FROM runtime_requests WHERE request_key='pending-command' AND json_extract(result_json,'$.exit_code')=0"
-            ),
-            1
-        );
+        if action == "pending-end-turn" {
+            assert_eq!(
+                count(
+                    "SELECT count(*) FROM runtime_requests WHERE request_key='pending-command' AND json_extract(result_json,'$.exit_code')=0"
+                ),
+                1
+            );
+        } else {
+            // A command no check cites is stopped by the runtime at result_submit and the
+            // result is accepted at once: no command_not_settled refusal round-trip.
+            assert_eq!(count(refusal), 0);
+        }
         assert_eq!(
             count(
                 "SELECT count(*) FROM runtime_events WHERE type IN ('ASSIGNMENT_RETRIED','NATIVE_DRIVER_STOPPED','USER_QUESTION_REQUESTED')"
@@ -2790,6 +2824,166 @@ async fn positive_owner_control(action: &str) {
     service.stop().await.unwrap();
     runner.await.unwrap().unwrap();
 }
+/// Exercise actual session/prompt requests through planning, an owner answer,
+/// live steering, a failed worker, an incomplete goal review and final verification.
+async fn coordinator_prompt_language(
+    engine: EngineKind,
+    language: &str,
+) -> (Vec<String>, Vec<String>) {
+    struct LanguageRoutes(EngineKind);
+    impl NativeRoutes for LanguageRoutes {
+        fn route(&self, root: &Path, role: &str) -> CoreResult<SessionRoute> {
+            let mut route = Routes.route(root, role)?;
+            if role == "orchestrator" {
+                route.launch.engine = self.0;
+                if self.0 == EngineKind::OpenCode {
+                    let credentials = root.join(".git/opencode");
+                    std::fs::create_dir_all(&credentials)?;
+                    route.launch.credential_directory = credentials;
+                }
+            }
+            Ok(route)
+        }
+
+        fn task_route(&self, root: &Path, _: &Value) -> CoreResult<SessionRoute> {
+            self.route(root, "orchestrator")
+        }
+    }
+
+    fn observations(store: &Store) -> Vec<String> {
+        store
+            .read(|db| {
+                Ok(db.prepare("SELECT text FROM host_transcript
+                    WHERE text LIKE 'Owner language prompt: %' ORDER BY id")?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<Vec<_>, _>>()?)
+            })
+            .unwrap()
+    }
+
+    let f = Fixture::new();
+    let project = f.0.join("project");
+    std::fs::write(project.join("scenario.txt"), "owner-language-probe").unwrap();
+    let service = Service::bind_native(f.config(), Arc::new(LanguageRoutes(engine)))
+        .await
+        .unwrap();
+    let registered = service.register(&project, "Prompt language").await.unwrap();
+    let id = registered["projectId"].as_str().unwrap();
+    service.activate(id).await.unwrap();
+    let runner = tokio::spawn(service.clone().serve());
+    let store = f.store();
+    let created = service.workspace(command(id, "tasks.create", json!(id), "create",
+        json!({"description":"Language fixture","checkout":{"kind":"main"},
+            "settings":{"model":"fixture-model","effort":"","mode":"guarded","language":language}})))
+        .await.unwrap();
+    let started = service.workspace(command(id, "tasks.start", created["target"].clone(), "start",
+        json!({}))).await.unwrap();
+    let execution = started["target"].as_str().unwrap();
+    let wait = async |sql: &str| {
+        tokio::time::timeout(Duration::from_secs(15), restart_signal(&store, sql))
+            .await
+            .unwrap_or_else(|_| {
+                let phases = observations(&store);
+                let events = store.read(|db| Ok(db.prepare(
+                    "SELECT type, coalesce(json_extract(payload_json,'$.code'),
+                        json_extract(payload_json,'$.reason'), '') FROM runtime_events ORDER BY id DESC LIMIT 20")?
+                    .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?)).unwrap();
+                let refusal = std::fs::read_to_string(project.join(".git/steer-fixture-refused")).ok();
+                panic!("{engine:?} {language} did not reach {sql}: {phases:?}; {events:?}; {refusal:?}");
+            });
+    };
+    wait("SELECT EXISTS(SELECT 1 FROM pending_questions WHERE status='open')").await;
+    let page = service.workspace(json!({"protocol":{"major":1,"minor":8},
+        "projectId":id,"requestId":"questions","operation":"decisions.list",
+        "target":execution,"cursor":null,"limit":100})).await.unwrap();
+    let d = &page["items"][0];
+    assert_eq!(d["status"], "pending");
+    let mut answer = command(
+        id,
+        "decisions.answer",
+        d["decisionId"].clone(),
+        "answer",
+        json!({"executionId":execution,"acpSessionId":d["acpSessionId"],"batchId":null,"answers":[{
+            "decisionId":d["decisionId"],"questionId":d["questionId"],"expectedVersion":d["version"],
+            "optionId":d["options"][0]["optionId"],"text":"","attachments":[]}]}),
+    );
+    answer["expectedVersion"] = d["version"].clone();
+    answer["ownerEpoch"] = d["ownerEpoch"].clone();
+    service.workspace(answer).await.unwrap();
+    wait("SELECT EXISTS(SELECT 1 FROM host_transcript WHERE text LIKE 'Owner language prompt: worker:%')").await;
+    service.prompt_execution(id, execution, "Language fixture steering", Some("steer"), json!([]))
+        .await.unwrap();
+    wait("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='STEERING_DELIVERED')").await;
+    std::fs::write(project.join(".git/owner-language-release"), "").unwrap();
+    wait("SELECT EXISTS(SELECT 1 FROM host_transcript WHERE text LIKE 'Owner language prompt: verification:%')").await;
+    let journey = observations(&store);
+    service.stop().await.unwrap();
+    runner.await.unwrap().unwrap();
+
+    // Restart from a separately retained planning checkpoint with no engine to
+    // reuse. Activation must build a fresh capsule and a real recovery prompt.
+    let f = Fixture::new();
+    let project = f.0.join("project");
+    std::fs::write(project.join("scenario.txt"), "owner-language-probe").unwrap();
+    let service = Service::bind_native(f.config(), Arc::new(LanguageRoutes(engine)))
+        .await
+        .unwrap();
+    let registered = service.register(&project, "Retained prompt language").await.unwrap();
+    let key = cortex_core::ProjectKey::new(&project, if workspace_protocol::channel::current().is_dev() {
+        cortex_core::StoreChannel::Dev
+    } else {
+        cortex_core::StoreChannel::Release
+    }).unwrap();
+    let host = tokio::task::spawn_blocking(move || workspace_service::native_sessions::NativeHost::open(key))
+        .await.unwrap().unwrap();
+    host.create("language-recovery".into(), "Retained language fixture".into(), "owner".into())
+        .await.unwrap();
+    let store = f.store();
+    store.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='language-recovery'", [])?;
+        cortex_core::lifecycle::event_tx(db, "language-recovery", "NATIVE_TASK_SETTINGS",
+            json!({"settings":{"language":language}}))?;
+        Ok(())
+    }).unwrap();
+    tokio::task::spawn_blocking(move || drop(host)).await.unwrap();
+    service.activate(registered["projectId"].as_str().unwrap()).await.unwrap();
+    let recovery = tokio::time::timeout(Duration::from_secs(15), async {
+        let record = project.join(".git/owner-language-recovery");
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&record) {
+                if !text.is_empty() {
+                    break vec![text];
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("recovery prompt not observed");
+    service.stop().await.unwrap();
+    (journey, recovery)
+}
+
+fn assert_coordinator_prompt_language(runtime: &tokio::runtime::Runtime) {
+    let mut mismatches = Vec::new();
+    for (engine, language) in [
+        (EngineKind::Codex, "ru"),
+        (EngineKind::Claude, "ru"),
+        (EngineKind::Codex, "en"),
+        (EngineKind::OpenCode, "ru"),
+    ] {
+        let (journey, recovery) = runtime.block_on(coordinator_prompt_language(engine, language));
+        let expected = ["initial", "answer", "worker", "steering", "worker-result", "worker",
+            "reviewer", "review", "worker", "reviewer", "verification"].map(|phase| {
+                let directive = if matches!(phase, "worker" | "reviewer") { "" } else { language };
+                format!("Owner language prompt: {phase}:{directive}")
+            });
+        if journey != expected || recovery != [format!("Owner language prompt: recovery:{language}")] {
+            mismatches.push(format!("{engine:?} {language}: journey {journey:?}; recovery {recovery:?}"));
+        }
+    }
+    assert!(mismatches.is_empty(), "session/prompt owner language mismatches:\n{}", mismatches.join("\n"));
+}
+
 /// A task saved in Russian: every worker and reviewer session receives the same
 /// owner-language line as the coordinator. (Workers still narrate in English by their
 /// generated profile protocol; this guards only the runtime delivery.)
@@ -4893,6 +5087,12 @@ fn main() {
         }
     }
 
+    if mode == "coordinator-prompt-language-probe" {
+        assert!(!namespace_host::assert_unavailable_view(), "the prompt language probe needs the real plan-admission namespace");
+        assert_coordinator_prompt_language(&tokio::runtime::Runtime::new().unwrap());
+        return;
+    }
+
     if mode == "active-steering-regression-probe" {
         assert!(!namespace_host::assert_unavailable_view(), "the explicit steering probe needs the real plan-admission namespace");
         tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -5016,6 +5216,9 @@ fn main() {
     if namespace_restricted {
         assert_ne!(mode, "active-steering-probe", "the explicit steering probe needs the real plan-admission namespace");
         return;
+    }
+    if mode.is_empty() {
+        assert_coordinator_prompt_language(&tokio::runtime::Runtime::new().unwrap());
     }
     if mode.is_empty() || mode == "active-steering-probe" {
         tokio::runtime::Runtime::new().unwrap().block_on(async {

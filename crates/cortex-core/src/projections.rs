@@ -282,7 +282,7 @@ pub(crate) fn task_with_disposition(
                         if worker_capacity_wait(db, runtime)? {
                             warnings.push("waiting_for_engine_capacity".into());
                             if reason.is_none() {
-                                reason = Some("Waiting for an engine connection slot".into());
+                                reason = Some(engine_capacity_notice(db, runtime)?.into());
                             }
                         }
                     }
@@ -313,6 +313,9 @@ pub(crate) fn task_with_disposition(
                 }
             }
             route = observed_route(db, runtime)?;
+            if let Some(effective) = fallback_route(db, runtime)? {
+                route = Some(effective);
+            }
         }
         if state == "unknown" && warnings.is_empty() {
             warnings.push("contradictory_evidence".into());
@@ -423,11 +426,25 @@ pub fn provider_route_wait(db: &Connection, task: &str) -> CoreResult<Option<&'s
            AND x.type='NATIVE_PROVIDER_ROUTE_WAIT_ENDED'
            AND json_extract(x.payload_json,'$.wait_id')=json_extract(e.payload_json,'$.wait_id'))
          ORDER BY e.id DESC LIMIT 1", [task])?;
-    Ok(wait.as_ref().and_then(|value| match field(value, "reason") {
-        Some("provider_rate_limited") => Some("Waiting for the provider's rate limit to reset"),
-        Some("provider_quota_limited") => Some("Waiting for the provider's usage quota to reset"),
+    let Some(reason) = wait.as_ref().and_then(|value| field(value, "reason")) else {
+        return Ok(None);
+    };
+    let ru = crate::lifecycle::domain::task_language_tx(db, task)? == "ru";
+    Ok(match (reason, ru) {
+        ("provider_rate_limited", false) => Some("Waiting for the provider's rate limit to reset"),
+        ("provider_rate_limited", true) => Some("Ожидаем сброса ограничения частоты запросов у провайдера"),
+        ("provider_quota_limited", false) => Some("Waiting for the provider's usage quota to reset"),
+        ("provider_quota_limited", true) => Some("Ожидаем сброса квоты использования у провайдера"),
         _ => None,
-    }))
+    })
+}
+
+fn engine_capacity_notice(db: &Connection, task: &str) -> CoreResult<&'static str> {
+    Ok(if crate::lifecycle::domain::task_language_tx(db, task)? == "ru" {
+        "Ожидаем свободного места для подключения к движку"
+    } else {
+        "Waiting for an engine connection slot"
+    })
 }
 
 /// Observational only: the current claim of the active stage has an engine
@@ -475,9 +492,12 @@ fn files_wait(
         if let Some(wait) = crate::scheduler::policy::write_conflict(db, runtime)?
             .filter(|w| w["reason"] == "owner_file_lease_held")
         {
-            let message = match wait["paths"][0].as_str() {
-                Some(path) => format!("Waiting for you to finish editing {path} in Code"),
-                None => "Waiting for you to release the file in Code".into(),
+            let ru = crate::lifecycle::domain::task_language_tx(db, runtime)? == "ru";
+            let message = match (wait["paths"][0].as_str(), ru) {
+                (Some(path), true) => format!("Ожидаем, пока вы закончите редактировать {path} в Code"),
+                (Some(path), false) => format!("Waiting for you to finish editing {path} in Code"),
+                (None, true) => "Ожидаем, пока вы освободите файл в Code".into(),
+                (None, false) => "Waiting for you to release the file in Code".into(),
             };
             return Ok(Some((message, None)));
         }
@@ -522,17 +542,33 @@ fn files_wait(
                 .to_owned()
         })
         .collect();
-    let mut files = paths.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
-    if paths.len() > 3 {
-        files.push_str(&format!(" and {} more", paths.len() - 3));
-    }
-    if files.is_empty() {
-        files = "the files this step needs".into();
-    }
-    let message = format!("Waiting for the task “{title}” to release {files}");
+    let ru = crate::lifecycle::domain::task_language_tx(db, runtime)? == "ru";
+    let shown = paths.len().min(3);
+    let files = paths[..shown].join(", ");
+    let more = paths.len() - shown;
+    // Workspace inserts this fragment into its own English sentence.
+    let release_target = if files.is_empty() {
+        "the files this step needs".into()
+    } else if more > 0 {
+        format!("{files} and {more} more")
+    } else {
+        files.clone()
+    };
+    let message = if ru {
+        let target = if files.is_empty() {
+            "файлы, нужные на этом шаге".into()
+        } else if more > 0 {
+            format!("{files} и ещё {more}")
+        } else {
+            files
+        };
+        format!("Ожидаем, пока задача «{title}» освободит {target}")
+    } else {
+        format!("Waiting for the task “{title}” to release {release_target}")
+    };
     let context = field(&w, "workspace_holder").map(|holder| FilesWait {
         holder_task_id: holder.into(),
-        release_target: files,
+        release_target,
     });
     Ok(Some((message, context)))
 }
@@ -673,6 +709,31 @@ fn automatic_facts(db: &Connection, runtime: &str, value: &mut Value) -> CoreRes
         value["reviewDeadEnd"] = json!({"item":item,"count":count});
     }
     Ok(())
+}
+/// The route a task actually runs on after its stored choice stopped being allowed
+/// (`NATIVE_ROUTE_FALLBACK`), unless the owner chose again since.
+fn fallback_route(
+    db: &Connection,
+    runtime: &str,
+) -> CoreResult<Option<workspace_protocol::read::RouteLabel>> {
+    let Some(r) = row(db, "SELECT payload_json,id FROM runtime_events WHERE task_id=?1 AND type='NATIVE_ROUTE_FALLBACK' \
+        AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='NATIVE_TASK_SETTINGS' \
+        AND json_extract(payload_json,'$.settings.model') IS NOT NULL AND json_extract(payload_json,'$.settings.model')!=''),0) \
+        ORDER BY id DESC LIMIT 1", [runtime])? else { return Ok(None) };
+    let payload: Value = serde_json::from_str(field(&r, "payload_json").unwrap_or("{}")).unwrap_or(json!({}));
+    let Some(model) = payload["to"]["model"].as_str().filter(|m| !m.is_empty()) else { return Ok(None) };
+    let effort = match payload["to"]["parameters"]["thought_level"].as_str().unwrap_or("") {
+        "engine_default" | "" => String::new(),
+        "low" => "Low".into(),
+        "medium" => "Medium".into(),
+        "high" => "High".into(),
+        "xhigh" => "Extra high".into(),
+        "minimal" => "Minimal".into(),
+        "max" => "Max".into(),
+        "none" => "None".into(),
+        s => s.replace('_', " "),
+    };
+    Ok(Some(workspace_protocol::read::RouteLabel { model: model.to_owned(), effort }))
 }
 fn observed_route(
     db: &Connection,
@@ -1029,6 +1090,41 @@ mod latency_diagnostic {
 mod files_wait_tests {
     use crate::{lifecycle, store::Store};
     use serde_json::json;
+    #[test]
+    fn projected_capacity_notices_follow_the_task_language() {
+        let root = std::env::temp_dir().join(format!("capacity-language-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let store = Store::open(
+            crate::ProjectKey::new(&root, crate::StoreChannel::Dev).unwrap(),
+            crate::OpenMode::Initialize,
+        ).unwrap();
+        lifecycle::TaskMachine::new(&store).create("t", "g", "o").unwrap();
+        store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='t'", [])?;
+            for (language, engine, rate, quota) in [
+                (
+                    "en", "Waiting for an engine connection slot",
+                    "Waiting for the provider's rate limit to reset", "Waiting for the provider's usage quota to reset",
+                ),
+                (
+                    "ru", "Ожидаем свободного места для подключения к движку",
+                    "Ожидаем сброса ограничения частоты запросов у провайдера", "Ожидаем сброса квоты использования у провайдера",
+                ),
+            ] {
+                lifecycle::event_tx(db, "t", "NATIVE_TASK_SETTINGS", json!({"settings":{"language":language}}))?;
+                assert_eq!(super::engine_capacity_notice(db, "t")?, engine);
+                for (code, expected) in [("provider_rate_limited", rate), ("provider_quota_limited", quota)] {
+                    lifecycle::event_tx(db, "t", "NATIVE_PROVIDER_ROUTE_WAITING",
+                        json!({"reason":code,"owner_epoch":1,"wait_id":format!("{language}:{code}")}))?;
+                    assert_eq!(super::provider_route_wait(db, "t")?, Some(expected));
+                }
+            }
+            Ok(())
+        }).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// A step queued behind another unfinished task's files reads as waiting for that
     /// task by name, until the holder finishes or this task claims a step.
     #[test]
@@ -1062,6 +1158,12 @@ mod files_wait_tests {
                     "Waiting for the task “Format all tests” to release test/a.js",
                 );
                 assert!(fallback.1.is_none());
+                db.execute("INSERT INTO task_language VALUES ('t','ru')", [])?;
+                assert_eq!(
+                    super::files_wait(db, "p", "t", &base)?.unwrap().0,
+                    "Ожидаем, пока задача «Format all tests» освободит test/a.js",
+                );
+                db.execute("UPDATE task_language SET language='en' WHERE task_id='t'", [])?;
                 db.execute(
                     "INSERT INTO workspace_projects VALUES ('p',?1,'owner','now',1)",
                     [&base],
@@ -1088,6 +1190,36 @@ mod files_wait_tests {
                     }),
                 );
                 assert!(super::files_wait(db, "other", "t", &base)?.unwrap().1.is_none());
+                for (paths, english, russian) in [
+                    (
+                        ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"].as_slice(),
+                        "a.rs, b.rs, c.rs and 2 more",
+                        "a.rs, b.rs, c.rs и ещё 2",
+                    ),
+                    (&[], "the files this step needs", "файлы, нужные на этом шаге"),
+                ] {
+                    lifecycle::event_tx(
+                        db,
+                        "t",
+                        "NATIVE_WRITE_CONFLICT_WAITING",
+                        json!({"node":"reset","holder_task":"h","paths":paths}),
+                    )?;
+                    for (language, expected_message) in [
+                        (
+                            "ru",
+                            format!("Ожидаем, пока задача «Description differs from title» освободит {russian}"),
+                        ),
+                        (
+                            "en",
+                            format!("Waiting for the task “Description differs from title” to release {english}"),
+                        ),
+                    ] {
+                        db.execute("UPDATE task_language SET language=?1 WHERE task_id='t'", [language])?;
+                        let (message, context) = super::files_wait(db, "p", "t", &base)?.unwrap();
+                        assert_eq!(message, expected_message);
+                        assert_eq!(context.unwrap().release_target, english);
+                    }
+                }
                 db.execute(
                     "UPDATE runtime_tasks SET state='COMPLETED' WHERE task_id='h'",
                     [],
@@ -1131,6 +1263,11 @@ mod files_wait_tests {
             let wait = super::files_wait(db, "p", "t", root)?.unwrap();
             assert_eq!(wait.0, "Waiting for you to finish editing file.txt in Code");
             assert!(wait.1.is_none());
+            db.execute("INSERT INTO task_language VALUES ('t','ru')", [])?;
+            assert_eq!(
+                super::files_wait(db, "p", "t", root)?.unwrap().0,
+                "Ожидаем, пока вы закончите редактировать file.txt в Code",
+            );
             leases::release_tx(db, editor, &checkout, &path, token.expose())?;
             assert_eq!(super::files_wait(db, "p", "t", root)?, None);
             leases::acquire_tx(db, editor, &checkout, &path)?;
@@ -1184,5 +1321,26 @@ mod files_wait_tests {
             .unwrap();
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod fallback_route_tests {
+    use super::*;
+
+    #[test]
+    fn the_effective_route_after_a_fallback_replaces_the_stale_choice_until_the_owner_chooses_again() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE runtime_events(id INTEGER PRIMARY KEY,task_id TEXT,type TEXT,payload_json TEXT);").unwrap();
+        let add = |kind: &str, payload: Value| {
+            db.execute("INSERT INTO runtime_events(task_id,type,payload_json) VALUES ('t',?,?)", [kind, &payload.to_string()]).unwrap();
+        };
+        add("NATIVE_TASK_SETTINGS", json!({"settings":{"model":"xr_removed","effort":"high"}}));
+        assert_eq!(fallback_route(&db, "t").unwrap(), None);
+        add("NATIVE_ROUTE_FALLBACK", json!({"to":{"model":"Opus","parameters":{"thought_level":"high"}}}));
+        let label = fallback_route(&db, "t").unwrap().unwrap();
+        assert_eq!((label.model.as_str(), label.effort.as_str()), ("Opus", "High"));
+        add("NATIVE_TASK_SETTINGS", json!({"settings":{"model":"xr_new","effort":"low"}}));
+        assert_eq!(fallback_route(&db, "t").unwrap(), None);
     }
 }

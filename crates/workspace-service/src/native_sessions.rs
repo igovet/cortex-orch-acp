@@ -21,7 +21,7 @@ use cortex_core::{
 use cortex_engine::{
     broker::Broker,
     engine::{Engine, Event, PermissionDecision, PermissionPolicy, Session},
-    environment::LaunchSpec,
+    environment::{EngineKind, LaunchSpec},
     gateway::{Channel, Credentials, Gateway, GatewayCore},
     Error, FutureResult,
 };
@@ -1120,6 +1120,9 @@ impl NativeHost {
                 )
                 .await
                 .map_err(engine_error)?;
+                crate::native_mcp::record_offered(&self.executor, &credential, &external)
+                    .await
+                    .map_err(engine_error)?;
                 record_withheld(&self.executor, &credential, &withheld)
                     .await
                     .map_err(engine_error)?;
@@ -1676,13 +1679,21 @@ impl SessionDriver {
             return Err(CoreError::Refused("active_steering_prompt_mismatch"));
         }
         let guided = !guidance.is_empty();
-        self.policy
+        let identity = self.policy
             .prompt_identity(guided)
             .await
             .map_err(|_| CoreError::Refused("channel_authority_refused"))?;
+        // Normal and active-steering channels both authenticate as coordinator.
+        // OpenCode already gets the language in its per-prompt instruction prefix.
+        let language_task = (identity.role == "coordinator"
+            && matches!(self.engine_kind, EngineKind::Claude | EngineKind::Codex))
+        .then_some(identity.task);
         let c = self.credential.clone();
-        let (delivery, capsule, live_steering, handoff) = receive(self.executor.write(move |db| {
+        let (delivery, capsule, live_steering, handoff, language) = receive(self.executor.write(move |db| {
             let (delivery, capsule) = cortex_core::recovery_context::delivery_tx(db, &c)?;
+            let language = language_task
+                .map(|task| cortex_core::assignment_brief::record_language_tx(db, &task))
+                .transpose()?;
             let mut section = String::new();
             let mut handoff = None;
             if let Some(input) = steering {
@@ -1712,11 +1723,17 @@ impl SessionDriver {
                     json!({"plan":proposal,"plan_digest":digest,
                            "live_attempts":workers,"owner_messages":messages}));
             }
-            Ok((delivery, capsule, section, handoff))
+            Ok((delivery, capsule, section, handoff, language))
         })?).await?;
-        let brief = format!("{text}{live_steering}");
+        let brief = match language {
+            Some(language) => {
+                let directive = crate::native_instructions::coordinator_language_directive(language);
+                format!("{directive}\n\n{text}{live_steering}")
+            }
+            None => format!("{text}{live_steering}"),
+        };
         let mut prompt = format!("{}\n\n{capsule}\n\n{brief}", self.project_context);
-        if self.engine_kind == cortex_engine::environment::EngineKind::OpenCode {
+        if self.engine_kind == EngineKind::OpenCode {
             prompt = format!("{}\n\n{prompt}", self.instructions);
         }
         let identity = self
@@ -3191,9 +3208,24 @@ impl GatewayCore for CorePolicy {
                 Ok(call) => call,
                 Err(code) => return Ok(crate::native_tool_errors::reply(code)),
             };
-            let result = self
-                .dispatch_call(credentials, channel, name, arguments, false)
+            let mut result = self
+                .dispatch_call(credentials, channel, name, arguments.clone(), false)
                 .await;
+            // `command_status` of a live command waits server-side (up to 10 s, or
+            // until it settles) so a model does not spin on identical answers.
+            if name == "command_status" {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                while tokio::time::Instant::now() < deadline
+                    && matches!(&result, Ok(v) if v["isError"] != true
+                        && v["structuredContent"]["settled"] != true
+                        && matches!(v["structuredContent"]["state"].as_str(), Some("running" | "settling")))
+                {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    result = self
+                        .dispatch_call(credentials, channel, name, arguments.clone(), false)
+                        .await;
+                }
+            }
             {
                 use crate::native_turn_guard::Outcome;
                 match &result {
@@ -3223,6 +3255,37 @@ impl GatewayCore for CorePolicy {
     }
 }
 impl CorePolicy {
+    /// Before a result is submitted, this worker's own commands that are still running
+    /// and that no check of the result cites are superseded: the runtime stops them
+    /// through the same stop path the owner uses and waits (bounded) for each receipt to
+    /// settle, so a forgotten background command never refuses the result.
+    async fn supersede_uncited_commands(&self, arguments: &Value) {
+        let cited: Vec<String> = arguments["checks"]
+            .as_array()
+            .map(|checks| {
+                checks
+                    .iter()
+                    .filter_map(|c| c["tool_call_ref"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (c, task_scope) = (self.credential.clone(), self.credential.channel_id.clone());
+        let Ok(rx) = self.executor.read(move |db| {
+            let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
+            let mut s = db.prepare(
+                "SELECT json_extract(result_json,'$.tool_call_ref') FROM runtime_requests WHERE task_id=? AND actor=? AND operation='command_run'
+                 AND json_type(result_json,'$.handle')='object' AND json_extract(result_json,'$.settled') IS NOT 1",
+            )?;
+            let rows = s
+                .query_map((&i.task, &task_scope), |r| r.get::<_, Option<String>>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((i.task, rows.into_iter().flatten().collect::<Vec<_>>()))
+        }) else {
+            return;
+        };
+        let Ok((task, active)) = receive(rx).await else { return };
+        stop_uncited(&self.commands, &task, &active, &cited).await;
+    }
     /// Channel authentication that keeps the precise refusal code.
     async fn identity(&self, ready: bool) -> cortex_engine::Result<Identity> {
         let c = self.credential.clone();
@@ -3741,6 +3804,7 @@ impl CorePolicy {
                 }
             }
             if name == "result_submit" {
+                self.supersede_uncited_commands(&arguments).await;
                 let mut evidence = if channel.stage.as_deref() == Some("review")
                     || arguments["checks"]
                         .as_array()
@@ -3755,6 +3819,8 @@ impl CorePolicy {
                 if let Some(checkout) = self.worktree_receipt() {
                     evidence.checkout_evidence = Some(json!({"checkout":checkout,"cwd":self.root}));
                 }
+                let delivery_root = self.root.clone();
+                let delivery_scoped = self.worktree.is_some();
                 let outcome = receive(
                     self.executor
                         .publication(move |store| {
@@ -3803,21 +3869,33 @@ impl CorePolicy {
                                     missing.as_deref(),
                                 );
                             }
-                            Ok((submitted, missing))
+                            // A review coverage refusal carries the current pages of what is
+                            // missing, read for the reviewer on its channel (counts as read).
+                            let inline = match (&submitted, missing.as_deref()) {
+                                (Err(error), Some(items)) => crate::native_review_delivery::inline(
+                                    store, &c, &i, &delivery_root, delivery_scoped, error.code(), items,
+                                ),
+                                _ => None,
+                            };
+                            Ok((submitted, missing, inline))
                         })
                         .map_err(tool_error)?,
                 )
                 .await
                 .map_err(tool_error)?;
-                let (outcome, missing) = outcome;
+                let (outcome, missing, inline) = outcome;
                 return match outcome {
                     Ok(value) => Ok(json!({"content":[{"type":"text","text":value.to_string()}],
                         "structuredContent":value,"isError":false})),
                     // A correctable content refusal goes back to the worker with its code
                     // and correction, so it can submit again in the same turn.
-                    Err(error) if crate::native_results::correctable(error.code()) => Ok(
-                        crate::native_results::refusal_reply_with(error.code(), missing),
-                    ),
+                    Err(error) if crate::native_results::correctable(error.code()) => {
+                        let reply = crate::native_results::refusal_reply_with(error.code(), missing);
+                        Ok(match inline {
+                            Some(delivery) => crate::native_review_delivery::attach(reply, delivery),
+                            None => reply,
+                        })
+                    }
                     Err(error) => Err(tool_error(error)),
                 };
             }
@@ -4434,5 +4512,74 @@ pub(crate) mod degenerate {
             assert!(agent_text(&thought));
             assert!(!agent_text(&tool));
         }
+    }
+}
+
+/// Stops the commands of `task` named in `active` that `cited` does not name, through
+/// the owner's stop path, and waits (bounded) for each to report done.
+async fn stop_uncited(
+    commands: &crate::native_commands::Running,
+    task: &str,
+    active: &[String],
+    cited: &[String],
+) {
+    let mut waits = Vec::new();
+    {
+        let commands = commands.lock().await;
+        for reference in active.iter().filter(|r| !cited.contains(r)) {
+            if let Some(running) = commands.get(reference).filter(|r| r.task == task) {
+                running.cancel.send_replace(true);
+                waits.push(running.done.clone());
+            }
+        }
+    }
+    for mut done in waits {
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            while !*done.borrow_and_update() {
+                if done.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
+    }
+}
+
+#[cfg(test)]
+mod supersede_tests {
+    use super::*;
+    use crate::native_owner_controls::RunningCommand;
+    use tokio::sync::watch;
+
+    fn running(task: &str) -> (RunningCommand, watch::Receiver<bool>, watch::Sender<bool>) {
+        let (cancel, observed) = watch::channel(false);
+        let (done_tx, done) = watch::channel(false);
+        (RunningCommand { task: task.into(), cancel, done }, observed, done_tx)
+    }
+
+    #[tokio::test]
+    async fn result_submit_stops_only_uncited_own_commands_and_waits_for_them() {
+        let map: crate::native_commands::Running = Default::default();
+        let (cited, cited_cancel, _c) = running("t");
+        let (stray, stray_cancel, stray_done) = running("t");
+        let mut watcher = stray_cancel.clone();
+        let (foreign, foreign_cancel, _f) = running("other");
+        {
+            let mut m = map.lock().await;
+            m.insert("native-command:cited".into(), cited);
+            m.insert("native-command:stray".into(), stray);
+            m.insert("native-command:foreign".into(), foreign);
+        }
+        // The command's monitor reports done once it sees the stop.
+        tokio::spawn(async move {
+            watcher.changed().await.unwrap();
+            stray_done.send_replace(true);
+        });
+        let active: Vec<String> = ["cited", "stray", "foreign"].map(|n| format!("native-command:{n}")).to_vec();
+        stop_uncited(&map, "t", &active, &["native-command:cited".to_owned()]).await;
+        assert!(*stray_cancel.borrow(), "uncited command stopped");
+        assert!(!*cited_cancel.borrow(), "cited command left running");
+        assert!(!*foreign_cancel.borrow(), "another task untouched");
+        assert!(*map.lock().await["native-command:stray"].done.borrow(), "waited for settlement");
     }
 }

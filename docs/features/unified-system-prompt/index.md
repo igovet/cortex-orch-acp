@@ -84,6 +84,18 @@ The final text for a session is built in
    message in English. The runtime resolves Automatic using the original
    request; it does not translate model text.
 
+**Per-turn owner language.** For Claude and Codex, `SessionDriver::prompt_inner`
+(`native_sessions.rs`) repeats the same coordinator paragraph in the text of every
+coordinator turn, not only at session launch: after an owner answer, a worker
+result, review and verification, on recovery/reconciliation, and in active
+steering turns while workers run. The language is the task's recorded effective
+language (`assignment_brief::record_language_tx`), so an answer on a reused engine
+session still carries its own directive. OpenCode already receives the route
+instructions in front of every prompt, so it gets the paragraph exactly once.
+Worker turns, worker briefs and reports get no owner directive and stay English.
+The wording is shared with the launch instructions (`native_instructions.rs`) and
+carries no tool argument contract.
+
 The Rust host does **not** add an attached-MCP-servers section, a
 worker-capability summary or an environment section to the system text. External
 MCP servers are attached at session start (`native_mcp.rs`) and the engine

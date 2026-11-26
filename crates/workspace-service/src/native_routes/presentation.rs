@@ -8,6 +8,19 @@ use std::{collections::HashMap, path::Path};
 
 const UNAVAILABLE: &str = "Saved route is unavailable — choose a route";
 const UNAVAILABLE_THOUGHT: &str = "Depends on an unavailable route — choose a route";
+const PENDING: &str = "(pending — applies to the next run)";
+const ACTIVE: &str = "(active)";
+/// Russian wording of a route-state note above, for a Russian chat reply such
+/// as `/cortex-status`. The ACP config options themselves keep the English text.
+pub(crate) fn russian_note(english: &str) -> Option<&'static str> {
+    Some(match english {
+        UNAVAILABLE => "Сохранённый маршрут недоступен — выберите маршрут",
+        UNAVAILABLE_THOUGHT => "Зависит от недоступного маршрута — выберите маршрут",
+        PENDING => "(ожидает — применится при следующем запуске)",
+        ACTIVE => "(активен)",
+        _ => return None,
+    })
+}
 const EFFORTS: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
 const SEPARATOR: &str = " · ";
 
@@ -167,8 +180,8 @@ fn disambiguate(pairs: &[(String, String)]) -> HashMap<String, String> {
 }
 fn state_suffix(state: Option<&str>) -> Option<&'static str> {
     match state {
-        Some("selected" | "pending_next_use") => Some("(pending — applies to the next run)"),
-        Some("active") => Some("(active)"),
+        Some("selected" | "pending_next_use") => Some(PENDING),
+        Some("active") => Some(ACTIVE),
         _ => None,
     }
 }
@@ -724,7 +737,15 @@ impl RouteResolver {
             };
         }
         if settings["task"] == true {
-            return match self.task_coordinator(settings) {
+            // A stored choice that is no longer allowed shows the route the
+            // task actually runs on: same model with a clamped effort, else the default.
+            let mut same = settings.clone();
+            same["effort"] = json!("");
+            return match self
+                .task_coordinator(settings)
+                .or_else(|_| self.task_coordinator(&same))
+                .or_else(|_| self.coordinator())
+            {
                 Ok(s) => Current {
                     route: Some(s.route_id().to_owned()),
                     parameters: s
