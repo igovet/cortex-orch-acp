@@ -185,6 +185,8 @@ permission change is introduced. Implemented in `crates/cortex-core/src/lifecycl
 
 ## Plan submission and coordinator polling
 
+A coordinator turn that only reads, repeats a refused submission or goes silent is ended by the runtime's per-turn bounds and counts toward the three-turn no-progress limit; see [what bounds every wait](../failures-and-cancellation/index.md#what-bounds-every-wait).
+
 Plan task `scope` is a write reservation used to schedule overlapping writers,
 not a read-access list. Reading needs no scope; writing tasks must not list
 read-only dependencies there. Read-only/investigation roles retain the required
@@ -196,6 +198,16 @@ and glob syntax is preserved. Plan admission, scope requests, access grants and
 comparisons of older stored reservations share that identity. This does not
 resolve symlinks or add a filesystem security boundary.
 
+
+`plan.outcomes` (1–32 items) names every required result of the original goal and
+the owner's later messages; each task lists the outcomes it delivers (`delivers`), an
+outcome no task delivers carries `deferred` with its reason, and a replan or steering
+amendment keeps every outcome with the same id and statement (or names it by id alone,
+and the runtime fills the recorded statement; the capsule and `task_get_context` list
+the outcomes in force verbatim in `plan_summary.outcomes`). The review checks the work
+against those outcomes and the verbatim goal, and the task completes only when every
+outcome is done; see [the original goal decides
+completion](../task-lifecycle/index.md#the-original-goal-decides-completion).
 
 The advertised `plan_submit` contract requires `plan.tasks` to contain 1–64 items and
 `plan.verification` to contain 1–16 items; empty arrays are rejected. A
@@ -488,7 +500,10 @@ one implementing task, goes back to the coordinator (`RETURNED_TO_COORDINATOR`,
 prompt tells it to read the review report and plan fixes by the roles that own the
 affected files. Blind fixes once sent application code to a devops task.
 APPROVE proceeds
-to verification; REQUEST_CHANGES creates fix nodes followed by a fresh reviewer;
+to verification when its `goal_coverage` reports every plan outcome delivered; an
+approval of a stage that leaves an outcome undelivered returns the task to its
+coordinator (`REVIEW_GOAL_NOT_MET`, `goal_not_met`) without any verification.
+REQUEST_CHANGES creates fix nodes followed by a fresh reviewer;
 BLOCK, which names the confirmed problems as findings, stops acceptance and goes
 back to the coordinator to address them. INCOMPLETE, which names in `not_covered`
 each part of the change the review cannot cover itself, with its dead-end
@@ -524,12 +539,20 @@ review of the task is required to read those bytes again; they are disclosed the
 same way (`settled_unread_tx`, `crates/cortex-core/src/lifecycle/completion.rs`;
 owner store 2026-11-21: three assignments were each refused twice for the same 32
 files). Changed bytes are a new file to read. The refusal hint points to
-`read_batch`, up to eight inline `project_read` items per call. An accepted INCOMPLETE schedules no
-second review of the same revision: actionable findings start their fixes,
-otherwise `REVIEW_DEAD_END_ROUTED` records the blocked parts. When every blocked
-part is one the reviewer's tools cannot reach (`tool_unavailable`), the parts
-become disclosed unverified limits (`REVIEW_LIMIT_DISCLOSED`) and the task
-continues to verification. The same holds for an `owner_decision` part the owner
+`read_batch`, up to eight inline `project_read` items per call. An accepted INCOMPLETE
+never leads to verification by itself. Any findings start their fixes first, a
+`cross_cutting` one included (it takes the conservative fix of every plan task;
+before, an INCOMPLETE review with a cross-cutting finding skipped its fixes, went to
+verification and lost the finding). Otherwise `REVIEW_DEAD_END_ROUTED` records the
+blocked parts. When every blocked part not already decided by the owner is one the
+reviewer's tools cannot reach (`tool_unavailable`), one follow-up review of the same
+revision is narrowed to those parts (`REVIEW_RERUN`: a new review node whose
+objective lists them and asks for another approach, routed away from the earlier
+reviewers' models). When the follow-up meets the same dead end, the parts are routed
+as `owner_decision` dead ends, so the coordinator asks the owner whether to close
+them as is. Only the owner's decision makes such parts disclosed unverified limits
+(`REVIEW_LIMIT_DISCLOSED` with `owner_authorized: true`, the review result marked
+`review_limit_owner_authorized`): an `owner_decision` part the owner
 already decided, in this plan revision or an earlier one since the newest reopen or
 owner message: its reason cites an owner question that was answered, or an earlier
 review routed the same item as an `owner_decision` dead end and an owner answer
@@ -538,7 +561,11 @@ the reviewer's detail, or only file names the decided items already named (one i
 for three generated files split into one item per file). It becomes a disclosed
 limit (`Review did not read …`, with `LOOP_BROKEN` naming the earlier answer), not
 another question (owner store 2026-11-21: ten identical questions after the owner
-chose to close as is, the last ones after the decided item had been split per file); otherwise the task continues with `review_incomplete`
+chose to close as is, the last ones after the decided item had been split per file); or
+any review dead end after the owner answered the runtime's loop question with
+`accept_unverified`. Only such a review binds verification and completion like an
+approval; one the runtime disclosed without the owner (a store from an earlier build)
+does not. Otherwise the task continues with `review_incomplete`
 on the next rung of the strategy ladder, in every run mode, and a dead end that
 repeats on the same item takes the `reassign` rung ([no-stop
 policy](../task-lifecycle/index.md#no-stop-policy-and-the-strategy-ladder)). A decided
@@ -822,9 +849,12 @@ gateway receipt that is:
 `NAME=value` assignments and the launchers `env`, `timeout`, `nice`, `nohup`,
 `command`, `exec` and `time` are removed, a command is trivial when nothing is
 left; when its program basename is a no-op, printer, listing, file read or search
-(`pwd`, `ls`, `echo`, `printf`, `cat`, `head`, `tail`, `tee`, `grep`, `rg`, `find`,
-`true`, `test`, `cd`, `env`, `which`, `stat`, `wc`, `sort` and the rest of that
-list); when it is a read-only `git` subcommand (`status`, `log`,
+(`pwd`, `ls`, `echo`, `printf`, `cat`, `head`, `tail`, `tee`, `find`,
+`true`, `cd`, `env`, `which`, `stat`, `wc`, `sort` and the rest of that
+list); when it is a `grep`, `egrep`, `fgrep` or `rg` that is not quiet (no `-q`,
+`--quiet` or `--silent`), names no pattern, or asks for help, the version or a file
+listing; when it is a `test` with no operand or a `[` without operands and a closing
+`]`; when it is a read-only `git` subcommand (`status`, `log`,
 `show`, `branch`, `rev-parse`, `ls-files`, `remote`, `config`, `describe`) or
 `git diff` without `--check`, `--exit-code` or `--quiet`; or when it is a
 `zsh`/`ksh` `-c` script, or an `sh`/`bash`/`dash` `-c` script outside one recognized
@@ -846,7 +876,12 @@ never a masking one's. So `bash -c "umask 022; cargo test --locked"`,
 `sh -c "umask 022 && cd web && npm test"` and
 `bash -c 'umask 022; exec timeout 900 "$HOME/.cargo/bin/cargo" test'` verify,
 while `pytest || true`, `pytest; echo done`, `pytest | tail -5`,
-`cargo test > log 2>&1` and `umask 022` alone are trivial. Before this, every
+`cargo test > log 2>&1` and `umask 022` alone are trivial. A file test or a
+quiet search is an assertion, not a stand-in: `test -f notes/a.txt`,
+`[ -s out ]` and `grep -q alpha notes/a.txt` exit nonzero when the result is
+wrong, so a plan whose result is a file's presence or content may verify with
+them (2026-11-25: such a plan was refused although no other check existed),
+while `grep alpha notes/a.txt` and `rg needle src` stay trivial. Before this, every
 inline script was trivial, and the `umask 022` this repository requires pushed
 workers' checks into exactly that form. This is a bounded recognizer, not a shell
 parser or a shell security boundary; direct argv is always the simpler route,
@@ -1404,6 +1439,30 @@ predecessor/dependent context at coordinator start and keeps these reads within
 the current sprint. Code availability is reported only from exact, receipt-bound
 file evidence. The graph view does not alter dependency scheduling, review,
 verification or acceptance.
+
+### Sprint impact checks after an owner change
+
+When the owner changes a running sprint member (an owner message delivered to
+its coordinator, an owner rework request, or an owner answer to a coordinator or
+worker question) while other members are still unstarted drafts, the runtime
+records `SPRINT_IMPACT_CHECK_REQUIRED` and refuses the task's completion with
+`sprint_impact_pending` until its coordinator records a verdict. A worker's
+replan or scope request is not such a change. The coordinator's next planning or
+reconciling turn names the trigger; it reads the drafts with `sprint_graph`
+`include: "pending_descriptions"` and calls the coordinator-only
+`sprint_revision_submit` (`unchanged`, or `revise` with draft updates, new drafts
+and cancellation proposals). The service validates a revision under the machine
+lock against the live graph, then the runtime schedules a mandatory independent
+fresh review (`_sprint_revision_review_N`, at most three reviewed revisions per
+trigger before the owner decides) that never binds the task's own review,
+verification or completion. An approved revision is applied by the runtime in an
+Automatic sprint and waits for the owner's Apply or Reject in a Hybrid or Manual
+sprint; cancellation proposals are only shown. Drafts a pending revision changes
+do not start (`sprint_revision_pending`); Workspace shows them as **Waits for a sprint revision**
+with Start off, from the revision itself even when the order was read before it, and the owner's
+card shows each change as before and after with Apply and Reject. Started, finished or archived tasks
+and the approved plan are never written. Details:
+[re-checking the sprint after an owner change](../../cortex-workspace/local-task-execution.md#re-checking-the-sprint-after-an-owner-change).
 
 ## Timing diagnostics
 

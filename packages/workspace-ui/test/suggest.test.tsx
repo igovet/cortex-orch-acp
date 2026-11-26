@@ -197,6 +197,25 @@ describe("the task's message field", () => {
     expect(p.listed).toHaveBeenCalledTimes(1);
   });
 
+  it("lists Cortex's built-in skills on / in their own group, filters them and writes a read_skill sentence", async () => {
+    await mount(world(), { skills: [{ name: "demo-data", path: ".agents/skills/demo-data/SKILL.md", description: null, pathOnly: false }], omitted: 0,
+      cortex: [{ id: "design-workflow", description: "Adaptive UI/UX workflow" }, { id: "incident", description: "Work an incident" }] });
+    const el = field();
+    type(el, "/");
+    await settle();
+    expect(options()).toEqual(["/stop", "/queue", "/now", "/details", "/changes", "/code", "/new", "/demo-data", "/design-workflow", "/incident"]);
+    expect(all(".ws-suggest .mi-h").map(h => h.textContent)).toEqual(["Commands", "Project skills", "Built-in skills"]);
+    type(el, "/incid");
+    await settle();
+    expect(options()).toEqual(["/incident"]);
+    type(el, "/workflow");
+    await settle();
+    expect(options()).toEqual(["/design-workflow"]);
+    press(el, "Enter");
+    await settle();
+    expect(el.value).toBe("Use the built-in skill design-workflow (read it with read_skill before acting). ");
+  });
+
   it("offers Resume, not Stop, on a paused task", async () => {
     await mount(world({ status: "paused", process: "stopped", executionId: "e" } as Partial<Task>));
     const el = field();

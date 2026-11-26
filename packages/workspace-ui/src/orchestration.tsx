@@ -1,5 +1,6 @@
 import { Match, Show, Switch } from "solid-js";
 import { useWs } from "./ctx";
+import { CoordinatorModels } from "./orch-coordinator";
 import { Defaults } from "./orch-defaults";
 import { ProjectCeiling } from "./orch-limits";
 import { Tools } from "./orch-mcp";
@@ -19,6 +20,7 @@ export { useReadOnly } from "./orch-shared";
 export function Orchestration(props: { page?: OrchestrationPage; server?: string; tab?: string }) {
   const ws = useWs();
   return <Switch fallback={<Defaults />}>
+    <Match when={props.page === "coordinator"}><CoordinatorModels /></Match>
     <Match when={props.page === "models"}><Models /></Match>
     <Match when={props.page === "engines"}><EnginesModels /></Match>
     <Match when={props.page === "ceiling"}><ProjectCeiling /></Match>

@@ -119,9 +119,12 @@ the escalated rung, nor for mandatory review and consultation; an off-kind `*`
 pin is ignored and selection proceeds from the listed models. When no model
 lists the work kind, the pin applies as before. Exact-role or alias pins, explicit user model requests
 and applicable `AGENTS.md`/`CLAUDE.md` grants remain explicit exceptions.
-Coordinator alternate selection is unchanged. The consultant is routed only to
-models listed for `design`; without one no consultation starts, and no
-availability substitute applies. Among the kept
+Coordinator alternate selection is unchanged. The consultant has its own work kind,
+`consultation` (Settings label "Senior consultation"), used by no other role. It is
+routed only to models listed for `consultation`; while no model lists it, the
+consultant keeps using the `design` list so existing settings still work (Settings
+shows "uses Design list until set"). Without a listed model no consultation
+starts, and no availability substitute applies. Among the kept
 models, independence from the reviewed work's authors (the routes of the
 revision's execution nodes, each with the number of files its sessions recorded
 changing) applies in this order: a model different from every author
@@ -298,6 +301,106 @@ Medium, narrowed to the closest level the selected model reports. Models with
 no concrete effort selector receive no effort parameter. This does not change
 automatic worker routing or explicit worker-effort policy.
 
+### Coordinator models and per-tier effort ranges
+
+The routing profile names the models that may coordinate in its own list,
+`coordinator_models`, apart from the worker tiers. Each entry is
+`{"engine": ..., "model": ..., "tiers": {<category>: {"min": effort, "max": effort}}}`:
+the categories are the tier names `flagship` (shown as Frontier), `deep`,
+`standard` and `light`, each with an inclusive effort range from `low`..`max`
+(`min` not above `max`). For example:
+
+```json
+"coordinator_models": [
+  {"engine": "claude-agent-acp", "model": "opus",
+   "tiers": {"flagship": {"min": "low", "max": "high"}}},
+  {"engine": "codex-acp", "model": "gpt-6.2-sol",
+   "tiers": {"deep": {"min": "xhigh", "max": "xhigh"},
+             "standard": {"min": "high", "max": "xhigh"},
+             "light": {"min": "medium", "max": "xhigh"}}}
+]
+```
+
+When the list is present, only an enabled, non-denied model listed there may
+be the coordinator: the Settings default, a task's or sprint's own choice, a
+coordinator pinned at task start, the no-stop alternate coordinator, the
+composer's route bar and the incoming ACP model picker all use that set. A
+model outside it is refused (`portable_coordinator_unavailable` for the
+default, `native_task_route_unavailable` for a task or pinned route), never
+substituted. The worker tiers and their `tier_efforts` do not change the
+coordinator; they apply to workers only.
+
+The coordinator's efforts are the union of its listed ranges, among the
+levels its route offers. A range one of whose bounds the route does not offer
+contributes nothing (the same `model_effort_policy_unsupported` rule as worker
+ranges), so a model whose every range is unsupported cannot coordinate. A
+saved, inherited or task effort outside the union moves to the nearest
+allowed level (the lower on a tie): the Settings default Medium becomes Xhigh
+for a model listed only on Deep at Xhigh. Only a level the route offers is
+moved: an effort the model does not support at all is refused
+(`unsupported_dependent_setting`), never substituted. A listed model whose
+route offers no effort setting may still coordinate, with no effort to
+constrain.
+
+Settings › Orchestration › **Coordinator models** (right after Defaults)
+edits the list: add a switched-on model, tick its categories, set the lowest
+and highest effort of each, remove it. The Defaults page shows the list under
+Coordinator with a link to it. Settings refuses to save an empty list, a
+model without a category, or an inverted or unknown range, and the runtime
+refuses an invalid file with `invalid_routing_overrides`. A profile stores
+the list with its routing section, so switching profiles switches it. Other
+management clients (the Paseo settings panel) keep `coordinator_models` as a
+key they preserve but do not edit.
+
+A profile written before the list (no `coordinator_models` key) keeps the
+older rule: once any engine places a model in a worker tier, only an enabled,
+non-denied model with at least one tier may coordinate, at the union of its
+worker tier ranges (`tier_efforts`, or the floor-to-maximum levels of tiers
+without a range). A profile that places no model at all leaves the
+coordinator unconstrained. Settings offers **Start the list**, which seeds
+the list from what the worker tiers allow now, for review before saving.
+
+Each worker model's policy may carry `tier_efforts`, an effort range per tier
+it is placed in, for example `{"deep": {"min": "high", "max": "xhigh"},
+"standard": {"min": "medium", "max": "xhigh"}}`. On that tier the range
+replaces `effort_floor`, `max_effort` and the light-only `max` rule; tiers
+without a range keep the legacy floor and maximum. Both bounds must be levels
+the route offers, otherwise the route is refused with
+`model_effort_policy_unsupported`. Automatic worker routing takes the tier
+target (light low, standard medium, deep and flagship high) moved into the
+range, the lower level on a tie. Settings validates ranges as it saves (`min`
+not above `max`, only placed tiers) and the runtime refuses an invalid file
+with `invalid_routing_overrides`.
+
+### Sprint task routes
+
+A sprint plan item may carry `complexity` (`low`, `normal` or `high`;
+omitted means normal), advertised in the `sprint_plan_submit` schema. When the
+owner chose no sprint model, creating the tasks from the plan picks each
+task's coordinator route in the runtime, never the model: complexity names a
+category (low: light then standard; normal: standard, deep, light; high:
+flagship (Frontier), then deep when no Frontier model is usable). The models
+of that category come from `coordinator_models` (a profile without the list:
+the worker tiers). They are ranked by the same provider usage the worker
+ranking reads (an exhausted route is skipped, a route at 95% or more goes
+last, then the least used, then configured order) and the effort is the
+category target (light low, standard medium, deep and Frontier high) moved
+into that model's range for the category.
+The task's draft settings receive the exact route id and effort, together
+with the sprint's mode and language, and the task record keeps
+`sprintRoute` (`routeId`, engine, model, tier, effort, complexity and used
+percent) for the board and plan views. An owner-chosen sprint model applies to
+every task instead. The new-sprint form always sends the model of the planning
+conversation; it is the sprint model for the tasks only when the owner picked a
+model there or later in the sprint's route bar (the sprint records
+`taskRoute: "sprint"`). Otherwise the form records `taskRoute: "automatic"` and
+each task gets its route by complexity. A sprint saved without `taskRoute`
+keeps the earlier rule (any saved model is the sprint model). When no listed model of those categories is usable, the
+task starts on the owner's default coordinator. The choice reads the usage
+known when the tasks are created; it does not refresh quota or reserve
+capacity.
+
+
 ### Explicit effort preservation
 
 A covered exact-model request can also select an exact effort in that **same
@@ -443,9 +546,33 @@ constrained automatic decision, plus `affinity.cross_engine_fallback` (`true`
 only when no affinity-engine route was eligible at all). Other work kinds
 retain soft affinity and ordinary conditional-hint/retry rules.
 
-## Current preset: Haiku 5.5 and Luna
+## Current preset
+
+The installation preset copies the owner's production `default` profile
+routing (models, tiers, effort floors and maximums, worker tier ranges,
+preferences and quota windows) and adds the owner's coordinator models
+(`coordinator_models`):
+
+| Coordinator model | Categories and effort ranges |
+| --- | --- |
+| Claude `opus` (Opus 5.5) | Frontier low → high |
+| Claude `sonnet` (Sonnet 5.5) | Deep xhigh; Standard high → xhigh; Light medium → xhigh |
+| Codex `gpt-6.2-astra` (Astra 6.2) | Frontier low → high |
+| Codex `gpt-6.2-sol` (Sol 6.2) | Deep xhigh; Standard high → xhigh; Light medium → xhigh |
+
+The worker tier ranges are the production ones: Sonnet Deep high → xhigh,
+Standard medium → xhigh, Light medium → high; Sol (deep and standard only)
+Deep high → xhigh, Standard medium → xhigh. Opus, Astra, Haiku, Luna, Terra
+and Fable keep their worker tiers without ranges. The coordinator default is
+`codex-acp/gpt-6.2-sol` at high effort. The full table is in
+[configuration](../../configuration.md#fresh-install-owner-default-snapshot).
+Existing installations keep their own files; **Reset to default preset**
+adopts the preset explicitly, with private backups.
+
+### Haiku 5.5 and Luna
 
 The installation preset enables `claude-agent-acp/haiku` with the same
+
 policy as `codex-acp/gpt-6-luna`: light tier only (no `also_standard_for`, so
 Haiku and Luna never serve standard testing), high/xhigh/max effort ladder,
 max ceiling, the same eleven preferred work kinds, and null request names. Its exact quota label is `seven_day_haiku`.
@@ -824,6 +951,12 @@ every routing decision is the same as before rank version 8.
   usable the runtime refuses with the visible reason
   `no_model_listed_for_work_kind` (naming the work kind and tier) in the
   `NATIVE_WORKER_ROUTE_BLOCKED` audit event and waits instead of retrying.
+  The task's pause reason names it for the owner: a blocked mandatory review
+  reads as `no_model_listed_for_review` ("No model may review this work. Add
+  Review to a model's Preferred work in Settings › Engines and models"), any
+  other kind as `no_model_listed_for_work_kind`; both link to that settings
+  page, and the task resumes by itself once a listed model is usable. Its
+  "Last attempts hit" list starts again at that resume.
   When no model lists the kind at all, the previous behavior holds: the
   ordinary eligible tier pool serves regular workers (audit `owner_list_exists:
   false`, `mode: no_owner_list`). Among the listed models it is also rank key

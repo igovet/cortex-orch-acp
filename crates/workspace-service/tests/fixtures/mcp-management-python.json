@@ -4822,9 +4822,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -4839,6 +4841,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -4874,7 +4879,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -4886,6 +4890,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -5322,9 +5327,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -5339,6 +5346,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -5374,7 +5384,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -5386,6 +5395,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -5799,9 +5809,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -5816,6 +5828,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -5851,7 +5866,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -5863,6 +5877,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -6276,9 +6291,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -6293,6 +6310,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -6328,7 +6348,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -6340,6 +6359,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -6753,9 +6773,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -6770,6 +6792,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -6805,7 +6830,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -6817,6 +6841,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -7230,9 +7255,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -7247,6 +7274,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -7282,7 +7312,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -7294,6 +7323,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -7707,9 +7737,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -7724,6 +7756,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -7759,7 +7794,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -7771,6 +7805,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -8184,9 +8219,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -8201,6 +8238,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -8236,7 +8276,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -8248,6 +8287,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -8661,9 +8701,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -8678,6 +8720,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -8713,7 +8758,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -8725,6 +8769,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -9160,9 +9205,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -9177,6 +9224,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -9212,7 +9262,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -9224,6 +9273,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -9740,9 +9790,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -9757,6 +9809,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -9792,7 +9847,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -9804,6 +9858,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -10239,9 +10294,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -10256,6 +10313,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -10291,7 +10351,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -10303,6 +10362,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -10716,9 +10776,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -10733,6 +10795,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -10768,7 +10833,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -10780,6 +10844,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -11457,9 +11522,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -11474,6 +11541,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -11509,7 +11579,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -11521,6 +11590,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -12139,9 +12209,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -12156,6 +12228,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -12191,7 +12266,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -12203,6 +12277,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -12742,9 +12817,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -12759,6 +12836,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -12794,7 +12874,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -12806,6 +12885,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -13329,9 +13409,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -13346,6 +13428,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -13381,7 +13466,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -13393,6 +13477,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -13912,9 +13997,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -13929,6 +14016,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -13964,7 +14054,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -13976,6 +14065,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -14495,9 +14585,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -14512,6 +14604,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -14547,7 +14642,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -14559,6 +14653,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -15075,9 +15170,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -15092,6 +15189,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -15127,7 +15227,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -15139,6 +15238,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -15607,9 +15707,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -15624,6 +15726,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -15659,7 +15764,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -15671,6 +15775,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -16139,9 +16244,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -16156,6 +16263,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -16191,7 +16301,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -16203,6 +16312,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -16671,9 +16781,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -16688,6 +16800,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -16723,7 +16838,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -16735,6 +16849,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -17205,9 +17320,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -17222,6 +17339,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -17257,7 +17377,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -17269,6 +17388,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -17786,9 +17906,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -17803,6 +17925,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -17838,7 +17963,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -17850,6 +17974,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -18369,9 +18494,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -18386,6 +18513,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -18421,7 +18551,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -18433,6 +18562,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -18952,9 +19082,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -18969,6 +19101,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -19004,7 +19139,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -19016,6 +19150,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -19535,9 +19670,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -19552,6 +19689,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -19587,7 +19727,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -19599,6 +19738,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -20112,9 +20252,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -20129,6 +20271,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -20164,7 +20309,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -20176,6 +20320,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -20689,9 +20834,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -20706,6 +20853,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -20741,7 +20891,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -20753,6 +20902,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -21270,9 +21420,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -21287,6 +21439,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -21322,7 +21477,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -21334,6 +21488,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -21851,9 +22006,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -21868,6 +22025,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -21903,7 +22063,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -21915,6 +22074,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -22430,9 +22590,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -22447,6 +22609,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -22482,7 +22647,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -22494,6 +22658,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -23015,9 +23180,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -23032,6 +23199,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -23067,7 +23237,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -23079,6 +23248,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -23598,9 +23768,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -23615,6 +23787,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -23650,7 +23825,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -23662,6 +23836,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -24174,9 +24349,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -24191,6 +24368,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -24226,7 +24406,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -24238,6 +24417,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -24753,9 +24933,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -24770,6 +24952,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -24805,7 +24990,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -24817,6 +25001,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -25338,9 +25523,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -25355,6 +25542,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -25390,7 +25580,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -25402,6 +25591,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -25921,9 +26111,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -25938,6 +26130,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -25973,7 +26168,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -25985,6 +26179,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -26505,9 +26700,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -26522,6 +26719,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -26557,7 +26757,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -26569,6 +26768,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -27089,9 +27289,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -27106,6 +27308,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -27141,7 +27346,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -27153,6 +27357,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -27685,9 +27890,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -27702,6 +27909,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -27737,7 +27947,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -27749,6 +27958,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -28281,9 +28491,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -28298,6 +28510,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -28333,7 +28548,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -28345,6 +28559,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -28877,9 +29092,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -28894,6 +29111,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -28929,7 +29149,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -28941,6 +29160,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -29473,9 +29693,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -29490,6 +29712,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -29525,7 +29750,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -29537,6 +29761,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -30054,9 +30279,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -30071,6 +30298,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -30106,7 +30336,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -30118,6 +30347,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -30635,9 +30865,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -30652,6 +30884,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -30687,7 +30922,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -30699,6 +30933,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -31238,9 +31473,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -31255,6 +31492,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -31290,7 +31530,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -31302,6 +31541,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -31817,9 +32057,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -31834,6 +32076,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -31869,7 +32114,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -31881,6 +32125,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -32396,9 +32641,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -32413,6 +32660,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -32448,7 +32698,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -32460,6 +32709,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -32979,9 +33229,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -32996,6 +33248,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -33031,7 +33286,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -33043,6 +33297,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -33562,9 +33817,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -33579,6 +33836,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -33614,7 +33874,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -33626,6 +33885,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -34144,9 +34404,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -34161,6 +34423,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -34196,7 +34461,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -34208,6 +34472,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -34727,9 +34992,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -34744,6 +35011,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -34779,7 +35049,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -34791,6 +35060,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -35310,9 +35580,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -35327,6 +35599,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -35362,7 +35637,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -35374,6 +35648,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -35893,9 +36168,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -35910,6 +36187,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -35945,7 +36225,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -35957,6 +36236,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -36476,9 +36756,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -36493,6 +36775,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -36528,7 +36813,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -36540,6 +36824,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -37059,9 +37344,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -37076,6 +37363,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -37111,7 +37401,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -37123,6 +37412,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -37642,9 +37932,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -37659,6 +37951,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -37694,7 +37989,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -37706,6 +38000,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -38225,9 +38520,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -38242,6 +38539,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -38277,7 +38577,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -38289,6 +38588,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -38810,9 +39110,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -38827,6 +39129,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -38862,7 +39167,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -38874,6 +39178,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -39393,9 +39698,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -39410,6 +39717,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -39445,7 +39755,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -39457,6 +39766,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -39972,9 +40282,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -39989,6 +40301,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -40024,7 +40339,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -40036,6 +40350,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -40555,9 +40870,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -40572,6 +40889,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -40607,7 +40927,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -40619,6 +40938,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -41138,9 +41458,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -41155,6 +41477,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -41190,7 +41515,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -41202,6 +41526,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -41717,9 +42042,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -41734,6 +42061,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -41769,7 +42099,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -41781,6 +42110,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",
@@ -42254,9 +42584,11 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "implementation_backend": "Backend implementation",
                   "implementation_frontend": "Frontend implementation (no design)",
                   "implementation_frontend_design": "Frontend implementation with UI design",
@@ -42271,6 +42603,9 @@
                   "analysis": "Analysis"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "implementation_backend": [
                     "worker-backend-dev",
                     "worker-data-engineer",
@@ -42306,7 +42641,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "writing": [
@@ -42318,6 +42652,7 @@
                   "analysis": []
                 },
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "implementation_backend": "codex-acp",
                   "implementation_frontend": "codex-acp",
                   "implementation_frontend_design": "claude-agent-acp",

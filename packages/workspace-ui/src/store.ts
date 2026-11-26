@@ -5,9 +5,10 @@ import type { Attachment, AttachmentInput, AttachmentRef, CommandEnvelope, Comma
 import type { OwnerActionVerb } from "@cortex/workspace-domain";
 import { downloadAttachment } from "./attachments";
 import { COPY, REQUESTING } from "./copy";
-import { buildIndex, stableIndex, type WorkspaceIndex } from "./selectors";
+import { buildIndex, revisionHeld, stableIndex, type WorkspaceIndex } from "./selectors";
 import { share } from "./stable";
 import { createSends } from "./sends";
+import { slowRead } from "./first-view";
 import type { FirstViewPort, ScopedFacts } from "./port/real";
 
 /** Not a machine capability: whether this shell may save an attachment where the owner picks. Only a shell withholds it. */
@@ -36,8 +37,12 @@ export const MACHINE_WAIT_MS = 15_000;
 export const MODELS_WAIT_MS = 90_000, MODELS_POLL_MS = 1500;
 /** While an engine's model list has failed, the settings are read again after this, doubling up to the bound. */
 export const CATALOGUE_RETRY_MS = 10_000, CATALOGUE_RETRY_MAX_MS = 300_000;
-/** The shortest gap between refreshes a stream of machine events can cause. A hidden window needs them even less often. */
-export const PUSH_GAP_MS = 2000, HIDDEN_PUSH_GAP_MS = 15_000;
+/**
+ * The shortest gap between refreshes a stream of one project's machine events can cause: the first event reads at once,
+ * the rest of a burst arrive together in one read after the gap. Each project has its own gap, so one project's events
+ * never delay another's. A hidden window needs them even less often.
+ */
+export const PUSH_GAP_MS = 250, HIDDEN_PUSH_GAP_MS = 15_000;
 /** A screen showing the machine overview that opens again rereads it when the last read is older than this. */
 export const OVERVIEW_STALE_MS = 60_000;
 const sameConnection = (a: PortConnection, b: PortConnection) => a.state === b.state && a.reason === b.reason;
@@ -107,6 +112,8 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
   const [overviewLoaded, setOverviewLoaded] = createSignal(!!options.initial);
   const [overviewIssue, setOverviewIssue] = createSignal<string | null>(null);
   const [readIssue, setReadIssue] = createSignal<string | null>(null);
+  /** The latest coherent read failed (not only slow), shown or not: an owner's explicit re-check says so at once. */
+  const [lastReadFailed, setLastReadFailed] = createSignal(false);
   const [syncing, setSyncing] = createSignal(false);
   const [rejected, setRejected] = createSignal(0);
   const [receipt, setReceipt] = createSignal<CommandReceipt | null>(null);
@@ -146,15 +153,26 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
   /** The service's execution order of each sprint whose live graph is current. A stale or failed read orders nothing. */
   const orders = createMemo<ReadonlyMap<string, SprintOrder>>(() => new Map([...graphs()].flatMap(([id, g]) => g.status === "ready" && g.graph ? [[id, g.graph.order] as const] : [])),
     new Map(), { equals: (a, b) => a.size === b.size && [...a].every(([id, o]) => b.get(id) === o) });
-  const index = createMemo<WorkspaceIndex>(prev => stableIndex(prev, buildIndex(state(), now, orders())));
+  /** The drafts a sprint revision still holds back, from every sprint graph read (a failed reread keeps the last graph's). */
+  const revisionHolds = createMemo<ReadonlySet<string>>(() => new Set([...graphs().values()].flatMap(g => revisionHeld(g.graph))),
+    new Set(), { equals: (a, b) => a.size === b.size && [...a].every(id => b.has(id)) });
+  const index = createMemo<WorkspaceIndex>(prev => stableIndex(prev, buildIndex(state(), now, orders(), revisionHolds())));
   // The projects whose tasks a confirmed read delivered in this run. A cached first frame is not one, and neither is the empty
-  // stand-in (version zero) of a project whose Cortex is away or not activated: neither says what the project holds.
+  // stand-in (`standIn`) of a project whose Cortex is away or not activated: neither says what the project holds.
   const [readProjects, setReadProjects] = createSignal<ReadonlySet<string>>(new Set(options.initial?.state.projects.map(p => p.id) ?? []));
   const confirmRead = (update: ProjectionUpdate) => {
-    const ids = update.scope === "workspace" ? update.state.projects.map(p => p.id) : update.version === "0" ? [] : [update.slice.project.id];
+    const ids = update.scope === "workspace" ? update.state.projects.map(p => p.id) : update.standIn ? [] : [update.slice.project.id];
     if (ids.some(id => !readProjects().has(id))) setReadProjects(held => new Set([...held, ...ids]));
   };
 
+  /**
+   * One update applied on its own: one that cannot be projected (a malformed record, say) is left out and logged, and every
+   * other update, and every later read, still applies. A throw here once stopped the queued reads after a coherent read, and
+   * the sidebar, header and menus stayed as they were for the rest of the session.
+   */
+  const guarded = <T,>(apply: () => T, otherwise: T): T => {
+    try { return apply(); } catch (error) { console.error("Workspace: an update could not be applied", error); return otherwise; }
+  };
   const install = (update: ProjectionUpdate, coherent = false) => {
     if (update.scope === "project" && registered && !registered.has(update.slice.project.id)) { setRejected(n => n + 1); return false; }
     const key = projectionKey(update), have = versions.get(key);
@@ -189,6 +207,13 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
   // A port that numbers its facts reads (`readOrder`, in the order they began) lets a read that began earlier never replace
   // facts from one that began later, however their replies cross.
   const factsOrder = new Map<string, number>();
+  /**
+   * Per project, the tasks that were already on the board when its last facts read was installed: for those, a missing saved
+   * record is an answer (the task has none). A task that appeared after it (just created) is not covered until the next one.
+   * The signal moves on every install, so a screen waiting for that read hears of it even when nothing else changed.
+   */
+  const factsCovered = new Map<string, ReadonlySet<string>>();
+  const [factsInstalls, setFactsInstalls] = createSignal(0);
   const installFacts = (update: ProjectFacts) => {
     if (registered && !registered.has(update.projectId)) return;
     const order = update.readOrder;
@@ -212,7 +237,12 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
       const confirmed = new Map<string, string | null>([...kept, ...scope.map(taskId => [taskId, scoped.workerExecutions?.[taskId] ?? executionOf(taskId)] as const)]);
       setFactsScoped(all => new Map(all).set(update.projectId, confirmed));
     }
-    const held = withSources(next); facts.set(update.projectId, held); setProjected(current => applyFacts(current, held));
+    const held = withSources(next); facts.set(update.projectId, held);
+    setProjected(current => {
+      factsCovered.set(update.projectId, new Set(current.tasks.flatMap(t => t.projectId === update.projectId ? [t.id] : [])));
+      return applyFacts(current, held);
+    });
+    setFactsInstalls(n => n + 1);
   };
   /** Per project, the tasks a facts read confirmed the workers of, and the execution each was read for. */
   const [factsScoped, setFactsScoped] = createSignal<ReadonlyMap<string, ReadonlyMap<string, string | null>>>(new Map());
@@ -296,9 +326,10 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
       clearTimeout(machineTimer);
     }).catch(error => {
       if (!active) return;
-      setMachineIssue(reasonOf(error));
+      // A read that was only slow is no issue: what the machine last said stays, and it is read again.
+      if (!slowRead(error)) setMachineIssue(reasonOf(error));
       // Busy or a lost read is worth the wait; a refusal is an answer: open the interface now and say so, still retrying.
-      if (!transientRead(error)) { clearTimeout(machineTimer); setMachineSettled(true); }
+      if (!transientRead(error) && !slowRead(error)) { clearTimeout(machineTimer); setMachineSettled(true); }
       // Nothing else would ask again soon: the composer must not stay without its models until some later refresh.
       clearTimeout(machineRetry);
       machineRetry = setTimeout(() => readMachine(), RETRY_MS);
@@ -318,10 +349,17 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
     if (held) installFacts(held);
   });
   let actionEpoch = 0, fullReadQueued = false;
+  /** A discarded read is read again with its own scope: one project's read never turns into a reread of every project. */
   const requeueRead = (projectId?: string) => {
     queuedReads.add(projectId);
     // The port may already have consumed an event's invalidation set.
     if (!projectId) fullReadQueued = true;
+  };
+  /** The project an owner action concerns is read first after the read under way, before other queued reads. */
+  const queueFirst = (projectId: string) => {
+    const rest = [...queuedReads].filter(id => id !== projectId);
+    queuedReads.clear(); queuedReads.add(projectId);
+    for (const id of rest) queuedReads.add(id);
   };
   // The confirmed state is settled once the coherent read ended and what the port answers late of it has arrived too.
   let settling = 0;
@@ -336,27 +374,27 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
     });
   };
   let machineReading: Promise<void> | undefined;
-  const refresh = (projectId?: string): Promise<void> => {
-    if (refreshing) { queuedReads.add(projectId); return refreshing; }
+  /** `first`: an owner action's project, read before anything else already queued. */
+  const refresh = (projectId?: string, first = false): Promise<void> => {
+    if (refreshing) { if (first && projectId) queueFirst(projectId); else queuedReads.add(projectId); return refreshing; }
     const full = !projectId && fullReadQueued;
     if (!projectId) fullReadQueued = false;
+    coveredBy(projectId);
     refreshing = readCoherent(projectId, full).finally(() => {
       refreshing = undefined;
-      for (const update of queuedDeltas.values()) install(update);
+      for (const update of queuedDeltas.values()) guarded(() => install(update), false);
       queuedDeltas.clear();
       if (active) {
-        for (const update of queuedEnrichments.values()) installEnrichment(update);
-        for (const update of queuedFacts.values()) installFacts(update);
+        for (const update of queuedEnrichments.values()) guarded(() => installEnrichment(update), undefined);
+        for (const update of queuedFacts.values()) guarded(() => installFacts(update), undefined);
       }
       queuedEnrichments.clear(); queuedFacts.clear();
       if (queuedReads.size && active) {
-        // Always read again after a command reply, even when an older poll is in flight.
-        const next = queuedReads.has(undefined) ? undefined : queuedReads.values().next().value;
-        if (next === undefined) {
-          // Event-scoped reads may omit explicitly queued projects.
-          if (queuedReads.size > 1) fullReadQueued = true;
-          queuedReads.clear();
-        } else queuedReads.delete(next);
+        // Always read again after a command reply, even when an older poll is in flight. One project at a time, in the
+        // order queued (an owner action's project at the head), and a read of every project last: a project read never
+        // widens into a reread of the whole machine.
+        const next = [...queuedReads].find(id => id !== undefined);
+        queuedReads.delete(next);
         void refresh(next);
       } else settleSyncing();
     });
@@ -372,25 +410,39 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
       // them: the first screen needs both, and neither should wait for the other.
       if (!projectId) { if (!machineSettled() && machineTimer === undefined) machineTimer = setTimeout(() => { if (!modelsPending()) setMachineSettled(true); }, MACHINE_WAIT_MS); readMachine(true); }
       const parameters = projectId ? { projectId } : {};
-      const snapshots = await port.query("project.snapshot", full ? { full: true } : parameters);
-      // Facts own sprint membership, hidden planning/purged rows and owner decisions.
-      const product = await port.query("project.facts", parameters) ?? [];
+      // Facts own sprint membership, hidden planning/purged rows and owner decisions. Both are asked for at once, in this
+      // order: the port binds the facts read to the task read it follows (the same projects, and the board it prepares).
+      const [snapshots, read] = await Promise.all([port.query("project.snapshot", full ? { full: true } : parameters), port.query("project.facts", parameters)]);
+      const product = read ?? [];
       if (!active) return;
       if (epoch !== actionEpoch) { requeueRead(projectId); return; }
       batch(() => {
         setCapabilities(offered);
-        for (const update of snapshots) install(update, true);
-        for (const update of product) installFacts(update);
+        for (const update of snapshots) guarded(() => install(update, true), false);
+        for (const update of product) guarded(() => installFacts(update), undefined);
+        // A coherent board is installed without the facts held for its project (they own archived, purged and planning rows).
+        // When this read brought none for it (its facts read was still under way, or failed), the last confirmed facts stay
+        // over the new board: rows are never shown from the board alone, then hidden when the facts arrive a moment later.
+        const delivered = new Set(product.map(f => f.projectId));
+        const boards = snapshots.flatMap(u => u.scope === "workspace" ? u.state.projects.map(p => p.id) : [u.slice.project.id]);
+        for (const id of new Set(boards)) {
+          const held = facts.get(id);
+          if (held && !delivered.has(id)) guarded(() => setProjected(current => applyFacts(current, held)), undefined);
+        }
         setConnection({ state: "connected", reason: null, at: Date.now() });
         setReady(true);
         setReadIssue(null);
+        setLastReadFailed(false);
         transientFailures = 0;
         lastRead = Date.now();
       });
     } catch (error) {
       if (!active) return;
       if (epoch !== actionEpoch) { requeueRead(projectId); return; }
-      const quiet = ready() && transientRead(error) && ++transientFailures < 3;
+      // A slow read is never shown as a failure, however often it recurs; it is simply read again. Once a view is confirmed,
+      // a failed read keeps it silently: only a failure that persists over three reads in a row is shown.
+      const quiet = slowRead(error) || (ready() && ++transientFailures < 3);
+      if (!slowRead(error)) setLastReadFailed(true);
       if (!quiet) setReadIssue(reasonOf(error));
       // A refused product/repository read is not evidence that the service is offline.
       if (serviceAnswered) setConnection({ state: "connected", reason: null, at: Date.now() });
@@ -408,16 +460,25 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
 
   };
   let active = true, again: ReturnType<typeof setTimeout> | undefined, lastRead: number | null = null;
-  // Coalesces a burst of machine events: the first refreshes at once, the rest arrive together after the gap.
-  let pushAt = 0, pushTimer: ReturnType<typeof setTimeout> | undefined;
-  const pushRefresh = () => {
-    if (pushTimer !== undefined) return;
-    const gap = typeof document !== "undefined" && document.hidden ? HIDDEN_PUSH_GAP_MS : PUSH_GAP_MS;
-    const wait = pushAt + gap - Date.now();
-    if (wait <= 0) { pushAt = Date.now(); void refresh(); return; }
-    pushTimer = setTimeout(() => { pushTimer = undefined; pushAt = Date.now(); if (active) void refresh(); }, wait);
+  // Coalesces a burst of machine events, per project (the key "" is a refresh of everything): the first refreshes at once,
+  // the rest arrive together after the gap. While a read runs, an event only queues its project, with no timer: the read
+  // after it starts as soon as the one under way ends.
+  const pushes = new Map<string, { at: number; timer?: ReturnType<typeof setTimeout> }>();
+  /** A read that starts now covers every event that came before it: its project's (or, read whole, every) wait ends. */
+  const coveredBy = (projectId?: string) => {
+    for (const [key, push] of pushes) if (!projectId || key === projectId) { clearTimeout(push.timer); push.timer = undefined; }
   };
-  onCleanup(() => { active = false; clearTimeout(again); clearTimeout(pushTimer); clearTimeout(machineTimer); clearTimeout(machineRetry); clearTimeout(modelsTimer); clearTimeout(modelsPoll); clearTimeout(overviewRetry); });
+  const pushRefresh = (projectId?: string) => {
+    const push = pushes.get(projectId ?? "") ?? { at: -Infinity };
+    pushes.set(projectId ?? "", push);
+    if (push.timer !== undefined) return;
+    if (refreshing) { queuedReads.add(projectId); return; }
+    const gap = typeof document !== "undefined" && document.hidden ? HIDDEN_PUSH_GAP_MS : PUSH_GAP_MS;
+    const wait = push.at + gap - Date.now();
+    if (wait <= 0) { push.at = Date.now(); void refresh(projectId); return; }
+    push.timer = setTimeout(() => { push.timer = undefined; push.at = Date.now(); if (active) void refresh(projectId); }, wait);
+  };
+  onCleanup(() => { active = false; for (const push of pushes.values()) clearTimeout(push.timer); clearTimeout(machineTimer); clearTimeout(machineRetry); clearTimeout(modelsTimer); clearTimeout(modelsPoll); clearTimeout(overviewRetry); });
   const reload = () => { if (!ready()) setConnection({ state: "connecting", reason: null, at: null }); return refresh(); };
   const onUpdate = (update: PortUpdate) => {
     if (update.kind === "preview") {
@@ -484,13 +545,13 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
     }
     // The port's own machine poll carries the same settings read: what it says about the model lists is followed too.
     if (update.kind === "machine") { batch(() => { installMachine(update.facts); if (update.facts.catalogue) followCatalogue([update.facts]); }); return; }
-    if (update.kind === "refresh") { pushRefresh(); return; }
+    if (update.kind === "refresh") { pushRefresh(update.projectId); return; }
     const back = update.connection.state === "connected" && connection().state !== "connected";
     setConnection(update.connection);
     // What happened while it was away arrives as a fresh snapshot, never as a guess.
     if (back) void refresh();
   };
-  onCleanup(port.subscribe(onUpdate));
+  onCleanup(port.subscribe(update => guarded(() => onUpdate(update), undefined)));
   if (!options.initial) void reload();
 
   const withheld = new Set(options.withhold ?? []);
@@ -508,9 +569,26 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
     pendingTask: (type: "start_task" | "close_task" | "accept_result" | "archive_task", taskId: string) =>
       [...pendingRequests().values()].some(c => c.type === type && c.taskId === taskId),
     savedView: (project: Pick<WorkspaceState["projects"][number], "id" | "repository">) => savedProjects().get(project.id) === project.repository,
-    mode: port.mode, state, index, ready, readProjects, readIssue, machineLoaded, machineIssue, modelsPending, modelsIssue,
+    mode: port.mode, state, index, ready, readProjects, readIssue, lastReadFailed, machineLoaded, machineIssue, modelsPending, modelsIssue,
     /** The composer's lists are known: the machine answered and is not still fetching the models. Until then an empty list means "not yet". */
     optionsKnown: () => machineLoaded() && !modelsPending(),
+    /**
+     * The task's own route (its saved settings) has been read. A task's model, effort, access and language come only with its
+     * saved record, read with the project's facts; until then the task is not known to use the machine's defaults, and a
+     * screen shows a placeholder rather than those defaults. A task that appeared after the project's last facts read (just
+     * created) is known once a facts read installed while it was on the board has its record, or still has none.
+     */
+    /** Moves on every confirmed facts install: a screen holding its last confirmed mode releases it when this moves. */
+    factsInstalls,
+    taskRouteKnown: (taskId: string): boolean => {
+      if (port.mode !== "real") return true;
+      const task = state().tasks.find(t => t.id === taskId);
+      if (!task) return false;
+      // A project whose facts were never read (its machine reads no saved records) has nothing more to say: the machine's route.
+      const held = facts.get(task.projectId);
+      factsInstalls();
+      return !!task.settings.model || !held || !!held.overlays[taskId] || !!factsCovered.get(task.projectId)?.has(taskId);
+    },
     /** Storage, retention, worktrees, the version and GitHub CLI have arrived. Until then a screen that shows them says they are loading. */
     overviewLoaded, overviewIssue, wantOverview,
     /** The first screen's gate: the machine has answered and its settings are in, or waiting for them has run out. */
@@ -526,8 +604,8 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
       try {
         for (const update of await port.query("project.facts", { projectId, fresh: true, git })) if (active) installFacts(update);
         if (active) setReadIssue(current => current === issue ? null : current);
-      } catch {
-        if (active) setReadIssue(issue);
+      } catch (error) {
+        if (active && !slowRead(error)) setReadIssue(issue);
       }
     },
     /**
@@ -565,6 +643,8 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
     ownerActions: () => port.ownerActions ? port.ownerActions.list() : Promise.resolve(null),
     actOwner: (projectId: string, actionId: string, action: OwnerActionVerb) => port.ownerActions ? port.ownerActions.act(projectId, actionId, action) : Promise.reject(new Error(COPY.notOffered)),
     ownerToken: (projectId: string, actionId: string, token: string) => port.ownerActions ? port.ownerActions.token(projectId, actionId, token) : Promise.reject(new Error(COPY.notOffered)),
+    openSignIn: (actionId: string) => port.ownerActions?.openSignIn ? port.ownerActions.openSignIn(actionId) : Promise.reject(new Error(COPY.notOffered)),
+    canOpenSignIn: () => !!port.ownerActions?.openSignIn,
     /** A sprint's live graph as last read, or undefined before any screen asked for it. */
     liveGraph: (sprintId: string): LiveGraphState | undefined => graphs().get(sprintId),
     /** Reads the live graph when `key` (what the screen shows) differs from the last read's, or the last read failed. */
@@ -631,6 +711,8 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
     draftIntegrationText: (request: IntegrationTextRequest): Promise<IntegrationText | null> => port.draftIntegrationText?.(request).catch(() => null) ?? Promise.resolve(null),
     draftCheckoutCommit: (request: Parameters<NonNullable<WorkspacePort["draftCheckoutCommit"]>>[0]) => port.draftCheckoutCommit?.(request).catch(() => null) ?? Promise.resolve(null),
     draftPushSummary: (request: Parameters<NonNullable<WorkspacePort["draftPushSummary"]>>[0]) => port.draftPushSummary?.(request).catch(() => null) ?? Promise.resolve(null),
+    /** The task side chat, or undefined where this port has none. It changes nothing the store holds. */
+    sideChat: port.sideChat,
     /** Bytes of one picture, video or sound; a port without them shows the file as not viewable. */
     readMedia: (checkoutId: string, file: string): Promise<FileRead> => port.readMedia?.(checkoutId, file) ?? Promise.resolve({ text: null, reason: "Viewing this file is not available here." }),
     /** The project's own skills for a composer's `/` list; null when this port has no such read or it failed. */
@@ -642,7 +724,8 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
     },
     dispatch(command: WorkspaceCommand, opts: { quiet?: boolean } = {}): Promise<CommandReceipt> {
       const settle = (result: CommandReceipt) => {
-        if (command.type === "accept_result") setAcceptanceIssue(result.ok ? null : { taskId: command.taskId, message: result.message });
+        // A result that moved on is followed by a fresh read at once: the screen shows the new version's Accept, not an error strip.
+        if (command.type === "accept_result") setAcceptanceIssue(result.ok || result.outcome === "stale_result" ? null : { taskId: command.taskId, message: result.message });
         if (!opts.quiet) setReceipt(result); return result;
       };
       // However it was pressed, one action runs once: a repeat joins the one already under way.
@@ -666,7 +749,7 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
       const work = port.command(envelope).catch((): CommandReceipt => ({ requestId: id, ok: false, outcome: "unknown_outcome", message: UNKNOWN_OUTCOME })).then(result => {
         // A title job only starts: it changes nothing a read could confirm now. The task shows its description label until
         // the job ends, and then the port rereads that project (an ordinary refresh, never "Updating confirmed state").
-        const background = command.type === "generate_title";
+        const background = command.type === "generate_title" || command.type === "generate_sprint_title";
         if (!background) actionEpoch++;
         if (result.ok) setProjected(state => ({ ...state,
           tasks: command.type === "rename_task" ? state.tasks.map(t => t.id === command.taskId ? {...t,title:command.title} : t) : state.tasks,
@@ -698,7 +781,9 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
             || ("sprintId" in command && state().sprints.find(s => s.id === command.sprintId)?.projectId)
             || ("checkoutId" in command && state().repos.find(r => r.checkouts.some(c => c.id === command.checkoutId))?.projectId);
           const registryChange = ["add_project","activate_project","rename_project","remove_project"].includes(command.type);
-          void refresh(registryChange ? undefined : projectId || undefined);
+          void refresh(registryChange ? undefined : projectId || undefined, true);
+          // A refusal that says the displayed state is stale is followed at once by a fresh read of the project's facts.
+          if (!result.ok && projectId && STALE_STATE_REFUSALS.has(result.outcome)) void self.refreshProjectFacts(projectId, false);
         }
         sends.settle(id, result);
         return settle(result);
@@ -713,4 +798,6 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
   };
   return self;
 }
+/** Receipt outcomes that mean the owner acted on a state that has moved on. */
+const STALE_STATE_REFUSALS = new Set(["task_not_paused", "task_paused", "stale_version", "stale_epoch", "task_not_resumable", "pause_settling", "stale_result"]);
 export type WorkspaceStore = ReturnType<typeof createWorkspaceStore>;

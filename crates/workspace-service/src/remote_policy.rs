@@ -14,7 +14,8 @@
 //! the owner's `sudo` password for an open prompt (`askpass.answer`), and only while the
 //! owner allows it; the same setting gates a sign-in token pasted for an owner action
 //! (`owner_actions.act` with `token`). `remote.sudo.set`, which changes that setting, is
-//! owner-only like every `remote.*` method.
+//! owner-only like every `remote.*` method. The one `notifications.*` method a phone may call is its
+//! read-only owner-moment subscription (`notifications.subscribe`, no parameters).
 use serde_json::Value;
 
 /// Service methods a remote device may call. `machine.call` is decided per operation by
@@ -42,6 +43,13 @@ const METHODS: &[&str] = &[
     // Open owner actions (a missing login, sudo) of the machine's tasks.
     "owner_actions.list",
 ];
+
+/// The phone's own notifications: the owner moments of every project (kind, fingerprint,
+/// title and target), read-only and only in this exact shape. The desktop's
+/// `notifications.report`, `.opened` and `.take` stay with the windows at the machine.
+fn moments_subscription(method: &str, params: &Value) -> bool {
+    method == "notifications.subscribe" && params.as_object().is_some_and(|m| m.is_empty())
+}
 
 /// `machine.call` operations a remote device may call whatever their parameters.
 const MACHINE_OPERATIONS: &[&str] = &[
@@ -87,6 +95,9 @@ pub fn allowed(method: &str, params: &Value) -> bool {
     }
     if method == "owner_actions.act" {
         return owner_action_allowed(params, crate::native_askpass::phone_allowed());
+    }
+    if method.starts_with("notifications.") {
+        return moments_subscription(method, params);
     }
     METHODS.contains(&method)
 }
@@ -157,6 +168,11 @@ pub fn machine_operation_allowed(op: &str, params: &Value) -> bool {
         "product.task" => match action {
             Some("draft_checkout_commit" | "draft_push_summary") => false,
             Some("short_text_poll") => params["taskId"].is_string(),
+            // The owner's side chat about one task is read-only and never reaches the task, so
+            // the phone may ask and read it like the task drafts above; always for one named task.
+            Some("side_question" | "side_chat_poll" | "side_chat_history" | "side_chat_clear") => {
+                params["taskId"].is_string()
+            }
             _ => true,
         },
         "product.sprint" if crate::machine::sprint_live::handles(params) => false,
@@ -249,6 +265,14 @@ mod tests {
         }
         assert!(machine("product.task", json!({"action":"draft_integration_text","taskId":"task"})));
         assert!(machine("product.task", json!({"action":"short_text_poll","taskId":"task"})));
+    }
+
+    #[test]
+    fn the_side_chat_is_offered_to_the_phone_for_a_named_task_only() {
+        for action in ["side_question", "side_chat_poll", "side_chat_history", "side_chat_clear"] {
+            assert!(machine("product.task", json!({"action":action,"taskId":"task"})), "{action}");
+            assert!(!machine("product.task", json!({"action":action})), "{action}");
+        }
     }
 
     #[test]
@@ -347,6 +371,25 @@ mod tests {
             "owner_actions",
             "owner_actions.other",
             "owner_actions.list.all",
+        ] {
+            assert!(!allowed(method, &json!({})), "{method}");
+        }
+    }
+
+    /// Exactly one notification method crosses the tunnel: the phone's read-only moments
+    /// subscription, with no parameters. A desktop window's report, claim and take do not.
+    #[test]
+    fn a_phone_subscribes_to_owner_moments_only() {
+        assert!(allowed("notifications.subscribe", &json!({})));
+        for params in [json!({"projectId":"p"}), json!(null), json!([]), json!("x")] {
+            assert!(!allowed("notifications.subscribe", &params), "{params}");
+        }
+        for method in [
+            "notifications.report",
+            "notifications.opened",
+            "notifications.take",
+            "notifications",
+            "notifications.subscribe.all",
         ] {
             assert!(!allowed(method, &json!({})), "{method}");
         }

@@ -169,6 +169,166 @@ fn authored_disclosure(text: &str) -> bool {
     }
     false
 }
+/// The names a `not_verified` item may carry: a recorded check of the task (any
+/// revision since it was last reopened) that did not pass, or a limit the runtime
+/// itself recorded. Anything else (a deliverable that was not made, a step that was
+/// skipped) is not a check gap: it is goal work, refused `not_verified_not_a_check`.
+fn check_names(db: &Connection, task: &str) -> CoreResult<BTreeSet<String>> {
+    let mut names: BTreeSet<String> = gaps(db, task)?.into_keys().collect();
+    let rows = db
+        .prepare(
+            "SELECT c.value FROM runtime_nodes n, json_each(n.result_json,'$.checks') c
+             WHERE n.task_id=?1 AND n.result_json IS NOT NULL AND json_valid(n.result_json)
+             AND n.revision>=coalesce((SELECT json_extract(payload_json,'$.revision')+1 FROM runtime_events
+               WHERE task_id=?1 AND type='TASK_REOPENED' ORDER BY id DESC LIMIT 1),0)",
+        )?
+        .query_map([task], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for raw in rows {
+        let check: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        if check["outcome"] != "passed" {
+            if let Some(name) = check["name"].as_str() {
+                names.insert(normalized(name));
+            }
+        }
+    }
+    let limits = db
+        .prepare(
+            "SELECT payload_json FROM runtime_events WHERE task_id=?1 AND type IN
+               ('LOOP_BROKEN','REVIEW_LIMIT_DISCLOSED','REVIEW_CHANGE_SET_LIMITED','PRIOR_WORKER_CHECK_DISCLOSED')
+             AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='TASK_REOPENED'),0)",
+        )?
+        .query_map([task], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for raw in limits {
+        let event: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        for limit in event["limits"].as_array().into_iter().flatten() {
+            if let Some(name) = limit["name"].as_str().or(limit.as_str()) {
+                names.insert(normalized(name));
+            }
+        }
+    }
+    // The runtime's own verification commands, named by their argv.
+    let failed = db
+        .prepare(
+            "SELECT c.value FROM runtime_events e, json_each(e.payload_json,'$.checks') c
+             WHERE e.task_id=? AND e.type IN ('VERIFICATION_FAILED','VERIFICATION_PASSED')",
+        )?
+        .query_map([task], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for raw in failed {
+        let check: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        if let Some(argv) = check["argv"].as_array() {
+            let words: Vec<&str> = argv.iter().filter_map(Value::as_str).collect();
+            names.insert(normalized(&words.join(" ")));
+            names.insert(normalized(&check["argv"].to_string()));
+        }
+    }
+    Ok(names)
+}
+/// How a final result reports each goal outcome. `allow_not_done` is the owner's
+/// decision to close the task as is (an answer to a question asked after
+/// verification or after a runtime stop): only then may an outcome stay not done,
+/// and the returned list keeps it for the disclosure.
+///
+/// - Plan outcomes in force: every id exactly once, no unknown id.
+/// - A plan accepted before plans named outcomes (legacy): the coordinator names
+///   the goal's outcomes here instead; at least one.
+/// - No plan (a direct informational answer): optional.
+pub fn final_outcomes(
+    db: &Connection,
+    task: &str,
+    submitted: &Value,
+    allow_not_done: bool,
+) -> CoreResult<Vec<Value>> {
+    let revision: i64 = db.query_row(
+        "SELECT revision FROM runtime_tasks WHERE task_id=?",
+        [task],
+        |r| r.get(0),
+    )?;
+    let planned = plan::task_outcomes(db, task)?;
+    let list = match submitted {
+        Value::Null => Vec::new(),
+        Value::Array(list) => list.clone(),
+        _ => return refuse("invalid_final_outcomes"),
+    };
+    if list.is_empty() && (planned.is_some() || revision > 0) {
+        return refuse("final_outcomes_required");
+    }
+    let mut seen = BTreeSet::new();
+    for item in &list {
+        let id = plan::outcome_id(&item["id"]).ok_or(CoreError::Refused("invalid_final_outcomes"))?;
+        if !seen.insert(id.to_owned()) {
+            return refuse("invalid_final_outcomes");
+        }
+        match item["status"].as_str() {
+            Some("done") => {
+                if item["evidence"]
+                    .as_str()
+                    .is_none_or(|e| e.trim().is_empty())
+                {
+                    return refuse("final_outcome_evidence_required");
+                }
+            }
+            Some("not_done") => {}
+            _ => return refuse("invalid_final_outcomes"),
+        }
+    }
+    if let Some(planned) = &planned {
+        let ids: BTreeSet<String> = planned
+            .iter()
+            .filter_map(|o| o["id"].as_str().map(str::to_owned))
+            .collect();
+        if seen.iter().any(|id| !ids.contains(id)) {
+            return refuse("final_outcome_unknown");
+        }
+        if ids.iter().any(|id| !seen.contains(id)) {
+            return refuse("final_outcomes_required");
+        }
+    }
+    if !allow_not_done && list.iter().any(|o| o["status"] != "done") {
+        return refuse("completion_goal_not_met");
+    }
+    Ok(list)
+}
+/// The plan outcomes a final result left out or did not do (for refusals).
+pub fn unmet_outcomes(db: &Connection, task: &str, submitted: &Value) -> CoreResult<Vec<Value>> {
+    let planned = plan::task_outcomes(db, task)?.unwrap_or_default();
+    let list = submitted.as_array().cloned().unwrap_or_default();
+    let mut out: Vec<Value> = planned
+        .iter()
+        .filter(|o| {
+            !list
+                .iter()
+                .any(|s| s["id"] == o["id"] && s["status"] == "done")
+        })
+        .map(|o| json!({"id":o["id"],"statement":o["statement"]}))
+        .collect();
+    for s in &list {
+        if s["status"] != "done" && !out.iter().any(|o| o["id"] == s["id"]) {
+            out.push(json!({"id":s["id"]}));
+        }
+    }
+    Ok(out)
+}
+/// Whether the recorded final result of `kind` (`SYNTHESIS_SUBMITTED`,
+/// `SYNTHESIS_RUNTIME_COMPOSED` or `ANSWER_SUBMITTED`) reports every goal outcome
+/// done, or not done only by the owner's close-as-is decision. A plan and final
+/// result both recorded before outcomes existed (legacy) pass unchanged.
+pub fn goal_met(db: &Connection, task: &str, payload: &Value) -> CoreResult<bool> {
+    let planned = plan::task_outcomes(db, task)?;
+    let Some(list) = payload["outcomes"].as_array() else {
+        return Ok(planned.is_none());
+    };
+    let owner = payload["owner_closed_as_is"] == true;
+    if list.iter().any(|o| o["status"] != "done") && !owner {
+        return Ok(false);
+    }
+    Ok(planned.unwrap_or_default().iter().all(|o| {
+        list.iter()
+            .any(|s| s["id"] == o["id"] && (s["status"] == "done" || owner))
+    }))
+}
 pub fn disclosed(db: &Connection, task: &str, text: &str, entries: &Value) -> CoreResult<String> {
     if text.trim().is_empty() {
         return refuse("synthesis_text_required");
@@ -208,6 +368,12 @@ pub fn disclosed(db: &Connection, task: &str, text: &str, entries: &Value) -> Co
     if gaps(db, task)?.keys().any(|s| !listed.contains(s)) {
         return refuse("synthesis_gaps_undisclosed");
     }
+    if !listed.is_empty() {
+        let known = check_names(db, task)?;
+        if listed.iter().any(|s| !known.contains(s)) {
+            return refuse("not_verified_not_a_check");
+        }
+    }
     if entries.is_empty() {
         return Ok(text.into());
     }
@@ -241,6 +407,9 @@ pub fn submit_synthesis_tx(db: &Transaction<'_>, task: &str, args: &Value) -> Co
             .ok_or(CoreError::Refused("synthesis_text_required"))?,
         &args["not_verified"],
     )?;
+    // A final result only for a met goal: an outcome not done is continued
+    // (replan_request) or put to the owner (user_question_request), never synthesized.
+    let outcomes = final_outcomes(db, task, &args["outcomes"], false)?;
     let previous: Option<String> = db.query_row(
         "SELECT synthesis FROM runtime_tasks WHERE task_id=?",
         [task],
@@ -259,7 +428,7 @@ pub fn submit_synthesis_tx(db: &Transaction<'_>, task: &str, args: &Value) -> Co
             db,
             task,
             "SYNTHESIS_SUBMITTED",
-            json!({"text":text,"not_verified":args["not_verified"]}),
+            json!({"text":text,"not_verified":args["not_verified"],"outcomes":outcomes}),
         )?;
     }
     Ok(json!({"recorded":true,"state":"RECONCILING"}))
@@ -754,8 +923,69 @@ pub fn review_packet_tx(
         .collect();
     Ok(
         json!({"changed_files":changed,"change_boundary":boundary,"predecessor_reports":reports,"read_scope":scope,
-        "read_scope_covers_change":outside.is_empty(),"outside_read_scope":outside,"review_binding":binding}),
+        "read_scope_covers_change":outside.is_empty(),"outside_read_scope":outside,"review_binding":binding,
+        "goal":review_goal(db, task)?}),
     )
+}
+/// Most characters of the goal and of each owner message in a review packet.
+const GOAL_CHARS: usize = 12_000;
+const OWNER_MESSAGE_CHARS: usize = 2_000;
+const OWNER_MESSAGES: usize = 12;
+/// What the review judges the work against: the task's original goal verbatim, the
+/// owner's messages and answers since (newest last), and the plan's goal outcomes.
+/// An approval of the stage that leaves an outcome undelivered does not reach
+/// verification (`review::advance_tx`).
+fn review_goal(db: &Connection, task: &str) -> CoreResult<Value> {
+    let goal: String = db.query_row(
+        "SELECT goal FROM runtime_tasks WHERE task_id=?",
+        [task],
+        |r| r.get(0),
+    )?;
+    let clip = |s: &str, n: usize| -> Value {
+        let count = s.chars().count();
+        if count <= n {
+            json!({"text":s})
+        } else {
+            json!({"text":s.chars().take(n).collect::<String>(),"truncated":true,"characters":count,
+                "source":"read_capsule constraints"})
+        }
+    };
+    let mut messages = db
+        .prepare(
+            "SELECT * FROM (SELECT id,'steering',json_extract(payload_json,'$.text'),NULL FROM runtime_events
+               WHERE task_id=?1 AND type='USER_STEERING' AND json_type(payload_json,'$.text')='text'
+             UNION ALL SELECT e.id,'answer',q.answer_text,q.text FROM runtime_events e
+               JOIN pending_questions q ON q.task_id=e.task_id AND q.id=json_extract(e.payload_json,'$.question_id')
+               WHERE e.task_id=?1 AND e.type='USER_ANSWER_RECEIVED' AND q.answer_text IS NOT NULL)
+             ORDER BY 1 DESC LIMIT ?2",
+        )?
+        .query_map((task, OWNER_MESSAGES as i64), |r| {
+            Ok((
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    messages.reverse();
+    let messages: Vec<Value> = messages
+        .into_iter()
+        .filter_map(|(kind, text, question)| {
+            let mut m = clip(&text?, OWNER_MESSAGE_CHARS);
+            m["kind"] = json!(kind);
+            if let Some(q) = question {
+                m["question"] = json!(q.chars().take(500).collect::<String>());
+            }
+            Some(m)
+        })
+        .collect();
+    let mut out = json!({"original":clip(&goal, GOAL_CHARS),"owner_messages":messages,
+        "outcomes":plan::task_outcomes(db, task)?,
+        "guidance":"Judge the work against the original goal, the owner's later messages and every plan outcome, not only against the objectives of this plan's tasks. A stage the plan narrowed or deferred is not the goal: report each outcome's delivery in your result. An approval that leaves an outcome undelivered sends the task back to its coordinator instead of to verification."});
+    if out["outcomes"].is_null() {
+        out["outcomes_note"] = json!("This plan was accepted before plans named goal outcomes; judge against the original goal and the owner's messages.");
+    }
+    Ok(out)
 }
 /// Characters that are control or invisible formatting (Unicode Cc/Cf) but not
 /// ordinary whitespace.
@@ -830,6 +1060,35 @@ pub fn compose_runtime_synthesis_tx(
     {
         return Ok(None);
     }
+    // The goal outcomes are done only on the approving reviewer's goal coverage;
+    // anything less keeps the coordinator.
+    let mut outcomes = Vec::new();
+    if let Some(planned) = plan::task_outcomes(db, task)? {
+        let review: Option<String> = db
+            .query_row(
+                "SELECT n.result_json FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+                 WHERE n.task_id=? AND n.revision=t.revision AND n.stage='review' AND n.status='completed'
+                 ORDER BY n.rowid DESC LIMIT 1",
+                [task],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let review: Value = review
+            .and_then(|r| serde_json::from_str(&r).ok())
+            .unwrap_or(Value::Null);
+        for outcome in planned {
+            let delivered = review["goal_coverage"].as_array().is_some_and(|c| {
+                c.iter()
+                    .any(|g| g["id"] == outcome["id"] && g["delivered"] == true)
+            });
+            if review["verdict"] != "APPROVE" || !delivered {
+                return Ok(None);
+            }
+            outcomes.push(json!({"id":outcome["id"],"status":"done",
+                "evidence":review["report_ref"].as_str().unwrap_or("approving review")}));
+        }
+    }
     let rows = db
         .prepare(
             "SELECT n.result_json FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
@@ -902,24 +1161,33 @@ pub fn compose_runtime_synthesis_tx(
         db,
         task,
         "SYNTHESIS_RUNTIME_COMPOSED",
-        json!({"text":text,"source":"retained-worker-summaries","summaries":summaries.len(),"changed_files":changed.len()}),
+        json!({"text":text,"source":"retained-worker-summaries","summaries":summaries.len(),"changed_files":changed.len(),
+            "outcomes":if outcomes.is_empty() { Value::Null } else { json!(outcomes) }}),
     )?;
     Ok(Some(text))
 }
 pub fn direct_answer_allowed(db: &Connection, task: &str) -> CoreResult<bool> {
+    Ok(answer_grounds(db, task)?.is_some())
+}
+/// Why a direct answer is allowed: `informational` (no plan yet), `owner_closed`
+/// (the owner answered a question asked after verification or a runtime stop
+/// question, deciding how the task ends) or `steered` (an owner message after a
+/// passed verification returned the work to planning). None: not allowed.
+pub fn answer_grounds(db: &Connection, task: &str) -> CoreResult<Option<&'static str>> {
+    let allowed = |v: bool, why: &'static str| Ok(v.then_some(why));
     if super::automatic::enabled(db, task)? || domain::owner_rework_needs_plan(db, task)? {
-        return Ok(false);
+        return Ok(None);
     }
     let (revision,informational):(i64,bool)=db.query_row("SELECT revision,plan_json IS NULL
         AND NOT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=?)
         AND NOT EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator')
         FROM runtime_tasks WHERE task_id=?",(task,task,task),|r|Ok((r.get(0)?,r.get(1)?)))?;
     if revision == 0 && informational {
-        return Ok(true);
+        return Ok(Some("informational"));
     }
     let active:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=? AND status IN ('pending','running'))",[task],|r|r.get(0))?;
     if active {
-        return Ok(false);
+        return Ok(None);
     }
     let boundary:i64=db.query_row("SELECT coalesce(max(id),0) FROM runtime_events WHERE task_id=?
         AND type IN ('PLAN_ACCEPTED','ASSIGNMENT_CREATED','REPLAN_REQUEST_ACCEPTED','VERIFICATION_REVISED')",[task],|r|r.get(0))?;
@@ -946,7 +1214,10 @@ pub fn direct_answer_allowed(db: &Connection, task: &str) -> CoreResult<bool> {
         WHERE v.task_id=? AND v.type='VERIFICATION_PASSED' AND v.id>?
         AND json_extract(v.payload_json,'$.revision')=? AND NOT EXISTS(SELECT 1 FROM runtime_events f
             WHERE f.task_id=v.task_id AND f.id>v.id AND f.type='VERIFICATION_FAILED'))",(task,boundary,revision),|r|r.get(0))?;
-    Ok(release || steered || stopped_release)
+    if release || stopped_release {
+        return allowed(true, "owner_closed");
+    }
+    allowed(steered, "steered")
 }
 pub fn submit_answer_tx(
     db: &Transaction<'_>,
@@ -954,13 +1225,34 @@ pub fn submit_answer_tx(
     actor: &str,
     key: &str,
     args: &Value,
+    evidence: Option<&super::completion::EvidenceSnapshot>,
 ) -> CoreResult<Value> {
     request_tx(db, task, actor, key, "answer_submit", args, || {
-        if domain::task_tx(db, task)?.0 != TaskState::Planning || !direct_answer_allowed(db, task)?
-        {
+        let (state, revision) = domain::task_tx(db, task)?;
+        let grounds = answer_grounds(db, task)?;
+        if state != TaskState::Planning || grounds.is_none() {
             return refuse("direct_answer_not_allowed");
         }
-        let text = disclosed(
+        if revision > 0 {
+            match super::completion::review_binding_tx(db, task) {
+                Ok((_, reviewed)) => {
+                    let evidence = evidence.ok_or(CoreError::Refused("project_revision_unavailable"))?;
+                    if super::completion::current_binding_digest(db, task, evidence)? != reviewed {
+                        return refuse("answer_project_revision_changed");
+                    }
+                }
+                // An owner-released answer may explain work stopped before approval.
+                // Its existing completion gate retains the answer and records the gap.
+                Err(CoreError::Refused("completion_review_missing")) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        // Planned work: the answer reports every goal outcome. Only the owner's own
+        // decision about how the task ends lets an outcome stay not done, and the
+        // runtime then discloses it below.
+        let owner_closed = grounds == Some("owner_closed");
+        let outcomes = final_outcomes(db, task, &args["outcomes"], owner_closed)?;
+        let mut text = disclosed(
             db,
             task,
             args["text"]
@@ -968,6 +1260,34 @@ pub fn submit_answer_tx(
                 .ok_or(CoreError::Refused("synthesis_text_required"))?,
             &args["not_verified"],
         )?;
+        let unmet: Vec<String> = outcomes
+            .iter()
+            .filter(|o| o["status"] != "done")
+            .map(|o| {
+                plan::task_outcomes(db, task)
+                    .ok()
+                    .flatten()
+                    .and_then(|p| p.into_iter().find(|p| p["id"] == o["id"]))
+                    .and_then(|p| p["statement"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| o["id"].as_str().unwrap_or("").to_owned())
+            })
+            .collect();
+        if !unmet.is_empty() {
+            let heading = if domain::task_language_tx(db, task)? == "ru" {
+                "Цель достигнута не полностью (решение владельца)"
+            } else {
+                "Goal not fully met (owner's decision)"
+            };
+            text = format!(
+                "{}\n\n## {heading}\n\n{}",
+                text.trim_end(),
+                unmet
+                    .iter()
+                    .map(|s| format!("- {s}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
         db.execute(
             "UPDATE runtime_tasks SET synthesis=? WHERE task_id=?",
             (&text, task),
@@ -976,7 +1296,9 @@ pub fn submit_answer_tx(
             db,
             task,
             "ANSWER_SUBMITTED",
-            json!({"text":text,"not_verified":args["not_verified"]}),
+            json!({"text":text,"not_verified":args["not_verified"],
+                "outcomes":if outcomes.is_empty() { Value::Null } else { json!(outcomes) },
+                "owner_closed_as_is":owner_closed && !unmet.is_empty()}),
         )?;
         domain::state_tx(db, task, TaskState::AnswerReady, None)?;
         Ok(json!({"recorded":true,"state":"ANSWER_READY"}))

@@ -185,14 +185,75 @@ pub(super) fn save_with(
     params: &Value,
     persist: impl FnOnce(&Path, &[u8]) -> Result<()>,
 ) -> Result<Value> {
+    save_target(config, params, None, persist)
+}
+/// Project-scoped registry: the same entries, validation and secret handling as
+/// the machine registry, in the owner's private per-project file. `value` is
+/// `{servers: [...], overrides: {machine server name: on or off for this project}}`.
+pub(crate) fn save_project(root: &Path, config: &crate::Config, params: &Value) -> Result<Value> {
+    save_target(config, params, Some(root), replace)
+}
+/// The private file holding one project's registry.
+pub(in crate::machine) fn project_path(
+    root: &Path,
+    config: &crate::Config,
+) -> Result<std::path::PathBuf> {
+    let owner = reader::owner_folder(config)?;
+    crate::native_mcp::project_registry_path(&owner, root).map_err(|e| {
+        refuse(
+            e.code(),
+            "The project's MCP registry location is unavailable.",
+        )
+    })
+}
+fn override_map(v: &Value, errors: &mut Errors) -> std::collections::BTreeMap<String, bool> {
+    let mut map = std::collections::BTreeMap::new();
+    if !truth(v) {
+        return map;
+    }
+    let Some(entries) = v.as_object() else {
+        errors.add("overrides", "must be an object of server name to true or false");
+        return map;
+    };
+    for (name, on) in entries {
+        let valid = name != "cortex"
+            && crate::config_read_model::matches(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", name);
+        match on.as_bool() {
+            Some(on) if valid => {
+                map.insert(name.clone(), on);
+            }
+            _ => errors.add(
+                format!("overrides.{name}"),
+                "must name a machine server other than 'cortex' and be true or false",
+            ),
+        }
+    }
+    map
+}
+fn save_target(
+    config: &crate::Config,
+    params: &Value,
+    project: Option<&Path>,
+    persist: impl FnOnce(&Path, &[u8]) -> Result<()>,
+) -> Result<Value> {
     if !params.is_object() {
         return Err(object_error());
     }
     let folder = reader::owner_folder(config)?;
-    let path = folder.join("mcp-servers.json");
+    let path = match project {
+        Some(root) => project_path(root, config)?,
+        None => folder.join("mcp-servers.json"),
+    };
     let before = reader::read_plain(&path, true)?;
     let current = view(&path, before.as_deref())?;
-    let wanted = array(&params["value"])?;
+    let wanted = array(if project.is_some() {
+        &params["value"]["servers"]
+    } else {
+        &params["value"]
+    })?;
+    let mut override_errors = Errors::default();
+    let overrides = project.map(|_| override_map(&params["value"]["overrides"], &mut override_errors));
+    override_errors.finish()?;
     // Match the machine editor's implicit removes, then ordered upserts.
     let mut names = BTreeSet::new();
     for server in wanted {
@@ -218,7 +279,10 @@ pub(super) fn save_with(
         .filter(|v| !names.contains(&v["name"].to_string()))
         .map(|v| v["name"].as_str().unwrap().to_owned())
         .collect();
-    if removed.is_empty() && wanted.is_empty() {
+    if removed.is_empty()
+        && wanted.is_empty()
+        && (project.is_none() || (before.is_none() && overrides.as_ref().is_some_and(|o| o.is_empty())))
+    {
         return Ok(json!({"changed":false}));
     }
     // mcp_operations constructs env patches before update admission. Preserve
@@ -243,6 +307,14 @@ pub(super) fn save_with(
     let expected = expected(&params, "mcp_servers")?;
     let _lock = owner_lock(&folder)?;
     user_defaults::ignore(&folder)?;
+    if project.is_some() {
+        crate::local::private_tree(path.parent().unwrap()).map_err(|_| {
+            refuse(
+                "unsafe_storage",
+                "The project's MCP registry folder is not private.",
+            )
+        })?;
+    }
     let data = reader::read_plain(&path, true)?;
     check("mcp_servers", &expected, &token(data.as_deref()))?;
     let current = view(&path, data.as_deref())?;
@@ -326,6 +398,25 @@ pub(super) fn save_with(
             e.finish()?;
         }
     }
+    if let Some(overrides) = &overrides {
+        let clash: Vec<_> = members(&mut doc)
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, s)| value(s))
+            .and_then(|s| s.as_object().cloned())
+            .map(|s| overrides.keys().filter(|n| s.contains_key(*n)).cloned().collect())
+            .unwrap_or_default();
+        if !clash.is_empty() {
+            let mut e = Errors::default();
+            e.add("overrides", format!("{} also has a project entry; remove one of them", clash.join(", ")));
+            e.finish()?;
+        }
+        let m = members(&mut doc);
+        m.retain(|(k, _)| k != "overrides");
+        if !overrides.is_empty() {
+            m.push(("overrides".into(), Ordered::from_value(&json!(overrides))));
+        }
+    }
     raw = value(&doc);
     if raw.get("version").is_none() {
         set(&mut doc, "version", Ordered::Scalar(json!(1)));
@@ -334,6 +425,9 @@ pub(super) fn save_with(
     body.push(b'\n');
     let mut reply = view(&path, Some(&body))?;
     reply["changed"] = json!(Some(body.as_slice()) != data.as_deref());
+    if let Some(overrides) = &overrides {
+        reply["overrides"] = json!(overrides);
+    }
     if body.len() > FRAME_BUDGET || serde_json::to_vec(&reply).unwrap().len() > FRAME_BUDGET {
         return Err(refuse(
             "machine_reply_too_large",

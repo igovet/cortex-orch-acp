@@ -51,7 +51,8 @@ pub(crate) fn supports(stage: Option<&str>, name: &str) -> bool {
         | "replan_request"
         | "scope_request"
         | "escalation_request"
-        | "sprint_plan_submit" => true,
+        | "sprint_plan_submit"
+        | "sprint_revision_submit" => true,
         "result_submit" => matches!(stage, Some("execution" | "review")),
         _ => {
             crate::native_documents::supports(name)
@@ -92,6 +93,32 @@ pub(crate) fn skill_ids(name: &str) -> Vec<&'static str> {
         .map(|p| p.skills.iter().map(String::as_str).collect())
         .unwrap_or_default()
 }
+/// Opening rule of a Claude execution or review worker prompt. Instruction only:
+/// the installed engine offers no switch that stops assistant text, and the
+/// runtime records whatever text is generated.
+pub(crate) const TOOL_CALLS_ONLY: &str = "# Output rule: tool calls only\n\n\
+This session is a delegated Cortex worker. While work remains, write no assistant text at all: every response consists only of tool calls. \
+Do not write a plan, an announcement of the next step, a progress update, a status note, a finding, a summary or an acknowledgement as assistant text, \
+not before the first tool call, not between tool calls and not after a tool result. \
+Nobody reads that text as part of your work; the runtime records any text you generate in the worker's activity. \
+Put everything you need to communicate into tool arguments: findings, decisions, assumptions, risks and the report go into the structured result \
+(`result_submit` or an owned report draft), and a genuine owner question goes through `ask_question`. \
+Wherever the instructions below say to explain, state, describe, say or report something, they mean the content of those tool arguments, never assistant text. \
+The only exception is the supporting detail the `ask_question` description tells you to write right before that call. \
+After the final tool call, end the turn without text, or with at most one short sentence; it never replaces the structured result.\n\n";
+/// Closing restatement of [`TOOL_CALLS_ONLY`], the last text of the prompt.
+pub(crate) const TOOL_CALLS_ONLY_AGAIN: &str = "\n# Output rule: tool calls only (repeated)\n\n\
+While work remains, respond only with tool calls: no plan, announcement, progress update, finding or summary as assistant text before, between or after tool calls. \
+Everything goes into tool arguments; the only text before a call is the detail `ask_question` asks for. \
+After the final tool call, end without text, or with one short sentence at most.\n";
+/// Adds a later prompt part before a closing [`TOOL_CALLS_ONLY_AGAIN`], which
+/// stays the last text; without one, `part` is appended.
+pub(crate) fn append(text: &mut String, part: &str) {
+    let end = text
+        .strip_suffix(TOOL_CALLS_ONLY_AGAIN)
+        .map_or(text.len(), str::len);
+    text.insert_str(end, part);
+}
 /// The role/stage comes from Core's authenticated channel, not an engine request.
 /// Only the tools actually served on that channel appear in the Codex supplement.
 pub(crate) fn compose(name: &str, stage: Option<&str>, engine: EngineKind) -> CoreResult<String> {
@@ -109,21 +136,16 @@ pub(crate) fn compose(name: &str, stage: Option<&str>, engine: EngineKind) -> Co
         .into_iter()
         .filter(|t| supports(stage, t["name"].as_str().unwrap_or("")))
         .collect::<Vec<_>>();
-    let mut text = p.body.clone();
-    if engine == EngineKind::Claude
+    // Claude execution workers and reviewers get the no-text rule first and last.
+    let silent = engine == EngineKind::Claude
         && role == "worker"
         && name != "worker-senior-consultant"
-        && matches!(stage, Some("execution" | "review"))
-    {
-        text.push_str(
-            "\n## Work without narration\n\n\
-             Do not write assistant text before the first tool call, between tool calls, or after a tool result while work remains. \
-             Before asking a genuine user question, write its supporting details as the question tool directs; this is the only exception while work remains. \
-             Use tools for questions, reports and the structured result. \
-             After the last tool call, if a closing response is needed, give at most one short sentence. \
-             It never replaces the structured result.\n",
-        );
+        && matches!(stage, Some("execution" | "review"));
+    let mut text = String::new();
+    if silent {
+        text.push_str(TOOL_CALLS_ONLY);
     }
+    text.push_str(&p.body);
     text.push_str("\n## Native capability boundary\n\nThis host is partially migrated. Only the tools advertised on this channel are available. Missing capabilities must be reported, never replaced with native engine mutations or invented receipts.\n");
     let discovery = if engine == EngineKind::Claude {
         "`mcp__cortex__tools_discover`"
@@ -171,6 +193,9 @@ pub(crate) fn compose(name: &str, stage: Option<&str>, engine: EngineKind) -> Co
             }
             text.push_str(&entry);
         }
+    }
+    if silent {
+        text.push_str(TOOL_CALLS_ONLY_AGAIN);
     }
     Ok(text)
 }
@@ -289,7 +314,7 @@ mod tests {
         }
     }
     #[test]
-    fn only_claude_execution_and_review_specialists_receive_the_narration_rule() {
+    fn only_claude_execution_and_review_specialists_receive_the_tool_calls_only_rule() {
         for (name, stage, engine, expected) in [
             (
                 "worker-backend-dev",
@@ -325,11 +350,21 @@ mod tests {
             ),
         ] {
             let text = compose(name, stage, engine).unwrap();
-            assert_eq!(
-                text.contains("## Work without narration"),
-                expected,
-                "{name} {stage:?} {engine:?}",
-            );
+            let label = format!("{name} {stage:?} {engine:?}");
+            // First and last text of the prompt, nowhere else.
+            assert_eq!(text.starts_with(TOOL_CALLS_ONLY), expected, "{label}");
+            assert_eq!(text.ends_with(TOOL_CALLS_ONLY_AGAIN), expected, "{label}");
+            assert_eq!(text.matches("# Output rule: tool calls only").count(), if expected { 2 } else { 0 }, "{label}");
+            // No retained instruction asks a silent worker for interim progress text.
+            assert!(!expected || !text.contains("English: progress,"), "{label}");
+            for preset in ["give short updates", "Brief is good", "say in a sentence what you're about to do"] {
+                assert!(!text.contains(preset), "{label}: {preset}");
+            }
+            // Parts the session adds later keep the closing rule last.
+            let mut later = text.clone();
+            append(&mut later, "\n\nRoute note.");
+            assert!(later.contains("Route note."), "{label}");
+            assert_eq!(later.ends_with(TOOL_CALLS_ONLY_AGAIN), expected, "{label}");
         }
     }
     /// Every tool any catalogue advertises has a handler, and every Cortex tool

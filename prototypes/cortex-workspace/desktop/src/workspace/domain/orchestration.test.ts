@@ -44,6 +44,7 @@ describe("the bundled preset", () => {
         expect(got.effortFloor).toEqual(want.effort_floor ?? null);
         expect(got.maxEffort).toEqual(want.max_effort ?? null);
         expect(got.effortLadder).toEqual(want.effort_ladder ?? null);
+        expect(got.tierEfforts ?? null).toEqual(want.tier_efforts ?? null);
         expect(got.alsoStandardFor).toEqual(want.also_standard_for ?? null);
         expect(got.preferredFor).toEqual(want.preferred_for ?? null);
         expect(got.preferredWhen).toEqual(want.preferred_when ?? null);
@@ -51,6 +52,7 @@ describe("the bundled preset", () => {
       }
     }
     expect(r.engines["claude-agent-acp"].quota).toEqual(src.quota_windows["claude-agent-acp"]);
+    expect(r.coordinatorModels).toEqual(src.coordinator_models);
     const d = cfg(setup()).surfaces.user_defaults;
     expect(d.coordinator).toMatchObject({
       engine: preset.coordinator.engine, model: preset.coordinator.model,
@@ -71,11 +73,11 @@ describe("the bundled preset", () => {
     }
     expect(cfg(setup()).profiles.map(x => x.name)).toEqual(["default"]);
   });
-  it("has the 23 profiles in their access classes, and the 12 work kinds", () => {
+  it("has the 23 profiles in their access classes, and the 13 work kinds", () => {
     expect(ROLE_CATALOG).toHaveLength(23);
     const count = (a: string) => ROLE_CATALOG.filter(r => r.access === a).length;
     expect([count("writing"), count("read_only"), count("consultant")]).toEqual([12, 10, 1]);
-    expect(WORK_KINDS.map(k => k.id)).toEqual(["implementation_backend", "implementation_frontend", "implementation_frontend_design", "operations", "debugging", "testing", "investigation", "review", "design", "writing", "planning", "analysis"]);
+    expect(WORK_KINDS.map(k => k.id)).toEqual(["implementation_backend", "implementation_frontend", "implementation_frontend_design", "operations", "debugging", "testing", "investigation", "review", "design", "writing", "planning", "analysis", "consultation"]);
   });
   it("computes role tiers the way the runtime does", () => {
     const row = (role: string, escalate: boolean) => (["low", "normal", "high"] as const).map(c => tierFor(role, escalate, c));

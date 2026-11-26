@@ -14,7 +14,7 @@ import { SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN } from "./prefs";
 import { APP_SECTIONS, MACHINE_SECTIONS, ORCHESTRATION_LABELS, ORCHESTRATION_SECTIONS, orchestrationSection, type OrchestrationSection, type Route, type SettingsSection } from "./router";
 import { defaultCheckout, repoOf, unavailableCheckout } from "./review-model";
 import { asOf, awaitsOwner, humanStatus, checkCounts, clock, dayClock, engineLimits, limitsText, newestObserved, homeView, inboxItems, planningNeedsOwner, projectsOn, rowIcon, sameBranch, sideRows, sideWord, sprintModeLabel, sprintRoute, sprintView, topWorkRows, type EngineLimit, type LimitWindow, type ProjectSummary, type SideRow, type TaskView } from "./selectors";
-import { workerFace } from "./session-model";
+import { workerState } from "./session-model";
 import { same } from "./stable";
 import { SprintActions, SprintCrumb } from "./sprint";
 import { BranchChip, TaskActions, TaskInspector, TaskTitle, taskTitle, taskWhyId } from "./task-chrome";
@@ -178,7 +178,8 @@ function ProjectRow(props: { summary: ProjectSummary; n: number; openByDefault: 
   };
   return <>
     <div class="proj-wrap">
-      <A class={`proj${cue() ? " unseen" : ""}`} to={project(props.summary.machine.id, id())} aria-current={current() ? "page" : undefined}>
+      <A class={`proj${cue() ? " unseen" : ""}`} to={project(props.summary.machine.id, id())} aria-current={current() ? "page" : undefined}
+        onClick={() => { if (hasLive() && !open()) ws.panels.setExpanded(id(), true); }}>
         <Tile name={props.summary.project.name} n={props.n} /><span class="trunc">{props.summary.project.name}</span>
         <Show when={props.summary.signal}>{s => <span class={`sig ${s().tone}`}>{s().text}</span>}</Show>
         <Show when={cue()}><NewMark text="new updates" /></Show>
@@ -455,7 +456,7 @@ export function TaskPanel(props: { view: TaskView; heading: string }) {
     <Show when={props.view.workers.length > 0}>
       <div class="ins-sec">
         <div class="ins-h"><span>Workers</span><span>{props.view.running} of {props.view.workers.length} running</span></div>
-        <For each={props.view.workers}>{w => <div class="wins"><I n={workerFace(w.status).icon} s={14} class="faint" /><span class="trunc">{w.role}</span><span class="st st-idle">{workerFace(w.status).label}</span></div>}</For>
+        <For each={props.view.workers}>{w => <div class="wins"><I n={workerState(w).icon} s={14} class="faint" /><span class="trunc">{w.role}</span><span class="st st-idle">{workerState(w).label}</span></div>}</For>
       </div>
     </Show>
     <Show when={task().result}>

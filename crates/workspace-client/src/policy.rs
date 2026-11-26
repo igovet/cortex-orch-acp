@@ -368,6 +368,29 @@ pub fn phone_method(operation: &str) -> bool {
         || matches!(operation, "service.stop" | "service.subscribe.code"))
 }
 
+/// The closed shape of a notification target, as the desktop shell checks a click's
+/// (`question`, `planning`, `result`, `task` or `sprint`, exactly its own fields, each id
+/// bounded and without spaces or control characters). The phone checks every target a
+/// machine names in a moment, and again the one a notification tap hands back.
+pub fn notification_target(target: &Value) -> bool {
+    let Some(map) = target.as_object() else {
+        return false;
+    };
+    let id = |key: &str| {
+        map.get(key).and_then(Value::as_str).is_some_and(|t| {
+            !t.is_empty() && t.len() <= 256 && !t.chars().any(|c| c.is_control() || c.is_whitespace())
+        })
+    };
+    let fields: &[&str] = match map.get("kind").and_then(Value::as_str) {
+        Some("question") => &["project", "task", "decision"],
+        Some("planning") => &["project", "sprint", "decision"],
+        Some("result" | "task") => &["project", "task"],
+        Some("sprint") => &["project", "sprint"],
+        _ => return false,
+    };
+    map.len() == fields.len() + 1 && fields.iter().all(|key| id(key))
+}
+
 fn authorize_body(body: Value, phone: bool) -> Result<Call, String> {
     if serde_json::to_vec(&body).map_err(|_| refused())?.len() > workspace_protocol::FRAME_BYTES {
         return Err(refused());
@@ -552,6 +575,20 @@ fn authorize_body(body: Value, phone: bool) -> Result<Call, String> {
             || !task
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"_:.-".contains(&b))
+        {
+            return Err(refused());
+        }
+        return Ok(call);
+    }
+    // A machine MCP sign-in card, opened in the system browser. Only the card is named; the
+    // service holds the address and the desktop checks it again.
+    if call.operation == "native.open_mcp_signin" {
+        let map = call.message.as_object().ok_or_else(refused)?;
+        let id = map.get("actionId").and_then(Value::as_str).unwrap_or("");
+        if map.len() != 1
+            || id.is_empty()
+            || id.len() > 96
+            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
         {
             return Err(refused());
         }
@@ -1025,6 +1062,39 @@ mod tests {
         }
     }
 
+    /// The phone's moments subscription is native: its web view can neither send it nor any
+    /// desktop notification call, and a target passes only in one of the closed shapes.
+    #[test]
+    fn a_phone_web_view_never_subscribes_and_targets_are_closed() {
+        for operation in ["notifications.subscribe", "notifications.report", "notifications.take"] {
+            assert!(!phone(operation, json!({})), "{operation}");
+        }
+        assert!(!desktop("notifications.subscribe", json!({})));
+        for ok in [
+            json!({"kind":"question","project":"p","task":"t","decision":"d"}),
+            json!({"kind":"planning","project":"p","sprint":"s","decision":"d"}),
+            json!({"kind":"result","project":"p","task":"t"}),
+            json!({"kind":"task","project":"p","task":"t"}),
+            json!({"kind":"sprint","project":"p","sprint":"s"}),
+        ] {
+            assert!(notification_target(&ok), "{ok}");
+        }
+        for bad in [
+            json!({"kind":"question","project":"p","task":"t"}),
+            json!({"kind":"result","project":"p","task":"t","extra":1}),
+            json!({"kind":"task","project":"p","sprint":"s"}),
+            json!({"kind":"task","project":"p","task":"a b"}),
+            json!({"kind":"task","project":"","task":"t"}),
+            json!({"kind":"task","project":"p","task":"x".repeat(257)}),
+            json!({"kind":"open","project":"p","task":"t"}),
+            json!({"kind":"task","project":7,"task":"t"}),
+            json!("task"),
+            Value::Null,
+        ] {
+            assert!(!notification_target(&bad), "{bad}");
+        }
+    }
+
     #[test]
     fn a_phone_never_sends_machine_bound_or_owner_only_operations() {
         for (operation, message) in [
@@ -1215,6 +1285,13 @@ mod tests {
                 assert!(!allowed("owner_actions.act", bad.clone()), "{bad}");
             }
             assert!(!allowed("owner_actions.other", json!({})));
+        }
+        // The sign-in address is never asked for by a window: `open` is the desktop client's own call.
+        assert!(!desktop("owner_actions.act", act("open")));
+        assert!(desktop("native.open_mcp_signin", json!({"actionId":"mcp_0123456789abcdef01234567"})));
+        assert!(!phone("native.open_mcp_signin", json!({"actionId":"mcp_0123456789abcdef01234567"})));
+        for bad in [json!({"actionId":"mcp_1","url":"https://x.test/"}), json!({"actionId":"a b"}), json!({})] {
+            assert!(!desktop("native.open_mcp_signin", bad.clone()), "{bad}");
         }
         assert!(desktop("owner_actions.act", act("terminal")));
         assert!(!phone("owner_actions.act", act("terminal")));

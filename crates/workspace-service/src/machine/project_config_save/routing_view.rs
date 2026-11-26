@@ -323,6 +323,13 @@ fn file_view(source: &str, path: &Path, replacement: Option<&[u8]>) -> Result<Va
             rules[k] = v.clone();
         }
     }
+    // The Workspace editor manages the coordinator list; other management clients keep it as an ignored key.
+    if let Some(v) = d
+        .get(crate::native_routes::COORDINATOR_MODELS)
+        .filter(|v| v.is_array())
+    {
+        rules[crate::native_routes::COORDINATOR_MODELS] = v.clone();
+    }
     out["valid"] = json!(true);
     out["rules"] = rules;
     out["ignored_keys"] = json!(d
@@ -336,22 +343,22 @@ fn file_view(source: &str, path: &Path, replacement: Option<&[u8]>) -> Result<Va
 fn builtin() -> Value {
     json!({"model_efforts":{},"supported_engines":ENGINES,"optional_engines":["opencode"],"model_policy_version":2,
     "default_auto_deny_engines":[],"default_auto_deny_families":[],"tiers":TIERS,"efforts":EFFORTS,
-    "work_kinds":&KINDS[..12],"work_kind_labels":{
+    "work_kinds":&KINDS[..13],"work_kind_labels":{
         "implementation_backend":"Backend implementation","implementation_frontend":"Frontend implementation (no design)",
         "implementation_frontend_design":"Frontend implementation with UI design","operations":"Operations","debugging":"Debugging",
         "testing":"Testing","investigation":"Investigation","review":"Review","design":"Design and architecture",
-        "writing":"Documentation and writing","planning":"Planning","analysis":"Analysis"},
+        "writing":"Documentation and writing","planning":"Planning","analysis":"Analysis","consultation":"Senior consultation"},
     "work_kind_roles":{
         "implementation_backend":["worker-backend-dev","worker-data-engineer","worker-fullstack-dev","worker-general","worker-refactorer"],
         "implementation_frontend":["worker-accessibility-fixer","worker-frontend-dev","worker-mobile-dev"],"implementation_frontend_design":[],
         "operations":["worker-devops-engineer"],"debugging":["worker-debugger","worker-performance-engineer"],
         "testing":["worker-build-verification","worker-qa-engineer"],"investigation":["worker-explorer"],
         "review":["worker-accessibility-auditor","worker-code-reviewer","worker-security-auditor"],
-        "design":["worker-architect","worker-database-architect","worker-senior-consultant","worker-ux-designer"],
-        "writing":["worker-technical-writer"],"planning":["worker-planner"],"analysis":[]},
+        "design":["worker-architect","worker-database-architect","worker-ux-designer"],
+        "writing":["worker-technical-writer"],"planning":["worker-planner"],"analysis":[],"consultation":["worker-senior-consultant"]},
     "builtin_affinity":{"implementation_backend":"codex-acp","implementation_frontend":"codex-acp",
         "implementation_frontend_design":"claude-agent-acp","operations":"codex-acp","debugging":null,"testing":null,
-        "investigation":"claude-agent-acp","review":"claude-agent-acp","design":"claude-agent-acp","writing":"claude-agent-acp","planning":"claude-agent-acp","analysis":"claude-agent-acp"},
+        "investigation":"claude-agent-acp","review":"claude-agent-acp","design":"claude-agent-acp","writing":"claude-agent-acp","planning":"claude-agent-acp","analysis":"claude-agent-acp","consultation":"claude-agent-acp"},
     "default_user_deny":[],"selection_modes":["listed"],"tier_sources":["configured"],
     "policy_attributes":["effort_floor","max_effort","effort_ladder","also_standard_for","preferred_for","preferred_when","request_names"],
     "policy_efforts":&EFFORTS[..5],"max_request_names":16})
@@ -552,13 +559,14 @@ fn efforts_at(state: &Path, registry: &Value, home: Option<&Path>) -> Result<Val
                             }
                         };
                     if !valid_entry(entry, id)
-                        || r["id"]
-                            != crate::native_routes::catalog_route_id(
-                                &r["engine"],
-                                &r["connection_id"],
-                                &r["model"],
-                                pairs,
-                            )
+                        || crate::native_routes::accepted_route_id(
+                            &r["id"],
+                            &r["engine"],
+                            &r["connection_id"],
+                            &r["model"],
+                            pairs,
+                        )
+                        .is_none()
                         || !model(&r["model"])
                         || !ENGINES.iter().any(|e| r["engine"] == *e)
                     {

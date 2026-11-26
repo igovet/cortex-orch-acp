@@ -1,3 +1,4 @@
+import { LoadingStrip } from "./skeleton";
 import { createEffect, createSignal, For, onCleanup, Show, useContext } from "solid-js";
 import { FEATURES, type RemoteOperation, type RemoteRequests, type RemoteStatus } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
@@ -99,7 +100,7 @@ export function RemoteAccessBody() {
   return <Show when={connected()} fallback={<div class="note-box plain" role="status">{ws.t("disconnected")}</div>}>
     <Show when={offered()} fallback={<div class="note-box plain" role="status">Remote access is not available in this build.</div>}>
       <Show when={problem()}>{why => <div class="note-box" role="alert"><I n="alert" s={14} class="st-warn" /><span>{why()}</span><button class="btn btn-line btn-sm" onClick={() => void read()}>Try again</button></div>}</Show>
-      <Show when={status()} fallback={<Show when={!problem()}><div class="cap muted" role="status">Reading remote access…</div></Show>}>{s => <>
+      <Show when={status()} fallback={<Show when={!problem()}><LoadingStrip label="Reading remote access…" /></Show>}>{s => <>
         <Show when={s().available} fallback={<div class="note-box plain" role="status"><I n="alert" s={14} class="faint" /><span>Remote access is unavailable on this machine.{s().reason ? ` ${s().reason}` : ""}</span></div>}>
           <div class="surface">
             <Srow t="Allow remote access" d="Off by default. Turning it off disconnects every device."><Sw label="Allow remote access" checked={s().enabled} disabled={busy() ? "Waiting for the machine" : undefined} onChange={turn} /></Srow>

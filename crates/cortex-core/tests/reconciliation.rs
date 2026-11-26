@@ -67,7 +67,7 @@ fn synthesis_disclosures_conflicts_and_certified_completion() {
     let (_p, s, o, mut e) = setup();
     e.artifacts.insert("r".into(), "f".repeat(64));
     assert_eq!(
-        s.write(|db| submit_synthesis_tx(db, "t", &json!({"text":"Too soon"})))
+        s.write(|db| submit_synthesis_tx(db, "t", &json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Too soon"})))
             .unwrap_err()
             .code(),
         "synthesis_not_expected"
@@ -76,12 +76,12 @@ fn synthesis_disclosures_conflicts_and_certified_completion() {
     s.write(|db|{db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id='t'",
         [json!({"report_ref":"r","report_digest":"f".repeat(64),"checks":[{"name":"Live check","outcome":"not_run","blocker":"No owner approval"}]}).to_string()])?;Ok(())}).unwrap();
     assert_eq!(
-        s.write(|db| submit_synthesis_tx(db, "t", &json!({"text":"Done"})))
+        s.write(|db| submit_synthesis_tx(db, "t", &json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Done"})))
             .unwrap_err()
             .code(),
         "synthesis_gaps_undisclosed"
     );
-    let args = json!({"text":"Done","not_verified":[{"item":"Live check","description":"Live behavior","blocker":"Paid call not authorized"}]});
+    let args = json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Done","not_verified":[{"item":"Live check","description":"Live behavior","blocker":"Paid call not authorized"}]});
     s.write(|db| {
         submit_synthesis_tx(db, "t", &args)?;
         submit_synthesis_tx(db, "t", &args)?;
@@ -92,7 +92,7 @@ fn synthesis_disclosures_conflicts_and_certified_completion() {
         s.write(|db| submit_synthesis_tx(
             db,
             "t",
-            &json!({"text":"Different","not_verified":args["not_verified"]})
+            &json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Different","not_verified":args["not_verified"]})
         ))
         .unwrap_err()
         .code(),
@@ -193,6 +193,7 @@ fn disclosure_labels_use_effective_language() {
             Ok(())
         })
         .unwrap();
+        record_checks(&s, &["a"]);
         let gaps = json!([{"item":"a","description":"Exact label","blocker":"Exact reason"}]);
         let body = s.read(|db| disclosed(db, "t", "Exact prose", &gaps)).unwrap();
         assert_eq!(
@@ -206,9 +207,25 @@ fn disclosure_labels_use_effective_language() {
         );
     }
 }
+/// Record `names` as unverified checks of the work node: real check gaps.
+fn record_checks(s: &Store, names: &[&str]) {
+    let checks: Vec<Value> = names
+        .iter()
+        .map(|n| json!({"name":n,"outcome":"unverified","blocker":"No device"}))
+        .collect();
+    s.write(|db| {
+        db.execute(
+            "UPDATE runtime_nodes SET result_json=json_set(result_json,'$.checks',json(?)) WHERE task_id='t' AND node_id='work'",
+            [json!(checks).to_string()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
 #[test]
 fn localized_single_disclosure_and_heading_refusal() {
     let (_p, s, _, _) = setup();
+    record_checks(&s, &["a", "b"]);
     let gaps = json!([{"item":"a","description":"Проверка","blocker":"Нет устройства"},{"item":"b","blocker":"Нет устройства"}]);
     s.write(|db| {
         lifecycle::event_tx(
@@ -297,7 +314,7 @@ fn reconciling_question_answer_returns_to_planning_and_cannot_skip_certification
         })
         .unwrap();
     assert!(s
-        .write(|db| submit_synthesis_tx(db, "t", &json!({"text":"Too soon"})))
+        .write(|db| submit_synthesis_tx(db, "t", &json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Too soon"})))
         .is_err());
     s.write(|db| {
         assert!(waits::answer_tx(
@@ -317,7 +334,8 @@ fn reconciling_question_answer_returns_to_planning_and_cannot_skip_certification
             "t",
             "coordinator",
             "answer",
-            &json!({"text":"Explained","request_key":"answer"}),
+            &json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Explained","request_key":"answer"}),
+            Some(&e),
         )
     })
     .unwrap();
@@ -356,21 +374,39 @@ fn released_answer_with_changed_project_fails_without_fabricated_certification()
         Ok(())
     })
     .unwrap();
-    s.write(|db| {
-        lifecycle::reconciliation::submit_answer_tx(
-            db,
-            "t",
-            "coordinator",
-            "answer",
-            &json!({"text":"Explained","request_key":"answer"}),
-        )
-    })
-    .unwrap();
     let changed = EvidenceSnapshot {
         project_digest: Some("b".repeat(64)),
         artifacts: std::collections::BTreeMap::from([("r".into(), "f".repeat(64))]),
         ..Default::default()
     };
+    let args = json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Explained","request_key":"answer"});
+    assert_eq!(
+        s.write(|db| lifecycle::reconciliation::submit_answer_tx(
+            db, "t", "coordinator", "answer", &args, Some(&changed),
+        ))
+        .unwrap_err()
+        .code(),
+        "answer_project_revision_changed"
+    );
+    s.write(|db| {
+        assert_eq!(task_tx(db, "t")?.0, cortex_core::TaskState::Planning);
+        let submitted: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id='t' AND type='ANSWER_SUBMITTED')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(!submitted);
+        let first = lifecycle::reconciliation::submit_answer_tx(
+            db, "t", "coordinator", "answer", &args, Some(&e),
+        )?;
+        let replay = lifecycle::reconciliation::submit_answer_tx(
+            db, "t", "coordinator", "answer", &args, None,
+        )?;
+        assert_eq!(first, replay);
+        Ok(())
+    })
+    .unwrap();
+    // A later change still fails the final certification gate.
     s.write(|db| close_answer_tx(db, "t", &changed)).unwrap();
     let (state, blocker): (String, String) = s
         .read(|db| {
@@ -501,7 +537,7 @@ fn failed_verification_survives_multiple_plan_revisions_until_exact_pass() {
     .unwrap();
 
     // A repair plan that keeps the exact command is accepted.
-    s.write(|db| lifecycle::plan::accept_tx(db, "t", "coordinator", "repair-r1", &plan_with))
+    s.write(|db| lifecycle::plan::accept_tx(db, "t", "coordinator", "repair-r1", &support::with_goal(&plan_with)))
         .unwrap();
 
     // Another replan before verification cannot make the previous revision's failure disappear.
@@ -513,10 +549,13 @@ fn failed_verification_survives_multiple_plan_revisions_until_exact_pass() {
         Ok(())
     })
     .unwrap();
-    let err = s
-        .write(|db| lifecycle::plan::accept_tx(db, "t", "coordinator", "drop-r2", &plan_without))
-        .unwrap_err();
-    assert_eq!(err.code(), "verification_failed_check_missing");
+    let accepted = s
+        .write(|db| lifecycle::plan::accept_tx(db, "t", "coordinator", "drop-r2", &support::with_goal(&plan_without)))
+        .unwrap();
+    assert_eq!(accepted["verification_kept_by_runtime"][0]["argv"], argv);
+    let stored: String = s.read(|db| Ok(db.query_row("SELECT plan_json FROM runtime_tasks WHERE task_id='t'", [], |r| r.get(0))?)).unwrap();
+    let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["verification"], json!([["cargo","test","-p","fixture-unit"], argv]));
 
     // The exact command later passes, allowing a subsequent plan to remove it.
     s.write(|db| {
@@ -539,7 +578,7 @@ fn failed_verification_survives_multiple_plan_revisions_until_exact_pass() {
     })
     .unwrap();
     s.write(|db| {
-        lifecycle::plan::accept_tx(db, "t", "coordinator", "drop-after-pass", &plan_without)
+        lifecycle::plan::accept_tx(db, "t", "coordinator", "drop-after-pass", &support::with_goal(&plan_without))
     })
     .unwrap();
 }
@@ -550,7 +589,7 @@ fn a_legacy_failed_run_keeps_commands_without_receipts() {
         "verification":[["cargo","check"],["cargo","test"]]});
     store.write(|db| {
         db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='t'", [])?;
-        let accepted = lifecycle::plan::accept_tx(db,"t","coordinator","initial",&plan)?;
+        let accepted = lifecycle::plan::accept_tx(db,"t","coordinator","initial",&support::with_goal(&plan))?;
         let revision = &accepted["revision"];
         lifecycle::event_tx(db,"t","VERIFICATION_FAILED",json!({"revision":revision,"revision_digest":"d","review_event":7,
             "checks":[{"argv":["cargo","check"],"exit_code":0,"complete":true,"revision":revision,"revision_digest":"d","review_event":7}]}))?;
@@ -559,13 +598,10 @@ fn a_legacy_failed_run_keeps_commands_without_receipts() {
     }).unwrap();
     let mut shortened = plan.clone();
     shortened["verification"] = json!([["cargo", "check"]]);
-    let error = store
-        .write(|db| lifecycle::plan::accept_tx(db, "t", "coordinator", "drop", &shortened))
-        .unwrap_err();
-    assert_eq!(error.code(), "verification_failed_check_missing");
-    store
-        .write(|db| lifecycle::plan::accept_tx(db, "t", "coordinator", "keep", &plan))
+    let kept = store
+        .write(|db| lifecycle::plan::accept_tx(db, "t", "coordinator", "drop", &support::with_goal(&shortened)))
         .unwrap();
+    assert_eq!(kept["verification_kept_by_runtime"], json!([{"argv":["cargo","test"],"reason":"failed_check"}]));
 }
 
 #[test]
@@ -696,7 +732,7 @@ fn replanning_budget_scope_policy_and_escalation_injection() {
                 receipt
             );
             settle_recovery_tx(db, "t", cortex_core::TaskState::Planning)?;
-            lifecycle::plan::accept_tx(db, "t", "coordinator", &format!("p{n}"), &plan)?;
+            lifecycle::plan::accept_tx(db, "t", "coordinator", &format!("p{n}"), &support::with_goal(&plan))?;
             if n == 0 {
                 // plan_json and PLAN_ACCEPTED carry the inserted node and its edges, so
                 // the plan agrees with the runtime node list.
@@ -745,7 +781,7 @@ fn replanning_budget_scope_policy_and_escalation_injection() {
         Ok(())
     })
     .unwrap();
-    for scope in [".git/config", "../escape", "a\\b", "protected/file"] {
+    for scope in ["../escape", "a\\b", "protected/file"] {
         assert!(s
             .write(|db| propose_replan_tx(
                 db,
@@ -787,4 +823,129 @@ fn replanning_budget_scope_policy_and_escalation_injection() {
         })
         .unwrap();
     assert!(packet.contains("unavailable"));
+}
+
+fn with_outcomes(s: &Store) {
+    s.write(|db| {
+        db.execute(
+            "UPDATE runtime_tasks SET plan_json=json_set(plan_json,'$.outcomes',json(?)) WHERE task_id='t'",
+            [json!([{"id":"prepare","statement":"The changes are prepared"},
+                {"id":"push","statement":"The changes are pushed to GitHub"}]).to_string()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+/// Business store t_4797cc4c: a synthesis that began "the push to GitHub was not
+/// done" completed the task, its unmet goal listed as eleven not-verified items. A
+/// final result now reports every goal outcome, and one not done is refused.
+#[test]
+fn a_synthesis_with_an_unmet_goal_outcome_is_refused_and_a_met_goal_completes() {
+    let (_p, s, o, mut e) = setup();
+    e.artifacts.insert("r".into(), "f".repeat(64));
+    with_outcomes(&s);
+    verify(&s, &o, &e, "pass", 0);
+    let refused = |args: Value| {
+        s.write(|db| submit_synthesis_tx(db, "t", &args))
+            .unwrap_err()
+            .code()
+    };
+    assert_eq!(refused(json!({"text":"Done"})), "final_outcomes_required");
+    assert_eq!(
+        refused(json!({"text":"Done","outcomes":[{"id":"prepare","status":"done","evidence":"r"}]})),
+        "final_outcomes_required"
+    );
+    assert_eq!(
+        refused(json!({"text":"Done","outcomes":[{"id":"prepare","status":"done","evidence":"r"},
+            {"id":"push","status":"done","evidence":"r"},{"id":"other","status":"done","evidence":"r"}]})),
+        "final_outcome_unknown"
+    );
+    assert_eq!(
+        refused(json!({"text":"Push not done","outcomes":[{"id":"prepare","status":"done","evidence":"r"},
+            {"id":"push","status":"not_done"}]})),
+        "completion_goal_not_met"
+    );
+    assert_eq!(
+        refused(json!({"text":"Done","outcomes":[{"id":"prepare","status":"done","evidence":"r"},
+            {"id":"push","status":"done"}]})),
+        "final_outcome_evidence_required"
+    );
+    // Unfinished work is not a check gap.
+    assert_eq!(
+        refused(json!({"text":"Done","not_verified":[{"item":"Push to GitHub","blocker":"Not done"}],
+            "outcomes":[{"id":"prepare","status":"done","evidence":"r"},{"id":"push","status":"done","evidence":"r"}]})),
+        "not_verified_not_a_check"
+    );
+    // Nothing was recorded by the refusals; the met goal completes.
+    assert_eq!(
+        s.read(|db| Ok(db.query_row("SELECT count(*) FROM runtime_events WHERE type='SYNTHESIS_SUBMITTED'", [], |r| r.get::<_, i64>(0))?))
+            .unwrap(),
+        0
+    );
+    s.write(|db| {
+        submit_synthesis_tx(db, "t", &json!({"text":"Done","outcomes":[
+            {"id":"prepare","status":"done","evidence":"r"},{"id":"push","status":"done","evidence":"https://github.com/o/r/pull/1"}]}))
+    })
+    .unwrap();
+    s.write(|db| complete_tx(db, "t", &e)).unwrap();
+    assert_eq!(s.write(|db| Ok(task_tx(db, "t")?.0)).unwrap(), cortex_core::TaskState::Completed);
+}
+/// complete_tx reads the goal itself: a recorded final result whose outcome is not
+/// done (or that leaves a plan outcome out) never completes.
+#[test]
+fn completion_refuses_a_recorded_result_that_leaves_the_goal_unmet() {
+    let (_p, s, o, mut e) = setup();
+    e.artifacts.insert("r".into(), "f".repeat(64));
+    with_outcomes(&s);
+    verify(&s, &o, &e, "pass", 0);
+    for outcomes in [
+        json!(null),
+        json!([{"id":"prepare","status":"done","evidence":"r"}]),
+        json!([{"id":"prepare","status":"done","evidence":"r"},{"id":"push","status":"not_done"}]),
+    ] {
+        s.write(|db| {
+            db.execute("UPDATE runtime_tasks SET synthesis='Done' WHERE task_id='t'", [])?;
+            lifecycle::event_tx(db, "t", "SYNTHESIS_SUBMITTED", json!({"text":"Done","outcomes":outcomes}))?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            s.write(|db| complete_tx(db, "t", &e)).unwrap_err().code(),
+            "completion_goal_not_met",
+            "{outcomes}"
+        );
+    }
+}
+/// A direct answer after planned work reports the goal outcomes too; only the
+/// owner's own close-as-is answer lets one stay not done, and it is disclosed.
+#[test]
+fn an_answer_after_planned_work_needs_outcomes_and_discloses_an_owner_closed_gap() {
+    let (p, s, o, mut e) = setup();
+    e.artifacts.insert("r".into(), "f".repeat(64));
+    with_outcomes(&s);
+    verify(&s, &o, &e, "pass", 0);
+    let q = s
+        .write(|db| {
+            skill_proposals::request(db, &p.0, "t", "coordinator", "q",
+                &json!({"question":"The push needs credentials. Close as is?","recommended":1,"options":["Close as is","Wait"],"request_key":"q"}))
+        })
+        .unwrap();
+    s.write(|db| {
+        assert!(waits::answer_tx(db, "t", q["question_id"].as_str().unwrap(), "Close as is", "text", Some("client"))?);
+        Ok(())
+    })
+    .unwrap();
+    let answer = |key: &str, outcomes: Value| {
+        s.write(|db| {
+            lifecycle::reconciliation::submit_answer_tx(db, "t", "coordinator", key,
+                &json!({"text":"Prepared; the push was not done","request_key":key,"outcomes":outcomes}), Some(&e))
+        })
+    };
+    assert_eq!(answer("a1", Value::Null).unwrap_err().code(), "final_outcomes_required");
+    answer("a2", json!([{"id":"prepare","status":"done","evidence":"r"},{"id":"push","status":"not_done"}])).unwrap();
+    let text: String = s
+        .read(|db| Ok(db.query_row("SELECT synthesis FROM runtime_tasks WHERE task_id='t'", [], |r| r.get(0))?))
+        .unwrap();
+    assert!(text.contains("## Goal not fully met (owner's decision)") && text.contains("pushed to GitHub"), "{text}");
+    s.write(|db| complete_tx(db, "t", &e)).unwrap();
 }

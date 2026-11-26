@@ -1,5 +1,5 @@
 import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Match, on, onCleanup, Show, Switch, useContext, type Accessor } from "solid-js";
-import { automaticQueueOf, dependencyProblem, isOpen, openPlanningQuestion, queueDrivenMode, runBlocker, sprintCloseBlockers, SPRINT_RUN_MODES, type AttachmentInput, type PlanItem, type Sprint, type SprintGraphEdit, type WorkspaceState } from "@cortex/workspace-domain";
+import { automaticQueueOf, COMPLEXITY_LABELS, dependencyProblem, isOpen, openPlanningQuestion, queueDrivenMode, runBlocker, sprintCloseBlockers, SPRINT_RUN_MODES, type AttachmentInput, type PlanItem, type Sprint, type SprintGraphEdit, type WorkspaceState } from "@cortex/workspace-domain";
 import { attachmentName } from "./attachments";
 import { dependentWhy, editNotice, linkProblem, linkWords, liveModel, placeWords, watchLiveGraphs, type LiveModel } from "./live-graph";
 import { AttachChips } from "./composer";
@@ -26,6 +26,7 @@ import { createLabel, itemTitle, planCaption, planGraph, planningAsks, planningT
 import { graphCounts, planLayers } from "./plan-graph";
 import { GraphView, type GraphApi, type GraphLinks, type GraphMemory } from "./sprint-graph";
 import { arrange, INLINE_FLOOR, inlineScale, type Opened } from "./sprint-space";
+import { changedBy, SprintRevisions } from "./sprint-revisions";
 
 type SprintRoute = Extract<Route, { name: "sprint" }>;
 const useSprint = (id: () => string) => { const ws = useWs(); return createMemo(() => ws.store.state().sprints.find(s => s.id === id()) ?? null); };
@@ -462,13 +463,18 @@ function PlanItemPanel(props: { row: PlanRow; total: number; onClose: () => void
   const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && shown() && !document.querySelector("dialog[open]")) { e.preventDefault(); shut(); } };
   document.addEventListener("keydown", onKey);
   onCleanup(() => document.removeEventListener("keydown", onKey));
+  const ws = useWs();
+  // A draft an applied sprint revision changed says which task changed it.
+  const revisedBy = (id: string) => { const sp = ws.store.index().byId.get(id)?.task.sprintId; return sp ? changedBy(ws.store.liveGraph(sp)?.graph ?? null, id, t => ws.store.index().byId.get(t)?.task.title ?? "?") : null; };
   queueMicrotask(() => placeFocus(close, { preventScroll: true }));
   return <aside class="ws-read" aria-label="Task details">
     <SectionHead class="ws-read-h" lead={props.back ? <button class="btn btn-sm" onClick={shut}><I n="arrow-left" s={14} />{props.back}</button> : undefined} title={`Task ${props.row.no} of ${props.total}`}><button data-tooltip="Close task details · Esc" ref={close} class="ib ws-ib" aria-label="Close task details" onClick={shut}><I n="x" s={14} /></button></SectionHead>
     <div class="ws-read-b selectable">
       <h2 class="ws-read-t">{itemTitle(props.row.item)}</h2>
+      <Show when={props.live && revisedBy(props.row.item.key)}>{words => <div class="cap muted">{words()}</div>}</Show>
       <dl class="kv">
         <dt>Depends on</dt><dd>{props.row.deps.length ? `Tasks ${props.row.deps.join(", ")}` : "Starts first"}</dd>
+        <Show when={props.row.item.complexity}>{c => <><dt>Complexity</dt><dd>{COMPLEXITY_LABELS[c()] ?? c()}</dd></>}</Show>
         <Show when={planState(props.row)}>{w => <><dt>State</dt><dd class={w().tone}>{w().text}</dd></>}</Show>
       </dl>
       <div class="ws-read-d"><ResultText breaks text={props.row.item.description} /></div>
@@ -592,7 +598,7 @@ function Plan(props: PlanProps) {
             <Show when={movable(r().item.key)}><span class="ws-prio" role="group" aria-label={`Priority of task ${r().no}`}>
               <button data-tooltip="" class="ib ws-ib" aria-label={`Move task ${r().no} up`} aria-disabled={priority()[0] === r().item.key || props.editor.busy ? "true" : undefined} data-why={priority()[0] === r().item.key ? "Already first among ready tasks" : props.editor.busy ? SAVING : undefined} onClick={e => { e.stopPropagation(); move(r().item.key, "up"); }}><I n="arrow-up" s={14} /></button>
               <button data-tooltip="" class="ib ws-ib" aria-label={`Move task ${r().no} down`} aria-disabled={priority().at(-1) === r().item.key || props.editor.busy ? "true" : undefined} data-why={priority().at(-1) === r().item.key ? "Already last among ready tasks" : props.editor.busy ? SAVING : undefined} onClick={e => { e.stopPropagation(); move(r().item.key, "down"); }}><I n="arrow-down" s={14} /></button>
-            </span></Show></span>
+            </span></Show><Show when={r().item.complexity}>{c => <span class="cap faint">{COMPLEXITY_LABELS[c()] ?? c()} complexity</span>}</Show></span>
           <Show when={accepted()}><span class="ac trunc">{r().item.acceptance}</span></Show>
           <span class="dep"><Show when={planState(r())} fallback={<Show when={r().deps.length} fallback={<span class="faint">Starts first</span>}><span class="muted">After {r().deps.join(", ")}</span></Show>}>{w => <span class={`st ${w().tone}`}><I n={w().icon} s={12} class={w().spin ? "spin" : undefined} />{w().text}</span>}</Show></span>
         </div>}</Keyed>}>
@@ -749,12 +755,17 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
   const divergedStrip: StripItem = { id: "live-diverged", tone: "info", role: "status", icon: <I n="layers" s={14} class="faint" />,
     get text() { return `${live().divergence ?? ""} The approved plan stays as approved.`; },
     action: <button class="btn btn-sm" onClick={() => setSurface("plan")}>Show approved plan</button> };
+  // Revisions a sprint task proposed that wait for the owner: one card each, with Apply and Reject.
+  // Readable: the card (its changes and the Apply and Reject buttons) is shown whole, never clamped to the strip's two lines.
+  const revisionStrip: StripItem = { id: "sprint-revisions", tone: "info", role: "status", readable: true, icon: <I n="layers" s={14} class="faint" />,
+    get text() { return <SprintRevisions sprint={s()} graph={ws.store.liveGraph(s().id)?.graph ?? null} />; } };
+  const revisionStrips = (): StripItem[] => (ws.store.liveGraph(s().id)?.graph?.revisions ?? []).some(r => r.status === "awaiting_owner") ? [revisionStrip] : [];
   const liveStrips = (): StripItem[] => !liveShown() ? [] : [
     ...(live().source === "service" && (live().unread > 0 || live().stale) ? [unreadStrip] : []),
     ...(live().divergence ? [divergedStrip] : []),
   ];
   const status = createMemo<StripItem[]>(() => created()
-    ? [line, ...(gapStrip() ? [gapStrip()!] : []), ...liveStrips(), ...(queueStrip() ? [queueStrip()!] : [])]
+    ? [line, ...(gapStrip() ? [gapStrip()!] : []), ...revisionStrips(), ...liveStrips(), ...(queueStrip() ? [queueStrip()!] : [])]
     : cancelled() ? [failure() ? failed : stopped] : warning() ? [warned, planning] : [planning]);
 
   // ---------- Space: the chat and the plan are tabs; in the plan, one yield rule and Full view ----------
@@ -879,6 +890,8 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
 
 function SummaryTab(props: { route: SprintRoute; sprint: Sprint }) {
   const ws = useWs();
+  // The revision history comes with the live graph.
+  watchLiveGraphs(ws.store, () => [props.sprint]);
   const data = createMemo(() => sprintSummary(ws.store.index(), props.sprint));
   const gap = createMemo(() => sprintGap(ws.store.index(), props.sprint));
   const cols = "18px minmax(0,2fr) 150px minmax(0,1.4fr) minmax(0,1fr)";
@@ -914,6 +927,7 @@ function SummaryTab(props: { route: SprintRoute; sprint: Sprint }) {
         </div></div>
       </Show>
       <Show when={data().closed > 0}><div class="cap muted">{data().closed} closed without a merge.</div></Show>
+      <SprintRevisions sprint={props.sprint} graph={ws.store.liveGraph(props.sprint.id)?.graph ?? null} history />
       <div class="cap faint">This is an index of real results. A check that did not run is shown as not run, never as a pass.</div>
     </div></div>
   </Page>;

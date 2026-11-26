@@ -25,10 +25,11 @@ impl<'a> Order<'a> {
         }
     }
 }
-const ATTRS: [&str; 7] = [
+const ATTRS: [&str; 8] = [
     "effort_floor",
     "max_effort",
     "effort_ladder",
+    "tier_efforts",
     "also_standard_for",
     "preferred_for",
     "preferred_when",
@@ -277,6 +278,20 @@ fn models(e: &mut Errors, v: &Value, o: Order) {
                     continue;
                 }
                 policy(e, &where_, p, oc.child("policy").child(n));
+                let placed = &c["tiers"][n.as_str()];
+                let placed: Vec<&str> = TIERS
+                    .into_iter()
+                    .filter(|t| {
+                        placed.as_str() == Some(*t)
+                            || placed.as_array().is_some_and(|a| a.contains(&json!(t)))
+                    })
+                    .collect();
+                if !crate::native_routes::tier_efforts_valid(&p["tier_efforts"], &placed) {
+                    e.add(
+                        format!("{where_}.tier_efforts"),
+                        format!("must be null or map tiers this model is placed in to {{min, max}} efforts from {}, min not above max", EFFORTS[..5].join(", ")),
+                    );
+                }
                 if c["auto"].as_array().is_some_and(|a| !a.contains(&json!(n))) {
                     for k in ["preferred_for", "preferred_when"] {
                         if truth(&p[k]) {
@@ -545,6 +560,14 @@ fn checked(r: &Value, unknown: bool, o: Order) -> Result<()> {
         if let Some((f, m)) = quota(v, o.child("quota_windows")) {
             e.coded(f, "invalid_quota_windows", m);
         }
+    }
+    if !crate::native_routes::coordinator_models_valid(&r[crate::native_routes::COORDINATOR_MODELS])
+    {
+        e.coded(
+            "rules.coordinator_models",
+            "invalid_coordinator_models",
+            format!("must be null or 1-64 unique {{engine, model, tiers}} entries: engine one of {engines}, an exact model id, tiers mapping one or more of {} to {{min, max}} efforts from {}, min not above max", TIERS.join(", "), EFFORTS[..5].join(", ")),
+        );
     }
     e.finish()?;
     // Loader-only errors retain their named refusals, not aggregated validation.

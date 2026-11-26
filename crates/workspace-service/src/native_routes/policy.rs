@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 const TIERS: [&str; 4] = ["flagship", "deep", "standard", "light"];
 const EFFORTS: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
-const KINDS: [&str; 12] = [
+const KINDS: [&str; 13] = [
     "implementation_backend",
     "implementation_frontend",
     "implementation_frontend_design",
@@ -19,6 +19,7 @@ const KINDS: [&str; 12] = [
     "writing",
     "planning",
     "analysis",
+    "consultation",
 ];
 const ROLES: [&str; 23] = [
     "accessibility-auditor",
@@ -48,7 +49,8 @@ const ROLES: [&str; 23] = [
 pub(super) fn role_kind(role: &str) -> &'static str {
     match role.trim_start_matches("worker-") {
         "accessibility-auditor" | "security-auditor" | "code-reviewer" => "review",
-        "architect" | "database-architect" | "ux-designer" | "senior-consultant" => "design",
+        "architect" | "database-architect" | "ux-designer" => "design",
+        "senior-consultant" => "consultation",
         "accessibility-fixer" | "frontend-dev" | "mobile-dev" => "implementation_frontend",
         "devops-engineer" => "operations",
         "explorer" => "investigation",
@@ -188,10 +190,21 @@ fn tiers(v: &Value) -> Vec<&str> {
         .filter(|t| v.as_str() == Some(t) || contains(v, t))
         .collect()
 }
-fn effective_kind<'a>(role: &str, node: &'a Value) -> &'a str {
+/// The consultant has its own `consultation` work kind. Until an owner list names
+/// it, the consultant keeps using the `design` list so older settings still work.
+fn effective_kind<'a>(rules: &Value, role: &str, node: &'a Value) -> &'a str {
     match role.trim_start_matches("worker-") {
         "code-reviewer" => "review",
-        "senior-consultant" => "design",
+        "senior-consultant" => {
+            let listed = rules["models"].as_object().is_some_and(|engines| {
+                engines.values().any(|engine| {
+                    engine["policy"].as_object().is_some_and(|models| {
+                        models.values().any(|p| kind_in(&p["preferred_for"], "consultation"))
+                    })
+                })
+            });
+            if listed { "consultation" } else { "design" }
+        }
         _ => node["work_kind"].as_str().unwrap_or(role_kind(role)),
     }
 }
@@ -225,22 +238,85 @@ fn now() -> f64 {
         .unwrap_or_default()
         .as_secs_f64()
 }
+fn effort_index(e: &str) -> Option<usize> {
+    EFFORTS[..5].iter().position(|v| *v == e)
+}
+/// An owner effort range for one tier: `{"min","max"}` from low..max, min not above max.
+fn tier_range(v: &Value) -> Option<(usize, usize)> {
+    let m = v.as_object()?;
+    if m.len() != 2 {
+        return None;
+    }
+    let min = effort_index(m.get("min")?.as_str()?)?;
+    let max = effort_index(m.get("max")?.as_str()?)?;
+    (min <= max).then_some((min, max))
+}
+/// The routing key naming the models a coordinator may use, apart from worker tiers.
+pub(crate) const COORDINATOR_MODELS: &str = "coordinator_models";
+/// `coordinator_models` is absent (or null) or a non-empty list of at most 64
+/// unique `{engine, model, tiers}` entries, each placing an exact model of a
+/// supported engine in at least one tier with a valid `{min, max}` effort range.
+pub(crate) fn coordinator_models_valid(v: &Value) -> bool {
+    if v.is_null() {
+        return true;
+    }
+    let Some(entries) = v.as_array().filter(|a| !a.is_empty() && a.len() <= 64) else {
+        return false;
+    };
+    let mut seen = BTreeSet::new();
+    entries.iter().all(|e| {
+        let Some(m) = e.as_object() else { return false };
+        let engine = e["engine"].as_str();
+        let model = e["model"].as_str();
+        m.len() == 3
+            && engine.is_some_and(|s| ["codex-acp", "claude-agent-acp", "opencode"].contains(&s))
+            && model.is_some_and(|s| {
+                !s.is_empty()
+                    && s.chars().count() <= 256
+                    && !s.chars().any(|c| c.is_whitespace() || c.is_control())
+            })
+            && seen.insert((engine, model))
+            && e["tiers"].as_object().is_some_and(|t| {
+                !t.is_empty()
+                    && t.iter()
+                        .all(|(k, r)| TIERS.contains(&k.as_str()) && tier_range(r).is_some())
+            })
+    })
+}
+/// `tier_efforts` is absent or a non-empty map of placed tiers to valid ranges.
+pub(crate) fn tier_efforts_valid(v: &Value, placed: &[&str]) -> bool {
+    if v.is_null() {
+        return true;
+    }
+    v.as_object().is_some_and(|m| {
+        !m.is_empty()
+            && m.iter()
+                .all(|(t, r)| placed.contains(&t.as_str()) && tier_range(r).is_some())
+    })
+}
 pub(super) fn validate_policy(r: &Value) -> CoreResult<()> {
+    if !coordinator_models_valid(&r[COORDINATOR_MODELS]) {
+        return refuse("invalid_routing_overrides");
+    }
     if let Some(engines) = r["models"].as_object() {
         for engine in engines.values() {
             if let Some(policy) = engine.get("policy").filter(|v| !v.is_null()) {
                 let entries = policy
                     .as_object()
                     .ok_or(CoreError::Refused("invalid_routing_overrides"))?;
-                for p in entries.values() {
+                for (model, p) in entries {
                     let attrs = p
                         .as_object()
                         .ok_or(CoreError::Refused("invalid_routing_overrides"))?;
+                    if !tier_efforts_valid(&p["tier_efforts"], &tiers(&engine["tiers"][model])) {
+                        return refuse("invalid_routing_overrides");
+                    }
                     if attrs.keys().any(|k| {
                         ![
                             "effort_floor",
                             "max_effort",
                             "effort_ladder",
+                            "tier_efforts",
                             "also_standard_for",
                             "preferred_for",
                             "preferred_when",
@@ -376,6 +452,18 @@ impl RouteResolver {
             .filter(|p| p[0] == "thought_level")
             .filter_map(|p| p[1].as_str())
             .collect();
+        // An owner range for this tier replaces the floor, maximum and the
+        // light-only `max` rule; both of its bounds must be offered by the route.
+        if let Some((min, max)) = tier_range(&p["tier_efforts"][tier]) {
+            if !offered.contains(EFFORTS[min]) || !offered.contains(EFFORTS[max]) {
+                return refuse("model_effort_policy_unsupported");
+            }
+            return Ok(EFFORTS[min..=max]
+                .iter()
+                .filter(|e| offered.contains(**e))
+                .map(|e| e.to_string())
+                .collect());
+        }
         let floor = p["effort_floor"].as_str();
         let ladder: Vec<_> = p["effort_ladder"]
             .as_array()
@@ -423,6 +511,166 @@ impl RouteResolver {
             .filter(|e| result.contains(**e))
             .map(|s| s.to_string())
             .collect())
+    }
+    /// The owner's explicit coordinator list (`coordinator_models`), when the
+    /// profile has one. Without it, the coordinator falls back to the worker
+    /// tiers (the legacy coupling of profiles written before the list).
+    fn coordinator_list(&self) -> Option<&Vec<Value>> {
+        self.rules[COORDINATOR_MODELS].as_array()
+    }
+    /// This route's entry in the coordinator list.
+    fn coordinator_entry(&self, c: &Candidate) -> Option<&Value> {
+        self.coordinator_list()?
+            .iter()
+            .find(|e| e["engine"] == c.engine() && e["model"] == c.model())
+    }
+    /// The tiers this route may coordinate at: its coordinator-list tiers, or
+    /// (legacy profile without the list) its worker tiers.
+    fn coordinator_placed(&self, c: &Candidate) -> Vec<&'static str> {
+        if self.coordinator_list().is_some() {
+            let tiers = self.coordinator_entry(c).map(|e| &e["tiers"]);
+            return TIERS
+                .into_iter()
+                .filter(|t| tiers.is_some_and(|m| m.get(*t).is_some()))
+                .collect();
+        }
+        TIERS
+            .into_iter()
+            .filter(|t| self.placed(c).contains(t))
+            .collect()
+    }
+    /// The offered efforts of one coordinator tier: inside the list's range for
+    /// it (both bounds must be offered by the route), or the worker policy of
+    /// that tier for a legacy profile.
+    fn coordinator_permitted(&self, c: &Candidate, tier: &str) -> CoreResult<Vec<String>> {
+        if self.coordinator_list().is_none() {
+            return self.permitted(c, tier);
+        }
+        let range = self
+            .coordinator_entry(c)
+            .and_then(|e| tier_range(&e["tiers"][tier]))
+            .ok_or(CoreError::Refused("model_effort_policy_unsupported"))?;
+        let offered: BTreeSet<_> = c.entry["route"]["supported_parameters"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| p[0] == "thought_level")
+            .filter_map(|p| p[1].as_str())
+            .collect();
+        let (min, max) = range;
+        if !offered.contains(EFFORTS[min]) || !offered.contains(EFFORTS[max]) {
+            return refuse("model_effort_policy_unsupported");
+        }
+        Ok(EFFORTS[min..=max]
+            .iter()
+            .filter(|e| offered.contains(**e))
+            .map(|e| e.to_string())
+            .collect())
+    }
+    /// The profile names its coordinator models: explicitly with a coordinator
+    /// list, or (legacy) once any engine places a model in a worker tier.
+    pub(super) fn profile_constrained(&self) -> bool {
+        self.coordinator_list().is_some()
+            || self.rules["models"].as_object().is_some_and(|engines| {
+                engines.values().any(|e| {
+                    e["tiers"]
+                        .as_object()
+                        .is_some_and(|m| m.values().any(|t| !tiers(t).is_empty()))
+                })
+            })
+    }
+    /// The efforts a coordinator on this route may use: the union of the
+    /// model's coordinator ranges (tiers whose range the route cannot honour
+    /// add nothing). `None` when the profile names no coordinator models at
+    /// all, or when this listed model's route offers no effort setting (no
+    /// effort to constrain); an empty list when this model is outside the
+    /// coordinator list or none of its ranges can be honoured.
+    pub(super) fn coordinator_efforts(&self, c: &Candidate) -> Option<Vec<String>> {
+        if !self.profile_constrained() {
+            return None;
+        }
+        let mut result = BTreeSet::new();
+        let placed = self.coordinator_placed(c);
+        let mut honoured = false;
+        for tier in &placed {
+            if let Ok(efforts) = self.coordinator_permitted(c, tier) {
+                honoured = true;
+                result.extend(efforts);
+            }
+        }
+        let offers_effort = c.entry["route"]["supported_parameters"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|p| p[0] == "thought_level");
+        if !offers_effort && !placed.is_empty() && (honoured || self.coordinator_list().is_some()) {
+            return None;
+        }
+        Some(
+            EFFORTS
+                .iter()
+                .filter(|e| result.contains(**e))
+                .map(|s| s.to_string())
+                .collect(),
+        )
+    }
+    /// Whether this route may coordinate under the profile.
+    pub(super) fn coordinator_eligible(&self, c: &Candidate) -> bool {
+        self.coordinator_efforts(c).is_none_or(|e| !e.is_empty())
+    }
+    /// The automatic route of one sprint task: its complexity names a tier
+    /// (low: light, normal: standard, high: flagship, then the next tiers),
+    /// that tier's coordinator models are ranked by provider usage (an
+    /// exhausted route is skipped, a hot one goes last, then the least used,
+    /// then configured order) and the effort is the tier target inside that
+    /// tier's coordinator range. The models come from the coordinator list, or
+    /// from the worker tiers for a legacy profile without one. `None` when no
+    /// model of any of those tiers is usable.
+    pub fn sprint_route(&self, complexity: &str) -> CoreResult<Option<Value>> {
+        let order: &[&str] = match complexity {
+            "low" => &["light", "standard"],
+            "high" => &["flagship", "deep"],
+            _ => &["standard", "deep", "light"],
+        };
+        for tier in order {
+            let mut options = Vec::new();
+            for c in self.candidates.iter().filter(|c| {
+                self.allowed(c, false)
+                    && !c.route_id().is_empty()
+                    && self.coordinator_placed(c).contains(tier)
+            }) {
+                let Ok(efforts) = self.coordinator_permitted(c, tier) else {
+                    continue;
+                };
+                if efforts.is_empty() {
+                    continue;
+                }
+                let usage = self.usage(c)?;
+                if usage.is_some_and(|u| u >= 100.0) {
+                    continue;
+                }
+                options.push((c, usage, efforts));
+            }
+            options.sort_by(|a, b| {
+                hot(a.1)
+                    .cmp(&hot(b.1))
+                    .then_with(|| a.1.unwrap_or(0.0).total_cmp(&b.1.unwrap_or(0.0)))
+            });
+            if let Some((c, usage, efforts)) = options.into_iter().next() {
+                let target = match *tier {
+                    "light" => "low",
+                    "standard" => "medium",
+                    _ => "high",
+                };
+                let effort = super::presentation::nearest_effort(&efforts, Some(target))
+                    .unwrap_or(target)
+                    .to_owned();
+                return Ok(Some(json!({"routeId":c.route_id(),"engine":c.engine(),
+                    "model":c.model(),"connectionId":c.connection_id(),"tier":tier,
+                    "effort":effort,"complexity":complexity,"usedPercent":usage})));
+            }
+        }
+        Ok(None)
     }
     pub(super) fn usage(&self, c: &Candidate) -> CoreResult<Option<f64>> {
         let cached = if c.engine() == "codex-acp" {
@@ -483,6 +731,7 @@ impl RouteResolver {
             "effort_floor",
             "max_effort",
             "effort_ladder",
+            "tier_efforts",
             "also_standard_for",
             "preferred_for",
             "preferred_when",
@@ -492,11 +741,15 @@ impl RouteResolver {
                 sources[key] = json!("configured");
             }
         }
-        json!({"effort_floor":p["effort_floor"],"max_effort":p["max_effort"],
+        let mut attrs = json!({"effort_floor":p["effort_floor"],"max_effort":p["max_effort"],
             "effort_ladder":p["effort_ladder"].as_array().cloned().unwrap_or_default(),
             "also_standard_for":kinds(&p["also_standard_for"]),"preferred_for":kinds(&p["preferred_for"]),
             "preferred_when":p["preferred_when"],"request_names":p["request_names"].as_array().cloned().unwrap_or_default(),
-            "attribute_sources":sources})
+            "attribute_sources":sources});
+        if !p["tier_efforts"].is_null() {
+            attrs["tier_efforts"] = p["tier_efforts"].clone();
+        }
+        attrs
     }
     pub fn previews(&self, plan: &Value, evidence: &Evidence) -> CoreResult<Value> {
         let mut result = Vec::new();
@@ -513,7 +766,7 @@ impl RouteResolver {
                 format!("worker-{role}")
             };
             let hint = n["model"].as_str().unwrap_or("auto");
-            let kind = effective_kind(&role, n);
+            let kind = effective_kind(&self.rules, &role, n);
             if hint.contains('/')
                 && !self.candidates.iter().any(|c| {
                     label(c) == hint && self.allowed(c, true) && !self.placed(c).is_empty()
@@ -787,7 +1040,7 @@ impl RouteResolver {
             return refuse("unknown_session_role");
         }
         let role_name = role.trim_start_matches("worker-");
-        let kind = effective_kind(role, node);
+        let kind = effective_kind(&self.rules, role, node);
         if !KINDS.contains(&kind) {
             return refuse("invalid_work_kind");
         }
@@ -983,6 +1236,11 @@ impl RouteResolver {
             |c: &Candidate| self.allowed(c, true) && self.automatic(c).is_none();
         let base_role_tier = role_tier(role, complexity, false);
         let mut role_tier = role_tier(role, complexity, escalated);
+        // The owner names the senior consultant's models explicitly (Preferred work:
+        // consultation); their tier never excludes them, so Frontier-only models qualify.
+        if consultant && kind == "consultation" {
+            role_tier = 0;
+        }
         let stretch_allowed = base_tier(role) >= 2 && complexity != "high" && base_role_tier == 2;
         let stretches = |c: &Candidate| {
             stretch_allowed

@@ -206,7 +206,11 @@ if (query.get("world") === "review") {
   const world = query.get("world") === "settings" ? settingsWorld() : query.get("world") === "pages" ? pagesWorld(sprintState === "running" || sprintState === "closed" ? sprintState : "planning") : scroll ? longConversation(conversationWorld()) : query.has("stopq") ? stopQuestion(conversationWorld()) : query.has("planningSprint") ? planningSprint(conversationWorld()) : conversationWorld();
   // `loading`: every conversation's transcript is still being read, for the first-view skeleton and, after its budget, its notice.
   if (query.has("loading")) for (const session of world.sessions) session.historyRead = { state: "loading" };
-  setTimeout(() => port.emit(projection("1", world)), 0);
+  // `earlier` (with `scroll`): the conversation and the worker feed are read in pages as the reader scrolls up (scroll-perf
+  // `earlier`), the way the real port reads them: every page is published as a fresh copy of the whole conversation, first to
+  // say it is loading and then with the rows put before the held ones, after `delay` ms.
+  if (scroll && query.has("earlier")) pagedHistory(world, port, Number(query.get("delay") ?? 250));
+  else setTimeout(() => port.emit(projection("1", world)), 0);
   // `scroll` only: one streamed update, as a working task sends them, for the scroll gate to send while it scrolls.
   let version = 1;
   // What each update cost: making the fake data (the fixture's own work) and the screens taking it in (the app's).
@@ -306,5 +310,61 @@ function longConversation(s: ReturnType<typeof conversationWorld>) {
   const worker = s.workers.find(w => w.id === "w-be2")!;
   worker.activity = Array.from({ length: 1500 }, (_, i) => i % 3 === 2 ? { sequence: i + 1, kind: "tool" as const, text: "mcp__cortex__project_read", at: null } : { sequence: i + 1, kind: "note" as const, text: reply(i), at: null });
   return s;
+}
+/**
+ * `earlier`: c-work's conversation of 2,400 more entries opens on its newest 40 with earlier conversation available, and
+ * Backend Dev's feed of 3,000 notes on its newest 200 with a cursor. Each earlier read is recorded (`__earlier.reads`) with
+ * where the reader was when it was asked for, so the scroll gate can tell how near the top a read starts.
+ */
+function pagedHistory(world: ReturnType<typeof conversationWorld>, port: ReturnType<typeof scriptedPort>, delay: number) {
+  const PAGE = 40, WORKER_PAGE = 200;
+  const session = world.sessions.find(x => x.taskId === "c-work")!;
+  const base = session.timeline.filter(e => !e.id.startsWith("long-"));
+  // Oldest first, as the conversation reads: 700 earlier turns, then the 300 of `longConversation`.
+  const ordered = [...Array.from({ length: 700 }, (_, i) => [
+    { id: `old-${i}-a`, kind: "cortex" as const, text: `### Earlier step ${i}\n\nRead the refresh handler and the **token table** again, then checked the lock order in round ${i}.\n\n- Kept the error text\n- Noted \`version\` for later` },
+    { id: `old-${i}-f`, kind: "fold" as const, text: `Read ${i % 5 + 1} files`, steps: ["mcp__cortex__project_read"] },
+    ...(i % 3 === 0 ? [{ id: `old-${i}-s`, kind: "said" as const, text: `Earlier owner note ${i}.` }] : []),
+  ]).flat(), ...session.timeline.filter(e => e.id.startsWith("long-"))];
+  let held = PAGE, state: "available" | "loading" = "available", version = 1;
+  const reads: unknown[] = [];
+  (window as unknown as { __earlier: unknown }).__earlier = { reads, total: ordered.length, pages: 0, appMs: [] as number[] };
+  const where = (selector: string) => {
+    const box = document.querySelector<HTMLElement>(selector);
+    // `above`: how much of the drawn rows lies above the viewport (from the top line of the feed's earlier part to the viewport's top).
+    const edge = box?.querySelector(".ws-earlier"), above = box && edge ? Math.round(box.getBoundingClientRect().top - edge.getBoundingClientRect().bottom) : null;
+    return box ? { scrollTop: Math.round(box.scrollTop), above, scrollHeight: box.scrollHeight, clientHeight: box.clientHeight, at: performance.now() } : null;
+  };
+  const publish = () => {
+    const rows = ordered.slice(ordered.length - held);
+    const next = { ...world, sessions: world.sessions.map(s => s !== session ? s : { ...s,
+      // A fresh copy of every row, as the real port projects the whole conversation again for each publish.
+      timeline: structuredClone(held >= ordered.length ? [...base, ...rows] : rows),
+      historyEarlier: held >= ordered.length ? undefined : { state, since: null } }) };
+    const t = performance.now();
+    port.emit(projection(String(++version), next));
+    ((window as unknown as { __earlier: { appMs: number[] } }).__earlier.appMs).push(performance.now() - t);
+  };
+  port.port.loadEarlierHistory = taskId => {
+    if (taskId !== "c-work" || state === "loading" || held >= ordered.length) return;
+    reads.push({ feed: "conversation", ...where(".timeline") });
+    state = "loading"; publish();
+    setTimeout(() => { held = Math.min(ordered.length, held + PAGE); state = "available"; (window as unknown as { __earlier: { pages: number } }).__earlier.pages++; publish(); }, delay);
+  };
+  // The worker's feed: the newest page with the facts, older pages through its cursor.
+  const worker = world.workers.find(w => w.id === "w-be2")!;
+  const notes = Array.from({ length: 3000 }, (_, i) => i % 3 === 2 ? { sequence: i + 1, kind: "tool" as const, text: "mcp__cortex__project_read", at: null }
+    : { sequence: i + 1, kind: "note" as const, text: `### Note ${i}\n\nThe handler takes the row lock before it reads the token. Checked **${i % 9 + 1} files**.`, at: null });
+  worker.activity = notes.slice(-WORKER_PAGE);
+  worker.activityCursor = String(notes.length - WORKER_PAGE);
+  const workerActivity = port.port.readWorkerActivity?.bind(port.port);
+  port.port.readWorkerActivity = async (taskId, workerId, cursor) => {
+    if (workerId !== "w-be2" || !cursor) return workerActivity ? workerActivity(taskId, workerId, cursor) : { activity: [], activityCursor: null, messages: [] };
+    reads.push({ feed: "worker", cursor, ...where(".stream") });
+    const end = Number(cursor), start = Math.max(0, end - WORKER_PAGE);
+    await new Promise(resolve => setTimeout(resolve, delay));
+    return { activity: structuredClone(notes.slice(start, end)), activityCursor: start > 0 ? String(start) : null, messages: [] };
+  };
+  setTimeout(publish, 0);
 }
 (window as unknown as { fixture: string | null }).fixture = query.get("load");

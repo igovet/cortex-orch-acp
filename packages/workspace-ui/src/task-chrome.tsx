@@ -11,10 +11,11 @@ import { FieldEdit } from "./field-edit";
 import { A, FactLine, I, Keyed, Modal, Pop } from "./kit";
 import { ActionBar, revealWhenCut } from "./layout";
 import { behindTarget, conflictLine, finishBlocked, mergeControls, taskCheckout } from "./review-model";
-import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, externalDoneBlocked, languageLabel, modeLabel, resumeState, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
+import { pauseSettingsPage, checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, externalDoneBlocked, languageLabel, modeLabel, resumeState, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerModel, workerState, workersOutcome, type SessionModel } from "./session-model";
 import { CHECK_ICON, VERIFICATION } from "./worker";
 import { archiveBlocked, ARCHIVE_STOP_UNCONFIRMED } from "./git-actions-model";
 import { spendRows, StallBadge, useLiveSpend } from "./task-spend";
+import { LoadingStrip } from "./skeleton";
 
 const useModel = (id: () => string) => {
   const ws = useWs();
@@ -191,7 +192,7 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
     if (m().mode === "closed" && t().status === "done") return "Archive keeps the task and its work without another confirmation.";
     // A pause whose stop or process exit is not confirmed cannot be resumed yet; it says so instead of offering Resume.
     if (m().mode === "paused" && resumeState(m().view)?.kind === "evidence") return resumeState(m().view)!.why;
-    return m().mode === "live" && m().view.sprint?.runMode !== "automatic" ? `${open() ? `${open()} question${open() === 1 ? "" : "s"} for you. ` : ""}Next step is Review.` : paused() ? "Resume, or send any message. Nothing was deleted." : "";
+    return m().mode === "live" && m().view.sprint?.runMode !== "automatic" ? `${open() ? `${open()} question${open() === 1 ? "" : "s"} for you. ` : ""}${chip().next ? `Next step is ${chip().next}.` : ""}`.trim() : paused() ? "Resume, or send any message. Nothing was deleted." : "";
   };
   const base = () => { const b = m().session.base; if (!b) return []; const behind = behindTarget(checkout(), b.branch); return [["Base", behind ? `${b.branch}, ${behind} behind` : b.branch, true] as [string, string, boolean]]; };
   const uncommitted = (): [string, string][] => { const c = checkout(); return c ? [["Uncommitted", c.files.length ? `${c.files.length} files` : "None"]] : m().session.changes ? [["Uncommitted", `${m().session.changes!.files} files`]] : []; };
@@ -202,6 +203,7 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
         {/* The next step, which the title band no longer shows, unless the note below already names it. */}
         <Show when={chip().next && !String(note() ?? "").includes(chip().next!)}><I n="chevron-right" s={12} class="faint" /><span class="muted">{chip().next}</span></Show></div>
       <Show when={note()}><div class="cap muted">{note()}</div></Show>
+      <Show when={pauseSettingsPage(m().view)}>{page => <div class="cap"><A class="lnk" to={{ name: "settings", section: "orchestration", machine: m().view.machine.id, page: page() }}>Open Engines and models</A></div>}</Show>
       <Show when={!note() && !m().view.unknown && m().view.fact.text !== chip().text + (chip().wide ?? "")}><div class="cap muted"><FactLine fact={m().view.fact} /></div></Show>
     </div>
     <Show when={t().archive?.stopUnconfirmed || t().archiveHold === "unconfirmed" && t().process === "unknown"}>
@@ -212,7 +214,7 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
         <Kv rows={[["Workers", `Stopped${stoppedAt(m()) === null ? "" : ` at ${clock(stoppedAt(m()))}`}`], ["Checkout", "Untouched"], ["Decisions", open() ? `${open()} still open` : "None open"], ["Queue", `${m().queue.length} kept`]]} /></div>
     </Show>
     <Show when={selected()}>{w => <div class="ins-sec"><div class="ins-h"><span>Selected worker</span></div>
-      <Kv rows={[["Worker", w().role], ["State", workerFace(w().status).label], ["Model", workerModel(w(), ws.route)], ...(w().scope.length ? [["Scope", w().scope.join(", "), true] as [string, string, boolean]] : []), ["Edited", `${editedFiles(w()).files} files, +${editedFiles(w()).add} −${editedFiles(w()).del}`], ["Commands", `${w().activity.filter(a => a.command).length} run`]]} /></div>}</Show>
+      <Kv rows={[["Worker", w().role], ["State", workerState(w()).label], ["Model", workerModel(w(), ws.route)], ...(w().scope.length ? [["Scope", w().scope.join(", "), true] as [string, string, boolean]] : []), ["Edited", `${editedFiles(w()).files} files, +${editedFiles(w()).add} −${editedFiles(w()).del}`], ["Commands", `${w().activity.filter(a => a.command).length} run`]]} /></div>}</Show>
     <div class="ins-sec">
       <div class="ins-h"><span>{t().checkout.kind === "worktree" ? "Worktree" : "Checkout"}</span></div>
       <Kv rows={[...(t().checkout.kind === "worktree" ? [["Path", (t().checkout as { path: string }).path, true] as [string, string, boolean]] : []), ["Branch", t().checkout.branch, true], ...base(), [sameBranch(t(), m().view.target) ? "Target branch" : "Merge into", m().view.target, true], ...uncommitted(), ["Conflicts", t().merge && t().conflict !== "none" ? (ws.store.mode === "real" && !t().merge!.files.length ? "No paths displayed" : conflictLine(t().merge!)) : "None"]]} />
@@ -234,12 +236,15 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
     </Show>
     <Show when={m().workers.length > 0}>
       <div class="ins-sec"><div class="ins-h"><span>Workers</span><span>{workersOutcome(m().workers, m().active.length)}</span></div>
-        <Keyed each={m().workers} by={w => w.id}>{w => { const f = () => workerFace(w().status); return <A class="wins ws-wins" to={{ name: "task", machine: m().view.machine.id, task: m().view.id, tab: "workers", worker: w().id }}><I n={f().icon} s={14} class={`${f().spin ? "spin " : ""}${f().tone === "st-idle" ? "faint" : f().tone}`} /><span class="trunc">{w().role}</span><span class={`st ${f().tone}`}>{f().label}</span></A>; }}</Keyed>
+        <Keyed each={m().workers} by={w => w.id}>{w => { const f = () => workerState(w()); return <A class="wins ws-wins" to={{ name: "task", machine: m().view.machine.id, task: m().view.id, tab: "workers", worker: w().id }}><I n={f().icon} s={14} class={`${f().spin ? "spin " : ""}${f().tone === "st-idle" ? "faint" : f().tone}`} /><span class="trunc">{w().role}</span><span class={`st ${f().tone}`}>{f().label}</span></A>; }}</Keyed>
       </div>
     </Show>
     <div class="ins-sec"><div class="ins-h"><span>Route and access</span></div>
-      <Kv rows={[["Coordinator model", ws.route(settings()) ?? ""], ...(ws.store.state().options.modes.length ? [["Access", modeLabel(settings().mode)] as [string, string]] : []), ...(ws.store.state().options.languages.length ? [["Language", languageLabel(settings().language)] as [string, string]] : [])]} />
-      <Show when={usesMachineRoute(m()) && ws.route(settings())}><div class="cap faint">What this machine sets for every task.</div></Show></div>
+      {/* Until the task's saved route is read, a placeholder: never the machine's defaults standing in for the task's own. */}
+      <Show when={ws.store.taskRouteKnown?.(m().view.id) ?? true} fallback={<LoadingStrip label="Reading this task's route" class="ws-route-pending" />}>
+        <Kv rows={[["Coordinator model", ws.route(settings()) ?? ""], ...(ws.store.state().options.modes.length ? [["Access", modeLabel(settings().mode)] as [string, string]] : []), ...(ws.store.state().options.languages.length ? [["Language", languageLabel(settings().language)] as [string, string]] : [])]} />
+        <Show when={usesMachineRoute(m()) && ws.route(settings())}><div class="cap faint">What this machine sets for every task.</div></Show>
+      </Show></div>
     {/* What the task spent, as its engines reported it (`native_progress`). */}
     <Show when={taskSpendRows().length > 0}>
       <div class="ins-sec"><div class="ins-h"><span>Spend</span></div><Kv rows={taskSpendRows()} /></div>

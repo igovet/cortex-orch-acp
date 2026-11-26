@@ -162,6 +162,10 @@ impl Lane {
         let thread = std::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
+                // Store connections are the runtime's own bookkeeping, never a task process:
+                // they read and commit at the session's default disk priority, not the
+                // lowest level the service unit gives the work it starts (`io_priority`).
+                crate::io_priority::raise_thread();
                 let setup = || -> CoreResult<_> {
                     // Acquire the owner fence BEFORE any writable initialization.
                     let lease = if owner {
@@ -176,7 +180,12 @@ impl Lane {
                     } else {
                         None
                     };
-                    let store = Store::open(key.clone(), mode)?;
+                    // A read lane queues behind an exclusive migration instead of refusing `busy`.
+                    let store = if owner {
+                        Store::open(key.clone(), mode)?
+                    } else {
+                        Store::open_waiting(key.clone(), mode)?
+                    };
                     Ok((store, lease))
                 };
                 match setup() {

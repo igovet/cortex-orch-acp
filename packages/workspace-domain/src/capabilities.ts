@@ -12,7 +12,7 @@ export const capabilityOf = (type: WorkspaceCommand["type"]) => ON_THE_WIRE[type
 /** What a machine with its helper offers, past the three commands of the wire. */
 export const MACHINE_COMMANDS: readonly WorkspaceCommand["type"][] = [
   "resolve_block", "finish_merge", "abort_merge", "resolve_with_cortex", "inspect_merge", "request_merge_checks", "stop_resolution", "set_task_settings", "rerun_check", "add_comment", "edit_comment", "remove_comment", "send_comments", "stop_worker", "stop_command", "allow_write",
-  "stop_task", "continue_task", "retry_task", "send_message", "remove_queued", "move_queued", "send_queued", "request_changes", "rework_task", "rename_task", "generate_title", "archive_task", "confirm_discard", "restore_task", "purge_task", "purge_many", "close_task", "accept_result", "integrate", "set_target",
+  "stop_task", "continue_task", "retry_task", "send_message", "remove_queued", "move_queued", "send_queued", "request_changes", "rework_task", "rename_task", "generate_title", "generate_sprint_title", "archive_task", "confirm_discard", "restore_task", "purge_task", "purge_many", "close_task", "accept_result", "integrate", "set_target",
   "git_stage", "git_revert", "git_draft", "git_commit", "git_fetch", "git_init", "git_pull", "git_pull_continue", "git_pull_abort", "git_push", "update_from_target", "create_branch", "revert_commit", "delete_worktree",
   "clear_old", "rename_machine", "set_retention", "save_storage", "set_worktree_root", "run_diagnostics", "run_cleanup",
   "save_surface", "activate_profile", "save_profile", "revert_profile", "deactivate_profile", "create_profile", "rename_profile", "describe_profile", "delete_profile", "apply_preset", "reset_preset",

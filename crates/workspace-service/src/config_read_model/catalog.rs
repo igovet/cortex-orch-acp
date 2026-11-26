@@ -4,7 +4,7 @@
 use super::{defaults::latest_snapshot, ConfigurationReader, SettingsRead, ENGINES};
 use cortex_core::{CoreError, CoreResult};
 use serde_json::{json, Value};
-use std::{collections::BTreeSet, path::Path};
+use std::{collections::{BTreeMap, BTreeSet}, path::Path};
 
 fn rows(v: &Value) -> impl Iterator<Item = &Value> {
     v.as_array().into_iter().flatten()
@@ -122,6 +122,10 @@ fn policy(rules: &Value, engine: &str, model: &str) -> (Value, Vec<&'static str>
         }
         attrs[key] = json!(kinds);
     }
+    if !p["tier_efforts"].is_null() {
+        attrs["tier_efforts"] = p["tier_efforts"].clone();
+        attrs["attribute_sources"]["tier_efforts"] = json!("configured");
+    }
     (attrs, tiers)
 }
 impl ConfigurationReader {
@@ -199,6 +203,19 @@ impl ConfigurationReader {
             pairs.extend(presented(raw).into_iter().map(|e| (e, *r)));
         }
         let providers = &rules["providers"];
+        // Ids earlier snapshots gave each model: a saved task may still hold one.
+        let mut retained = BTreeMap::new();
+        for (_, r) in &pairs {
+            let id = r["id"].as_str().unwrap().to_owned();
+            retained
+                .entry(id.clone())
+                .or_insert_with(|| crate::native_routes::retained_route_ids(&self.environment.state, &id));
+        }
+        // A current route is never an earlier id of another current route of the same model.
+        let current: BTreeSet<String> = pairs
+            .iter()
+            .filter_map(|(e, _)| e["route"]["id"].as_str().map(str::to_owned))
+            .collect();
         let mut routes = vec![];
         for (e, r) in &pairs {
             let engine = e["route"]["engine"].as_str().unwrap();
@@ -238,7 +255,13 @@ impl ConfigurationReader {
                     "deny":tokens(&s["rules"]["deny"],engine,model),
                     "auto_allow":tokens(&s["rules"]["auto_allow"],engine,model)});
             }
-            routes.push(json!({"route_id":e["route"]["id"],"engine":engine,"model":model,
+            let previous: Vec<_> = retained[r["id"].as_str().unwrap()]
+                .get(model)
+                .into_iter()
+                .flatten()
+                .filter(|id| !current.contains(id.as_str()))
+                .collect();
+            let mut route = json!({"route_id":e["route"]["id"],"engine":engine,"model":model,
                 "model_name":e["model_name"],"connection_id":r["id"],"connection_name":r["name"],
                 "connection_state":r["state"],"qualified":r["qualified"],"observed":!seed,
                 "tier":if candidate { tiers.first().copied() } else { None },
@@ -251,7 +274,12 @@ impl ConfigurationReader {
                 "selectable":ready && !disabled,"in_selector":ready && !disabled,"disabled":disabled,
                 "deny_tokens":deny,"enabled":enabled,"engine_disabled":contains(&rules["deny"], &format!("{engine}/*")),
                 "default_auto_excluded":null,"auto_allow_tokens":tokens(&rules["auto_allow"],engine,model),
-                "automatic":automatic,"superseded_by":null,"matches":matches}));
+                "automatic":automatic,"superseded_by":null,"matches":matches});
+            // Only a route that replaced older ids names them; older readers see no new field.
+            if !previous.is_empty() {
+                route["previous_route_ids"] = json!(previous);
+            }
+            routes.push(route);
         }
         let mut engines = vec![];
         for engine in ENGINES {

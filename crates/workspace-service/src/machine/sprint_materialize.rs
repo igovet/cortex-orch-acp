@@ -27,12 +27,39 @@ pub(super) fn task_id(project: &str, sprint: &str, version: u64, key: &str) -> S
     format!("wt_{}", &hex[..32])
 }
 
+/// The owner-chosen sprint route every task of the sprint uses, merged over the
+/// default mode and language; `None` when each task gets its automatic route.
+/// The sprint's `settings.model` is always the planning conversation's model; it
+/// is a route for the tasks only when the owner picked it (`taskRoute: "sprint"`).
+/// A sprint saved without `taskRoute` (an older client) keeps the earlier rule:
+/// any saved model applies to every task.
+pub(super) fn owner_sprint_route(sprint: &Value) -> Option<Value> {
+    if sprint["taskRoute"] == "automatic" {
+        return None;
+    }
+    sprint["settings"]
+        .as_object()
+        .filter(|s| {
+            s.get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|m| !m.is_empty())
+        })
+        .map(|s| {
+            let mut merged = json!({"mode":"guarded","language":"auto"});
+            for (k, v) in s {
+                merged[k] = v.clone();
+            }
+            merged
+        })
+}
+
 struct Item<'a> {
     key: &'a str,
     description: &'a str,
     title: Option<String>,
     depends: Vec<&'a str>,
     checkout: Option<&'a Value>,
+    complexity: &'a str,
 }
 
 fn invalid_plan(detail: impl std::fmt::Display) -> Refused {
@@ -85,11 +112,22 @@ fn ordered(items: &[Value]) -> Result<Vec<Item<'_>>> {
             }
             _ => None,
         };
+        let complexity = match &item["complexity"] {
+            Value::Null => "normal",
+            Value::String(c) if ["low", "normal", "high"].contains(&c.as_str()) => c.as_str(),
+            _ => {
+                return Err(invalid_plan(format!(
+                    "task {} has an unknown complexity",
+                    n + 1
+                )))
+            }
+        };
         parsed.push(Item {
             key,
             description,
             title,
             depends,
+            complexity,
             checkout: item.get("checkout").filter(|c| !c.is_null()),
         });
     }
@@ -137,7 +175,22 @@ thread_local! {
 /// is `{done, created, taskIds, strayTaskIds}`. A `requestId` is accepted but not needed:
 /// the sprint and plan version are the action's identity, so any repeat (the same or
 /// a new request) answers with the same tasks and `created: 0`.
+#[cfg(test)]
 pub fn materialize(root: &Path, project: &str, state: &Path, p: &Value) -> Result<Value> {
+    materialize_routed(root, project, state, p, &|_| None)
+}
+
+/// [`materialize`] with the runtime's automatic route of each task: without an
+/// owner-chosen sprint model, `routes(complexity)` names the profile route and
+/// effort of a task of that complexity (see `RouteResolver::sprint_route`); a
+/// task it names no route for starts on the owner's default coordinator.
+pub fn materialize_routed(
+    root: &Path,
+    project: &str,
+    state: &Path,
+    p: &Value,
+    routes: &dyn Fn(&str) -> Option<Value>,
+) -> Result<Value> {
     let sprint_id = string(p, "sprintId")?;
     let version = p["planVersion"]
         .as_u64()
@@ -208,23 +261,25 @@ pub fn materialize(root: &Path, project: &str, state: &Path, p: &Value) -> Resul
         .collect();
     // The sprint's route and checkout apply to every task it creates; a sprint-wide
     // checkout wins over a plan item's own.
-    let route = sprint["settings"]
-        .as_object()
-        .filter(|s| {
-            s.get("model")
-                .and_then(Value::as_str)
-                .is_some_and(|m| !m.is_empty())
-        })
-        .map(|s| {
-            let mut merged = json!({"mode":"guarded","language":"auto"});
-            for (k, v) in s {
-                merged[k] = v.clone();
-            }
-            merged
-        });
-    let options: Vec<Value> = order
+    let route = owner_sprint_route(&sprint);
+    // Without an owner-chosen sprint model each task gets the runtime's route
+    // for its complexity, inside the sprint's own mode and language.
+    let assigned: Vec<Option<Value>> = order
         .iter()
         .map(|item| {
+            if route.is_some() {
+                return None;
+            }
+            routes(item.complexity).filter(|r| {
+                r["routeId"].as_str().is_some_and(|m| !m.is_empty())
+                    && r["effort"].as_str().is_some_and(|e| !e.is_empty())
+            })
+        })
+        .collect();
+    let options: Vec<Value> = order
+        .iter()
+        .zip(&assigned)
+        .map(|(item, assigned)| {
             let checkout = sprint
                 .get("checkout")
                 .filter(|c| !c.is_null())
@@ -234,6 +289,14 @@ pub fn materialize(root: &Path, project: &str, state: &Path, p: &Value) -> Resul
             let mut options = json!({"checkout":{"kind":checkout}});
             if let Some(route) = &route {
                 options["settings"] = route.clone();
+            } else if let Some(assigned) = assigned {
+                let mut merged = json!({"mode":"guarded","language":"auto"});
+                for (k, v) in sprint["settings"].as_object().into_iter().flatten() {
+                    merged[k] = v.clone();
+                }
+                merged["model"] = assigned["routeId"].clone();
+                merged["effort"] = assigned["effort"].clone();
+                options["settings"] = merged;
             }
             options
         })
@@ -253,7 +316,7 @@ pub fn materialize(root: &Path, project: &str, state: &Path, p: &Value) -> Resul
     if !product["tasks"].is_object() {
         return Err(refuse("state_unreadable", "Saved tasks are unreadable."));
     }
-    for item in &order {
+    for (item, assigned) in order.iter().zip(&assigned) {
         let id = &ids[item.key];
         let mut record = product["tasks"]
             .get(id)
@@ -261,6 +324,18 @@ pub fn materialize(root: &Path, project: &str, state: &Path, p: &Value) -> Resul
             .filter(Value::is_object)
             .unwrap_or_else(|| json!({}));
         record["sprintId"] = json!(sprint_id);
+        match assigned {
+            Some(a) => {
+                record["sprintRoute"] = json!({"routeId":a["routeId"],"engine":a["engine"],
+                    "model":a["model"],"tier":a["tier"],"effort":a["effort"],
+                    "complexity":item.complexity,"usedPercent":a["usedPercent"]});
+            }
+            None => {
+                if let Some(r) = record.as_object_mut() {
+                    r.remove("sprintRoute");
+                }
+            }
+        }
         record["dependencies"] = json!(item.depends.iter().map(|d| &ids[d]).collect::<Vec<_>>());
         record["planning"] = json!(false);
         if let Some(title) = item

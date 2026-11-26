@@ -1063,6 +1063,8 @@ pub(super) fn correctable(code: &str) -> bool {
             | "review_block_findings_required"
             | "review_not_covered_required"
             | "assignment_blocker_required"
+            | "objective_partial_blocker_required"
+            | "review_goal_coverage_required"
     )
 }
 /// The report text a submission names: the inline Markdown, or the complete body of
@@ -1155,6 +1157,8 @@ pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Va
         "review_block_findings_required" => "A BLOCK must name each confirmed problem in findings. Name them, or finish the review and choose the verdict your evidence supports.",
         "review_not_covered_required" => "not_covered goes with verdict INCOMPLETE only, and INCOMPLETE needs at least one not_covered part with its blocker.",
         "assignment_blocker_required" => "A failed assignment needs blocker: the dead end (kind and concrete detail) you cannot clear within your role and permissions. If you can still finish the work, finish it and submit the completed result instead.",
+        "objective_partial_blocker_required" => "objective_status partial (with the undone parts in remaining) is accepted only at a dead end, as assignment_outcome failed with its blocker. Finish the remaining parts listed in missing in this session and submit objective_status complete; only a part you genuinely cannot do goes back as a failed assignment.",
+        "review_goal_coverage_required" => "An approval answers, in goal_coverage, every outcome of the review packet goal (listed in missing) exactly once: delivered true only when the reviewed work delivers it as the goal states it. Approving a stage that leaves an outcome undelivered is fine: report it as delivered false.",
         "open_failed_check" => "A cited check failed and is still open. Each item in missing names the check, its tool_call_ref, the gap that keeps it open and what closes it: only a verified passing rerun of the same argv, cwd and profile, cited as passed under the same name, closes a failure. At a genuine dead end, submit assignment_outcome \"failed\" with its blocker instead.",
         "failed_check_repair_required" => "A project check failed. Repair the cause in your scope, rerun the exact same command, and submit the result again. Only a genuine dead end, submitted as a failure with its blocker, goes to the coordinator.",
         "omitted_failed_check" => "A failed check run that an earlier submission cited is missing (each is named in missing by its tool_call_ref). Cite each again as a failed check; a verified exact passing rerun cited as passed under the same name closes it. At a genuine dead end, submit assignment_outcome \"failed\" with its blocker.",
@@ -1182,6 +1186,8 @@ pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Va
         "review_coverage_unfinished" | "review_not_covered_required" => Some("not_covered"),
         "review_block_findings_required" => Some("findings"),
         "assignment_blocker_required" => Some("blocker"),
+        "objective_partial_blocker_required" => Some("objective_status"),
+        "review_goal_coverage_required" => Some("goal_coverage"),
         "native_summary_required" => Some("summary"),
         "invalid_publication" => Some("report_title"),
         "open_failed_check"
@@ -1554,6 +1560,37 @@ fn relieve(
                 "Review parts not covered",
                 format!("The review was recorded INCOMPLETE after repeated identical refusals; these parts stay uncovered: {}.", shown(&open)),
             ));
+            "disclosed"
+        }
+        // Never a pass: a partial objective is recorded as the failed assignment it is,
+        // and an approval's unanswered goal outcomes as not delivered.
+        "objective_partial_blocker_required" => {
+            relieved["assignment_outcome"] = json!("failed");
+            if relieved["remaining"].as_array().is_none_or(Vec::is_empty) {
+                relieved["remaining"] = json!(["Parts of the objective the worker did not name"]);
+            }
+            if !lifecycle::review::valid_blocker(&relieved["blocker"]["kind"]) {
+                relieved["blocker"] = json!({"kind":"other_role_work","detail":
+                    "The worker reported its objective as partly done without naming a dead end; the runtime recorded the remaining work for the coordinator after repeated identical refusals."});
+            }
+            "failed_assignment"
+        }
+        "review_goal_coverage_required" if review => {
+            let outcomes = store.read(|db| lifecycle::plan::task_outcomes(db, &i.task))?.unwrap_or_default();
+            let mut coverage: Vec<Value> = relieved["goal_coverage"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|c| outcomes.iter().any(|o| o["id"] == c["id"]))
+                .collect();
+            for o in &outcomes {
+                if !coverage.iter().any(|c| c["id"] == o["id"]) {
+                    coverage.push(json!({"id":o["id"],"delivered":false,
+                        "note":"The reviewer did not report this outcome after repeated identical refusals."}));
+                }
+            }
+            relieved["goal_coverage"] = json!(coverage);
             "disclosed"
         }
         "assignment_blocker_required" => {

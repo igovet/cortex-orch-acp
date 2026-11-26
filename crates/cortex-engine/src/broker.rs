@@ -37,6 +37,23 @@ pub struct RelayEntry {
     args: Vec<String>,
     env: Vec<Value>,
 }
+impl RelayEntry {
+    /// A service-owned stdio server that needs no broker, channel or secret (the
+    /// side chat's read-only project files): an absolute existing executable,
+    /// plain arguments and no environment.
+    pub fn stdio(name: &str, command: &Path, args: Vec<String>) -> Result<Self> {
+        if name.is_empty()
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            || matches!(name, "cortex" | "worker" | "coordinator")
+            || !command.is_absolute()
+            || !command.is_file()
+            || args.iter().any(|a| a.contains('\0'))
+        {
+            return Err(Error::Invalid);
+        }
+        Ok(Self { name: name.into(), command: command.into(), args, env: vec![] })
+    }
+}
 
 pub struct Broker {
     endpoint: PathBuf,

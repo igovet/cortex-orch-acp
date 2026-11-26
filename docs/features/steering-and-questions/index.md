@@ -29,6 +29,11 @@ metadata still display. Exact skill proposals keep their approval/decline
 pair and recommend approval unless explicitly marked otherwise; runtime stop
 questions retain the runtime's own recommendation. No recommendation counts
 as an answer.
+The runtime marks one answer in its own fixed-answer questions the same way
+(retry now after an infrastructure interruption, retry later after a broken
+loop). Plain ACP clients receive the recommended option with a visible suffix
+on its label, " (Recommended)" or " (рекомендую)" by task language; the answer
+identity is unchanged. Workspace shows "Recommended" or "Рекомендую".
 
 Only an answer recorded against that exact question resumes the requesting
 phase. A completed worker-local question (or complete batch) also restores the
@@ -85,7 +90,13 @@ with its own review and verification. If the user chose to finish, it closes
 the task with a short `answer_submit` only when the answer is an ordinary
 planning choice. An explicit owner choice to close the task as-is takes the
 runtime-owned force-finish path below instead. The coordinator uses
-`synthesis_submit` only when nothing is left for the user to decide.
+`synthesis_submit` only when nothing is left for the user to decide and every goal
+outcome is done. An owner message can add a goal outcome: the next plan or
+`steer_plan` amendment lists it beside every earlier outcome, which no plan may drop.
+After the owner answered a question asked after verification, `answer_submit` may
+report an outcome `not_done`; the runtime then lists it under its own "Goal not fully
+met (owner's decision)" section. See [the original goal decides
+completion](../task-lifecycle/index.md#the-original-goal-decides-completion).
 
 A question can carry a `skill_proposal` for a reusable project skill. The
 runtime validates action-matched approval and decline labels before persistence,
@@ -300,11 +311,13 @@ With that list nonempty, an authored not-verified heading (including common
 English/Russian aliases) refuses the proposal before persistence, rather than
 silently removing context. Correct the text and retry while keeping the complete
 structured list; see [disclosure ownership](../task-lifecycle/index.md#runtime-composed-synthesis).
-The runtime completes
-such an answer only after re-checking the revision's completion gates (completed
-nodes, unchanged report digests, approved review, passing verification on the
-unchanged project); a project changed since verification ends the task `FAILED`
-with `answer_not_certified:completion_project_revision_changed`. A later failed
+Before recording an answer that relies on an existing review, the runtime checks
+the current checkout or the specific files bound to that review. If the binding
+changed, the coordinator receives `answer_project_revision_changed` and can
+propose a scoped plan with fresh verification in the same turn. Completion
+rechecks the nodes, report digests, review and verification. A change after
+submission still ends the task `FAILED` with
+`answer_not_certified:completion_project_revision_changed`. A later failed
 verification, an accepted plan, assignment, replan or verification repair, or a
 newly provisioned worker removes the answer option. Previously such a message,
 even one that needed no decision, left the coordinator only refused synthesis

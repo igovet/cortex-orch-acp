@@ -186,7 +186,7 @@ pub(crate) fn read(store: &Store, project: &str, p: ReadOutput) -> CoreResult<Va
         "failed"
     };
     let mut result = json!({
-        "operation":operation, "status":status, "argv":receipt["argv"], "cwd":receipt["cwd"],
+        "operation":operation, "status":status, "argv":redacted_argv(&receipt["argv"]), "cwd":receipt["cwd"],
         "exitCode":receipt["exit_code"], "signal":receipt["signal"], "failure":receipt["failure"],
         "output":{"state":if status=="running" {"pending"} else {"unavailable"}}
     });
@@ -234,7 +234,7 @@ pub(crate) fn read(store: &Store, project: &str, p: ReadOutput) -> CoreResult<Va
     let length = chunk.len();
     use base64::Engine;
     let (chunk, encoding) = match String::from_utf8(chunk) {
-        Ok(text) => (text, "utf-8"),
+        Ok(text) => (crate::machine::redact_display_text(&text), "utf-8"),
         Err(e) => (
             base64::engine::general_purpose::STANDARD.encode(e.as_bytes()),
             "base64",
@@ -249,6 +249,18 @@ pub(crate) fn read(store: &Store, project: &str, p: ReadOutput) -> CoreResult<Va
         "complete":complete && offset == 0 && next == output.size,
     });
     Ok(result)
+}
+
+/// A command line as display text: every word is credential-redacted.
+fn redacted_argv(argv: &Value) -> Value {
+    match argv.as_array() {
+        Some(a) => Value::Array(
+            a.iter()
+                .map(|w| w.as_str().map_or_else(|| w.clone(), |s| json!(crate::machine::redact_display_text(s))))
+                .collect(),
+        ),
+        None => argv.clone(),
+    }
 }
 
 /// Hash the very bytes being paged, not a separate open or read after verification.
@@ -395,6 +407,20 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn command_output_masks_credentials_in_text_pages_and_argv() {
+        let f = Fixture::new("command_run");
+        f.settle(Some(b"OPENAI_API_KEY=sk-qa0123456789abcdefghijklmnop\nrev ok\n"), false);
+        let page = f.output(json!({})).unwrap();
+        let chunk = page["output"]["chunk"].as_str().unwrap();
+        assert!(!chunk.contains("qa0123"), "{chunk}");
+        assert!(chunk.contains("OPENAI_API_KEY=[REDACTED]") && chunk.contains("rev ok"));
+        let argv = redacted_argv(&json!(["printf", "OPENAI_API_KEY=sk-qa0123456789abcdefghijklmnop\\n", "-n"]));
+        assert_eq!(argv[0], "printf");
+        assert_eq!(argv[1], "OPENAI_API_KEY=[REDACTED]");
+        assert_eq!(argv[2], "-n");
     }
 
     #[test]

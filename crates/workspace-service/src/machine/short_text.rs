@@ -44,7 +44,7 @@ pub(super) const MAX_PUSH_SUMMARY: usize = 8000;
 pub(super) fn handles(p: &Value) -> bool {
     matches!(
         p["action"].as_str(),
-        Some("generate_title" | "draft_integration_text" | "draft_checkout_commit" | "draft_push_summary" | "short_text_poll")
+        Some("generate_title" | "generate_sprint_title" | "draft_integration_text" | "draft_checkout_commit" | "draft_push_summary" | "short_text_poll")
     )
 }
 
@@ -425,7 +425,7 @@ fn owner_titled(root: &Path, project: &str, task: &str) -> Result<bool> {
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         .is_some_and(|o| o.get("draftTitle").is_some()))
 }
-fn description(root: &Path, project: &str, task: &str) -> Result<Option<String>> {
+pub(super) fn description(root: &Path, project: &str, task: &str) -> Result<Option<String>> {
     let Some(store) = context::open(root, cortex_core::OpenMode::LiveReadOnly)? else {
         return Ok(None);
     };
@@ -516,6 +516,114 @@ pub(super) fn title_job(
         "reason":reason,"saved":saved,"route":route})
 }
 
+
+// ---------------------------------------------------------------- sprint titles
+
+fn sprint_title_prompt(description: &str) -> String {
+    format!(
+        "Write a title for the software sprint below. The text asks for several pieces of work; \
+         summarize the whole sprint, not only its first line.\n\
+         Rules: at most 8 words; name what the sprint delivers; \
+         use the language of the sprint text; no quotes, no trailing period, no prefix.\n\
+         Reply with the title only.\n\n<sprint>\n{}\n</sprint>\n",
+        bounded(description, MAX_DESCRIPTION)
+    )
+}
+
+/// Save a sprint title unless the owner named the sprint or a model already did.
+/// Takes `machine.lock` only when it is free, retrying until `budget` ends.
+pub(super) fn save_sprint_title(
+    state: &Path,
+    project: &str,
+    sprint: &str,
+    title: &str,
+    budget: Duration,
+) -> Result<bool> {
+    let deadline = Instant::now() + budget;
+    let _lock = loop {
+        if let Some(lock) = settings::Lock::try_new(state, "machine.lock")? {
+            break lock;
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let mut product = super::native::product(state, project)?;
+    let record = product["sprints"]
+        .as_array_mut()
+        .ok_or_else(|| refuse("state_unreadable", "Saved sprints are unreadable."))?
+        .iter_mut()
+        .find(|s| s["id"] == sprint)
+        .ok_or_else(|| refuse("unknown_sprint", "Unknown sprint."))?;
+    // Only a sprint the owner has not named, and no model has, is named.
+    if !record["title"].is_null() || record["titleState"] == "user" || !record["archivedAt"].is_null() {
+        return Ok(false);
+    }
+    record["title"] = json!(title);
+    record["titleState"] = json!("generated");
+    settings::write_json(&product_path(state, project)?, &product)?;
+    Ok(true)
+}
+
+/// The sprint title job: a model title is saved in the background. Without a route or a usable
+/// answer nothing is saved: the sprint keeps showing the label made of its first sentence (`fallback_title`)
+/// and a retry stays possible.
+pub(super) fn sprint_title_job(
+    state: &Path,
+    project: &str,
+    sprint: &str,
+    description: &str,
+    chosen: std::result::Result<Chosen, &'static str>,
+    budget: Duration,
+) -> Value {
+    let (answer, route) = generate(state, "sprint_title", &sprint_title_prompt(description), chosen, budget);
+    let (title, reason) = match answer.map(|a| title_of(&a).ok_or("unusable_answer")) {
+        Ok(Ok(title)) => (Some(title), None),
+        Ok(Err(reason)) | Err(reason) => (None, Some(reason)),
+    };
+    let saved = title
+        .is_some_and(|t| save_sprint_title(state, project, sprint, &t, SAVE_BUDGET).unwrap_or(false));
+    json!({"state":"done","source":if reason.is_none(){"model"}else{"fallback"},
+        "label":if reason.is_some(){json!(fallback_title(description))}else{Value::Null},
+        "reason":reason,"saved":saved,"route":route})
+}
+
+/// Start naming `sprint` in the background. `None` when it is named by the owner
+/// or a model already, or unknown. Never waits for a model, `machine.lock` or the writer.
+pub(super) fn start_sprint_title(
+    root: &Path,
+    project: &str,
+    state: &Path,
+    config: &crate::Config,
+    sprint: &str,
+) -> Result<Option<String>> {
+    let product = super::native::product(state, project)?;
+    let Some(record) = product["sprints"]
+        .as_array()
+        .and_then(|all| all.iter().find(|s| s["id"] == sprint))
+    else {
+        return Err(refuse("unknown_sprint", "Unknown sprint."));
+    };
+    if record["titleState"] == "user"
+        || record["titleState"] == "generated"
+        || record["title"].is_string()
+    {
+        return Ok(None);
+    }
+    let description = record["description"].as_str().unwrap_or("").to_owned();
+    let (id, fresh) = begin(project, sprint, "sprint_title");
+    if fresh {
+        let (root, project, state, config, sprint) = (
+            root.to_owned(), project.to_owned(), state.to_owned(), config.clone(), sprint.to_owned(),
+        );
+        spawn(id.clone(), move || {
+            let chosen = choose(&config, &root);
+            sprint_title_job(&state, &project, &sprint, &description, chosen, RUN_BUDGET)
+        })?;
+    }
+    Ok(Some(id))
+}
 // ---------------------------------------------------------------- changes
 
 /// What changed for one integration text, read from Git.
@@ -525,6 +633,12 @@ pub(super) struct Changes {
     pub files: Vec<(String, Option<u64>, Option<u64>)>,
     pub untracked: Vec<String>,
     excerpt: String,
+}
+impl Changes {
+    /// The bounded, credential-filtered diff excerpts.
+    pub(super) fn excerpt(&self) -> &str {
+        &self.excerpt
+    }
 }
 /// Whether a changed file is listed by name only and never read for the excerpt:
 /// environment files, SSH keys, certificates and key stores, package-registry
@@ -672,7 +786,7 @@ pub(super) async fn changes(
     }
     Ok(changes)
 }
-fn file_lines(changes: &Changes, max: usize) -> Vec<String> {
+pub(super) fn file_lines(changes: &Changes, max: usize) -> Vec<String> {
     let total = changes.files.len() + changes.untracked.len();
     let mut lines: Vec<String> = changes
         .files
@@ -739,7 +853,7 @@ fn marked_prefix(text: &str, max: usize) -> String {
     format!("{}{TRUNCATED}", clip_utf8(text, max - TRUNCATED.len()))
 }
 
-fn limited(text: &str, max: usize) -> String {
+pub(super) fn limited(text: &str, max: usize) -> String {
     if text.len() <= max {
         text.to_owned()
     } else {
@@ -750,7 +864,7 @@ fn limited(text: &str, max: usize) -> String {
 // Never supply credentials from native settings, Git config, stderr, or known
 // private files. Also redact recognizable secrets in arbitrary repository text
 // before clipping it. This is not a classifier for every possible secret.
-fn prompt_data(text: &str) -> String {
+pub(super) fn prompt_data(text: &str) -> String {
     let text = visible(text);
     if text.contains("PRIVATE KEY-----") {
         return "[private-key material omitted]\n".to_owned();
@@ -997,7 +1111,7 @@ pub(super) fn integration_key(
         super::files::revision(&inputs)
     )
 }
-fn task_id(p: &Value) -> Result<&str> {
+pub(super) fn task_id(p: &Value) -> Result<&str> {
     p["taskId"]
         .as_str()
         .filter(|s| {
@@ -1007,6 +1121,13 @@ fn task_id(p: &Value) -> Result<&str> {
                     .all(|b| b.is_ascii_alphanumeric() || b"_:.-".contains(&b))
         })
         .ok_or_else(|| refuse("invalid_task", "Unknown task."))
+}
+
+fn sprint_id(p: &Value) -> Result<&str> {
+    p["sprintId"]
+        .as_str()
+        .filter(|s| s.starts_with("sp_") && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"_:.-".contains(&b)))
+        .ok_or_else(|| refuse("unknown_sprint", "Unknown sprint."))
 }
 
 /// `generate_title`, `draft_integration_text` and `short_text_poll`. Never waits
@@ -1053,8 +1174,18 @@ pub(super) async fn run(
         }
         return Ok(json!({"jobId":id}));
     }
-    let task = if action == "short_text_poll" && p["taskId"].is_null() {
+    if action == "generate_sprint_title" {
+        let sprint = sprint_id(p)?;
+        let reply = start_sprint_title(root, project, state, config, sprint)?;
+        return Ok(match reply {
+            Some(id) => json!({"jobId":id}),
+            None => json!({"jobId":null,"skipped":"owner_title"}),
+        });
+    }
+    let task = if action == "short_text_poll" && p["taskId"].is_null() && p["sprintId"].is_null() {
         String::new()
+    } else if action == "short_text_poll" && p["taskId"].is_null() {
+        sprint_id(p)?.to_owned()
     } else {
         task_id(p)?.to_owned()
     };

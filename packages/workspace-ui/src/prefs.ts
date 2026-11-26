@@ -10,6 +10,10 @@ export type VoicePrefs = { provider: string; language: string; microphone: strin
 export type SidebarYield = "full" | "room" | null;
 /** What the palette can ask of the sprint plan on view. `fit` and `full` are null while the plan is not in the Graph view. */
 export type GraphActions = { show: (() => void) | null; fit: (() => void) | null; full: (() => void) | null; fullOn: boolean };
+/** Where the task side chat floats and how it is shown. `x` and `y` below 0 mean the default corner; `open` false is closed. */
+export type SideChatPlace = { x: number; y: number; w: number; h: number; collapsed: boolean; open: boolean };
+export const SIDE_CHAT_PLACE: SideChatPlace = { x: -1, y: -1, w: 380, h: 480, collapsed: false, open: false };
+const isSideChatPlace = (v: unknown) => isRecord(v) && ["x", "y", "w", "h"].every(k => Number.isFinite((v as Record<string, unknown>)[k])) && isBool((v as Record<string, unknown>).collapsed) && isBool((v as Record<string, unknown>).open);
 
 const isBool = (v: unknown) => typeof v === "boolean";
 const isStrings = (v: unknown) => Array.isArray(v) && v.every(x => typeof x === "string");
@@ -40,6 +44,8 @@ export function createPanels() {
   // Null until the owner first presses the toggle: until then the minimap follows the canvas width.
   const [minimap, setMinimap] = persisted<boolean | null>("cw.graph.minimap", null, v => v === null || isBool(v));
   const [links, setLinks] = persisted<"direct" | "chain">("cw.graph.links", "direct", v => v === "direct" || v === "chain");
+  // The side chat's place, size and state, the same for every task.
+  const [sideChat, setSideChat] = persisted<SideChatPlace>("cw.ws.sideChat", SIDE_CHAT_PLACE, isSideChatPlace);
   // Held by the screen on view. Nothing here is stored: a yield ends as soon as its screen lets go.
   const holds = new Map<object, { why: Exclude<SidebarYield, null>; opened: () => void }>();
   const [held, setHeld] = createSignal<SidebarYield>(null);
@@ -56,6 +62,7 @@ export function createPanels() {
     sidebarHidden, sidebarWidth, inspectorHidden, overlayOpen, terminalOpen, expanded, pins, sort, setSort, lastMachine, setLastMachine, wide,
     notifications, setNotifications, autosave, setAutosave, showAllTools, setShowAllTools, voice, setVoice, advanced,
     planView, setPlanView, convHidden, setConvHidden, minimap, setMinimap, links, setLinks, graph,
+    sideChat, setSideChat,
     setAdvanced(id: string, open: boolean) { setAdvanced({ ...untrack(advanced), [id]: open }); },
     /** The sidebar as drawn: the owner's choice, unless a screen holds it away for now. */
     sidebarShown: () => !sidebarHidden() && held() === null,

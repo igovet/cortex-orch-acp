@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 pub(super) const ENGINES: [&str; 3] = ["claude-agent-acp", "codex-acp", "opencode"];
 const TIERS: [&str; 4] = ["flagship", "deep", "standard", "light"];
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
-const KINDS: [&str; 13] = [
+const KINDS: [&str; 14] = [
     "implementation_backend",
     "implementation_frontend",
     "implementation_frontend_design",
@@ -18,6 +18,7 @@ const KINDS: [&str; 13] = [
     "writing",
     "planning",
     "analysis",
+    "consultation",
     "implementation",
 ];
 fn model(v: &Value) -> bool {
@@ -75,6 +76,7 @@ fn policy(p: &Value) -> bool {
             "effort_floor",
             "max_effort",
             "effort_ladder",
+            "tier_efforts",
             "also_standard_for",
             "preferred_for",
             "preferred_when",
@@ -217,6 +219,10 @@ fn valid_inner(r: &Value, editor: bool, final_policy: bool) -> bool {
             return false;
         }
     }
+    if !crate::native_routes::coordinator_models_valid(&r[crate::native_routes::COORDINATOR_MODELS])
+    {
+        return false;
+    }
     if let Some(v) = m.get("quota_windows") {
         let Some(engines) = v.as_object() else {
             return false;
@@ -299,6 +305,17 @@ fn valid_inner(r: &Value, editor: bool, final_policy: bool) -> bool {
                     if !model(&json!(name)) || !policy(p) {
                         return false;
                     }
+                    let placed = c.get("tiers").map_or(&Value::Null, |t| &t[name.as_str()]);
+                    let placed: Vec<&str> = TIERS
+                        .into_iter()
+                        .filter(|t| {
+                            placed.as_str() == Some(*t)
+                                || placed.as_array().is_some_and(|a| a.contains(&json!(t)))
+                        })
+                        .collect();
+                    if !crate::native_routes::tier_efforts_valid(&p["tier_efforts"], &placed) {
+                        return false;
+                    }
                     if let Some(auto) = c.get("auto") {
                         if !auto.as_array().unwrap().contains(&json!(name))
                             && (super::workers::truthy(&p["preferred_for"])
@@ -327,6 +344,9 @@ pub(super) fn view(rules: &Value) -> Value {
             policies[name] = json!({"effortFloor":p["effort_floor"],"maxEffort":p["max_effort"],
                 "effortLadder":p["effort_ladder"],"alsoStandardFor":p["also_standard_for"],
                 "preferredFor":p["preferred_for"],"preferredWhen":p["preferred_when"],"requestNames":p["request_names"]});
+            if !p["tier_efforts"].is_null() {
+                policies[name]["tierEfforts"] = p["tier_efforts"].clone();
+            }
         }
         let mut ts = json!({});
         for (name, t) in c["tiers"].as_object().into_iter().flatten() {
@@ -346,9 +366,13 @@ pub(super) fn view(rules: &Value) -> Value {
         let (engine, model) = route.split_once('/').unwrap_or((route, ""));
         pins[role] = json!({"engine":engine,"model":model,"effort":if effort.is_empty(){Value::Null}else{json!(effort)}});
     }
-    json!({"version":2,"deny":or(&rules["deny"],json!([])),"providers":or(&rules["providers"],json!(ENGINES)),
+    let mut view = json!({"version":2,"deny":or(&rules["deny"],json!([])),"providers":or(&rules["providers"],json!(ENGINES)),
         "engines":engines,"pins":pins,"affinity":or(&rules["engine_affinity"],json!({})),
-        "autoAllow":or(&rules["auto_allow"],json!([])),"legacyTiers":[]})
+        "autoAllow":or(&rules["auto_allow"],json!([])),"legacyTiers":[]});
+    if rules[crate::native_routes::COORDINATOR_MODELS].is_array() {
+        view["coordinatorModels"] = rules[crate::native_routes::COORDINATOR_MODELS].clone();
+    }
+    view
 }
 fn or(v: &Value, default: Value) -> Value {
     if super::workers::truthy(v) {

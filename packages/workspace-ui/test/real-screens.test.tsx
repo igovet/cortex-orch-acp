@@ -483,6 +483,51 @@ describe("Accept on real native result facts", () => {
   });
 });
 
+describe("Accept pressed before the machine settled the result", () => {
+  const setup = (settledVersion: number) => {
+    const s = machine([wireTask({executionId:"e",phase:"result",runtimeState:"COMPLETED",executionState:"result"})]);
+    const answer = s.answers["machine.call"]!;
+    const checks = [{name:"Runtime check",outcome:"passed",detail:""}];
+    // A deferring read answers before the folder check ends: the result has no source version yet.
+    const unsettled = {kind:"work",version:2,digest:"first-look",summary:"Native result",checks,acceptanceAvailable:true};
+    const settled = {kind:"work",version:settledVersion,sourceVersion:"47",digest:"native-review-digest",summary:"Native result",checks,acceptanceAvailable:true};
+    let accepted = false, settledRead = false;
+    s.answers["machine.call"] = message => {
+      const call = message as {op:string;params?:{action:string;defer?:boolean}};
+      if (call.op === "product.read") {
+        if (call.params?.defer !== true) settledRead = true;
+        const result = call.params?.defer === true && !settledRead ? unsettled : settled;
+        return {ok:true,result:{tasks:{"task-1":{result,workspaceDigest:result.digest,reviewActions:{accept:true},
+          ...(accepted ? {status:"ready_to_merge",acceptance:{version:"47",digest:settled.digest}} : {})}},sprints:[],messages:[]}};
+      }
+      if (call.op === "product.task" && call.params?.action === "accept") accepted = true;
+      return answer(message);
+    };
+    const accepts = () => s.calls.filter(c => c.operation === "machine.call" && (c.message as {params?:{action:string}}).params?.action === "accept");
+    return { s, accepts };
+  };
+  it("reads the settled result once and accepts it on the first press", async () => {
+    const { s, accepts } = setup(2);
+    await open(s, TASK + "/changes");
+    expect(button("Accept v2")).toBeTruthy();
+    button("Accept v2")!.click();
+    await settled();
+    expect(accepts()).toHaveLength(1);
+    expect(accepts()[0].message).toMatchObject({params:{action:"accept",taskId:"task-1",digest:"native-review-digest",version:"47"}});
+    expect(document.body.textContent).not.toContain("Acceptance was not confirmed");
+  });
+  it("follows a result that truly changed without an error strip and without accepting it", async () => {
+    const { s, accepts } = setup(3);
+    await open(s, TASK + "/changes");
+    button("Accept v2")!.click();
+    await settled();
+    expect(accepts()).toHaveLength(0);
+    expect(document.body.textContent).not.toContain("Acceptance was not confirmed");
+    await settled();
+    expect(button("Accept v3")).toBeTruthy();
+  });
+});
+
 describe("task merge recovery on real-port data", () => {
   it("clears only the saved legacy record after explicit confirmation and permits a retry after Git is settled", async () => {
     const s = machine([wireTask({executionId:"e",phase:"result",runtimeState:"COMPLETED",executionState:"result"})]);

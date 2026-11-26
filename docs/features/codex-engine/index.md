@@ -241,17 +241,40 @@ review-stage session) runs in `read-only` (read-only sandbox, approval on reques
 its approval requests reach the runtime, which refuses every one that is not a
 contained read or search), and its start is refused with
 `restricted_mode_unavailable` when the adapter does not offer that mode; a writing
-worker runs in `workspace-write` (sandbox rooted at the project, approvals sent to
-Cortex rather than to Codex's automatic reviewer as in `agent`, which is never
-selected): `apply_patch` edits inside the project without asking, and every
+worker runs in the Cortex worker permission profile
+`permission-profile:cortex-workspace` (else, when the engine does not offer it,
+`workspace-write`). The launcher defines the profile with non-persistent `-c`
+layers (`permission_layers` in
+`crates/workspace-service/src/native_codex_runtime.rs`): Codex's built-in
+`:workspace` profile, sandbox rooted at the project, with `.cortex`, `.cortex-dev`,
+the dev owner files and fixed credential names at the project root kept
+read-only (`.git`, `.codex` and `.agents` are read-only in `:workspace` itself),
+`default_permissions=":workspace"` (Codex requires a default once profiles are
+defined) and `approval_policy="on-request"` with `approvals_reviewer="user"`,
+because codex-acp gives a profile mode the config's effective policy, which the
+owner's `config.toml` may set otherwise. Approvals go to Cortex rather than to
+Codex's automatic reviewer as in `agent`, which is never selected. `apply_patch`
+edits other project paths without asking; a patch into a read-only path fails
+Codex's writable-path check and becomes an approval request, and every
 escalation is answered by the runtime by the access mode's decision table (see
 [native engines](../permissions-and-containment/index.md#native-engines)): an edit
 outside the project, into credential or key material or into Git control and
 engine/Cortex configuration asks the owner in Guarded and Development and is
-allowed and recorded in Auto; one into Cortex private state is refused in every
-mode. codex-acp offers no way to exclude a path from the writable root, so an
-in-project `apply_patch` into `.cortex`, `.cortex-dev`, a credential file or a Git
-control file is not prevented.
+allowed and recorded in Auto; one into Cortex private state likewise asks in
+Guarded and Development and is allowed in Auto (`auto_private`), and one into a
+live store file (`cortex.sqlite3` and its WAL, SHM and journal, the store lock
+files) is refused in every mode (`cortex_live_store`). Observed without a paid call
+(Codex CLI 0.166.0, codex-acp 2.6.0, the real binaries driven over ACP against a
+local mock Responses endpoint): under the profile a patch into `.cortex`,
+`.cortex-dev`, a dev owner file, `.env` or `.git` sends `session/request_permission`
+with the exact path, Allow once writes it and Reject writes nothing; under
+`workspace-write` a patch into `.cortex` is written without a request. After
+approval Codex creates no missing parent directory, so an allowed patch into a new
+directory below `.cortex` fails; use `project_write`, which creates parents.
+Codex 0.166 accepts only exact read-only paths (a glob only as `deny`, which would
+also hide the file from reading), so a credential name elsewhere in the project is
+still written without asking. A full Cortex session with the real engine was not
+run; the runtime's answers are covered by the fake-engine scenario.
 Codex has no native read tool here, so the read
 rows of the table do not arise. Codex's
 `unified_exec` feature stays listed as enabled, but the launcher's `shell_tool`

@@ -1,11 +1,12 @@
 import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { accessFor, ENGINE_KEYS, engineLabel, ENGINES, mcpProblems, mcpTools, newMcpServer, parseCommandLine, pathMissing, ROLE_CATALOG, serverStatus, setCoordinatorMode, setGrant, setLevel, suggestLevels, toolsDiff, toolWarnings, type ConnectOutcome, type ConnectResult, type EngineKey, type GrantColumn, type McpEnv, type McpObservation, type McpServer, type Problem, type ToolLevel, type ToolRow } from "@cortex/workspace-domain";
+import { workspaceCopy } from "./copy";
 import { useWs } from "./ctx";
 import { A, Count, I, Keyed, MenuItem, Pop } from "./kit";
 import { share } from "./stable";
 import { ActionBar } from "./layout";
 import { HELP } from "./orch-help";
-import { Bar, orchTo, Shell, slug, useMcp, useReadOnly } from "./orch-shared";
+import { Bar, orchTo, Shell, slug, useMcp, useProjectName, useReadOnly } from "./orch-shared";
 import { clock } from "./selectors";
 import { Adv, Chk, Err, Hint, Lines, Lock, Pick, Seg, SetH, Srow, Sw, Tabs, Tags } from "./settings-kit";
 
@@ -131,7 +132,7 @@ function SandboxFields(props: { s: McpServer; set: (s: McpServer) => void; off?:
   const missing = (p: string) => pathMissing(p) ? "The server is dropped from sessions until this exists." : null;
   const open = () => props.s.containment === "none";
   return <>
-    <Srow t="Run without the sandbox" d={open() ? "Runs with your full user rights: no file, network or process limits. The paths, Network and runtime directory variables below are not applied." : "Off by default. Only for a server that cannot start contained."}><Sw label="Run without the sandbox" checked={open()} disabled={props.off} onChange={on => props.set({ ...props.s, containment: on ? "none" : "contained" })} /></Srow>
+    <Srow t="Run without the sandbox" d={open() ? "On by default. The server runs with your full user rights, like your other tools; the paths, Network and runtime directory variables below are not applied." : "Turn on to run it inside the sandbox (advanced): only the granted paths and network, and some servers fail to start there."}><Sw label="Run without the sandbox" checked={open()} disabled={props.off} onChange={on => props.set({ ...props.s, containment: on ? "none" : "contained" })} /></Srow>
     <Srow t="Network" d="Off by default."><Sw label="Network" checked={props.s.network} disabled={props.off} onChange={network => props.set({ ...props.s, network })} /></Srow>
     <div class="ws-pad ws-fld"><span class="lab">Read paths</span><Lines label="Read path" add="Add read path" items={props.s.readPaths} disabled={props.off} note={missing} problems={props.problems} path={`${props.prefix}.read_paths`} onChange={readPaths => props.set({ ...props.s, readPaths })} /></div>
     <div class="ws-pad ws-fld"><span class="lab">Write paths</span><span class="cap muted">Only writable state beyond the task scope.</span><Lines label="Write path" add="Add write path" items={props.s.writePaths} disabled={props.off} note={missing} problems={props.problems} path={`${props.prefix}.write_paths`} onChange={writePaths => props.set({ ...props.s, writePaths })} /></div>
@@ -177,7 +178,7 @@ function useConnect(server: () => McpServer, done: (r: ConnectResult) => void) {
     if (!connect && ws.store.discoverMcp) {
       const id = ++attempt, draft = structuredClone(server()), identity = JSON.stringify(draft);
       setBusy(true); setResult(null);
-      void ws.store.discoverMcp(draft).then(r => {
+      void ws.store.discoverMcp(draft, ws.settings.scope()).then(r => {
         if (id !== attempt) return;
         if (JSON.stringify(server()) !== identity) {
           setResult({ok:false,code:"not_supported",message:"The connection changed while checking. Retry the current draft."});
@@ -201,9 +202,10 @@ const ADD_TABS = [{ id: "define", label: "1 Define" }, { id: "connect", label: "
 /** A server cannot be saved before its tools are known, so the whole flow runs on a draft that exists only here. */
 function AddServer(props: { tab?: string }) {
   const ws = useWs();
-  const d = useMcp(), off = useReadOnly();
+  const d = useMcp(), off = d.off;
   const m = () => ws.machine();
-  const key = () => `${m().id}:mcp_new`, seenKey = () => `${m().id}:mcp_new_seen`;
+  const at = () => ws.settings.scope() ? `${m().id}:${ws.settings.scope()}` : m().id;
+  const key = () => `${at()}:mcp_new`, seenKey = () => `${at()}:mcp_new_seen`;
   const s = () => (ws.settings.draft(key()) as McpServer | undefined) ?? newMcpServer();
   const set = (next: McpServer) => ws.settings.setDraft(key(), next);
   const seen = () => (ws.settings.draft(seenKey()) as McpObservation | undefined) ?? null;
@@ -218,7 +220,7 @@ function AddServer(props: { tab?: string }) {
     if (r.ok) ws.settings.setDraft(seenKey(), r.observation);
     else if (r.manual) setHand(true);
   });
-  const pick = (id: string) => { setTemplate(id); const t = templates().find(x => x.name === id); set(t ? { ...t } : newMcpServer()); ws.settings.setDraft(seenKey(), undefined); };
+  const pick = (id: string) => { setTemplate(id); const t = templates().find(x => x.name === id); set(t ? { containment: "none", ...t } : newMcpServer()); ws.settings.setDraft(seenKey(), undefined); };
   const others = () => d.count();
   const finish = async (enabled: boolean) => {
     if (problems().length || off()) return;
@@ -231,7 +233,7 @@ function AddServer(props: { tab?: string }) {
     } else d.set(d.value().filter(x => x.name !== name));
   };
   const blocked = () => off() ?? problems()[0]?.message;
-  return <Shell section="tools" wide back={{ to: orchTo(m().id, "tools"), label: "MCP servers" }} title="Add a server" lead="Define it, connect once to list its tools, then decide who may use each one.">
+  return <Shell section="tools" wide back={{ to: orchTo(m().id, "tools"), label: "MCP servers" }} title="Add a server" lead={d.scope() ? "Define it, connect once to list its tools, then decide who may use each one. Only this project gets it." : "Define it, connect once to list its tools, then decide who may use each one."}>
     <Tabs label="Add a server" tabs={ADD_TABS.map(t => ({ ...t, off: t.id !== "define" && !defined() ? "Name the server and its command first" : undefined }))} current={tab()} route={id => orchTo(m().id, "tools", { server: "new", tab: id })} />
     <Switch>
       <Match when={tab() === "define"}>
@@ -239,7 +241,7 @@ function AddServer(props: { tab?: string }) {
           <Srow t="Start from" d="Fills the fields with a known server."><Pick id="m-add-template" label="Start from" width="200px" value={template()} options={[{ id: "blank", label: "Blank" }, ...templates().map(t => ({ id: t.name, label: t.name }))]} onPick={pick} /></Srow>
           <ConnectionFields s={s()} set={set} off={off()} problems={problems()} prefix="new" isNew />
         </div>
-        <Adv id="add-sandbox" label="Sandbox" force={s().readPaths.length > 0 || s().writePaths.length > 0 || s().network || s().containment === "none"}><div class="surface"><SandboxFields s={s()} set={set} off={off()} problems={problems()} prefix="new" /></div></Adv>
+        <Adv id="add-sandbox" label="Sandbox" force={s().readPaths.length > 0 || s().writePaths.length > 0 || s().network || s().containment === "contained"}><div class="surface"><SandboxFields s={s()} set={set} off={off()} problems={problems()} prefix="new" /></div></Adv>
         <ActionBar class="ws-form-f"><button class="btn btn-primary" aria-disabled={defined() ? undefined : "true"} data-why={defined() ? undefined : "Name the server and its command first"} onClick={() => { if (defined()) go("connect"); }}>Next: Connect</button></ActionBar>
       </Match>
       <Match when={tab() === "connect"}>
@@ -278,7 +280,7 @@ function AddServer(props: { tab?: string }) {
 const EDIT_TABS = [{ id: "connection", label: "Connection" }, { id: "tools", label: "Tools" }, { id: "sandbox", label: "Sandbox" }];
 function EditServer(props: { name: string; tab?: string }) {
   const ws = useWs();
-  const d = useMcp(), off = useReadOnly();
+  const d = useMcp(), off = d.off;
   const m = () => ws.machine();
   const s = createMemo(() => d.value().find(x => x.name === props.name));
   const [observed, setObserved] = createSignal<McpObservation | null>(null);
@@ -302,8 +304,8 @@ function EditServer(props: { name: string; tab?: string }) {
   createEffect(on(serverName, () => { setObserved(null); setDiff(null); setFailed(null); }, { defer: true }));
   const remove = () => ws.open({ kind: "confirm", title: `Remove ${props.name}?`, danger: true, action: "Remove", note: "It leaves the draft. Save to write that. Running tasks keep their tools.", go() { d.set(d.value().filter(x => x.name !== props.name)); ws.go(orchTo(m().id, "tools")); return true; } });
   const duplicate = () => ws.open({ kind: "prompt", title: `Duplicate ${props.name}`, label: "New server name", action: "Duplicate", hint: "Use this to give the same server different engines.", go(name) { const copy = { ...structuredClone(s()!), name, enabled: false, env: [] }; if (mcpProblems(copy, d.value(), true).some(p => p.path === "name")) return false; d.set([...d.value(), copy]); ws.go(orchTo(m().id, "tools", { server: name, tab: "tools" })); return true; } });
-  return <Show when={s()} fallback={<Shell section="tools" wide back={{ to: orchTo(m().id, "tools"), label: "MCP servers" }} title="No such server" lead={`${props.name} is not on this machine.`}><span></span></Shell>}>
-    {server => <Shell section="tools" wide back={{ to: orchTo(m().id, "tools"), label: "MCP servers" }} title={server().name} lead={server().command} bar={<Bar d={d} />} head={<div class="row ws-gap4">
+  return <Show when={s()} fallback={<Shell section="tools" wide back={{ to: orchTo(m().id, "tools"), label: "MCP servers" }} title="No such server" lead={d.scope() ? `${props.name} is not one of this project's own servers.` : `${props.name} is not on this machine.`}><span></span></Shell>}>
+    {server => <Shell section="tools" wide back={{ to: orchTo(m().id, "tools"), label: "MCP servers" }} title={server().name} lead={server().command} bar={<Bar d={d.raw} />} head={<div class="row ws-gap4">
       <span class={`st ${serverStatus(server()).tone}`}>{serverStatus(server()).text}</span>
       <Sw label={`${server().name} enabled`} checked={server().enabled} disabled={off()} onChange={enabled => set({ ...server(), enabled })} />
       <button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) duplicate(); }}>Duplicate…</button>
@@ -333,27 +335,65 @@ function EditServer(props: { name: string; tab?: string }) {
   </Show>;
 }
 
-function ServerList() {
+type Mcp = ReturnType<typeof useMcp>;
+/**
+ * The machine's servers, seen from one project: read-only here, with the project's own on or off choice for each. A choice
+ * equal to the machine's setting is not stored, so the machine applies again. A server the project defines under the same
+ * name replaces the machine's, so it has no switch.
+ */
+function InheritedServers(props: { d: Mcp }) {
   const ws = useWs();
-  const d = useMcp(), off = useReadOnly();
+  const d = props.d, off = d.off, m = () => ws.machine();
+  const servers = () => m().config.surfaces.mcp_servers;
+  const replaced = (s: McpServer) => d.value().some(x => x.name === s.name);
+  const on = (s: McpServer) => d.overrides()[s.name] ?? s.enabled;
+  const why = (s: McpServer) => off() ?? (!on(s) && s.problem ? s.problem : undefined);
+  const word = (s: McpServer) => replaced(s) ? workspaceCopy("mcpReplaced") : d.overrides()[s.name] === undefined ? (s.enabled ? workspaceCopy("mcpMachineOn") : workspaceCopy("mcpMachineOff")) : on(s) ? workspaceCopy("mcpHereOn") : workspaceCopy("mcpHereOff");
+  const edit = (s: McpServer) => { ws.settings.setScope(null); ws.go(orchTo(m().id, "tools", { server: s.name, tab: "tools" })); };
+  return <>
+    <SetH title={workspaceCopy("mcpInherited")} count={servers().length || undefined}></SetH>
+    <p class="set-grp-lead">{workspaceCopy("mcpInheritedNote")}</p>
+    <Show when={servers().length > 0} fallback={<div class="surface ws-empty">{workspaceCopy("mcpInheritedNone")}</div>}>
+      <div class="surface"><div class="gt">
+        <div class="gr osrow th"><span>Server</span><span>Tools</span><span>Engines</span><span>Network</span><span></span><span>{workspaceCopy("mcpForProject")}</span><span></span></div>
+        <Keyed each={servers()} by={s => s.name}>{s => <div class="gr osrow" data-inherited={s().name}>
+          <span class="trunc"><span class="w500 trunc">{s().name}</span><span class="sub mono trunc">{basename(s().command)}</span><span class={`sub trunc ${replaced(s()) || d.overrides()[s().name] !== undefined ? "" : "muted"}`}>{word(s())}</span></span>
+          <span class="cap muted tnum ws-wrap">{counts(s())}</span>
+          <span class="cap muted trunc">{allServer(s())}</span>
+          <span class="cap muted">{s().containment === "none" ? "No sandbox" : s().network ? "On" : "Off"}</span>
+          <span></span>
+          <span><Show when={!replaced(s())}><Sw label={`${s().name} for this project`} checked={on(s())} disabled={why(s())} onChange={next => d.setOverride(s().name, next === s().enabled ? undefined : next)} /></Show></span>
+          <span class="row ws-gap4"><button class="btn btn-line btn-sm" onClick={() => edit(s())}>{workspaceCopy("mcpEditOnMachine")}</button></span>
+        </div>}</Keyed>
+      </div></div>
+    </Show>
+  </>;
+}
+
+function ServerList() {
+  const ws = useWs(), project = useProjectName();
+  const d = useMcp(), off = d.off;
+
   const m = () => ws.machine();
   const open = (name: string) => ws.go(orchTo(m().id, "tools", { server: name, tab: "tools" }));
   const check = (s: McpServer) => { const r: ConnectResult = ws.demo?.connect.run(s, null, ws.store.clock()) ?? { ok: false, code: "not_supported", message: ws.t("noConnect") }; if (r.ok) ws.run({ type: "record_mcp_tools", machineId: m().id, server: s.name, observation: r.observation }); else open(s.name); };
   const remove = (s: McpServer) => ws.open({ kind: "confirm", title: `Remove ${s.name}?`, danger: true, action: "Remove", note: "It leaves the draft. Save to write that. Running tasks keep their tools.", go() { d.set(d.value().filter(x => x.name !== s.name)); return true; } });
   const duplicate = (s: McpServer) => ws.open({ kind: "prompt", title: `Duplicate ${s.name}`, label: "New server name", action: "Duplicate", hint: "Use this to give the same server different engines.", go(name) { const copy = { ...structuredClone(s), name, enabled: false, env: [] }; if (mcpProblems(copy, d.value(), true).some(p => p.path === "name")) return false; d.set([...d.value(), copy]); return true; } });
   const add = () => { if (!off()) ws.go(orchTo(m().id, "tools", { server: "new" })); };
-  return <Shell section="tools" wide title="MCP servers" lead="External tools for agents on this machine, and who may use each one. Servers are per machine; a project cannot add its own." bar={<Bar d={d} />}
+  return <Shell section="tools" wide title="MCP servers" lead={d.scope() ? workspaceCopy("mcpProjectLead").replace("{project}", project(d.scope()) ?? "") : "External tools for agents on this machine, and who may use each one. Choose a project to give one project its own servers or switch machine servers on or off there."} bar={<Bar d={d.raw} />}
     head={<button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={add}><I n="plus" s={12} />Add server</button>}>
-    <SetH title="Servers" count={d.value().length || undefined}><Hint text={HELP.mcpIntro} label="MCP servers" /></SetH>
+    <Show when={d.scope()}><InheritedServers d={d} /></Show>
+    <SetH title={d.scope() ? workspaceCopy("mcpOwn") : "Servers"} count={d.value().length || undefined}><Hint text={HELP.mcpIntro} label="MCP servers" /></SetH>
     <p class="set-grp-lead">Switching a server on or off is a draft change: it is written when you save.</p>
-    <Show when={d.value().length > 0} fallback={<div class="surface ws-empty">No servers. Add one to give workers extra tools.</div>}>
+    <Show when={d.value().length > 0} fallback={<div class="surface ws-empty">{d.scope() ? workspaceCopy("mcpOwnNone") : "No servers. Add one to give workers extra tools."}</div>}>
       <div class="surface"><div class="gt">
         <div class="gr osrow th"><span>Server</span><span>Tools</span><span>Engines</span><span>Network</span><span>Checked</span><span>Enabled</span><span></span></div>
         <Keyed each={d.value()} by={s => s.name}>{s => {
           const status = () => serverStatus(s()), seen = () => m().config.mcpObserved[s().name];
           return <div class="gr osrow ws-pointer" onClick={() => open(s().name)}>
             <span class="trunc"><A class="ws-cellbtn w500 trunc" to={orchTo(m().id, "tools", { server: s().name, tab: "tools" })} onClick={e => e.stopPropagation()}>{s().name}</A><span class="sub mono trunc">{basename(s().command)}</span>
-              <Show when={status().tone !== "st-ok" && status().tone !== "st-idle"}><span class={`sub trunc ${status().tone}`}>{status().text}</span></Show></span>
+              <Show when={status().tone !== "st-ok" && status().tone !== "st-idle"}><span class={`sub trunc ${status().tone}`}>{status().text}</span></Show>
+              <Show when={d.scope() && m().config.surfaces.mcp_servers.some(x => x.name === s().name)}><span class="sub trunc">{workspaceCopy("mcpReplacesMachine")}</span></Show></span>
             <span class="cap muted tnum ws-wrap">{counts(s())}</span>
             <span class="cap muted trunc">{allServer(s())}</span>
             <span class="cap muted">{s().containment === "none" ? "No sandbox" : s().network ? "On" : "Off"}</span>

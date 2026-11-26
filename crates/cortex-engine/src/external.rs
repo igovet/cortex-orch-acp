@@ -167,6 +167,7 @@ pub struct ExternalProxy {
     closed: Arc<AtomicBool>,
     process: Option<JoinHandle<Result<()>>>,
     monitor: Option<JoinHandle<()>>,
+    stderr_tail: Arc<std::sync::Mutex<String>>,
 }
 impl ExternalProxy {
     /// Launches without an OS containment policy. Only for a registry command the
@@ -229,12 +230,23 @@ impl ExternalProxy {
         let (stop, mut stopping) = watch::channel(false);
         let closed = Arc::new(AtomicBool::new(false));
         let closing = closed.clone();
+        let tail: Arc<std::sync::Mutex<String>> = Arc::default();
+        let drained = tail.clone();
         let process = tokio::spawn(async move {
             let drain = tokio::spawn(async move {
                 let mut b = [0u8; 8192];
                 while let Ok(n) = stderr.read(&mut b).await {
                     if n == 0 {
                         break;
+                    }
+                    // Only the newest bytes are kept, for a secret-free exit diagnostic.
+                    if let Ok(mut t) = drained.lock() {
+                        t.push_str(&String::from_utf8_lossy(&b[..n]));
+                        if t.len() > 4096 {
+                            let cut = t.len() - 4096;
+                            let cut = (cut..t.len()).find(|i| t.is_char_boundary(*i)).unwrap_or(t.len());
+                            t.drain(..cut);
+                        }
                     }
                 }
             });
@@ -280,7 +292,37 @@ impl ExternalProxy {
             closed,
             process: Some(process),
             monitor: Some(monitor),
+            stderr_tail: tail,
         })
+    }
+    /// The newest non-empty stderr line of the server, made safe to show: control
+    /// characters dropped, long or credential-like words replaced, 160 characters at most.
+    pub fn stderr_line(&self) -> Option<String> {
+        let text = self.stderr_tail.lock().ok()?;
+        let line = text.lines().rev().map(str::trim).find(|l| !l.is_empty())?;
+        // A credential-looking word hides itself and the word after it.
+        let mut hide_next = false;
+        let safe = line
+            .split_whitespace()
+            .map(|w| {
+                let l = w.to_ascii_lowercase();
+                let sensitive = w.len() > 48
+                    || ["token", "secret", "password", "bearer", "key=", "auth"].iter().any(|k| l.contains(k));
+                let hidden = sensitive || hide_next;
+                hide_next = sensitive;
+                if hidden {
+                    "<redacted>".to_owned()
+                } else {
+                    w.chars().filter(|c| !c.is_control()).collect()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(safe.chars().take(160).collect())
+    }
+    /// The server's stderr shows it waits for the owner to sign in (nothing is returned from it).
+    pub fn needs_sign_in(&self) -> bool {
+        self.stderr_tail.lock().ok().is_some_and(|t| sign_in_need(&t).is_some())
     }
     /// True once the contained server process has exited or this proxy was fenced.
     /// An observed exit only; `false` is not evidence that the server is healthy.
@@ -479,5 +521,177 @@ impl Drop for ExternalProxy {
         if let Some(m) = self.monitor.take() {
             m.abort()
         }
+    }
+}
+
+/// Whether a server's stderr shows it waits for the owner to sign in (OAuth), and the
+/// sign-in address when one is printed. The address is returned only as a plain, bounded
+/// `https` URL (no whitespace or control characters, at most 2048 bytes) taken from a line
+/// that asks to authorize or sign in, or from an address that itself names `oauth` or
+/// `authorize`. It is an in-memory value for the owner's browser, never a log or report.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SignInNeed {
+    pub url: Option<String>,
+}
+/// Reads server stderr text for a sign-in requirement (see [`SignInNeed`]); `None` when it shows none.
+pub fn sign_in_need(text: &str) -> Option<SignInNeed> {
+    let mut url = None;
+    let mut phrase = false;
+    for line in text.lines() {
+        let lower = line.to_ascii_lowercase();
+        let asks = ["authorize this client", "please authorize", "sign-in for this server", "sign in for this server",
+            "waiting for authorization", "authentication required", "please sign in", "please log in", "visit the following url", "open the following url"]
+            .iter()
+            .any(|k| lower.contains(k));
+        phrase |= asks;
+        for word in line.split_whitespace() {
+            let word = word.trim_matches(|c: char| matches!(c, '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']' | ',' | ';' | '.'));
+            let Some(rest) = word.strip_prefix("https://") else { continue };
+            let host_ok = rest
+                .split(['/', '?', '#'])
+                .next()
+                .is_some_and(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:".contains(&b)));
+            let w = word.to_ascii_lowercase();
+            let names_auth = w.contains("oauth") || w.contains("authorize");
+            if host_ok && word.len() <= 2048 && !word.chars().any(|c| c.is_control()) && (asks || names_auth) {
+                url = Some(word.to_owned());
+                phrase = true;
+            }
+        }
+    }
+    phrase.then_some(SignInNeed { url })
+}
+
+/// A server started only to learn whether it is ready, and to hold a sign-in open: the
+/// service sends one MCP `initialize` and watches for the answer. A server that waits for
+/// the owner to sign in answers only after the sign-in completes, so keeping this process
+/// alive lets its own local OAuth callback finish. It carries no channel and no tool grant.
+pub struct SignInProbe {
+    ready: Arc<AtomicBool>,
+    closed: Arc<AtomicBool>,
+    tail: Arc<std::sync::Mutex<String>>,
+    stop: watch::Sender<bool>,
+    task: Option<JoinHandle<()>>,
+}
+impl SignInProbe {
+    pub async fn launch(spec: ExternalLaunch, containment: Option<Arc<dyn Containment>>) -> Result<Self> {
+        spec.validate()?;
+        let mut command = Command::new(&spec.executable);
+        if let Some(containment) = containment {
+            unsafe {
+                command.pre_exec(move || containment.enter());
+            }
+        }
+        let mut child = command
+            .args(&spec.args)
+            .current_dir(&spec.cwd)
+            .env_clear()
+            .envs(spec.environment)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()?;
+        let pid = child.id().ok_or(Error::Io)?;
+        let mut input = child.stdin.take().ok_or(Error::Io)?;
+        let mut output = BufReader::new(child.stdout.take().ok_or(Error::Io)?);
+        let mut stderr = child.stderr.take().ok_or(Error::Io)?;
+        let (stop, mut stopping) = watch::channel(false);
+        let ready = Arc::new(AtomicBool::new(false));
+        let closed = Arc::new(AtomicBool::new(false));
+        let tail: Arc<std::sync::Mutex<String>> = Arc::default();
+        let (r, c, t) = (ready.clone(), closed.clone(), tail.clone());
+        let task = tokio::spawn(async move {
+            let drain = tokio::spawn(async move {
+                let mut b = [0u8; 8192];
+                while let Ok(n) = stderr.read(&mut b).await {
+                    if n == 0 {
+                        break;
+                    }
+                    if let Ok(mut text) = t.lock() {
+                        text.push_str(&String::from_utf8_lossy(&b[..n]));
+                        if text.len() > 16384 {
+                            let cut = text.len() - 16384;
+                            let cut = (cut..text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
+                            text.drain(..cut);
+                        }
+                    }
+                }
+            });
+            let ask = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cortex-sign-in-check","version":"1"}}});
+            let talk = async {
+                wire::write_frame(&mut input, &ask).await.ok()?;
+                loop {
+                    let reply = wire::read_frame(&mut output).await.ok()??;
+                    if reply.get("method").is_none() && reply.get("id") == Some(&json!(1)) {
+                        return reply.get("result").is_some().then_some(());
+                    }
+                }
+            };
+            tokio::select! {
+                answered = talk => {
+                    if answered.is_some() {
+                        r.store(true, Ordering::SeqCst);
+                    }
+                }
+                _ = child.wait() => {}
+                _ = stopping.changed() => {}
+            }
+            c.store(true, Ordering::SeqCst);
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+            let _ = child.wait().await;
+            let _ = drain.await;
+        });
+        Ok(Self { ready, closed, tail, stop, task: Some(task) })
+    }
+    /// The server answered `initialize`: it is signed in and working.
+    pub fn ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
+    }
+    /// The process has ended (or was stopped).
+    pub fn exited(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+    /// What the server's stderr says about signing in so far.
+    pub fn sign_in(&self) -> Option<SignInNeed> {
+        sign_in_need(&self.tail.lock().ok()?)
+    }
+    /// Ends the process and its group and waits for it.
+    pub async fn shutdown(mut self) {
+        let _ = self.stop.send(true);
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+impl Drop for SignInProbe {
+    fn drop(&mut self) {
+        let _ = self.stop.send(true);
+    }
+}
+
+#[cfg(test)]
+mod sign_in_tests {
+    use super::sign_in_need;
+    #[test]
+    fn mcp_remote_authorization_line_gives_the_address() {
+        let text = "[1] Using transport\nPlease authorize this client by visiting: https://kling.ai/oauth/authorize?state=abc&x=1\n";
+        let need = sign_in_need(text).unwrap();
+        assert_eq!(need.url.as_deref(), Some("https://kling.ai/oauth/authorize?state=abc&x=1"));
+    }
+    #[test]
+    fn an_oauth_address_alone_and_a_phrase_alone_count() {
+        assert!(sign_in_need("open https://id.example/oauth/authorize?c=1 now").unwrap().url.is_some());
+        assert_eq!(sign_in_need("This instance is running the sign-in for this server").unwrap().url, None);
+    }
+    #[test]
+    fn ordinary_output_and_unsafe_addresses_do_not_count() {
+        assert!(sign_in_need("listening on https://example.com/docs\nready").is_none());
+        assert!(sign_in_need("").is_none());
+        let n = sign_in_need("Please authorize: http://x.test/oauth/authorize and https://bad_host/a").unwrap();
+        assert_eq!(n.url, None);
     }
 }

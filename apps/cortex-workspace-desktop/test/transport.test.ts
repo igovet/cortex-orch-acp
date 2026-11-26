@@ -132,14 +132,17 @@ describe("native port", () => {
     expect(updates).toEqual([{type:"connection",state:"connected"},{type:"connection",state:"disconnected",reason:"Machine service disconnected"}]);
     native.dispose();
   });
-  it("passes the service's project change through as a refresh", async () => {
+  it("passes a resync, a remote access change and one project's runtime change through as what they are", async () => {
     let event: (e: unknown) => void = () => {};
     const native = createDesktopTransport({invoke: vi.fn(), listen: async f => { event=f; return () => {}; }});
     const updates: unknown[] = [];
     native.transport.subscribe(e => updates.push(e));
     await Promise.resolve();
     event({type:"refresh"});
-    expect(updates).toEqual([{type:"refresh"}]);
+    event({type:"remote_state"});
+    event({type:"project_state",projectId:"p"});
+    event({type:"project_state"});
+    expect(updates).toEqual([{type:"refresh"},{type:"remote_state"},{type:"project_state",projectId:"p"}]);
     native.dispose();
   });
   it("validates native event shape and releases an asynchronously installed listener", async () => {

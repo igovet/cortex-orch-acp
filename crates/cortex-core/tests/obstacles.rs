@@ -36,10 +36,14 @@ fn an_untried_access_claim_is_technical_but_a_real_refusal_is_access() {
     let found = obstacles::classify(&s);
     assert_eq!((found.class, found.rule), ("technical", "blocker_missing_access_unattempted"), "{found:?}");
     assert!(found.detail.contains("nothing was tried"), "{found:?}");
+    // Without a named service, host or credential even a tried claim is not an owner
+    // access card ("Нужен доступ: unknown"); it stays in the task's own flow.
     s.attempted = Some(true);
-    assert_eq!(obstacles::classify(&s).class, "access");
+    assert_eq!((obstacles::classify(&s).class, obstacles::classify(&s).rule), ("technical", "blocker_missing_access_unnamed"));
     s.attempted = None;
-    assert_eq!(obstacles::classify(&s).class, "access");
+    assert_eq!(obstacles::classify(&s).class, "technical");
+    let data = signals(Some("missing_access"), "The owner-authorized active-tab read did not identify the production workspace; no sanitized original-run data was supplied", &[], "");
+    assert_eq!(obstacles::classify(&data).class, "technical");
     let mut quoted = signals(Some("missing_access"), "gh says: not logged into any GitHub hosts", &[], "");
     quoted.attempted = Some(false);
     assert_eq!(obstacles::classify(&quoted).class, "access");

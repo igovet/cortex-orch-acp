@@ -290,3 +290,91 @@ fn linked_worktree_shares_logical_channel_store() {
         p.key()
     );
 }
+/// An existing format-12 store gains the narration index and planner statistics on its next
+/// writable open, transactionally and idempotently; every other mode reads it unchanged. A worker's
+/// narration lookup (its `{attempt}:` message identities in one session) then seeks that index
+/// instead of walking the whole session.
+#[test]
+fn an_existing_store_gains_the_narration_index_and_statistics_on_a_writable_open_only() {
+    let p = Project::new();
+    drop(p.open());
+    let state = |db: &Connection| {
+        let index: i64 = db
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='host_transcript_by_message'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let stats: i64 = db
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sqlite_stat1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (index == 1, stats == 1)
+    };
+    let db = Connection::open(p.key().database()).unwrap();
+    db.execute_batch(
+        "DROP INDEX host_transcript_by_message; DROP TABLE IF EXISTS sqlite_stat1; PRAGMA foreign_keys=OFF;",
+    )
+    .unwrap();
+    {
+        let mut insert = db
+            .prepare("INSERT INTO host_transcript(session_id,seq,kind,text,message_id,created_at) VALUES ('s',?,'agent_message','x',?,'now')")
+            .unwrap();
+        for seq in 0..2000i64 {
+            insert
+                .execute((seq, format!("xa_{}:msg_{seq}", seq % 50)))
+                .unwrap();
+        }
+    }
+    drop(db);
+    assert_eq!(state(&Connection::open(p.key().database()).unwrap()), (false, false));
+    drop(Store::open(p.key(), OpenMode::InspectImmutable).unwrap());
+    drop(Store::open(p.key(), OpenMode::LiveReadOnly).unwrap());
+    drop(Store::open(p.key(), OpenMode::RuntimeValidate).unwrap());
+    assert_eq!(state(&Connection::open(p.key().database()).unwrap()), (false, false));
+    let plan = |db: &Connection| {
+        db.prepare(
+            "EXPLAIN QUERY PLAN SELECT seq,message_id,text FROM host_transcript
+             WHERE session_id='s' AND kind='agent_message' AND message_id>='xa_7:' AND message_id<'xa_7;'
+             ORDER BY seq DESC LIMIT 4001",
+        )
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n")
+    };
+    for _ in 0..2 {
+        let s = p.open();
+        s.read(|db| {
+            assert_eq!(state(db), (true, true));
+            let plan = plan(db);
+            assert!(plan.contains("host_transcript_by_message"), "{plan}");
+            let found: i64 = db.query_row(
+                "SELECT count(*) FROM host_transcript WHERE session_id='s' AND kind='agent_message'
+                 AND message_id>='xa_7:' AND message_id<'xa_7;'",
+                [],
+                |r| r.get(0),
+            )?;
+            // The range holds exactly the identities with that prefix.
+            let prefixed: i64 = db.query_row(
+                "SELECT count(*) FROM host_transcript WHERE session_id='s' AND kind='agent_message'
+                 AND substr(message_id,1,5)='xa_7:'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!((found, prefixed), (40, 40));
+            Ok(())
+        })
+        .unwrap();
+        drop(s);
+    }
+    // A store that has them is still read by every mode.
+    drop(Store::open(p.key(), OpenMode::InspectImmutable).unwrap_or_else(|e| panic!("{}", e.code())));
+    drop(Store::open(p.key(), OpenMode::LiveReadOnly).unwrap());
+}

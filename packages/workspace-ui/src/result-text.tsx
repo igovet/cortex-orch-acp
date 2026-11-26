@@ -1,7 +1,7 @@
 import { createMemo, For, useContext, type JSX } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { WsContext } from "./ctx";
-import { fileReference, ResultLink, ResultScope } from "./result-links";
+import { bareFileReference, fileReference, ResultLink, ResultScope } from "./result-links";
 import { parse, tokenize, type Block, type Token } from "./markdown";
 import { CopyCode } from "./message-copy";
 
@@ -45,7 +45,9 @@ function imageRef(alt: string, raw: string, links: Links): JSX.Element {
   const label = <>Image: {decodeEntities(unescape(alt)).trim() || place}{alt.trim() && place ? " (" + place + ")" : ""}</>;
   return href && /^https?:/i.test(href) && !links.label ? renderLink(links, { class: "ws-img-ref", href, inert: links.inert, children: label }) : <span class="ws-img-ref">{label}</span>;
 }
-type Links = { paths: boolean; inert?: boolean; label?: boolean; markLink?: () => void };
+/** `bare`: a single file name in prose (`README.md`) is a tentative link too, as it is in a code span: an owner's own text
+ *  (a task description) names files without backticks. It becomes a link only when the checkout lists that file. */
+type Links = { paths: boolean; inert?: boolean; label?: boolean; bare?: boolean; markLink?: () => void };
 function renderLink(links: Links, props: Parameters<typeof ResultLink>[0]) {
   links.markLink?.();
   return <ResultLink {...props} />;
@@ -58,7 +60,7 @@ function prose(text: string, links: Links): JSX.Element {
   let at = 0;
   for (const match of text.matchAll(candidates)) {
     const token = match[0].replace(/\.+$/, ""), start = match.index!;
-    const ref = fileReference(token);
+    const ref = fileReference(token) ?? (links.bare ? bareFileReference(token) : undefined);
     if (!ref) continue;
     out.push(text.slice(at, start), renderLink(links, { href: "#", reference: ref, children: token }));
     at = start + token.length;
@@ -75,7 +77,7 @@ function render(text: string, tokens: Token[], links: Links): JSX.Element[] {
       case "br": return <br />;
       case "esc": return part(k.s + 1, k.e);
       case "code": {
-        const span = part(k.a, k.b), ref = links.paths ? fileReference(span.trim()) : undefined;
+        const span = part(k.a, k.b), ref = links.paths ? fileReference(span.trim()) ?? bareFileReference(span.trim()) : undefined;
         return <code>{ref ? renderLink(links, { href: "#", reference: ref, children: span }) : span}</code>;
       }
       case "strong": return <strong>{render(text, k.kids, links)}</strong>;
@@ -133,8 +135,8 @@ export function reuseBlocks(next: Block[], previous: Block[]): Block[] {
   for (const b of previous) { const key = JSON.stringify(b), list = pool.get(key); if (list) list.push(b); else pool.set(key, [b]); }
   return next.map(b => pool.get(JSON.stringify(b))?.shift() ?? b);
 }
-export function ResultText(props: { text?: string; breaks?: boolean; inertLinks?: boolean }) {
-  const links = useLinks(props.inertLinks);
+export function ResultText(props: { text?: string; breaks?: boolean; inertLinks?: boolean; bareNames?: boolean }) {
+  const links = { ...useLinks(props.inertLinks), bare: props.bareNames };
   const text = createMemo(() => props.text ?? "");
   const blocks = createMemo<Block[]>(previous => reuseBlocks(parse(text(), props.breaks), previous), []);
   return <div class="ws-result-copy"><Blocks links={links} blocks={blocks()} /></div>;

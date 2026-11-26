@@ -337,6 +337,17 @@ async fn cleanup_and_sprint_deletion_use_native_temp_store_with_start_fences() {
             Ok(())
         })
         .unwrap();
+    // A legacy hidden planning attempt (no such job exists any more) never holds a deletion back.
+    let mut saved: Value = serde_json::from_slice(&fs::read(&product_path).unwrap()).unwrap();
+    let at = saved["sprints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|s| s["id"] == sprint.as_str())
+        .unwrap();
+    saved["sprints"][at]["planningAttempt"] = json!({"id":"legacy"});
+    fs::write(&product_path, saved.to_string()).unwrap();
+    let mut events = f.service.subscribe();
     let start = json!({"protocol":{"major":1,"minor":8},"requestId":"start-deleted-sprint","projectId":f.id,"actorId":"fixture",
         "operation":"tasks.start","target":"member","expectedVersion":"1","ownerEpoch":null,"payload":{}});
     assert_eq!(
@@ -353,6 +364,13 @@ async fn cleanup_and_sprint_deletion_use_native_temp_store_with_start_fences() {
         .await;
     assert_eq!(result["done"], true);
     assert_eq!(result["taskIds"], json!(["member"]));
+    assert!(result.get("progressed").is_none(), "{result}");
+    // The pass announces what it changed, so a screen never keeps a read from part-way through.
+    let mut announced = false;
+    while let Ok(event) = events.try_recv() {
+        announced |= event["type"] == "invalidation" && event["projectId"] == f.id.as_str();
+    }
+    assert!(announced, "a finished deletion pass invalidates the project");
     assert_eq!(answers(), json!({"other":answer_ref("o.png")}));
     assert_eq!(
         f.ok(
@@ -521,6 +539,17 @@ async fn native_retention_keeps_dirty_work_and_unconfirmed_executions() {
     let reason = finish["reason"].as_str().unwrap();
     // Owner-readable: the task title, never its id or the raw refusal code.
     assert!(reason.contains("“fixture” no longer belongs"), "{reason}");
+    assert!(finish.get("progressed").is_none(), "{finish}");
+    // The sprint keeps the concrete reason for every later read and screen.
+    let saved: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    let kept = saved["sprints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == sprint)
+        .unwrap();
+    assert_eq!(kept["deleteReason"], json!(reason));
+    assert_eq!(kept["deleting"], true);
     assert!(
         !reason.contains("unauthorized") && !reason.contains("dirty:"),
         "{reason}"
@@ -820,10 +849,10 @@ async fn hunks_stage_unstage_and_revert_independently() {
 #[tokio::test]
 async fn project_skills_are_named_for_the_composer_without_their_bodies() {
     let f = Fixture::new().await;
-    assert_eq!(
-        f.ok("repo.skills", json!({})).await,
-        json!({"skills":[],"omitted":0})
-    );
+    let none = f.ok("repo.skills", json!({})).await;
+    assert_eq!(none["skills"], json!([]));
+    assert_eq!(none["omitted"], 0);
+    assert!(none["cortex"].as_array().unwrap().iter().any(|s| s["id"] == "design-workflow"));
     fs::create_dir_all(f.repo.join(".agents/skills/demo-data")).unwrap();
     fs::write(
         f.repo.join(".agents/skills/demo-data/SKILL.md"),

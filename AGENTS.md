@@ -91,7 +91,12 @@ and retains a private backup in `.migration-backups/`. An
 `OpenMode::InspectImmutable` (or `LiveReadOnly`) open must remain non-mutating
 and report `legacy_storage_migration_required`; format 10 and unknown formats
 remain fail-closed (`unsupported_storage`). No separate migration or rollback
-command ships. Initialize never opens an existing database file with a plain
+command ships. Read-path indexes and planner statistics are in-format additions, not a
+format change: every `OpenMode::Initialize` open of a format-12 store creates a
+missing additive index inside its `BEGIN IMMEDIATE` install transaction and runs
+SQLite's bounded `PRAGMA optimize` under the exclusive access lock; read-only and
+inspection opens accept a store with or without them (see
+`docs/project/storage.md#runtime-indexes-and-offloaded-worker-activity`). Initialize never opens an existing database file with a plain
 descriptor (closing it would drop the process's POSIX locks and let another
 process delete the live WAL/SHM); see `create_private_database` in
 `crates/cortex-core/src/store/locks.rs`.

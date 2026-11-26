@@ -34,6 +34,12 @@ function layout(box: HTMLElement, height = 2000) {
     scrollTop: { configurable: true, get: () => g.top, set: (v: number) => { g.top = Math.max(0, Math.min(v, Math.max(0, g.height - 400))); } },
   });
   box.getBoundingClientRect = () => ({ top: 0, bottom: 400, left: 0, right: 400, width: 400, height: 400, x: 0, y: 0 }) as DOMRect;
+  // A feed's top edge (its reserve and the line above its earliest row) lies at the top of its content.
+  const rect = Element.prototype.getBoundingClientRect;
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+    if (box.contains(this) && this.matches(".ws-reserve, .ws-earlier")) return { top: -g.top, bottom: 30 - g.top, height: 30 } as DOMRect;
+    return rect.call(this);
+  });
   return g;
 }
 const wheelUp = (target: Element) => target.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
@@ -527,4 +533,32 @@ it("keeps the end, or the reader's row, when the dock below resizes the feed", a
   // A reader who scrolled up keeps their row where it was whichever way the dock resizes.
   wheelUp(box); top = 600; follow.onScroll();
   client = 380; resize(box); expect(top).toBe(600); client = 520; resize(box); expect(top).toBe(600); expect(follow.following()).toBe(false);
+});
+
+describe("worker activity pager", () => {
+  const withCursor = (o: Shape = {}) => { const s = taskWorld(o); s.workers[0].activityCursor = "page-1"; return s; };
+  it("reads nothing while scrolling in the middle, reads once on approaching the top, and keeps the reader's row in place", async () => {
+    let reads = 0, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const f: Feed = { name: "worker", path: `/m/${M}/t/t/workers/w`, feed: ".livepane .stream", world: withCursor,
+      prepare: p => { p.port.readWorkerActivity = async () => { reads++; await gate; return { activity: notes(-10, 10), activityCursor: null, messages: [] }; }; } };
+    const { box, g, away } = await feedOf(f);
+    // The middle of the feed: 1,400 px from the top, well outside the reach.
+    await away(1400);
+    for (let y = 1400; y > 900; y -= 25) { g.top = y; scrolled(box); }
+    for (let y = 900; y < 1500; y += 25) { g.top = y; scrolled(box); }
+    resize(box); await settle();
+    expect(reads).toBe(0);
+    // Approaching the top: one read for the whole approach, however many scroll events.
+    for (let y = 1400; y > 300; y -= 50) { g.top = y; scrolled(box); }
+    await settle();
+    expect(reads).toBe(1);
+    for (let y = 300; y > 100; y -= 10) { g.top = y; scrolled(box); }
+    resize(box); await settle();
+    expect(reads).toBe(1);
+    const row = box.querySelector(".stream-in")!.lastElementChild!;
+    release(); await settle();
+    expect(reads).toBe(1);
+    expect(row.isConnected).toBe(true);
+  });
 });

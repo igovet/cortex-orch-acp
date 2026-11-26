@@ -102,28 +102,63 @@ struct Recent {
     digest: String,
     at: std::time::Instant,
 }
-type Slots = std::collections::HashMap<
-    std::path::PathBuf,
-    std::sync::Arc<tokio::sync::Mutex<Option<Recent>>>,
->;
+type Flight = tokio::sync::watch::Receiver<Option<std::result::Result<String, &'static str>>>;
+/// Per-folder state. Guarded by a std mutex that is never held across an await, so a
+/// reader never queues behind another reader's (or a refresh's) full-folder hash.
+#[derive(Default)]
+struct Slot {
+    last: Option<Recent>,
+    inflight: Option<Flight>,
+}
+type Slots = std::collections::HashMap<std::path::PathBuf, std::sync::Arc<std::sync::Mutex<Slot>>>;
 static OBSERVED: std::sync::LazyLock<std::sync::Mutex<Slots>> =
     std::sync::LazyLock::new(Default::default);
+/// How long the reader that starts a refresh waits for it before answering with the
+/// previous observation (the refresh keeps running and the next read has it).
+const REFRESH_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+fn refused() -> CoreError {
+    CoreError::Refused("project_revision_unavailable")
+}
 /// `native_effects::observe_digest` of `root` for presentation reads (product facts and
-/// review actions). Reads of one folder share one observation at a time, and a read
-/// reuses the last one while the folder's change signal is unchanged and it is younger
-/// than `RECENT`: an open window rereads facts after every streamed update, and
-/// hashing a large folder each time kept the machine busy while nothing changed.
-/// Accepting a result and the native verifier never use this; they observe fresh.
+/// review actions). A read reuses the last observation while the folder's change signal
+/// is unchanged and it is younger than `RECENT`. While another read's observation of the
+/// folder is running, a reader that has a previous observation gets it at once
+/// (stale-while-revalidate); one that has none shares the running observation. The
+/// reader that starts a refresh waits at most `REFRESH_GRACE` when it has a previous
+/// observation. The observation runs detached, so no reader's cancellation or timeout
+/// stops it. Accepting a result and the native verifier never use this; they observe
+/// fresh.
 pub(crate) async fn recent_observation(
     root: std::path::PathBuf,
 ) -> cortex_core::CoreResult<String> {
     let slot = OBSERVED
         .lock()
-        .map_err(|_| CoreError::Refused("project_revision_unavailable"))?
+        .map_err(|_| refused())?
         .entry(root.clone())
         .or_default()
         .clone();
-    let mut held = slot.lock().await;
+    let wait_for = |mut rx: Flight| async move {
+        loop {
+            if let Some(done) = rx.borrow_and_update().clone() {
+                return done.map_err(CoreError::Refused);
+            }
+            if rx.changed().await.is_err() {
+                return Err(refused());
+            }
+        }
+    };
+    let running = {
+        let held = slot.lock().map_err(|_| refused())?;
+        held.inflight
+            .clone()
+            .map(|rx| (rx, held.last.as_ref().map(|seen| seen.digest.clone())))
+    };
+    if let Some((rx, last)) = running {
+        return match last {
+            Some(last) => Ok(last),
+            None => wait_for(rx).await,
+        };
+    }
     let at = std::time::Instant::now();
     let probe = root.clone();
     let signal = tokio::task::spawn_blocking(move || folder_signal(&probe))
@@ -139,20 +174,56 @@ pub(crate) async fn recent_observation(
     } else {
         signal
     };
-    if let (Some(signal), Some(seen)) = (&signal, held.as_ref()) {
-        if seen.signal == *signal && seen.at.elapsed() < RECENT {
-            return Ok(seen.digest.clone());
-        }
+    let (tx, rx) = tokio::sync::watch::channel(None);
+    enum Next {
+        Running(Flight, Option<String>),
+        Reuse(String),
+        Start(Option<String>),
     }
-    *held = None;
-    let digest = crate::native_effects::observe_digest(root).await?;
-    // The signal was taken first: a change during the observation moves the next one.
-    *held = signal.map(|signal| Recent {
-        signal,
-        digest: digest.clone(),
-        at,
+    let next = {
+        let mut held = slot.lock().map_err(|_| refused())?;
+        if let Some(running) = held.inflight.clone() {
+            // Another reader started a refresh while this one took its signal.
+            Next::Running(running, held.last.as_ref().map(|seen| seen.digest.clone()))
+        } else if let Some(seen) = held.last.as_ref().filter(|seen| {
+            signal.as_ref() == Some(&seen.signal) && seen.at.elapsed() < RECENT
+        }) {
+            Next::Reuse(seen.digest.clone())
+        } else {
+            held.inflight = Some(rx.clone());
+            Next::Start(held.last.as_ref().map(|seen| seen.digest.clone()))
+        }
+    };
+    let previous = match next {
+        Next::Reuse(digest) => return Ok(digest),
+        Next::Running(_, Some(last)) => return Ok(last),
+        Next::Running(running, None) => return wait_for(running).await,
+        Next::Start(previous) => previous,
+    };
+    let finishing = slot.clone();
+    tokio::spawn(async move {
+        let done = crate::native_effects::observe_digest(root).await;
+        if let Ok(mut held) = finishing.lock() {
+            held.inflight = None;
+            // The signal was taken first: a change during the observation moves the next one.
+            held.last = match (&done, signal) {
+                (Ok(digest), Some(signal)) => Some(Recent {
+                    signal,
+                    digest: digest.clone(),
+                    at,
+                }),
+                _ => None,
+            };
+        }
+        let _ = tx.send(Some(done.map_err(|e| e.code())));
     });
-    Ok(digest)
+    match previous {
+        None => wait_for(rx).await,
+        Some(stale) => match tokio::time::timeout(REFRESH_GRACE, wait_for(rx)).await {
+            Ok(done) => done,
+            Err(_) => Ok(stale),
+        },
+    }
 }
 /// A cheap change signal of one Git working folder: HEAD, the index entries, the
 /// identity, size and change times of every tracked and unignored untracked file (the
@@ -802,11 +873,11 @@ pub(super) fn integration_result(
     }
     Ok(actions)
 }
-/// A task of a sprint that works in the project folder itself: the tasks after it
-/// write the same folder, so its result is compared on the files it wrote.
+/// A task that works in the project folder itself (sprint or standalone): other tasks
+/// and the owner write the same folder, so its result is compared on the files it
+/// wrote, never on the whole folder.
 pub(super) fn own_writes(record: &Value) -> bool {
-    record["sprintId"].as_str().is_some_and(|s| !s.is_empty())
-        && record["checkout"]["kind"] == "main"
+    record["checkout"]["kind"] == "main"
 }
 fn result_evidence(
     store: &Store,
@@ -1019,7 +1090,7 @@ mod recent_tests {
         let first = recent_observation(root.clone()).await.unwrap();
         let slot = OBSERVED.lock().unwrap().get(&root).unwrap().clone();
         // A distinguishable cached value proves the second call did not rehash files.
-        slot.lock().await.as_mut().unwrap().digest = "cached-only".to_owned();
+        slot.lock().unwrap().last.as_mut().unwrap().digest = "cached-only".to_owned();
         assert_eq!(
             recent_observation(root.clone()).await.unwrap(),
             "cached-only"
@@ -1032,7 +1103,7 @@ mod recent_tests {
         assert_ne!(fresh, first);
         assert_eq!(recent_observation(root.clone()).await.unwrap(), fresh);
         assert!(
-            slot.lock().await.is_none(),
+            slot.lock().unwrap().last.is_none(),
             "recent metadata must not be reused"
         );
         OBSERVED.lock().unwrap().remove(&root);
@@ -1127,5 +1198,37 @@ mod recent_tests {
         std::fs::remove_dir_all(root.join(".git")).unwrap();
         assert_eq!(folder_signal(&plain), None);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn seeded(root: &std::path::Path, last: Option<&str>) -> tokio::sync::watch::Sender<Option<std::result::Result<String, &'static str>>> {
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let slot = OBSERVED.lock().unwrap().entry(root.to_owned()).or_default().clone();
+        let mut held = slot.lock().unwrap();
+        held.inflight = Some(rx);
+        held.last = last.map(|d| Recent { signal: "s".into(), digest: d.into(), at: std::time::Instant::now() });
+        tx
+    }
+    /// A reader during another read's slow observation gets the last observation at once.
+    #[tokio::test]
+    async fn a_reader_during_a_slow_observation_gets_the_last_one_at_once() {
+        let root = std::env::temp_dir().join(format!("cw-swr-{}", super::super::settings::unique()));
+        let _running = seeded(&root, Some("last-digest"));
+        let began = std::time::Instant::now();
+        let seen = recent_observation(root.clone()).await.unwrap();
+        assert_eq!(seen, "last-digest");
+        assert!(began.elapsed() < std::time::Duration::from_millis(100));
+        OBSERVED.lock().unwrap().remove(&root);
+    }
+    /// With no previous observation a reader shares the running one instead of hashing again.
+    #[tokio::test]
+    async fn a_reader_without_a_last_observation_shares_the_running_one() {
+        let root = std::env::temp_dir().join(format!("cw-swr2-{}", super::super::settings::unique()));
+        let running = seeded(&root, None);
+        let reader = tokio::spawn(recent_observation(root.clone()));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!reader.is_finished());
+        running.send(Some(Ok("shared".to_owned()))).unwrap();
+        assert_eq!(reader.await.unwrap().unwrap(), "shared");
+        OBSERVED.lock().unwrap().remove(&root);
     }
 }

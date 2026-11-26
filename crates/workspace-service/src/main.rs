@@ -5,6 +5,8 @@ fn main() {
     // Before any thread exists: every process this service starts inherits it.
     workspace_service::launch::default_build_parallelism();
     workspace_service::native_codex_runtime::dispatch();
+    // A side-chat session's read-only project files server.
+    workspace_service::side_chat_files::dispatch();
     // `sudo`'s askpass helper and the `sudo` shim of host commands.
     workspace_service::native_askpass::dispatch();
     service_main();
@@ -102,6 +104,7 @@ async fn run() -> std::io::Result<()> {
     service.start_remote().await;
     // Open owner actions (a missing login, sudo) are checked again in the background.
     service.start_owner_actions();
+    service.start_mcp_signin();
     // Installed notifications can relaunch the fixed channel desktop when no window
     // claims a click. An extracted run must not use that installed activation path.
     if extraction.is_none() {

@@ -8,7 +8,7 @@ import { checkoutFiles, repoOf, taskCheckout } from "./review-model";
 export type ResultTarget = { kind: "url"; url: string } | { kind: "file"; path: string; line?: number; column?: number };
 export const ResultScope = createContext<() => { projectId: string; taskId?: string; projectCode?: boolean }>();
 
-type FileReference = { path: string; line?: number; column?: number };
+type FileReference = { path: string; line?: number; column?: number; /** A bare root-level file name: a link only when the checkout has that file. */ tentative?: boolean };
 const controls = /[\u0000-\u001f\u007f]/;
 const scheme = /^[a-z][a-z\d+.-]*:/i;
 
@@ -21,6 +21,12 @@ export function fileReference(value: string, explicit = false): FileReference | 
   if (!explicit && !(/^(?:\/|\.\.?\/)/.test(path) || (path.includes("/") && /\.[\p{L}\d_-]+$/u.test(path)) || ((line || fragment) && /^[\p{L}\d_./ -]+$/u.test(path)))) return;
   const positive = (n?: string) => n && Number.isSafeInteger(Number(n)) && Number(n) > 0 ? Number(n) : undefined;
   return { path, line: positive(line ?? fragment), column: positive(column) };
+}
+
+/** A single-segment name in a code span (`README.md`, `Makefile`). It becomes a link only when the checkout lists it. */
+export function bareFileReference(value: string): FileReference | undefined {
+  if (value.length > 100 || !(/^[\p{L}\d_-][\p{L}\d_.-]*\.[\p{L}\d_-]{1,10}$/u.test(value) || /^(?:Makefile|Dockerfile|LICENSE)$/.test(value))) return;
+  return { path: value, tentative: true };
 }
 
 /** Ubuntu checkout paths are POSIX paths. This only classifies a target; the service still owns Code's file access. */
@@ -236,13 +242,24 @@ export function ResultLink(props: { href: string; reference?: FileReference; cla
       if (active) setInfo({ path: full, notice: "Could not confirm this file in the checkout. Refresh and try again." });
     } finally { if (active) setBusy(false); }
   };
+  const present = createMemo(() => {
+    if (!props.reference?.tentative) return true;
+    const source = scope?.();
+    if (!ws || !source) return false;
+    const state = ws.store.state(), task = source.taskId ? state.tasks.find(t => t.id === source.taskId && t.projectId === source.projectId) : undefined;
+    const repo = repoOf(state, source.projectId);
+    const checkout = source.taskId ? task && taskCheckout(state, task) : repo?.checkouts.find(c => c.kind === "main");
+    if (!repo || !checkout) return false;
+    const files = checkoutFiles(state, repo, checkout), path = props.reference.path;
+    return files.tree.includes(path) && files.diffs.find(d => d.path === path)?.status !== "D";
+  });
   const fileOpener = () => ws?.openResultTarget && ws.machine().kind === "local" && ws.can("workspace.open_editor") && pathInfo()?.path.startsWith("/") ? ws.openResultTarget : undefined;
-  return <><a id={linkId} ref={el => { trigger = el; }} class={props.class} href={props.href} rel="noreferrer" draggable={false}
+  return <Show when={present()} fallback={props.children}><a id={linkId} ref={el => { trigger = el; }} class={props.class} href={props.href} rel="noreferrer" draggable={false}
     aria-busy={busy() || pathInfo()?.resolving || undefined} aria-haspopup={pathInfo() ? "dialog" : undefined} aria-expanded={pathInfo() ? true : undefined}
     aria-controls={pathInfo() && linkId ? `${linkId}-details` : undefined}
     onClick={e => void activate(e)} onAuxClick={e => { e.preventDefault(); e.stopPropagation(); }}>{props.children}</a>
     <Show when={status()}><span role="status"> {status()}</span></Show>
     <Show when={pathInfo()}>{path => <PathPopover trigger={trigger} info={path()} openLabel={path().artifact ? "Open in default app" : ws!.externalLabel()} close={close}
       retry={checkoutTimedOut() && relativeArtifact() && !resolvedArtifactPath() ? retry : undefined}
-      open={fileOpener() ? () => fileOpener()!({ ...props.reference, kind: "file", path: path().path }) : undefined} />}</Show></>;
+      open={fileOpener() ? () => fileOpener()!({ path: path().path, line: props.reference?.line, column: props.reference?.column, kind: "file" }) : undefined} />}</Show></Show>;
 }

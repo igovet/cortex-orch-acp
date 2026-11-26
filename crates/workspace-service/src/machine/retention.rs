@@ -607,11 +607,11 @@ pub async fn delete_sprint(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    if !sprint["planningAttempt"].is_null() && sprint["deletePlannerStopped"] != true {
-        return Ok(
-            json!({"done":false,"reason":"Waiting for the sprint planner to stop. Retry Delete sprint.","taskIds":deleted,"keptPaths":kept}),
-        );
-    }
+    // The sprint planner is the sprint's planning task: a member whose execution the
+    // prepare step stops and whose purge refuses while it is not quiet. A legacy
+    // `planningAttempt` (a hidden planning job that no longer exists) has nothing
+    // left to stop and never holds a deletion back.
+    let before = deleted.len();
     let mut blockers = Vec::new();
     for task in &members {
         if deleted.contains(&json!(task)) {
@@ -670,8 +670,20 @@ pub async fn delete_sprint(
         settings::write_json(&product_path(state, project)?, &product)?;
     }
     if !blockers.is_empty() {
+        let reason = format!(
+            "Not every task could be deleted yet. {} Retry Delete sprint.",
+            blockers.join(" ")
+        );
+        // The sprint keeps the concrete reason, so every screen (and a later read after a
+        // reply nobody waited for) says what the deletion waits for, not only this reply.
+        let changed = product["sprints"][index]["deleteReason"] != json!(reason);
+        if changed {
+            product["sprints"][index]["deleteReason"] = json!(reason);
+            settings::write_json(&product_path(state, project)?, &product)?;
+        }
         return Ok(
-            json!({"done":false,"reason":format!("Not every task could be deleted yet. {} Retry Delete sprint.",blockers.join(" ")),"taskIds":deleted,"keptPaths":kept}),
+            json!({"done":false,"reason":reason,"taskIds":deleted,"keptPaths":kept,
+                "progressed":changed || deleted.len() > before}),
         );
     }
     let result = json!({"done":true,"taskIds":members,"keptPaths":kept});
@@ -686,5 +698,7 @@ pub async fn delete_sprint(
     settings::write_json(&product_path(state, project)?, &product)?;
     // The deleted sprint's files go with it, once nothing else references them.
     let _ = super::attachment_files::sweep_locked(state, SystemTime::now());
-    Ok(result)
+    let mut reply = result;
+    reply["progressed"] = json!(true);
+    Ok(reply)
 }

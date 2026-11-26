@@ -66,8 +66,10 @@ pub fn require_read_only_plan(db: &Connection, task: &str, plan: &Value) -> Core
 
 /// The node id prefix of a runtime-scheduled review of a submitted plan.
 const REVIEW: &str = "_plan_review_";
+/// A sprint revision review (`sprint_impact`) is a plan review too: it reviews a
+/// proposed graph, never the task's own changes.
 pub fn is_plan_review(node: &str) -> bool {
-    node.starts_with(REVIEW)
+    node.starts_with(REVIEW) || super::sprint_impact::is_revision_review(node)
 }
 /// What the independent reviewer of a plan checks. The plan itself follows.
 const REVIEW_OBJECTIVE: &str = "Independently review the submitted sprint plan below against the sprint request \

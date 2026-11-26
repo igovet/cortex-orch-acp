@@ -7,3 +7,4 @@
 .owner-command { display: block; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--bg-canvas); font-size: var(--t-sec); overflow-wrap: anywhere; user-select: all; }
 .owner-token { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .owner-card .inp { width: 100%; min-width: 0; }
+.owner-in-task { display: flex; flex-direction: column; gap: 10px; padding: 8px 16px 0; flex: none; min-width: 0; }

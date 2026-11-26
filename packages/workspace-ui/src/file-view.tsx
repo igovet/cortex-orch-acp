@@ -1,3 +1,4 @@
+import { LoadingStrip } from "./skeleton";
 import { createMemo, createResource, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import type { FileRead } from "@cortex/workspace-domain";
 import { Code } from "./diff";
@@ -173,7 +174,7 @@ function Media(props: { path: string; kind: "image" | "video" | "audio"; read: (
   });
   const name = () => props.path.split("/").pop() ?? props.path;
   const what = () => props.kind === "image" ? "picture" : props.kind === "video" ? "video" : "sound";
-  return <Show when={!read.loading} fallback={<Placeholder title="Opening…" />}>
+  return <Show when={!read.loading} fallback={<LoadingStrip label="Opening…" />}>
     <Show when={url() && !broken()} fallback={props.fallback(broken() ? `This ${what()} cannot be played or shown here.` : read()?.reason ?? `This ${what()} cannot be shown here.`, broken() ? "Its format may not be supported by this window." : undefined)}>
       <div class="fv-media" data-kind={props.kind}>
         {props.kind === "image" ? <img src={url()!} alt={name()} onError={() => setBroken(true)} />

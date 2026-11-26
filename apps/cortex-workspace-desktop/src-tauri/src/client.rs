@@ -187,6 +187,7 @@ impl Bridge {
                     };
                     if pr_opener {
                         methods.push(json!("native.open_pull_request"));
+                        methods.push(json!("native.open_mcp_signin"));
                     }
                 }
                 Ok(value)
@@ -231,6 +232,10 @@ impl Bridge {
                 .map_err(|text| format!("{REFUSED}{text}")),
             "native.open_pull_request" => self
                 .open_pull_request(&call.message)
+                .await
+                .map_err(|text| format!("{REFUSED}{text}")),
+            "native.open_mcp_signin" => self
+                .open_mcp_signin(&call.message)
                 .await
                 .map_err(|text| format!("{REFUSED}{text}")),
             _ => self.shared.request(call).await,
@@ -367,6 +372,30 @@ impl Bridge {
             "The browser could not open this pull request.",
         )
         .await?;
+        Ok(json!({"outcome":"opened"}))
+    }
+    /// A machine MCP sign-in in the system browser. The service holds the address; it is
+    /// checked here to be one plain https address before any program sees it.
+    async fn open_mcp_signin(&self, message: &Value) -> Result<Value, String> {
+        let reply = self
+            .rpc(
+                "owner_actions.act",
+                json!({"projectId":"machine","actionId":message["actionId"],"action":"open"}),
+            )
+            .await
+            .map_err(|_| "This sign-in is no longer waiting.".to_owned())?;
+        let url = reply["url"]
+            .as_str()
+            .filter(|u| opener::web_address(u))
+            .ok_or("The sign-in address is not available yet or is not a plain https address.")?;
+        if self.capture_pull_request(url)? {
+            return Ok(json!({"outcome":"opened"}));
+        }
+        let (program, args) =
+            opener::system_opener().ok_or("No browser opener is installed on this machine.")?;
+        let mut args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+        args.push(url.into());
+        opener::launch(&program, &args, "The browser could not open this sign-in.").await?;
         Ok(json!({"outcome":"opened"}))
     }
     async fn open_logs(&self) -> Result<Value, String> {

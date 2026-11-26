@@ -36,7 +36,9 @@ reads keep their existing behavior. No evaluator or new containment claim follow
 
 No engine process runs in an OS jail: Claude Code, codex-acp and Codex App Server
 run as the owner with the launch environment's `HOME` and the connection's native
-directory, can read what the owner can read, and share the host network. What
+directory, can read what the owner can read, and share the host network. This is an
+owner decision (2026-11-25: the engine must read and see everything the owner
+can), not a deferred gap; no read or network isolation is added. What
 bounds a model's native tools is the engine session's mode and tool
 configuration, set in `crates/workspace-service/src/native_engine_policy.rs`, and
 the runtime's answer to each permission request the engine sends
@@ -53,7 +55,7 @@ the access mode, and no session gets `bypassPermissions` or `agent-full-access`:
 | Channel | Claude (claude-agent-acp) | Codex (codex-acp) | OpenCode |
 | --- | --- | --- | --- |
 | Coordinator, consultant, read-only profile, any review-stage session | `default` | `read-only` | `cortex` |
-| Writing worker (any access mode) | `default` | `workspace-write` | `cortex` |
+| Writing worker (any access mode) | `default` | `permission-profile:cortex-workspace` (else `workspace-write`) | `cortex` |
 
 A read-only session whose adapter offers no such mode does not start; the
 `NATIVE_SESSION_START_FAILED` event records `restricted_mode_unavailable`. The
@@ -70,26 +72,42 @@ task-stop and outward notification tools from the model's context;
 relay and the owner-registered external servers attached to that channel);
 `plugins` and `skills` are empty; hooks and auto-memory are off. Native `Read`,
 `Grep`, `Glob`, `WebFetch` and `WebSearch` remain. Claude Code reads and searches
-inside the project without asking. Cortex supplies four project-root deny rules:
+inside the project without asking. Cortex supplies four project-root `ask` rules:
 `Read(./.cortex/**)`, `Read(./.cortex-dev/**)`,
-`Read(./.cortex-dev-owner.json)` and `Read(./.cortex-workspace-dev.json)`.
+`Read(./.cortex-dev-owner.json)` and `Read(./.cortex-workspace-dev.json)`, so a
+native read there becomes a request the runtime decides by the table below.
 These are `Read` rules, not separate `Grep` or `Glob` rules or a guarantee about
 all search behavior. Requests that the engine does send are evaluated by Cortex.
+Claude has no native write tool; its writes are the gateway's `project_write` and
+`project_edit`, whose protected paths follow the same on-request rule (see below).
 
 **Codex.** The native Codex launcher forces `shell_tool` and `view_image` off,
 with subagents, plugins, hooks and apps, verified with `codex features list`
 before App Server starts, and codex-acp's thread config carries the same
 switches, so Codex runs commands and reads images only through Cortex tools.
 Native `apply_patch` stays on (Codex has no supported switch for it); Codex has
-no native read tool. In `read-only` every `apply_patch` asks and is refused. In
-`workspace-write` (a sandbox whose writable root is the project, with approvals
-sent to Cortex rather than to Codex's automatic reviewer as in `agent`)
-`apply_patch` edits inside the project without asking, and every escalation it
-asks for (a write outside the writable root, an additional sandbox permission) is
-answered by the runtime. codex-acp offers no way to exclude a path from the
-writable root, so an in-project `apply_patch` into `.cortex`, `.cortex-dev`, a
-credential file or a Git control file gets no runtime decision and is not
-prevented. Codex's `unified_exec` feature stays listed as enabled: no supported
+no native read tool. In `read-only` every `apply_patch` asks and is refused. A
+writing worker runs in the Cortex worker permission profile
+(`permission-profile:cortex-workspace`), which the native Codex launcher defines
+for every session as non-persistent `-c` layers: Codex's built-in `:workspace`
+profile (what `workspace-write` maps to) with `.cortex`, `.cortex-dev`, the dev
+owner files and fixed credential names at the project root (`.env`, `.env.local`,
+`.env.development`, `.env.production`, `.env.test`, `.netrc`, `.npmrc`, `.pypirc`,
+`.htpasswd`, `.git-credentials`, `.kube`, `credentials`, `credentials.json`) kept
+read-only, plus `approval_policy="on-request"` and `approvals_reviewer="user"`;
+`:workspace` itself keeps `.git`, `.codex` and `.agents` read-only. `apply_patch`
+edits other project paths without asking; a patch into a read-only path or outside
+the project fails Codex's writable-path check and becomes an approval request the
+runtime answers by the table below, and only an allowed patch is written (observed
+with Codex 0.166.0 and codex-acp 2.6.0 against a local mock model endpoint, no
+paid call; see [SECURITY.md](../../../SECURITY.md#native-engine-tools)). An
+allowed patch into a new directory below `.cortex` fails, because Codex creates no
+missing parent after approval; `project_write` creates parents. Codex 0.166 accepts
+only exact paths as read-only entries (a glob only as `deny`, which would also hide
+the file), so a credential name elsewhere in the project is still written without
+asking. An engine without the profile (a custom launch command) falls back to
+`workspace-write`, where an in-project patch into `.cortex` or a credential file
+gets no runtime decision. Codex's `unified_exec` feature stays listed as enabled: no supported
 switch of Codex CLI 0.166.0 changes it. With the launcher's flags the local CLI's
 model-visible inventory declares neither `exec_command` nor `write_stdin`; that
 does not cover a custom launch command or a live session. See [Codex shell tool
@@ -111,13 +129,30 @@ table (`classify` in `crates/cortex-engine/src/permission.rs`, path classes in
 | Deletion | ask the owner | ask the owner | allow, recorded |
 | Credential and key material anywhere, read or write | ask the owner | ask the owner | allow, recorded (`auto_credential`) |
 | Git control files, engine and Cortex configuration, write | ask the owner | ask the owner | allow, recorded (`auto_control`) |
-| Cortex private state (`.cortex`, `.cortex-dev`, dev owner files, service state), read or write | refused | refused | refused |
+| Cortex private state (`.cortex`, `.cortex-dev`, dev owner files, service state), read or write | ask the owner | ask the owner | allow, recorded (`auto_private`) |
+| Live store files (`cortex.sqlite3` and its `-wal`, `-shm`, `-journal`, the store's `.*.lock` files), write | refused (`cortex_live_store`) | refused | refused |
 | Web fetch | ask the owner | allow | allow |
 
 Read-only roles and review-stage sessions get only the read rows and the web-fetch row:
 their native write, delete and execute requests are refused in every mode under the
 `read_only` rule, while a web fetch, which only reads, follows the web-fetch row like any
-other channel's. This table applies to native engine tools only. Cortex gateway
+other channel's. This table applies to native engine tools only. Cortex private state
+is allowed on request by owner decision (2026-11-25): a task that needs something
+changed there gets it once the owner allows it, never silently and never refused
+outright. Only writes to the live store files stay refused in every mode: the
+runtime holds POSIX locks on them and commits through the database and its WAL, so
+a write from another process can corrupt the running store. The gateway applies
+the same rule to a direct `project_read`, `project_write` or `project_edit` of
+Cortex private state and to a gateway write of `.git` or of a credential file
+(`.env*`, keys and credential files by name in any directory, not source that only
+mentions a token or password) (`NATIVE_PROTECTED_PATH_DECIDED`;
+refused `protected_path_not_confirmed` when no owner can answer); inside
+`read_batch`, `project_mkdir`, `project_delete` and the skill-link tool these paths
+stay refused (deleting a credential file follows the ordinary deletion consent).
+A plan scope, `scope_request` or `access_request` may name Cortex private state,
+`.git` and credential files; it grants no write there, and each write is decided
+as above, so a task asking for such a change is planned and the owner is asked
+instead of the plan being refused. Other Cortex gateway
 commands follow a separate filesystem policy (see [the command backend](../../project/native-incoming-acp.md#brokered-command-namespace-backend)).
 "Ask the owner" opens a card on the
 connected owner client titled `Owner decision: <role> wants to <operation>
@@ -738,7 +773,8 @@ owner code or an explicit command-line override. Engine/Guarded behavior is unch
 | `core.hooksPath` when it names a directory inside the project (e.g. husky) | read-only | ordinary project file rules |
 | Other linked worktrees' metadata; `modules/` containers | read-only; existing submodule data writable only in Development/Auto | denied |
 | The project's `.git` for reviewers and read-only roles | read-only | denied |
-| `.cortex`, `.cortex-dev` and the Dev state files | hidden | denied |
+| `.cortex`, `.cortex-dev` | read-only (empty view) in Guarded and Development; writable in Auto except the live store files (`cortex.sqlite3`, `-wal`, `-shm`, `-journal`, `.*.lock`), which stay read-only. A refused write reports a `cortex_store` hint pointing at `project_write`/`project_edit`, where the runtime asks the owner | allowed on request (Auto allows, others ask); live store files refused |
+| The Dev owner and workspace state files | hidden | denied |
 | The project's `.codex`, `.claude`, `.agents`, `.github` | writable subject to grants and masks | ordinary project file rules (see also [Project skill links](#project-skill-links)) |
 | Tool state in the project (`.venv`, `node_modules/.cache`, `.pytest_cache`, `__pycache__`, `.mypy_cache`, `target/`, `build/`, ...) | writable | allowed (ordinary project files) |
 

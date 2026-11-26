@@ -1,5 +1,5 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
-import { autoOn, autoVerdict, CONNECTION_ENGINE, denyTokens, EFFORT_LEVELS, effortLabel, engineInUse, ENGINES, notOffered, orphanTokens, policyOf, ROLE_CATALOG, setDeny, setEngineUse, setModelAuto, setModelEnabled, setPolicy, setPreferred, setProvider, setStretch, setTier, WORK_KINDS, type CatalogueModel, type EngineKey, type ModelPolicy, type Problem, type RoutingRules } from "@cortex/workspace-domain";
+import { autoOn, consultationListed, autoVerdict, CONNECTION_ENGINE, denyTokens, EFFORT_LEVELS, effortLabel, engineInUse, ENGINES, notOffered, orderedEfforts, orphanTokens, policyOf, ROLE_CATALOG, setDeny, setEngineUse, setModelAuto, setModelEnabled, setPolicy, setPreferred, setProvider, setStretch, setTier, setTierRange, TIER_LABELS, TIERS, tierRange, WORK_KINDS, type CatalogueModel, type EngineKey, type ModelPolicy, type Problem, type RoutingRules, type Tier } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { A, I } from "./kit";
 import { HELP, PREFERRED_WHEN_HELP, PREFERRED_WORK_HELP, workKindHelp } from "./orch-help";
@@ -12,7 +12,7 @@ const kindName = (id: string) => WORK_KINDS.find(k => k.id === id)?.label ?? `${
 /** Preferred work in words, for a cell that has no room for the checklist. */
 export const preferredWords = (p: ModelPolicy) => (p.preferredFor ?? []).map(kindName).join(", ");
 
-/** The twelve work kinds as a checklist, each with the roles it covers. Kinds an older file still names stay, marked as kept. */
+/** The work kinds as a checklist, each with the roles it covers. Kinds an older file still names stay, marked as kept. */
 export function PreferredWork(props: Fields & { needsAuto?: boolean }) {
   const e = () => props.engine, id = () => props.model.id;
   const p = () => policyOf(props.rules, e(), id());
@@ -21,7 +21,7 @@ export function PreferredWork(props: Fields & { needsAuto?: boolean }) {
   const why = () => props.off ?? (props.needsAuto !== false && !auto() ? "Turn on Automatic first" : undefined);
   return <div class="ws-fld"><span class="lab">Preferred work<Hint text={PREFERRED_WORK_HELP} label="preferred work" /></span>
     <div class="ws-checks ws-kinds">
-      <For each={WORK_KINDS}>{k => <label class="ws-check"><Chk label={`${props.model.label} preferred for ${k.label}`} checked={!!p().preferredFor?.includes(k.id)} disabled={why()} onChange={on => props.set(setPreferred(props.rules, e(), id(), k.id, on))} /><span><span class="ws-kind-t">{k.label}</span><span class="ws-kind-d">{ROLE_CATALOG.filter(r => r.kind === k.id).map(r => r.label).join(", ") || workKindHelp(k.id, [])}</span></span></label>}</For>
+      <For each={WORK_KINDS}>{k => <label class="ws-check"><Chk label={`${props.model.label} preferred for ${k.label}`} checked={!!p().preferredFor?.includes(k.id)} disabled={why()} onChange={on => props.set(setPreferred(props.rules, e(), id(), k.id, on))} /><span><span class="ws-kind-t">{k.label}</span><span class="ws-kind-d">{ROLE_CATALOG.filter(r => r.kind === k.id).map(r => r.label).join(", ") || workKindHelp(k.id, [])}{k.id === "consultation" && !consultationListed(props.rules) ? " — uses Design list until set" : ""}</span></span></label>}</For>
       <For each={legacy()}>{k => <label class="ws-check"><Chk label={`${props.model.label} preferred for ${k}`} checked disabled={props.off} onChange={on => props.set(setPreferred(props.rules, e(), id(), k, on))} /><span>{k} (legacy, kept)</span></label>}</For>
     </div>
     <Err problems={props.problems} path={`models.${e()}.policy.${id()}.preferred_for`} />
@@ -34,6 +34,35 @@ export function PreferWhen(props: Fields) {
     <textarea class="inp ws-when" rows="3" aria-label={`Prefer ${props.model.label} when`} disabled={!!props.off} value={p().preferredWhen ?? ""} onInput={ev => patch({ preferredWhen: ev.currentTarget.value || null })} />
     <span class={`cap tnum ${(p().preferredWhen?.length ?? 0) > 500 ? "st-bad" : "faint"}`}>{p().preferredWhen?.length ?? 0} of 500. The coordinator judges this. Retries ignore it.</span>
     <Err problems={props.problems} path={`models.${props.engine}.policy.${props.model.id}.preferred_when`} />
+  </div>;
+}
+
+/**
+ * For each tier the model is placed in, the lowest and highest effort it may run at there, over the levels it offers. No range
+ * keeps the floor and max. A stored level the model no longer offers stays visible.
+ */
+export function TierRanges(props: Fields) {
+  const e = () => props.engine, id = () => props.model.id;
+  const tiers = () => props.rules.engines[e()].tiers[id()] ?? [];
+  const levels = () => orderedEfforts(props.model.efforts).filter(x => (EFFORT_LEVELS as readonly string[]).includes(x));
+  const stored = () => Object.keys(policyOf(props.rules, e(), id()).tierEfforts ?? {});
+  const at = () => `models.${e()}.policy.${id()}.tier_efforts`;
+  const choices = (value: string) => [{ id: "", label: "No range" }, ...levels().map(x => ({ id: x, label: effortLabel(x) })), ...(value && !levels().includes(value) ? [{ id: value, label: effortLabel(value), sub: "Not offered by this model" }] : [])];
+  const pick = (t: Tier, end: "min" | "max", value: string) => {
+    if (!value) return props.set(setTierRange(props.rules, e(), id(), t, null));
+    const now = tierRange(props.rules, e(), id(), t);
+    props.set(setTierRange(props.rules, e(), id(), t, end === "min" ? { min: value, max: now?.max ?? value } : { min: now?.min ?? value, max: value }));
+  };
+  return <div class="ws-fld"><span class="lab">Effort range by tier<Hint text={HELP.tierEfforts} label="effort range by tier" /></span>
+    <Show when={tiers().length > 0} fallback={<span class="cap faint">Place the model in a tier first.</span>}>
+      <For each={TIERS.filter(t => tiers().includes(t))}>{t => {
+        const range = () => tierRange(props.rules, e(), id(), t);
+        const end = (which: "min" | "max", word: string) => <Pick id={`m-range-${which}-${t}-${slug(`${e()}-${id()}`)}`} label={`${word} effort on ${TIER_LABELS[t]} for ${props.model.label}`} width="110px" value={range()?.[which] ?? ""} options={choices(range()?.[which] ?? "")} disabled={props.off} onPick={x => pick(t, which, x)} />;
+        return <div class="row ws-gap4"><span class="cap ws-range-t">{TIER_LABELS[t]}</span>{end("min", "Lowest")}<span class="cap faint">to</span>{end("max", "Highest")}</div>;
+      }}</For>
+    </Show>
+    <span class="cap faint">No range keeps the effort floor and max effort for that tier.</span>
+    <For each={stored()}>{t => <Err problems={props.problems} path={`${at()}.${t}`} />}</For>
   </div>;
 }
 
@@ -51,6 +80,7 @@ export function ModelPolicyFields(props: Fields) {
   const setRung = (i: number, value: string) => { const next = ladder().slice(0, i); if (value) next[i] = value; const rest = ladder().slice(i + 1); patch({ effortLadder: [...next, ...(value ? rest : [])].length ? [...next, ...(value ? rest : [])] : null }); };
   return <div class="ws-detail-b">
     <div class="ws-fld"><span class="lab">Tiers</span><Tiers label={props.model.label} on={tiers()} disabled={props.off} onChange={(t, on) => props.set(setTier(props.rules, e(), id(), t, on))} /><Err problems={props.problems} path={`models.${e()}.tiers.${id()}`} /></div>
+    <TierRanges {...props} />
     <div class="ws-row2">
       <div class="ws-fld"><span class="lab">Effort floor<Hint text={HELP.modelPolicy} label="model policy" /></span>{level("Effort floor", p().effortFloor, "effortFloor")}<span class="cap faint">Never run it below this level.</span></div>
       <div class="ws-fld"><span class="lab">Max effort</span>{level("Max effort", p().maxEffort, "maxEffort")}<span class="cap faint">Never run it above this level.</span><Err problems={props.problems} path={`${at()}.max_effort`} /></div>
@@ -201,6 +231,7 @@ export function EnginesModels() {
                     <div class="ws-kv"><span class="cap muted">Now</span><span class="cap">{autoVerdict(v(), cat(), e.id, x.id)}<Show when={tokens().length > 0}>, matching <span class="mono">{tokens().join(", ")}</span></Show></span></div>
                     <PreferredWork engine={e.id} model={x} rules={v()} set={r => d.set(r)} off={off()} problems={d.problems()} />
                     <PreferWhen engine={e.id} model={x} rules={v()} set={r => d.set(r)} off={off()} problems={d.problems()} />
+                    <TierRanges engine={e.id} model={x} rules={v()} set={r => d.set(r)} off={off()} problems={d.problems()} />
                     <Show when={e.id === "opencode"}>
                       <Srow t={`Allow ${x.label} in automatic routing`} d="OpenCode routes stay out of automatic routing unless allowed one by one. This writes an auto-allow entry for this exact route.">
                         <Sw label={`Allow ${x.label} in automatic routing`} checked={v().autoAllow.includes(allowToken())} disabled={off()} onChange={on => d.set({ ...v(), autoAllow: on ? [...v().autoAllow, allowToken()] : v().autoAllow.filter(t => t !== allowToken()) })} />

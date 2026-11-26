@@ -13,6 +13,7 @@ Every product feature has one page below. Each page names its source area; proje
 | Senior consultant | Runtime | Read-only escalation assignment with configured route |
 | Informational questions | Runtime | Read-only answer before any plan/worker; exact answer receipt |
 | Chat and tool history | ACP runtime and client | Readable tool rows; thinking and bookkeeping hidden in Paseo, evidence retained |
+| Task side chat | Workspace service | Read-only, isolated session on the task's route; private per-task history; never reaches the task |
 
 ## Pages
 
@@ -49,6 +50,10 @@ Access, commands and observability:
 - [Commands and project skill management](skill-management/index.md)
 - [Observability and resource attribution](observability/index.md)
 - [Token and provider plan usage](token-and-plan-usage/index.md)
+
+Workspace:
+
+- [Task side chat](side-chat/index.md)
 
 Engines and client integrations:
 

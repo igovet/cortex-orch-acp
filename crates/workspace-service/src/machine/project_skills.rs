@@ -7,6 +7,24 @@ use super::native::*;
 use serde_json::{json, Value};
 use std::path::Path;
 
+/// Cortex's own topic skills the coordinator can read with `read_skill`, offered in the composer's
+/// `/` list. Role profiles, protocol skills every session already follows and skills that only an
+/// explicit command activates (`/harvest`, `/skill-management`, clear commands) are not offered.
+/// Each id must stay readable by the coordinator (a test enforces it).
+const CORTEX_SKILLS: [(&str, &str); 11] = [
+    ("requirements-intake", "Ask only the material questions before planning a request whose goal is unclear."),
+    ("design-workflow", "Adaptive UI/UX intake, art direction, implementation and visual review."),
+    ("design-intake", "Question bank for design requests: ground choices in project evidence."),
+    ("visual-review", "Evidence-backed visual review of a finished interface."),
+    ("documentation-sync", "Keep documentation in step with changed behavior, commands and links."),
+    ("verification-coverage", "Plan real verification for every changed surface."),
+    ("live-qualification", "Follow the target project's live-check policy and evidence rules."),
+    ("incident", "Work an incident: symptoms, evidence, smallest justified repair."),
+    ("cortex-release", "Release work against the target checkout's ACP documentation and version rules."),
+    ("context-compaction", "Recover durable state after context loss."),
+    ("question-banks", "Situational question prompts for unanswered material questions."),
+];
+
 pub fn list(checkout: &Path) -> Result<Value> {
     let (skills, omitted) = crate::native_skills::index(checkout);
     let skills: Vec<Value> = skills
@@ -18,7 +36,11 @@ pub fn list(checkout: &Path) -> Result<Value> {
                 "pathOnly":s.shadowed})
         })
         .collect();
-    Ok(json!({"skills":skills,"omitted":omitted}))
+    let cortex: Vec<Value> = CORTEX_SKILLS
+        .iter()
+        .map(|(id, description)| json!({"id":id,"description":description}))
+        .collect();
+    Ok(json!({"skills":skills,"omitted":omitted,"cortex":cortex}))
 }
 
 #[cfg(test)]
@@ -43,6 +65,21 @@ mod tests {
         let dir = root.join(folder).join(name);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("SKILL.md"), body).unwrap();
+    }
+    #[test]
+    fn cortex_skills_are_all_readable_by_the_coordinator_and_never_a_role() {
+        for (id, description) in CORTEX_SKILLS {
+            assert!(
+                crate::native_instructions::read_skill("orchestrator", id).is_ok(),
+                "{id}"
+            );
+            assert!(!id.starts_with("worker-") && id != "orchestrator");
+            assert!(!description.is_empty() && description.len() < 120);
+        }
+        let t = tmp("cortex");
+        let v = list(&t.0).unwrap();
+        assert_eq!(v["cortex"].as_array().unwrap().len(), CORTEX_SKILLS.len());
+        assert_eq!(v["cortex"][0]["id"], "requirements-intake");
     }
     #[test]
     fn names_project_skills_with_paths_and_descriptions_and_never_a_body() {

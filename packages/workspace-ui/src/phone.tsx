@@ -3,10 +3,12 @@ import { render } from "solid-js/web";
 import type { PhoneFrame, PhoneWorkspace } from "./ctx";
 import { I } from "./kit";
 import { machineLine, machineRefusal, UPDATE_NEEDED } from "./phone-words";
-import { PAIR_LINK_PREFIX, type PhoneMachine, type PhoneShell, type PhoneState } from "./phone-shell";
+import type { NotificationClicks } from "./notification-target";
+import { workspaceCopy } from "./copy";
+import { PAIR_LINK_PREFIX, type PhoneMachine, notificationWords, type PhoneNotificationState, type PhoneShell, type PhoneState, type PhoneTap } from "./phone-shell";
 import { createRealPort } from "./port/real";
 import { relayProblem } from "./remote-access";
-import { createTheme, type Theme, type ThemePref } from "./theme";
+import { createTheme, persisted, type Theme, type ThemePref } from "./theme";
 import { dropHover } from "./touch";
 import { Workspace } from "./workspace";
 import "./phone.css";
@@ -80,6 +82,36 @@ export function PhoneApp(props: PhoneAppProps) {
   const closePage = () => setPages(list => list.slice(0, -1));
   const doneAll = () => { setFlow([]); setPages([]); setSheet(false); };
 
+  // The phone's own notifications: on by default once a machine is paired, turned on or off in Settings.
+  const notifier = shell.notifications;
+  const [notifyOn, setNotifyOn] = persisted<boolean>("cw.ws.notifications", true, v => typeof v === "boolean");
+  const [notifyState, setNotifyState] = createSignal<PhoneNotificationState | null>(null);
+  const [notifyIssue, setNotifyIssue] = createSignal<string | null>(null);
+  const notifyWanted = createMemo(() => notifyOn() && machines().length > 0);
+  const applyNotify = (on: boolean) => notifier?.set(on, notificationWords()).then(next => { setNotifyState(next); setNotifyIssue(null); },
+    error => setNotifyIssue(`Not changed: ${failure(error)}`));
+  // Applied once the machines are known, and again only when the wish changes (never on a connection change).
+  const known = createMemo(() => state() !== null);
+  createEffect(() => { if (notifier && known()) void applyNotify(notifyWanted()); });
+  // A tap opens its machine (switching to it when another is open) and then the place, through the workspace's own notification path.
+  let tapped: PhoneTap | null = null;
+  const tapListeners = new Map<string, (target: unknown) => void>();
+  const deliverTap = () => {
+    const tap = tapped, listener = tap && tapListeners.get(tap.machineId);
+    if (tap && listener) { tapped = null; listener(tap.target); }
+  };
+  onCleanup(notifier?.taps(tap => {
+    tapped = tap; doneAll();
+    if (tap.machineId !== activeId()) void shell.select(tap.machineId); else deliverTap();
+  }) ?? (() => undefined));
+  const clicksFor = (id: string): NotificationClicks => listener => {
+    tapListeners.set(id, listener);
+    deliverTap();
+    return () => { if (tapListeners.get(id) === listener) tapListeners.delete(id); };
+  };
+  const notifySettings = { on: notifyOn, state: notifyState, issue: notifyIssue, set: (on: boolean) => setNotifyOn(on),
+    battery: () => notifier?.battery().catch(error => setNotifyIssue(failure(error))) };
+
   // A page about a machine that is gone (forgotten here or elsewhere) closes.
   createEffect(() => { const page = topPage(); if (page?.kind === "machine" && state() && !machineOf(page.id)) closePage(); });
 
@@ -152,9 +184,9 @@ export function PhoneApp(props: PhoneAppProps) {
       <Show when={activeId()} keyed fallback={<Show when={machines().length > 0} fallback={<Connect onScan={() => scan()} onPaste={() => paste()} />}>
         <Screen label="Machines"><Bar title="Machines" /><div class="ph-body"><MachineList machines={machines()} active={null} onPick={select} /></div>
           <div class="ph-foot"><button class="btn btn-line" onClick={() => push({ kind: "start" })}><I n="plus" s={14} />Add machine</button></div></Screen>
-      </Show>}>{id => <MachineWorkspace id={id} shell={shell} frame={frameFor(id)} theme={theme} logo={props.logo} />}</Show>
+      </Show>}>{id => <MachineWorkspace id={id} shell={shell} frame={frameFor(id)} theme={theme} logo={props.logo} clicks={clicksFor(id)} />}</Show>
       <Show when={pages().length > 0}><Switch>
-        <Match when={topPage()?.kind === "settings"}><PhoneSettings shell={shell} theme={theme} machines={machines()} active={activeId()} onBack={closePage} onOpen={openPage} onAdd={() => push({ kind: "start" })} /></Match>
+        <Match when={topPage()?.kind === "settings"}><PhoneSettings shell={shell} theme={theme} machines={machines()} active={activeId()} notify={notifySettings} onBack={closePage} onOpen={openPage} onAdd={() => push({ kind: "start" })} /></Match>
         <Match when={(() => { const p = topPage(); return p?.kind === "machine" ? machineOf(p.id) : undefined; })()}>{m => <MachinePage shell={shell} machine={m()} active={m().id === activeId()} onBack={closePage}
           onSettings={() => { setPages([]); workspace?.openMachineSettings(); }} onSwitch={() => { doneAll(); void shell.select(m().id); }} />}</Match>
         <Match when={topPage()?.kind === "appearance"}><AppearancePage theme={theme} onBack={closePage} /></Match>
@@ -203,12 +235,12 @@ export function PhoneApp(props: PhoneAppProps) {
 }
 
 /** The workspace of one machine. Created whole for that machine and disposed whole when another becomes active. */
-function MachineWorkspace(props: { id: string; shell: PhoneShell; frame: PhoneFrame; theme: Theme; logo?: JSX.Element }) {
+function MachineWorkspace(props: { id: string; shell: PhoneShell; frame: PhoneFrame; theme: Theme; logo?: JSX.Element; clicks?: NotificationClicks }) {
   // Each machine starts at its own Home: no route, tab or cached board of the machine before carries over.
   try { localStorage.removeItem("cw.ws.tabs"); } catch { /* no storage */ }
   history.replaceState(null, "", "/");
   const port = createRealPort({ transport: props.shell.transport(props.id), registry: true, actorId: "phone" });
-  return <Workspace port={port} shell={props.frame} theme={props.theme} logo={props.logo} voice={props.shell.voice} />;
+  return <Workspace port={port} shell={props.frame} theme={props.theme} logo={props.logo} voice={props.shell.voice} notificationClicks={props.clicks} />;
 }
 
 function Connect(props: { onScan: () => void; onPaste: () => void; onBack?: () => void }) {
@@ -253,7 +285,9 @@ function MachineList(props: { machines: PhoneMachine[]; active: string | null; o
 }
 
 const THEME_WORDS: Record<ThemePref, string> = { system: "System", light: "Light", dark: "Dark" };
-function PhoneSettings(props: { shell: PhoneShell; theme: Theme; machines: PhoneMachine[]; active: string | null; onBack: () => void; onOpen: (page: Page) => void; onAdd: () => void }) {
+type NotifySettings = { on: () => boolean; state: () => PhoneNotificationState | null; issue: () => string | null; set: (on: boolean) => void; battery: () => void };
+
+function PhoneSettings(props: { shell: PhoneShell; theme: Theme; machines: PhoneMachine[]; active: string | null; notify?: NotifySettings; onBack: () => void; onOpen: (page: Page) => void; onAdd: () => void }) {
   const [lock, setLock] = createSignal<{ enabled: boolean; available: boolean } | null>(null);
   const [relay, setRelay] = createSignal<{ url: string | null; isDefault: boolean } | null>(null);
   void props.shell.appLock?.read().then(setLock, () => setLock(null));
@@ -270,8 +304,16 @@ function PhoneSettings(props: { shell: PhoneShell; theme: Theme; machines: Phone
         <button class="ph-row" onClick={() => props.onOpen({ kind: "appearance" })}><span class="ph-row-t">Appearance</span><span class="cap muted ph-row-v">{THEME_WORDS[props.theme.pref()]}</span><I n="chevron-right" s={14} class="faint" /></button>
         <Show when={lock()?.available}><button class="ph-row" onClick={() => props.onOpen({ kind: "lock" })}><span class="ph-row-t">App lock</span><span class="cap muted ph-row-v">{lock()!.enabled ? "Fingerprint" : "Off"}</span><I n="chevron-right" s={14} class="faint" /></button></Show>
         <Show when={props.shell.relay}><button class="ph-row" onClick={() => props.onOpen({ kind: "relay" })}><span class="ph-row-t">Relay server</span><Show when={relay()}>{r => <span class="cap muted ph-row-v">{r().isDefault ? "Default" : "Custom"}</span>}</Show><I n="chevron-right" s={14} class="faint" /></button></Show>
+        <Show when={props.shell.notifications && props.notify}>{n => <label class="ph-row"><span class="ph-row-t"><span>{workspaceCopy("phoneNotify")}</span><span class="cap muted">{workspaceCopy("phoneNotifyNote")}</span></span>
+          <span class="sw"><input type="checkbox" aria-label={workspaceCopy("phoneNotify")} checked={n().on()} onChange={e => n().set(e.currentTarget.checked)} /><i></i></span></label>}</Show>
         <button class="ph-row" onClick={() => props.onOpen({ kind: "about" })}><span class="ph-row-t">About</span><span class="cap muted ph-row-v tnum">{props.shell.version}</span><I n="chevron-right" s={14} class="faint" /></button>
       </div>
+      <Show when={props.shell.notifications && props.notify}>{n => <>
+        <Show when={n().on() && n().state()?.enabled && n().state()?.permission === "denied"}><p class="ph-note" role="status">{workspaceCopy("phoneNotifyBlocked")}</p></Show>
+        <Show when={n().on() && n().state()?.enabled && n().state()?.batteryExempt === false}><div class="ph-note" role="status"><span>{workspaceCopy("phoneNotifyBattery")}</span></div>
+          <button class="btn btn-line ph-wide" onClick={() => n().battery()}>{workspaceCopy("phoneNotifyBatteryButton")}</button></Show>
+        <Show when={n().issue()}>{why => <p class="ph-err" role="alert">{why()}</p>}</Show>
+      </>}</Show>
     </div>
   </Screen>;
 }

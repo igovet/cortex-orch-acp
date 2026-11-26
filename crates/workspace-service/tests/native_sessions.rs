@@ -1295,8 +1295,11 @@ async fn channel_source_project_and_commands() {
         std::fs::create_dir_all(p.0.join("src/nested/.cortex-dev")).unwrap();
         check(&w,"command_run",json!({"argv":["/usr/bin/touch","src/private-scope-effect"],"request_key":"private-scope"}),json!({"/result/structuredContent/exit_code":0})).await;
         assert!(p.0.join("src/private-scope-effect").exists());
-        check(&w,"command_run",json!({"argv":["/usr/bin/touch","src/nested/.cortex-dev/denied"],"request_key":"private-child"}),json!({"/result/structuredContent/exit_code":1})).await;
-        assert!(!p.0.join("src/nested/.cortex-dev/denied").exists());
+        // Auto: the owner allowed model writes to Cortex store directories; only live store files stay sealed.
+        check(&w,"command_run",json!({"argv":["/usr/bin/touch","src/nested/.cortex-dev/allowed"],"request_key":"private-child"}),json!({"/result/structuredContent/exit_code":0})).await;
+        assert!(p.0.join("src/nested/.cortex-dev/allowed").exists());
+        // A nested store keeps the project unobservable for the result; the fixture removes it again.
+        std::fs::remove_dir_all(p.0.join("src/nested/.cortex-dev")).unwrap();
         let trivial_ref = receipt["tool_call_ref"].clone();
         check(
             &w,
@@ -1490,12 +1493,13 @@ async fn coordinator_tools_not_chat_and_lease() {
         "refusal"
     );
     assert_eq!(h.state("t".into()).await.unwrap(), TaskState::Planning);
-    // A verification that only searches is a correctable content error with its exact
-    // code, never an authority refusal; nothing is recorded and the coordinator may retry.
+    // A verification that only prints a search (no `-q`: its status asserts nothing the
+    // output does not) is a correctable content error with its exact code, never an
+    // authority refusal; nothing is recorded and the coordinator may retry.
     let trivial = json!({"name":"plan_submit","arguments":{"request_key":"trivial","plan":{
         "tasks":[{"id":"w","role":"backend-dev","objective":"Write notes.txt","dependencies":[],
             "scope":["notes.txt"],"model":"auto"}],
-        "verification":[["grep","-qx","ok","notes.txt"]]}},
+        "verification":[["grep","-x","ok","notes.txt"]]}},
         "__fixture_expect":{"/result/isError":true,
             "/result/structuredContent/code":"verification_trivial_command",
             "/result/structuredContent/recorded":false}});
@@ -2032,13 +2036,26 @@ async fn access_modes_and_outside_routes() {
             } else {
                 assert!(!outside.0.join("count").exists());
             }
+            // Another project's Cortex state is allowed on request (Auto allows; with
+            // no owner client here an ask is refused); its live database never.
             for store in [".cortex", ".cortex-dev"] {
                 std::fs::create_dir(outside.0.join(store)).unwrap();
                 let target = outside.0.join(store).join("db");
                 std::fs::write(&target, "fixture").unwrap();
-                checked(&d,"outside_write",json!({"path":target,"content":"no","request_key":store}),
-                    json!({"/result/isError":true,"/result/structuredContent/code":"cortex_private"}),"end_turn").await;
-                assert_eq!(std::fs::read_to_string(target).unwrap(), "fixture");
+                if mode == "auto" {
+                    checked(&d,"outside_write",json!({"path":target,"content":"yes","request_key":store}),
+                        json!({"/result/isError":false}),"end_turn").await;
+                    assert_eq!(std::fs::read_to_string(&target).unwrap(), "yes");
+                } else {
+                    checked(&d,"outside_write",json!({"path":target,"content":"no","request_key":store}),
+                        json!({"/result/isError":true,"/result/content/0/text":"outside_action_not_confirmed"}),"end_turn").await;
+                    assert_eq!(std::fs::read_to_string(&target).unwrap(), "fixture");
+                }
+                let live = outside.0.join(store).join("cortex.sqlite3");
+                std::fs::write(&live, "fixture").unwrap();
+                checked(&d,"outside_write",json!({"path":live,"content":"no","request_key":format!("{store}-live")}),
+                    json!({"/result/isError":true,"/result/structuredContent/code":"cortex_live_store"}),"end_turn").await;
+                assert_eq!(std::fs::read_to_string(live).unwrap(), "fixture");
             }
             checked(
                 &d,
@@ -2310,9 +2327,15 @@ async fn claude_permission_requests_follow_runtime_policy() {
                 ),
                 owner_confirmed,
             ),
+            // Cortex private state is allowed on request: Auto allows, otherwise it
+            // asks (no client here: refused).
             (
                 native("edit", json!({"file_path":control}), Some(control.clone())),
-                &reject,
+                owner_confirmed,
+            ),
+            (
+                native("read", json!({"file_path":control}), Some(control.clone())),
+                owner_confirmed,
             ),
             (
                 native("execute", json!({"command":"ls"}), None),
@@ -2353,7 +2376,7 @@ async fn claude_permission_requests_follow_runtime_policy() {
             db.query_row("SELECT count(*) FROM runtime_events WHERE type IN ('NATIVE_PERMISSION_DECIDED','NATIVE_PERMISSION_CANCELLED','NATIVE_PERMISSION_AUTO_ALLOWED')
                 AND json_extract(payload_json,'$.rule') IS NOT NULL",[],|r|r.get(0))?,
         ))).unwrap();
-        assert_eq!((requested, ruled), (14, 14));
+        assert_eq!((requested, ruled), (15, 15));
         // A channel tool the access mode allows leaves one combined record; every other
         // request keeps its request record and its separate decision record.
         let (combined, pairs, decisions): (i64, i64, i64) = s.read(|db| Ok((
@@ -2365,7 +2388,7 @@ async fn claude_permission_requests_follow_runtime_policy() {
         ))).unwrap();
         assert!(combined > 0, "{mode}");
         assert_eq!(pairs, decisions, "{mode}");
-        assert_eq!(combined + pairs, 14, "{mode}");
+        assert_eq!(combined + pairs, 15, "{mode}");
         d.shutdown().await.unwrap();
         drop(s);
         close(h).await;
@@ -2997,8 +3020,9 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
     d.shutdown().await.unwrap();
     drop(s);
     close(h).await;
-    // A writing Codex worker runs in workspace-write in every access mode, and its
-    // escalations (an apply_patch outside the project, into credentials, Git
+    // A writing Codex worker runs in the Cortex worker permission profile when its
+    // engine offers it (the native Codex launcher defines it), in every access mode,
+    // and its escalations (an apply_patch outside the project, into credentials, Git
     // controls or Cortex state) are answered by the runtime per the decision table.
     for access in ["auto", "guarded", "development"] {
         let p = Project::new();
@@ -3008,6 +3032,7 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
             .status()
             .unwrap()
             .success());
+        std::fs::write(p.0.join("codex-permission-profile"), "").unwrap();
         let outside = Project::new();
         let h = p.host().await;
         let o = h
@@ -3035,7 +3060,7 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
         let confirmed = s.read(|db| Ok(db.query_row(
             "SELECT json_extract(payload_json,'$.mode') FROM runtime_events WHERE type='NATIVE_ACCESS_MODE_CONFIRMED'",
             [], |r| r.get::<_, String>(0))?)).unwrap();
-        assert_eq!(confirmed, "workspace-write", "{access}");
+        assert_eq!(confirmed, "permission-profile:cortex-workspace", "{access}");
         let inside = p.0.join("src/a.rs");
         for (target, outcome, rule) in [
             (
@@ -3091,8 +3116,19 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
                     "control_target"
                 },
             ),
-            (p.0.join(".cortex/injected"), "reject", "cortex_private"),
-            (p.0.join(".cortex-dev/injected"), "reject", "cortex_private"),
+            // Cortex private state is allowed on request like credentials; the live
+            // store files are refused in every mode.
+            (
+                p.0.join(".cortex/injected"),
+                if access == "auto" { "allow-once" } else { "reject" },
+                if access == "auto" { "auto_private" } else { "cortex_private" },
+            ),
+            (
+                p.0.join(".cortex-dev/injected"),
+                if access == "auto" { "allow-once" } else { "reject" },
+                if access == "auto" { "auto_private" } else { "cortex_private" },
+            ),
+            (p.0.join(".cortex/cortex.sqlite3-wal"), "reject", "cortex_live_store"),
         ] {
             let request = native("edit", json!({"path":target}), Some(target.clone()));
             assert_eq!(
@@ -3114,13 +3150,96 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
             );
             let decider = if outcome == "allow-once" {
                 format!("mode:{access}")
-            } else if rule == "cortex_private" {
+            } else if rule == "cortex_live_store" {
                 "runtime".into()
             } else {
                 "no_owner_client".into()
             };
             assert_eq!(payload["decider"], decider, "{access} {target:?}");
         }
+        // The sandbox itself (the fixture follows Codex 0.166 under the profile): an
+        // ordinary project patch is written without a request; a patch into Cortex
+        // state or Git controls fails the sandbox check, becomes an approval request
+        // and is written only when the runtime allows it.
+        let requested = |s: &Store| -> i64 {
+            s.read(|db| Ok(db.query_row(
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PERMISSION_REQUESTED'",
+                [], |r| r.get(0))?)).unwrap()
+        };
+        std::fs::create_dir_all(p.0.join("src")).unwrap();
+        std::fs::create_dir_all(p.0.join(".cortex")).unwrap();
+        let before = requested(&s);
+        let patch = json!({"path":"src/plain.rs","content":"fn plain() {}\n"});
+        assert_eq!(d.prompt(&format!("sandbox-patch:{patch}")).await.unwrap().stop_reason, "end_turn");
+        assert_eq!(std::fs::read_to_string(p.0.join("src/plain.rs")).unwrap(), "fn plain() {}\n");
+        assert_eq!(requested(&s), before, "{access}: an ordinary patch asks nothing");
+        for (relative, rule) in [
+            (".cortex/patched.md", if access == "auto" { "auto_private" } else { "cortex_private" }),
+            (".git/patched", if access == "auto" { "auto_control" } else { "control_target" }),
+            // A credential file the profile keeps read-only (the project root `.env`).
+            (".env", if access == "auto" { "auto_credential" } else { "credential" }),
+        ] {
+            let patch = json!({"path":relative,"content":"patched"});
+            assert_eq!(d.prompt(&format!("sandbox-patch:{patch}")).await.unwrap().stop_reason, "end_turn");
+            let (kind, payload) = last_decision(&s);
+            assert_eq!(kind, "NATIVE_PERMISSION_DECIDED", "{access} {relative}");
+            assert_eq!(payload["rule"], rule, "{access} {relative}");
+            let written = std::fs::read_to_string(p.0.join(relative)).ok();
+            if access == "auto" {
+                assert_eq!(payload["decider"], "mode:auto", "{relative}");
+                assert_eq!(written.as_deref(), Some("patched"), "{relative}");
+            } else {
+                assert_eq!(payload["decider"], "no_owner_client", "{access} {relative}");
+                assert_eq!(written, None, "{access} {relative}");
+            }
+        }
+        // The gateway reaches the same paths only through a runtime decision: Cortex
+        // state on request (missing parents included), Git reads without one, and
+        // the live store files never.
+        async fn call(d: &workspace_service::native_sessions::SessionDriver, name: &str, args: Value, expected: Value) {
+            let prompt = format!("call:{}", json!({"name":name,"arguments":args,"__fixture_expect":expected}));
+            assert_eq!(d.prompt(&prompt).await.unwrap().stop_reason, "end_turn", "{name} {args}");
+        }
+        let auto = access == "auto";
+        let refused = json!({"/result/isError":true,"/result/structuredContent/code":"protected_path_not_confirmed"});
+        call(&d, "project_write", json!({"path":".cortex/gateway/note.md","content":"note\n","expected_sha256":"absent","request_key":"gw-write"}),
+            if auto { json!({"/result/isError":false}) } else { refused.clone() }).await;
+        assert_eq!(std::fs::read_to_string(p.0.join(".cortex/gateway/note.md")).ok().as_deref(),
+            auto.then_some("note\n"), "{access}");
+        call(&d, "project_read", json!({"path":".cortex/gateway/note.md"}),
+            if auto { json!({"/result/isError":false}) } else { refused.clone() }).await;
+        call(&d, "project_read", json!({"path":".git/HEAD"}), json!({"/result/isError":false})).await;
+        call(&d, "project_write", json!({"path":".cortex/cortex.sqlite3-journal","content":"x","expected_sha256":"absent","request_key":"gw-live"}),
+            json!({"/result/isError":true,"/result/structuredContent/code":"cortex_live_store"})).await;
+        assert!(!p.0.join(".cortex/cortex.sqlite3-journal").exists());
+        // A Git control file and credential files (by name, in any directory) are
+        // decided the same way for gateway writes; reading a credential file and
+        // writing ordinary source that merely mentions a token need no decision.
+        call(&d, "project_write", json!({"path":".git/qa-note","content":"1\n","expected_sha256":"absent","request_key":"gw-git"}),
+            if auto { json!({"/result/isError":false}) } else { refused.clone() }).await;
+        assert_eq!(std::fs::read_to_string(p.0.join(".git/qa-note")).ok().as_deref(), auto.then_some("1\n"), "{access}");
+        call(&d, "project_write", json!({"path":"config/.env.production","content":"QA=1\n","expected_sha256":"absent","request_key":"gw-env"}),
+            if auto { json!({"/result/isError":false}) } else { refused.clone() }).await;
+        assert_eq!(std::fs::read_to_string(p.0.join("config/.env.production")).ok().as_deref(), auto.then_some("QA=1\n"), "{access}");
+        std::fs::create_dir_all(p.0.join("app")).unwrap();
+        std::fs::write(p.0.join("app/.env"), "SAMPLE=1\n").unwrap();
+        call(&d, "project_read", json!({"path":"app/.env"}), json!({"/result/isError":false})).await;
+        call(&d, "project_edit", json!({"path":"app/.env","edits":[{"old_string":"SAMPLE=1\n","new_string":"SAMPLE=1\nQA=2\n"}],"request_key":"gw-env-edit"}),
+            if auto { json!({"/result/isError":false}) } else { refused.clone() }).await;
+        assert_eq!(std::fs::read_to_string(p.0.join("app/.env")).unwrap(), if auto { "SAMPLE=1\nQA=2\n" } else { "SAMPLE=1\n" }, "{access}");
+        call(&d, "project_write", json!({"path":"src/token.rs","content":"pub fn token() {}\n","expected_sha256":"absent","request_key":"gw-source"}),
+            json!({"/result/isError":false})).await;
+        let decided: Vec<(String, bool, String)> = s.read(|db| {
+            let mut q = db.prepare("SELECT json_extract(payload_json,'$.rule'),json_extract(payload_json,'$.allowed'),json_extract(payload_json,'$.decider')
+                FROM runtime_events WHERE type='NATIVE_PROTECTED_PATH_DECIDED' ORDER BY id")?;
+            let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }).unwrap();
+        let asked = if auto { ("cortex_private".to_owned(), true, "mode:auto".to_owned()) }
+            else { ("cortex_private".to_owned(), false, "no_owner_client".to_owned()) };
+        let rule = |rule: &str| (rule.to_owned(), asked.1, asked.2.clone());
+        assert_eq!(decided, vec![asked.clone(), asked.clone(), ("cortex_live_store".into(), false, "runtime".into()),
+            rule("control_target"), rule("credential"), rule("credential")], "{access}");
         d.shutdown().await.unwrap();
         drop(s);
         close(h).await;
@@ -4450,7 +4569,7 @@ async fn native_plan_review_verification_journey(
         json!({"tasks":[],"verification":[["true"]]}),
         json!({"tasks":[{"id":"work","role":"code-reviewer","objective":"Reserved","dependencies":[],"scope":["."],"model":"auto"}],"verification":[["true"]]}),
         json!({"tasks":[{"id":"work","role":"backend-dev","objective":"Cycle","dependencies":["work"],"scope":["."],"model":"auto"}],"verification":[["true"]]}),
-        json!({"tasks":[{"id":"work","role":"backend-dev","objective":"Private","dependencies":[],"scope":[".cortex/private"],"model":"auto"}],"verification":[["true"]]}),
+        json!({"tasks":[{"id":"work","role":"backend-dev","objective":"Escape","dependencies":[],"scope":["../private"],"model":"auto"}],"verification":[["true"]]}),
         json!({"tasks":[{"id":"work","role":"backend-dev","objective":"Shell","dependencies":[],"scope":["."],"model":"auto"}],"verification":[["true","&&","false"]]}),
     ] {
         let stop = coordinator
@@ -5360,9 +5479,38 @@ async fn native_workspace_binding_projects_activity_and_scoped_skills() {
     let encoded = serde_json::to_string(&page).unwrap();
     assert!(encoded.contains("Native public response."));
     assert!(encoded.contains("orchestrator: Fixture step"));
-    assert!(!encoded.contains("private-fixture-value"));
+    assert!(!encoded.contains("private-fixture-value"), "a thought and a credential-named argument are never retained");
+    assert!(encoded.contains("shown-fixture-input") && encoded.contains("shown-fixture-output"), "{encoded}");
     assert!(!encoded.contains("Skills already included"));
     assert!(page.next_cursor.is_none());
+    // Cortex MCP calls in both engine shapes keep their real arguments and results; only the credential-named value is masked.
+    assert_eq!(driver.prompt("native-cortex-tools").await.unwrap().updates, 5);
+    let rows: Vec<String> = s
+        .read(|db| {
+            Ok(db
+                .prepare("SELECT update_json FROM host_updates WHERE json_extract(update_json,'$.toolCallId') LIKE '%:claude-batch' OR json_extract(update_json,'$.toolCallId') LIKE '%:codex-report' ORDER BY seq")?
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+        .unwrap();
+    let retained = rows.join("\n");
+    for want in ["read_batch", "r_fixture", "batch result text", "report body text", "[REDACTED]"] {
+        assert!(retained.contains(want), "{want}: {retained}");
+    }
+    assert!(!retained.contains("hidden-fixture-token"), "{retained}");
+    let QueryReply::History(page) = reader.query(query()).unwrap().data else {
+        panic!()
+    };
+    let steps: Vec<Value> = page
+        .items
+        .iter()
+        .filter_map(|r| r.text.as_deref()?.strip_prefix("Workspace step: ").map(|s| serde_json::from_str(s).unwrap()))
+        .collect();
+    let step = |id: &str| steps.iter().rev().find(|s| s["callId"].as_str().is_some_and(|c| c.ends_with(id))).cloned().unwrap_or_else(|| panic!("{id}: {steps:?}"));
+    assert!(step(":claude-batch")["input"].as_str().unwrap().contains("r_fixture"));
+    assert_eq!(step(":claude-batch")["output"], "batch result text");
+    assert_eq!(step(":codex-report")["output"], "report body text");
+    assert!(step(":codex-report")["input"].as_str().unwrap().contains("r_fixture"));
     assert_eq!(
         h.state("runtime".into()).await.unwrap(),
         TaskState::Planning
@@ -5629,6 +5777,21 @@ async fn configured_external_worker_grants() {
             assert!(boundary.contains("If the external tool is not advertised"));
             assert!(!boundary.contains("mcp__fixture__"));
             assert!(!boundary.contains("# Cortex tool cheat sheet"));
+            // A plain string replaces the Claude Code preset (claude-agent-acp 0.107.0
+            // `sessionSystemPrompt`); the tool-calls-only rule opens and closes it.
+            let prompt: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(p.0.join("review-system-prompt")).unwrap(),
+            )
+            .unwrap();
+            let prompt = prompt.as_str().expect("systemPrompt is a replacing string");
+            assert!(prompt.starts_with("# Output rule: tool calls only\n"));
+            assert!(prompt.ends_with(
+                "After the final tool call, end without text, or with one short sentence at most.\n"
+            ));
+            assert_eq!(prompt.matches("# Output rule: tool calls only").count(), 2);
+            for preset in ["give short updates", "Brief is good", "English: progress,"] {
+                assert!(!prompt.contains(preset), "{preset}");
+            }
         }
         assert_eq!(
             p.0.join("src/external-write").exists(),
@@ -6056,9 +6219,18 @@ async fn reopened_synthesis_feedback() -> bool {
         let current = "pytest run (original assigned verification command)";
         for revision in 1..=2 {
             if revision == 2 {
+                std::fs::write(p.0.join("work.txt"), "changed between turns").unwrap();
                 s.write(|db| {
                     assert!(domain::reopen_tx(db, "retry")?);
-                    domain::settle_recovery_tx(db, "retry", TaskState::Planning)
+                    domain::settle_recovery_tx(db, "retry", TaskState::Planning)?;
+                    cortex_core::lifecycle::event_tx(
+                        db,
+                        "retry",
+                        "USER_STEERING",
+                        json!({"request":"follow-up","text":"Recheck the current file.","delivery":"boundary"}),
+                    )?;
+                    assert!(cortex_core::lifecycle::steering::apply_pending_tx(db, "retry")?);
+                    Ok(())
                 })
                 .unwrap();
             }
@@ -6066,6 +6238,29 @@ async fn reopened_synthesis_feedback() -> bool {
                 .dispatch("retry".into(), o.clone(), SessionRole::Coordinator, route())
                 .await
                 .unwrap();
+            if revision == 2 {
+                s.write(|db| {
+                    assert_eq!(cortex_core::lifecycle::steering::deliver_tx(db, "retry")?.len(), 1);
+                    Ok(())
+                }).unwrap();
+                let stale_answer = json!({"name":"answer_submit","arguments":{
+                    "text":"The previous check still applies.","request_key":"stale-answer",
+                    "not_verified":[{"item":old,"blocker":"pytest is not installed"}]
+                },"__fixture_expect":{
+                    "/result/isError":true,
+                    "/result/structuredContent/code":"answer_project_revision_changed",
+                    "/result/structuredContent/recorded":false
+                }});
+                assert_eq!(
+                    d.prompt(&format!("call:{stale_answer}")).await.unwrap().stop_reason,
+                    "end_turn"
+                );
+                assert_eq!(h.state("retry".into()).await.unwrap(), TaskState::Planning);
+                s.write(|db| {
+                    cortex_core::lifecycle::steering::confirm_tx(db, "retry")?;
+                    Ok(())
+                }).unwrap();
+            }
             // Permission and a valid schema cannot bypass the task-state gate; the refusal
             // is a structured tool error naming synthesis_not_expected.
             assert_eq!(
@@ -6075,12 +6270,67 @@ async fn reopened_synthesis_feedback() -> bool {
                     .stop_reason,
                 "end_turn"
             );
+            let mut plan = json!({"tasks":[{"id":"recheck","role":"qa-engineer","objective":"Check unchanged work.txt",
+                "dependencies":[],"scope":["work.txt"],"model":"auto"}],
+                "verification":[["/usr/bin/cmp","/dev/null","/dev/null"]]});
+            if revision == 2 {
+                // The continuation's coordinator sees the outcomes of the plan in force
+                // verbatim, a plan that drops one is answered with the exact statement to
+                // carry, and a plan that names it by id alone is accepted.
+                let statement = "The requested change is made";
+                d.prompt(&format!("call:{}", json!({"name":"task_get_context","arguments":{},
+                    "__fixture_expect":{"/result/structuredContent/plan_summary/outcomes/0/id":"goal",
+                        "/result/structuredContent/plan_summary/outcomes/0/statement":statement}})))
+                    .await.unwrap();
+                // A batched context read larger than one batch item is deferred, and the
+                // deferred item still carries the outcomes inline (live: the coordinator
+                // only got batch_result_limit and could not replan).
+                d.prompt(&format!("call:{}", json!({"name":"read_batch",
+                    "arguments":{"calls":[{"id":"capsule","tool":"read_capsule","arguments":{}},
+                        {"id":"ctx","tool":"task_get_context","arguments":{}}]},
+                    "__fixture_expect":{"/result/structuredContent/results/0/status":"deferred",
+                        "/result/structuredContent/results/0/plan_outcomes/0/id":"goal",
+                        "/result/structuredContent/results/0/plan_outcomes/0/statement":statement,
+                        // A repeated, unchanged context read is compact and keeps them too.
+                        "/result/structuredContent/results/1/result/unchanged_since_last_read":true,
+                        "/result/structuredContent/results/1/result/plan_outcomes/0/statement":statement}})))
+                    .await.unwrap();
+                let mut dropped = plan.clone();
+                dropped["outcomes"] = json!([{"id":"recheck","statement":"The file is rechecked"}]);
+                dropped["tasks"][0]["delivers"] = json!(["recheck"]);
+                d.prompt(&format!("call:{}", json!({"name":"plan_submit",
+                    "arguments":{"request_key":"plan-dropped","plan":dropped},
+                    "__fixture_expect":{"/result/isError":true,
+                        "/result/structuredContent/code":"plan_outcome_dropped",
+                        "/result/structuredContent/recorded":false,
+                        "/result/structuredContent/missing_outcomes/0/id":"goal",
+                        "/result/structuredContent/missing_outcomes/0/statement":statement}})))
+                    .await.unwrap();
+                // A plan whose delivers names an undefined id is answered with that id.
+                let mut ghost = plan.clone();
+                ghost["outcomes"] = json!([{"id":"goal"}]);
+                ghost["tasks"][0]["delivers"] = json!(["goal", "ghost"]);
+                d.prompt(&format!("call:{}", json!({"name":"plan_submit",
+                    "arguments":{"request_key":"plan-ghost","plan":ghost},
+                    "__fixture_expect":{"/result/isError":true,
+                        "/result/structuredContent/code":"plan_outcome_unknown",
+                        "/result/structuredContent/recorded":false,
+                        "/result/structuredContent/unknown_delivers/0/id":"ghost",
+                        "/result/structuredContent/unknown_delivers/0/task":"recheck",
+                        "/result/structuredContent/defined_outcome_ids/0":"goal"}})))
+                    .await.unwrap();
+                assert_eq!(h.state("retry".into()).await.unwrap(), TaskState::Planning);
+                plan["outcomes"] = json!([{"id":"goal"}]);
+                plan["tasks"][0]["delivers"] = json!(["goal"]);
+            }
             d.prompt(&call("plan_submit", json!({
                 "request_key":format!("plan-{revision}"),
-                "plan":{"tasks":[{"id":"recheck","role":"qa-engineer","objective":"Check unchanged work.txt",
-                    "dependencies":[],"scope":["work.txt"],"model":"auto"}],
-                    "verification":[["/usr/bin/cmp","/dev/null","/dev/null"]]}
+                "plan":plan
             }))).await.unwrap();
+            if revision == 2 {
+                let kept = s.read(|db| cortex_core::lifecycle::plan::task_outcomes(db, "retry")).unwrap().unwrap();
+                assert_eq!(kept, vec![json!({"id":"goal","statement":"The requested change is made"})]);
+            }
             d.shutdown().await.unwrap();
             let step = h.advance("retry".into(), o.clone()).await.unwrap();
             assert_eq!(step["state"], "EXECUTING");
@@ -6200,6 +6450,37 @@ async fn reopened_synthesis_feedback() -> bool {
                         [], |r| r.get::<_,i64>(0))?, 1);
                     assert!(db.query_row("SELECT synthesis FROM runtime_tasks WHERE task_id='retry'",
                         [], |r| r.get::<_,Option<String>>(0))?.is_none());
+                    Ok(())
+                }).unwrap();
+            }
+            if revision == 2 {
+                // An unmet goal outcome is never synthesized: the refusal records nothing
+                // and tells the coordinator to continue the work instead.
+                let continue_now = "Nothing was recorded: the original goal is not met, so the task cannot finish. Do not synthesize unfinished work. Continue now: call replan_request and then submit a plan whose tasks deliver every outcome that is not done (keep every outcome and the unresolved verification commands), or, when only the owner can decide (for example whether to close the task as is), ask with user_question_request.";
+                for (arguments, code) in [
+                    (json!({"text":"Rechecked, but the goal is not met.",
+                        "not_verified":[{"item":gap,"blocker":"pytest is not installed"}],
+                        "outcomes":[{"id":"goal","status":"not_done"}]}), "completion_goal_not_met"),
+                    (json!({"text":"Rechecked.",
+                        "not_verified":[{"item":gap,"blocker":"pytest is not installed"},
+                            {"item":"Push the branch","blocker":"not done"}]}), "not_verified_not_a_check"),
+                ] {
+                    let mut expect = json!({"/result/isError":true,
+                        "/result/structuredContent/code":code,
+                        "/result/structuredContent/recorded":false});
+                    if code == "completion_goal_not_met" {
+                        expect["/result/structuredContent/message"] = json!(continue_now);
+                    }
+                    d.prompt(&format!(
+                        "call:{}",
+                        json!({"name":"synthesis_submit","arguments":arguments,"__fixture_expect":expect})
+                    ))
+                    .await
+                    .unwrap();
+                }
+                s.read(|db| {
+                    assert_eq!(db.query_row("SELECT count(*) FROM runtime_events WHERE task_id='retry' AND type='SYNTHESIS_SUBMITTED'",
+                        [], |r| r.get::<_,i64>(0))?, 1);
                     Ok(())
                 }).unwrap();
             }
@@ -6739,7 +7020,8 @@ async fn recovery_project_operations_and_structured_tool_errors() {
         .await;
     }
     // Newly batchable reads run through their own handlers. A private path is refused
-    // inside the batch exactly as a direct call refuses it; the other items still deliver.
+    // inside the batch (a direct project_read of it is decided by the runtime and
+    // asks the owner outside Auto); the other items still deliver.
     std::fs::write(p.0.join("notes.txt"), "batched line\n").unwrap();
     checked(
         &d,
@@ -6759,14 +7041,6 @@ async fn recovery_project_operations_and_structured_tool_errors() {
             "/result/structuredContent/results/2/status":"error",
             "/result/structuredContent/results/2/error/code":"private_or_invalid_path",
             "/result/structuredContent/results/3/status":"error"}),
-        "end_turn",
-    )
-    .await;
-    checked(
-        &d,
-        "project_read",
-        json!({"path":".cortex/cortex.sqlite3"}),
-        json!({"/result/isError":true,"/result/structuredContent/code":"private_or_invalid_path"}),
         "end_turn",
     )
     .await;

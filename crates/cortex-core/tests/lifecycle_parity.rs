@@ -1428,3 +1428,130 @@ fn an_allow_write_answer_lifts_that_owner_denial() {
         assert_eq!(denied(&s), !lifted, "{answer}");
     }
 }
+
+/// Business store t_4797cc4c: the plan narrowed the goal to "preparation only, no
+/// push", the review approved that stage, verification ran and the task completed
+/// with the push undone. An approval that reports a goal outcome undelivered now
+/// returns to the coordinator without any verification; only a full approval with
+/// every outcome delivered is verified, exactly once, and completes.
+#[test]
+fn an_approved_stage_that_misses_the_goal_is_never_verified() {
+    let outcomes = json!([{"id":"prepare","statement":"The changes are prepared"},
+        {"id":"push","statement":"The changes are pushed to GitHub","deferred":"After preparation"}]);
+    for delivered in [false, true] {
+        let (_p, s, o) = setup();
+        s.write(|db| {
+            db.execute("UPDATE runtime_tasks SET plan_json=? WHERE task_id='t'",
+                [json!({"verification":[["cargo","test","-p","x"]],"outcomes":outcomes,
+                    "tasks":[{"id":"n","role":"worker-backend-dev","objective":"Work","dependencies":[],"scope":["src"],"delivers":["prepare"]}]}).to_string()])?;
+            Ok(())
+        })
+        .unwrap();
+        let mut e = evidence('b');
+        finish_execution(&s, &mut e);
+        s.write(|db| add_review_tx(db, "t", &e)).unwrap();
+        e.artifacts.insert("review".into(), "e".repeat(64));
+        let coverage = json!([{"id":"prepare","delivered":true},{"id":"push","delivered":delivered}]);
+        s.write(|db| {
+            bind(db, "_review_1", "ar", "xr", "cr")?;
+            start_review_tx(db, "t", "ar", &e)?;
+            publish(db, "ar", "review")?;
+            // An approval must answer every goal outcome.
+            assert_eq!(
+                record_result_tx(db, "t", "ar",
+                    &json!({"report_ref":"review","summary":"Approved","checks":[],"verdict":"APPROVE",
+                        "goal_coverage":[{"id":"prepare","delivered":true}]}), &e)
+                .unwrap_err()
+                .code(),
+                "review_goal_coverage_required"
+            );
+            record_result_tx(db, "t", "ar",
+                &json!({"report_ref":"review","summary":"Approved","checks":[],"verdict":"APPROVE","goal_coverage":coverage}), &e)?;
+            cortex_core::lifecycle::review::advance_tx(db, "t")?;
+            Ok(())
+        })
+        .unwrap();
+        let verifications = |s: &Store| -> i64 {
+            s.read(|db| Ok(db.query_row(
+                "SELECT count(*) FROM runtime_events WHERE task_id='t' AND type LIKE 'VERIFICATION_%'", [], |r| r.get(0))?))
+            .unwrap()
+        };
+        if !delivered {
+            assert_eq!(state(&s), "RECOVERING");
+            assert_eq!(verifications(&s), 0);
+            let (reason, undelivered): (String, String) = s
+                .read(|db| Ok((
+                    db.query_row("SELECT json_extract(payload_json,'$.reason') FROM runtime_events WHERE type='RETURNED_TO_COORDINATOR'", [], |r| r.get(0))?,
+                    db.query_row("SELECT json_extract(payload_json,'$.undelivered') FROM runtime_events WHERE type='REVIEW_GOAL_NOT_MET'", [], |r| r.get(0))?,
+                )))
+                .unwrap();
+            assert_eq!(reason, "goal_not_met");
+            assert!(undelivered.contains("push"), "{undelivered}");
+            // The next plan keeps the outcomes and the verification that never ran.
+            s.write(|db| {
+                settle_recovery_tx(db, "t", TaskState::Planning)?;
+                db.execute("UPDATE capacity_reservations SET state='released'", [])?;
+                let delivered_now = json!([{"id":"prepare","statement":"The changes are prepared"},{"id":"push","statement":"The changes are pushed to GitHub"}]);
+                let next = json!({"verification":[["cargo","test"]],"outcomes":delivered_now,
+                    "tasks":[{"id":"push","role":"devops-engineer","objective":"Push","dependencies":[],"scope":["."],"delivers":["prepare","push"]}]});
+                // A plan that leaves the owed command out is accepted: the runtime appends it.
+                let accepted = plan::accept_tx(db, "t", "c", "next", &next)?;
+                assert_eq!(accepted["verification_kept_by_runtime"], json!([{"argv":["cargo","test","-p","x"],"reason":"goal_not_met"}]));
+                let stored: String = db.query_row("SELECT plan_json FROM runtime_tasks WHERE task_id='t'", [], |r| r.get(0))?;
+                let stored: serde_json::Value = serde_json::from_str(&stored)?;
+                assert_eq!(stored["verification"], json!([["cargo","test"],["cargo","test","-p","x"]]));
+                Ok(())
+            })
+            .unwrap();
+            continue;
+        }
+        assert_eq!(state(&s), "VERIFYING");
+        s.write(|db| {
+            retain_check_tx(db, "t", &o, "check", &["cargo".into(), "test".into(), "-p".into(), "x".into()],
+                &CommandObservation { complete: true, exit_code: Some(0), receipt_ref: "fake-executor:1".into() }, &e)?;
+            assert!(record_verification_tx(db, "t", &["check".into()], &e)?);
+            reconciliation::submit_synthesis_tx(db, "t", &json!({"text":"Done","outcomes":[
+                {"id":"prepare","status":"done","evidence":"r"},{"id":"push","status":"done","evidence":"review"}]}))?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(verifications(&s), 1);
+        e.workers.insert("xa".into(), ProcessObservation::ConfirmedExited);
+        e.workers.insert("xr".into(), ProcessObservation::ConfirmedExited);
+        s.write(|db| complete_tx(db, "t", &e)).unwrap();
+        assert_eq!(state(&s), "COMPLETED");
+    }
+}
+
+/// A worker whose objective is only partly done names what remains and may submit
+/// that only at a dead end; the node then does not count as done.
+#[test]
+fn a_partly_done_objective_needs_a_dead_end_and_is_not_a_success() {
+    let (_p, s, _) = setup();
+    let mut e = evidence('b');
+    e.artifacts.insert("r".into(), "f".repeat(64));
+    s.write(|db| {
+        publish(db, "a", "r")?;
+        let partial = json!({"report_ref":"r","summary":"half","checks":[],"objective_status":"partial","remaining":["Push the branch"]});
+        assert_eq!(
+            record_result_tx(db, "t", "a", &partial, &e).unwrap_err().code(),
+            "objective_partial_blocker_required"
+        );
+        let mut empty = partial.clone();
+        empty["remaining"] = json!([]);
+        empty["assignment_outcome"] = json!("failed");
+        empty["blocker"] = json!({"kind":"missing_access","detail":"No push credentials"});
+        assert_eq!(
+            record_result_tx(db, "t", "a", &empty, &e).unwrap_err().code(),
+            "objective_partial_blocker_required"
+        );
+        let mut blocked = partial.clone();
+        blocked["assignment_outcome"] = json!("failed");
+        blocked["blocker"] = json!({"kind":"missing_access","detail":"No push credentials"});
+        record_result_tx(db, "t", "a", &blocked, &e)?;
+        let status: String = db.query_row("SELECT status FROM runtime_nodes WHERE node_id='n'", [], |r| r.get(0))?;
+        assert_eq!(status, "failed");
+        Ok(())
+    })
+    .unwrap();
+}

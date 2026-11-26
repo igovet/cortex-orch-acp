@@ -301,7 +301,8 @@ fn exhaust_environment_waits(s: &Store) -> String {
     }
     assert_eq!(
         serde_json::from_str::<Value>(&options).unwrap(),
-        if ru {
+        {
+        let labels = if ru {
             json!([
                 "Повторить сейчас: начать новый круг всех стратегий",
                 "Другой подход: опишите в ответе, что сделать иначе",
@@ -315,7 +316,11 @@ fn exhaust_environment_waits(s: &Store) -> String {
                 "Accept unverified: record this as not verified and finish the task",
                 "Retry later: try again automatically in 30 minutes",
             ])
-        },
+        };
+        let mut expected = labels.as_array().unwrap().iter().map(|l| json!({"label":l})).collect::<Vec<_>>();
+        expected[3]["recommended"] = json!(true);
+        json!(expected)
+    },
     );
     let requested = events(s, "USER_QUESTION_REQUESTED");
     assert_eq!(requested.len(), 1);
@@ -323,6 +328,7 @@ fn exhaust_environment_waits(s: &Store) -> String {
         requested[0]["option_ids"],
         json!(lifecycle::automatic::LOOP_OPTIONS)
     );
+    assert_eq!(requested[0]["recommended"], 4);
     assert!(events(s, "VERIFICATION_FAILED").is_empty());
     assert!(events(s, "VERIFICATION_PASSED").is_empty());
     assert!(s
@@ -438,7 +444,7 @@ fn an_accepted_environment_failure_is_a_disclosed_limit_never_a_pass() {
         .next()
         .unwrap();
     assert_eq!(
-        s.write(|db| submit_synthesis_tx(db, "t", &json!({"text":"Done"})))
+        s.write(|db| submit_synthesis_tx(db, "t", &json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Done"})))
             .unwrap_err()
             .code(),
         "synthesis_gaps_undisclosed"
@@ -447,7 +453,7 @@ fn an_accepted_environment_failure_is_a_disclosed_limit_never_a_pass() {
         submit_synthesis_tx(
             db,
             "t",
-            &json!({"text":"Done",
+            &json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Done",
         "not_verified":[{"item":limit,"blocker":"Accepted by the owner without verification."}]}),
         )
     })
@@ -747,7 +753,7 @@ fn a_former_runtime_message_a_coordinator_already_carried_no_longer_holds_comple
     })
     .unwrap();
     verify(&s, &o, &e, "pass", 0);
-    s.write(|db| submit_synthesis_tx(db, "t", &json!({"text":"Done"})))
+    s.write(|db| submit_synthesis_tx(db, "t", &json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Done"})))
         .unwrap();
     // The synthesis was a coordinator turn after the message: delivered.
     s.write(|db| complete_tx(db, "t", &e)).unwrap();
@@ -776,7 +782,7 @@ fn a_former_runtime_message_newer_than_every_coordinator_turn_is_named() {
     })
     .unwrap();
     verify(&s, &o, &e, "pass", 0);
-    s.write(|db| submit_synthesis_tx(db, "t", &json!({"text":"Done"})))
+    s.write(|db| submit_synthesis_tx(db, "t", &json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Done"})))
         .unwrap();
     s.write(|db| {
         db.execute("INSERT INTO task_events(task_id,event_type,dedup_key,payload_json,origin,created_at,consumed_by,superseded)
@@ -836,12 +842,12 @@ fn a_loop_broken_limit_must_be_disclosed_by_the_final_result() {
     );
     verify(&s, &o, &e, "pass", 0);
     assert_eq!(
-        s.write(|db| submit_synthesis_tx(db, "t", &json!({"text":"Done"})))
+        s.write(|db| submit_synthesis_tx(db, "t", &json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Done"})))
             .unwrap_err()
             .code(),
         "synthesis_gaps_undisclosed"
     );
-    s.write(|db| submit_synthesis_tx(db, "t", &json!({"text":"Done","not_verified":[
+    s.write(|db| submit_synthesis_tx(db, "t", &json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Done","not_verified":[
         {"item":"Coverage of generated fixtures","blocker":"The worker could not read them after repeated refusals."}]})))
         .unwrap();
 }
@@ -902,13 +908,13 @@ fn an_owner_accepted_failing_command_completes_with_its_limit_disclosed() {
         assert_eq!(state(&s), "RECONCILING");
         if accepted {
             assert_eq!(
-                s.write(|db| submit_synthesis_tx(db, "t", &json!({"text":"Done"})))
+                s.write(|db| submit_synthesis_tx(db, "t", &json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Done"})))
                     .unwrap_err()
                     .code(),
                 "synthesis_gaps_undisclosed"
             );
         }
-        s.write(|db| submit_synthesis_tx(db, "t", &json!({"text":"Done","not_verified":[
+        s.write(|db| submit_synthesis_tx(db, "t", &json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Done","not_verified":[
             {"item":"cargo test","blocker":"The owner accepted this failing check as not verified."}]})))
             .unwrap();
         let completed = s.write(|db| complete_tx(db, "t", &e));
@@ -963,7 +969,7 @@ fn every_command_accepted_unverified_completes_without_a_passed_verification() {
         submit_synthesis_tx(
             db,
             "t",
-            &json!({"text":"Done",
+            &json!({"outcomes":[{"id":"goal","status":"done","evidence":"r"}],"text":"Done",
         "not_verified":[{"item":limit,"blocker":"Accepted by the owner without verification."}]}),
         )
     })

@@ -1,7 +1,7 @@
 import { createRoot } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRealPort, FOCUS_STALE_MS, GIT_VISIBLE_REFRESH_MS, MACHINE_POLL_MS, type ProjectLocator } from "../src/port/real";
-import { createWorkspaceStore, PUSH_GAP_MS } from "../src/store";
+import { createWorkspaceStore, HIDDEN_PUSH_GAP_MS, PUSH_GAP_MS } from "../src/store";
 import { capabilitiesWire, scriptedPort, scriptedTransport, snapshot, wireTask } from "./support";
 
 let dispose: () => void = () => {};
@@ -37,17 +37,61 @@ describe("an idle store", () => {
     await settled(10);
     query.mockClear();
     const reads = () => query.mock.calls.filter(([operation]) => operation === "project.snapshot").length;
-    for (let n = 0; n < 20; n++) s.emit({ kind: "refresh" });
-    await settled(0);
+    // The first reads at once; the rest came while it ran, so one more read follows it at once, with no timer.
+    for (let n = 0; n < 20; n++) s.emit({ kind: "refresh", projectId: "p" });
     expect(reads()).toBe(1);
-    for (let n = 0; n < 20; n++) s.emit({ kind: "refresh" });
     await settled(0);
-    expect(reads()).toBe(1);
-    await settled(PUSH_GAP_MS);
     expect(reads()).toBe(2);
+    // A burst within the gap after that: one read for all of it, once the gap has passed.
+    for (let n = 0; n < 20; n++) s.emit({ kind: "refresh", projectId: "p" });
+    await settled(0);
+    expect(reads()).toBe(2);
+    await settled(PUSH_GAP_MS - 1);
+    expect(reads()).toBe(2);
+    await settled(1);
+    expect(reads()).toBe(3);
     await settled(PUSH_GAP_MS * 5);
-    expect(reads()).toBe(2);
+    expect(reads()).toBe(3);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("never lets one project's events delay another's", async () => {
+    const s = scriptedPort();
+    const query = vi.spyOn(s.port, "query");
+    createRoot(d => { dispose = d; return createWorkspaceStore(s.port); });
+    await settled(10);
+    query.mockClear();
+    const reads = (projectId: string) => query.mock.calls.filter(([operation, parameters]) => operation === "project.snapshot" && (parameters as { projectId?: string }).projectId === projectId).length;
+    s.emit({ kind: "refresh", projectId: "p" });
+    await settled(0);
+    s.emit({ kind: "refresh", projectId: "p" });
+    // P is inside its gap; Q's first event reads at once all the same.
+    s.emit({ kind: "refresh", projectId: "q" });
+    await settled(0);
+    expect(reads("p")).toBe(1);
+    expect(reads("q")).toBe(1);
+    expect(query.mock.calls.some(([operation, parameters]) => operation === "project.snapshot" && !(parameters as { projectId?: string }).projectId)).toBe(false);
+    await settled(PUSH_GAP_MS);
+    expect(reads("p")).toBe(2);
+    expect(reads("q")).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("waits the longer gap for a hidden window", async () => {
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+    const s = scriptedPort();
+    const query = vi.spyOn(s.port, "query");
+    createRoot(d => { dispose = d; return createWorkspaceStore(s.port); });
+    await settled(10);
+    query.mockClear();
+    const reads = () => query.mock.calls.filter(([operation]) => operation === "project.snapshot").length;
+    s.emit({ kind: "refresh", projectId: "p" });
+    await settled(0);
+    s.emit({ kind: "refresh", projectId: "p" });
+    await settled(HIDDEN_PUSH_GAP_MS - 1);
+    expect(reads()).toBe(1);
+    await settled(1);
+    expect(reads()).toBe(2);
   });
 });
 

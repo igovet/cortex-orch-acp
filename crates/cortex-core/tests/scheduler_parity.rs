@@ -279,13 +279,20 @@ fn symlinks_private_paths_and_outside_paths_are_runtime_denials() {
         bind(db, "t", "n", "a", "xa", "c")
     })
     .unwrap();
+    // Cortex private state and Git control paths may be reserved (owner decision
+    // 2026-11-25); each write there is still decided by the runtime.
+    for (i, path) in [".cortex/file", ".git/hooks"].iter().enumerate() {
+        let decision = s
+            .write(|db| request_access_tx(db, "t", "c", &format!("protected{i}"), &[(*path).into()]))
+            .unwrap();
+        assert_eq!(decision["status"], "granted", "{path}");
+    }
     for (i, path) in [
         "link/file",
-        ".cortex/file",
-        ".git/hooks",
         "../escape",
         "/tmp/outside",
         "a*b",
+        "a\\b",
     ]
     .iter()
     .enumerate()

@@ -2290,6 +2290,25 @@ mod tests {
                 .unwrap_err();
         assert_eq!(dangling.code(), "verification_executable_unavailable");
     }
+    /// The standard read-only file checks a plan may use (`test -f`, `grep -q`) are
+    /// found where the verifier launches them, both on the owner's tool path and on
+    /// the fixed system fallback (2026-11-25: a plan with them was refused).
+    #[tokio::test]
+    async fn preflight_finds_the_system_test_and_grep_programs() {
+        let f = Fixture::new();
+        if !sandbox_available(&f.0).await {
+            return;
+        }
+        let checks = json!([["test", "-f", "file"], ["grep", "-q", "confirmed", "file"]]);
+        verification_preflight(f.0.clone(), &checks)
+            .await
+            .expect("test and grep on the owner's tool path");
+        let fallback: BTreeMap<OsString, OsString> =
+            [("PATH".into(), "/nonexistent-tools".into())].into();
+        verification_preflight_in(f.0.clone(), &checks, fallback)
+            .await
+            .expect("test and grep on the system fallback path");
+    }
     /// No-paid host check: run the unchanged UI stage through the production
     /// verifier. Supply the observed toolchain HOME without changing test HOME.
     #[tokio::test]

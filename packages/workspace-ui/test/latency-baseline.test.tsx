@@ -146,12 +146,13 @@ it("traces a leading and a trailing project invalidation and holds the old card 
   const t = trace(), origin = now();
   b.commit();
   b.invalidate();
-  // At one millisecond before the trailing deadline, the read still has not started.
-  await tick(1899);
+  // The trailing read is due one foreground gap (250 ms) after the leading one began: 150 ms from here. One millisecond
+  // before that, it still has not started.
+  await tick(149);
   expect(b.readStarts).toEqual([leading]);
   expect(column()).toBe("todo");
   await tick(1);
-  expect(b.readStarts).toEqual([leading, origin + 1900]);
+  expect(b.readStarts).toEqual([leading, origin + 150]);
   await tick(39);
   expect(column()).toBe("todo");
   await tick(1);
@@ -159,7 +160,9 @@ it("traces a leading and a trailing project invalidation and holds the old card 
   t.mark("installedDOM");
   t.sample("confirmedFrame", expectPlaced, true);
   await tick(32);
-  expect(t.points).toEqual({ installedDOM: 1940, confirmedFrame: 1948, stableFrame: 1964 });
+  expect(t.points.installedDOM).toBe(190);
+  expect(t.points.installedDOM).toBeLessThanOrEqual(250);
+  expect(t.points).toEqual({ installedDOM: 190, confirmedFrame: 204, stableFrame: 220 });
   console.info("latency fixture (virtual ms), invalidation", { leadingReadStart: 0, leadingReadReply: b.readReplies[0] - leading,
     readStart: b.readStarts[1] - origin, readReply: b.readReplies[1] - origin, ...t.points });
 });

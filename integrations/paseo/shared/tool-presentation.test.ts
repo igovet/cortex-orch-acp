@@ -10,7 +10,7 @@ const cortexTools = [
   "user_question_request", "result_submit", "list_sources", "read_source",
   "read_skill", "read_capsule", "read_large_output", "read_diagnostics", "ask_question",
   "list_route_options", "read_batch", "tools_discover", "check_preflight", "verification_submit",
-  "access_request", "project_skill_link", "outside_write", "outside_command", "sprint_plan_submit", "sprint_graph", "sprint_task_result",
+  "access_request", "project_skill_link", "outside_write", "outside_command", "sprint_plan_submit", "sprint_revision_submit", "sprint_graph", "sprint_task_result",
 ];
 
 test("maps every advertised Cortex MCP operation to a human semantic row", () => {

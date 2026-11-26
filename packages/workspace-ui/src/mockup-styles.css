@@ -131,6 +131,10 @@ button.chip:hover, a.chip:hover { background: var(--bg-hover); color: var(--fg);
 /* Native-style popup menus: popover attribute gives light dismiss with no script. */
 [popover] { margin: 0; padding: 4px; border: 0; border-radius: var(--r-menu); background: var(--bg-raised); color: var(--fg); box-shadow: var(--shadow-menu); min-width: 200px; font-size: var(--t-sec); }
 [data-theme="light"] [popover] { background: #fff; }
+/* A menu never grows with its content: it keeps a readable width, and a long label or reason wraps or is cut inside it. */
+[popover][role="menu"] { max-width: min(360px, calc(100vw - 16px)); box-sizing: border-box; }
+[popover][role="menu"] .mi .grow { min-width: 0; overflow-wrap: anywhere; }
+.mi .mi-why { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .pop-tl { position: fixed; inset: auto; top: 38px; left: 44px; width: 268px; }
 .pop-anchor { position: fixed; inset: auto; position-area: bottom span-right; margin-top: 4px; }
 .pop-up { position: fixed; inset: auto; position-area: top span-right; margin-bottom: 6px; }

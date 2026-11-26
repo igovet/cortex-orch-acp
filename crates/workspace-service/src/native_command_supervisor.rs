@@ -27,6 +27,7 @@ fn live_profile(name: &str) -> io::Result<Profile> {
         "read_only" => Ok(Profile::ReadOnly),
         "guarded" => Ok(Profile::Guarded),
         "development" => Ok(Profile::Development),
+        "auto" => Ok(Profile::Auto),
         _ => Err(io::Error::other("command_profile_invalid")),
     }
 }
@@ -65,6 +66,9 @@ pub(crate) struct Spec {
     pub cwd: PathBuf,
     pub argv: Vec<String>,
     pub profile: String,
+    /// Auto access: the development view with a writable `.cortex`, minus the live store files.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout: Option<Value>,
     pub writes: Vec<PathBuf>,
@@ -229,7 +233,10 @@ pub fn run() -> io::Result<()> {
         handshake(&mut input, json!({"authorize":true}))?;
         Sandbox::prepare_worktree(&spec.root, logical, &spec.protected).map(Prepared::Scoped)
     } else {
-        let profile = live_profile(&spec.profile)?;
+        let profile = match live_profile(&spec.profile)? {
+            Profile::Development if spec.auto => Profile::Auto,
+            p => p,
+        };
         LiveSandbox::prepare_authorized(
             &spec.root,
             profile,

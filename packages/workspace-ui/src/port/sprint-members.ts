@@ -1,7 +1,7 @@
 import type { Sprint, TaskOverlay } from "@cortex/workspace-domain";
 
 /** A sprint as the service saves it. An unfinished deletion keeps the sprint, archived, with what it set out to delete. */
-export type SavedSprint = Sprint & { planningTaskId?: string; deleting?: unknown; deleteTaskIds?: unknown; deletedTaskIds?: unknown };
+export type SavedSprint = Sprint & { planningTaskId?: string; deleting?: unknown; deleteTaskIds?: unknown; deletedTaskIds?: unknown; deleteReason?: unknown };
 const ids = (v: unknown): string[] | null => Array.isArray(v) && v.every(x => typeof x === "string") ? v : null;
 
 /**
@@ -33,9 +33,11 @@ export function unreadMembers(tasks: Record<string, TaskOverlay>, sprints: reado
 export function presentSprint(tasks: Record<string, TaskOverlay>, sprint: SavedSprint): Sprint & { planningTaskId?: string } {
   // Not a sprint record this can read: it reaches the screens as it came, as before.
   if (!ids(sprint.taskIds)) return sprint;
-  const { deleting, deleteTaskIds, deletedTaskIds, ...rest } = sprint;
+  const { deleting, deleteTaskIds, deletedTaskIds, deleteReason, ...rest } = sprint;
   const taskIds = liveMembers(tasks, sprint);
-  if (deleting !== true) return deleting === undefined && deleteTaskIds === undefined && deletedTaskIds === undefined && taskIds.length === sprint.taskIds.length ? sprint : { ...rest, taskIds };
+  if (deleting !== true) return deleting === undefined && deleteTaskIds === undefined && deletedTaskIds === undefined && deleteReason === undefined && taskIds.length === sprint.taskIds.length ? sprint : { ...rest, taskIds };
   const members = [...new Set(ids(deleteTaskIds) ?? sprint.taskIds)];
-  return { ...rest, taskIds, deletion: { total: members.length, left: members.filter(id => !deletedMember(tasks, sprint, id)) } };
+  // What the service last found holding the deletion back, in its own words: the retry says it, not only one reply.
+  const reason = typeof deleteReason === "string" && deleteReason.trim() ? { reason: deleteReason } : {};
+  return { ...rest, taskIds, deletion: { total: members.length, left: members.filter(id => !deletedMember(tasks, sprint, id)), ...reason } };
 }

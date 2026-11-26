@@ -171,7 +171,14 @@ pub(super) async fn apply(plan: &Plan<'_>, product: &mut Value, git: &mut Git) -
         let observed =
             crate::machine::legacy_source::capture(path).map_err(crate::machine::context::core)?;
         if branch.trim() != plan.target
-            || observed.as_deref() != product["tasks"][plan.task]["acceptedRevision"].as_str()
+            || (observed.as_deref() != product["tasks"][plan.task]["acceptedRevision"].as_str()
+                && !crate::machine::integration::own_files_intact_since_acceptance(
+                    plan.root,
+                    plan.project,
+                    plan.task,
+                    &product["tasks"][plan.task],
+                    path,
+                )?)
         {
             return Err(refuse(
                 "workspace_drift",

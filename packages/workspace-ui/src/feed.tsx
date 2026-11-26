@@ -1,3 +1,4 @@
+import { LoadingBar } from "./skeleton";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, type JSX } from "solid-js";
 import type { CommandOutput, CommandOutputRead, CommandOutputRef } from "@cortex/workspace-domain";
 import { CopySource } from "./message-copy";
@@ -5,13 +6,62 @@ import { useWs } from "./ctx";
 import { I } from "./kit";
 import { taskCheckout } from "./review-model";
 import { goToCode } from "./result-links";
-import { detailFailed, displayStep, editDiff, isProjectRoot, PROJECT_ROOT, hasRecordedDetail, privateStep, stepHasContent, type DisplayStep, type StepView } from "./tool-names";
+import { detailFailed, displayStep, editDiff, isProjectRoot, PROJECT_ROOT, hasRecordedDetail, stepHasContent, type DisplayStep, type StepView } from "./tool-names";
 
 /** Which folds and steps the owner opened. It lives above the rows, so no live update or redraw of a row can close one. */
 export type OpenState = { is: (key: string) => boolean; toggle: (key: string) => void; clear: () => void };
 export function createOpenState(): OpenState {
   const [open, setOpen] = createSignal<Record<string, boolean>>({});
   return { is: key => !!open()[key], toggle: key => setOpen(all => ({ ...all, [key]: !all[key] })), clear: () => setOpen({}) };
+}
+
+/** Defence in depth for recorded text: the runtime already redacts credentials before it retains a call, and this masks what still reads
+ *  as one so a row never shows it: a credential-named JSON value, well-known secret formats (provider keys, tokens, private keys, JWTs,
+ *  bearer/basic credentials) and `NAME=value` assignments. Only the value is masked; the rest stays as recorded. */
+const COUNT_WORD = new Set(["count", "counts", "usage", "limit", "max", "min", "total", "budget", "used", "input", "output", "cached", "reasoning", "prompt", "completion"]);
+/** Whole-word match on the field name (`apiKey`, `api_key`, `sudo-password`), so `graphRevision` or a token count is not a secret. */
+export function isSecretName(name: string): boolean {
+  const words = name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const has = (w: string) => words.includes(w);
+  const pair = (a: string, b: string) => words.some((w, i) => w === a && words[i + 1] === b);
+  return ["password", "passwd", "passphrase", "secret", "secrets", "authorization", "credential", "credentials", "apikey", "apikeys"].some(has)
+    || (has("token") && !words.some(w => COUNT_WORD.has(w)))
+    || ["api", "access", "private", "secret", "auth", "ssh", "signing"].some(a => pair(a, "key"))
+    || pair("client", "secret") || pair("bearer", "token");
+}
+const MARKER = /^\[(?:REDACTED|HIDDEN_SECRET)/;
+const VALUE = String.raw`"[^"\r\n]*"|'[^'\r\n]*'|[^\s'"]+`;
+const NAME = String.raw`[A-Za-z0-9_]*(?:api[_-]?key|access[_-]?key|private[_-]?key|token|secret|password|passwd|credential|authorization)[A-Za-z0-9_]*`;
+const assignment = (text: string, pattern: RegExp) => text.replace(pattern, (whole, name: string, sep: string, raw: string, offset: number) => {
+  if (/^HIDDEN_SECRET$/i.test(name) && text[offset - 1] === "[") return whole;
+  const q = raw[0] === '"' || raw[0] === "'" ? raw[0] : "";
+  const inner = q ? (raw.length > 1 && raw.endsWith(q) ? raw.slice(1, -1) : raw.slice(1)) : raw;
+  if (MARKER.test(inner) || (/token/i.test(name) && /^\d+$/.test(inner))) return whole;
+  return `${name}${sep}${q}[REDACTED]${q}`;
+});
+export function maskSecrets(text: string): string {
+  const walk = (value: unknown, key?: string): unknown => {
+    if (key && isSecretName(key) && value !== null && typeof value !== "number" && typeof value !== "boolean") return "[REDACTED]";
+    if (Array.isArray(value)) return value.map(v => walk(v));
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, walk(v, k)]));
+    return value;
+  };
+  let out = text;
+  if (text.trimStart()[0] === "{" || text.trimStart()[0] === "[") {
+    try {
+      const parsed = JSON.parse(text), masked = walk(parsed);
+      if (JSON.stringify(masked) !== JSON.stringify(parsed)) out = JSON.stringify(masked, null, 2);
+    } catch { out = text; }
+  }
+  out = out
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[REDACTED]")
+    .replace(/\b(Bearer|Basic|Token)\s+([A-Za-z0-9._~+/=_-]{8,})/gi, (whole, scheme: string, value: string) =>
+      MARKER.test(value) || (!/^bearer$/i.test(scheme) && !/[0-9=+/]/.test(value)) ? whole : `${scheme} [REDACTED]`);
+  out = assignment(out, new RegExp(String.raw`\b(${NAME})(\s*[=:]\s*)(${VALUE})`, "gi"));
+  out = assignment(out, new RegExp(String.raw`\b([A-Z][A-Z0-9_]*_KEYS?)(=)(${VALUE})`, "g"));
+  return out
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|sk-proj-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/g,
+      value => /^sk-(?!proj-)/.test(value) && !/\d/.test(value) ? value : "[REDACTED]");
 }
 
 /** Recorded output exactly as written: a long line scrolls sideways inside this box, never wraps or widens its column. Keys,
@@ -74,13 +124,13 @@ export function StepDetail(props: { step: DisplayStep; taskId: string; metadataO
 }
 
 const TEXT_PREVIEW = 1000;
-function RecordedText(props: { label: string; text?: string | null; missing: string; box?: string; partial?: boolean }) {
+function RecordedText(props: { label: string; text?: string | null; missing: string; box?: string; partial?: boolean; loading?: boolean }) {
   const [all, setAll] = createSignal(false);
   const long = () => (props.text?.length ?? 0) > TEXT_PREVIEW;
   const shown = () => all() || !long() ? props.text : props.text!.slice(0, TEXT_PREVIEW) + "…";
   return <section aria-label={props.label}>
     <div class="ev-dh">{props.label}</div>
-    <Show when={props.text != null} fallback={<div>{props.missing}</div>}>
+    <Show when={props.text != null} fallback={<Show when={props.loading} fallback={<div>{props.missing}</div>}><LoadingBar label={props.missing} /></Show>}>
       <Show when={props.text !== ""} fallback={<div>Recorded empty.</div>}>
         <Show when={props.label === "Input"} fallback={<OutputBox label={props.box ?? props.label}>{shown()}</OutputBox>}>
           <pre class="args" role="region" tabIndex={0} aria-label="Input"><code>{shown()}</code></pre>
@@ -148,15 +198,15 @@ function CommandDetail(props: { request: CommandOutputRead; pending: boolean; re
   const input = () => {
     const r = receipt();
     if (!r || (r.argv === null && r.cwd === null)) return undefined;
-    return JSON.stringify({ argv: r.argv ?? undefined, cwd: r.cwd ?? undefined }, null, 2);
+    return maskSecrets(JSON.stringify({ argv: r.argv ?? undefined, cwd: r.cwd ?? undefined }, null, 2));
   };
   const nextOffset = () => page()?.nextOffset;
   return <div class="ws-step-detail">
-    <RecordedText label="Input" text={input()} missing={busy() ? "Loading command input…" : "No input was recorded."} />
+    <RecordedText label="Input" text={input()} loading={busy()} missing={busy() ? "Loading command input…" : "No input was recorded."} />
     <Show when={receipt()}>{r => <div>
       Command {r().status}{r().exitCode !== null ? `, exit ${r().exitCode}` : ""}{r().signal !== null ? `, signal ${r().signal}` : ""}
     </div>}</Show>
-    <RecordedText label="Output" box="Command output" text={page() && (text() || page()!.totalBytes === 0) ? text() : undefined} partial={nextOffset() != null}
+    <RecordedText label="Output" box="Command output" text={page() && (text() || page()!.totalBytes === 0) ? maskSecrets(text()) : undefined} partial={nextOffset() != null} loading={busy()}
       missing={busy() ? "Loading command output…" : failed() ? "Command output could not be loaded." : receipt()?.output.state === "pending" && props.pending ? "Waiting for output…" : page() ? "Load more bytes to decode the output." : "Command output is unavailable."} />
     <Show when={page()}>{p => <>
       <div>{p().offset + p().byteLength} of {p().totalBytes} retained bytes loaded.</div>
@@ -164,7 +214,7 @@ function CommandDetail(props: { request: CommandOutputRead; pending: boolean; re
       <Show when={decoding()}><div>Shown as UTF-8 text; invalid bytes are replaced.</div></Show>
     </>}</Show>
     <Show when={page() && failed()}><div role="alert">More output could not be loaded. Only previously loaded text is shown.</div></Show>
-    <Show when={busy() && page()}><div role="status">Loading more output…</div></Show>
+    <Show when={busy() && page()}><LoadingBar label="Loading more output…" /></Show>
     <Show when={failed() || nextOffset() != null || (!busy() && receipt()?.output.state === "pending")}>
       <button type="button" class="lnk" disabled={busy()} onClick={() => void load(nextOffset() ?? undefined)}>
         {failed() ? "Retry output read" : nextOffset() != null ? "Load more output" : "Refresh output"}
@@ -176,33 +226,34 @@ function CommandDetail(props: { request: CommandOutputRead; pending: boolean; re
 function ToolDetail(props: { view: StepView; taskId: string; args?: string; output?: string; tail?: string; active?: boolean; pending?: boolean; commandRef?: CommandOutputRef; fallbackCommand?: string }) {
   const ws = useWs();
   const step = () => props.view.detail;
-  const hidden = () => privateStep(props.view);
   const ref = () => props.commandRef ?? step()?.commandOutputRef;
   const pending = () => props.active !== false && (props.pending || /^(pending|in_progress)$/.test(step()?.status ?? ""));
   const read = ws.store.readCommandOutput;
   const request = createMemo(() => {
     const task = ws.store.state().tasks.find(t => t.id === props.taskId), command = ref();
-    return !hidden() && task && command && read && ws.shell.kind === "desktop"
+    return task && command && read && ws.shell.kind === "desktop"
       ? JSON.stringify({ projectId: task.projectId, taskId: task.id, ...command }) : undefined;
   });
   const input = () => {
     const d = step();
+    if (d?.input) return maskSecrets(d.input);
     const selected = d && { path: d.path, query: d.query, reference: d.ref };
     const command = d?.command ?? props.fallbackCommand;
-    if (selected && Object.values(selected).some(v => v !== undefined)) return JSON.stringify({ command, ...selected }, null, 2);
-    return command ?? (!displayStep(props.args) ? props.args : undefined);
+    if (selected && Object.values(selected).some(v => v !== undefined)) return maskSecrets(JSON.stringify({ command, ...selected }, null, 2));
+    const plain = command ?? (!displayStep(props.args) ? props.args : undefined);
+    return plain === undefined ? undefined : maskSecrets(plain);
   };
   const fromTail = () => step()?.output === undefined && props.output === undefined && props.tail !== undefined;
-  const output = () => step()?.output ?? props.output ?? props.tail;
+  const output = () => { const text = step()?.output ?? props.output ?? props.tail; return text === undefined ? undefined : maskSecrets(text); };
   return <>
-    <Show when={!hidden() && step()}>{d => <StepDetail step={d()} taskId={props.taskId} metadataOnly />}</Show>
+    <Show when={step()}>{d => <StepDetail step={d()} taskId={props.taskId} metadataOnly />}</Show>
     <Show when={request()} keyed fallback={<div class="ws-step-detail">
-      <RecordedText label="Input" text={hidden() ? undefined : input()} missing={hidden() ? "Private or redacted." : "No input was recorded."} />
-      <Show when={!hidden() && input()}><div class="cap">Recorded input only; other fields may not have been retained.</div></Show>
+      <RecordedText label="Input" text={input()} missing="No input was recorded." />
+      <Show when={input() && !step()?.input}><div class="cap">Recorded input only; other fields may not have been retained.</div></Show>
       <RecordedText label="Output" box={props.view.kind === "shell" ? "Command output" : undefined}
-        text={hidden() || ref() ? undefined : output()}
-        missing={hidden() ? "Private or redacted." : ref() ? "Command output is unavailable here." : pending() ? "Waiting for output…" : "No output was recorded."} />
-      <Show when={!hidden() && !ref() && fromTail()}><div class="cap">Recorded command tail only.</div></Show>
+        text={ref() ? undefined : output()}
+        missing={ref() ? "Command output is unavailable here." : pending() ? "Waiting for output…" : "No output was recorded."} />
+      <Show when={!ref() && fromTail()}><div class="cap">Recorded command tail only.</div></Show>
     </div>}>{key => <CommandDetail request={JSON.parse(key)} pending={pending()} read={read!} />}</Show>
   </>;
 }
@@ -235,7 +286,7 @@ export function StepRow(props: { view: StepView; taskId: string; tone?: string; 
         <ToolDetail view={props.view} taskId={props.taskId} args={props.args} output={props.output} tail={props.tail}
           active={props.active} pending={props.pending} commandRef={props.commandRef} fallbackCommand={props.fallbackCommand} />
       </Show>
-      <Show when={!privateStep(props.view)}>{props.extra}</Show>
+      {props.extra}
     </div></Show>
   </div>;
 }

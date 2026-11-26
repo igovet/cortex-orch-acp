@@ -50,14 +50,27 @@ pub(crate) fn codex_native_confirmed(options: &Value, expected: &str) -> bool {
         && mode.next().is_none()
 }
 
+/// The Codex permission profile a writing Codex worker runs in when its App
+/// Server defines it (the native Codex launcher does, see
+/// `native_codex_runtime::PERMISSION_LAYERS`): Codex's own `:workspace` profile
+/// with Cortex private state and fixed credential names at the project root kept
+/// read-only, so an `apply_patch` there fails Codex's sandbox check and becomes
+/// an approval request the runtime answers, instead of a silent write.
+pub(crate) const CODEX_WORKER_PROFILE: &str = "cortex-workspace";
+/// codex-acp's (2.6.0) mode id of [`CODEX_WORKER_PROFILE`].
+pub(crate) const CODEX_WORKER_PROFILE_MODE: &str = "permission-profile:cortex-workspace";
+
 /// The engine permission mode of a session, independent of the access mode:
 ///
 /// - claude-agent-acp: `default`, the mode in which every tool Claude Code does
 ///   not auto-approve reaches the runtime as `session/request_permission`.
 /// - codex-acp: `read-only` (read-only sandbox, approval on request) for a
-///   read-only channel; `workspace-write` (project-writable sandbox, approval on
-///   request answered by the runtime, unlike `agent`, whose escalations go to
-///   Codex's own automatic reviewer) for a writing worker.
+///   read-only channel; for a writing worker [`CODEX_WORKER_PROFILE_MODE`] when
+///   the engine offers it, else `workspace-write` (project-writable sandbox,
+///   approval on request answered by the runtime, unlike `agent`, whose
+///   escalations go to Codex's own automatic reviewer). The profile only narrows
+///   `workspace-write`: it is `:workspace` with more read-only paths, and the
+///   launcher pins its approval policy to `on-request` with the user reviewer.
 /// - OpenCode: `cortex`, whose permissions ask for every tool.
 ///
 /// A mode the engine does not offer refuses the start with
@@ -70,6 +83,9 @@ pub(crate) fn native_mode(
     let mode = match (engine, read_only) {
         (EngineKind::Claude, _) => "default",
         (EngineKind::Codex, true) => "read-only",
+        (EngineKind::Codex, false) if offers(options, CODEX_WORKER_PROFILE_MODE) => {
+            CODEX_WORKER_PROFILE_MODE
+        }
         (EngineKind::Codex, false) => "workspace-write",
         (EngineKind::OpenCode, _) => "cortex",
     };
@@ -122,10 +138,11 @@ pub(crate) const CLAUDE_DISALLOWED_TOOLS: &[&str] = &[
     "SendFeedback",
 ];
 
-/// Project-relative Cortex private state no native read may reach. Claude Code
-/// reads inside its working directory without asking, so these deny rules (a
-/// deny rule wins over every allow rule) keep the store out of native reads.
-pub(crate) const CLAUDE_PRIVATE_READ_DENIALS: &[&str] = &[
+/// Project-relative Cortex private state. Claude Code reads inside its working
+/// directory without asking, so these `ask` rules make a native read there a
+/// permission request the runtime answers: Cortex private state is allowed on
+/// request (Auto allows, Guarded and Development ask the owner).
+pub(crate) const CLAUDE_PRIVATE_READ_ASKS: &[&str] = &[
     "Read(./.cortex/**)",
     "Read(./.cortex-dev/**)",
     "Read(./.cortex-dev-owner.json)",
@@ -180,7 +197,7 @@ pub(crate) fn claude_session_meta() -> Value {
     let settings = json!({
         "disableAllHooks": true,
         "autoMemoryEnabled": false,
-        "permissions": {"deny": CLAUDE_PRIVATE_READ_DENIALS, "ask": CLAUDE_CREDENTIAL_READ_ASKS},
+        "permissions": {"ask": CLAUDE_PRIVATE_READ_ASKS.iter().chain(CLAUDE_CREDENTIAL_READ_ASKS).collect::<Vec<_>>()},
     });
     json!({"claudeCode":{"options":{
         "allowDangerouslySkipPermissions": false,
@@ -241,16 +258,68 @@ pub(crate) fn project_private(path: &Path) -> bool {
     })
 }
 
+/// The live files of a project store: `cortex.sqlite3` with its WAL, SHM and
+/// journal, and the store's `.<name>.lock` files, directly in a `.cortex` or
+/// `.cortex-dev` directory. The runtime holds POSIX locks on them and commits
+/// through them; a write from another process can corrupt the running store.
+pub(crate) fn live_store_file(path: &Path) -> bool {
+    let (Some(name), Some(parent)) = (
+        path.file_name().and_then(|n| n.to_str()),
+        path.parent().and_then(Path::file_name),
+    ) else {
+        return false;
+    };
+    (parent == ".cortex" || parent == ".cortex-dev")
+        && (name.starts_with("cortex.sqlite3") || (name.starts_with('.') && name.ends_with(".lock")))
+}
+
+/// A credential or key file by its name (any directory), for the gateway's write
+/// decision (`native_project::Protected::Credential`): `.env*`, SSH and service
+/// keys, the package-manager and Git credential files and key-store extensions.
+/// Unlike the native [`path_class`], a name that merely contains `secret`,
+/// `credential`, `password` or `token` (ordinary source such as `token.rs`) is not
+/// one, so writing source code never needs a decision.
+pub(crate) fn credential_file(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    name.starts_with(".env")
+        || ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "service-account", "kubeconfig"]
+            .iter()
+            .any(|p| name.starts_with(p))
+        || [
+            ".netrc",
+            ".npmrc",
+            ".pypirc",
+            ".htpasswd",
+            ".git-credentials",
+            "credentials",
+            "credentials.json",
+        ]
+        .contains(&name)
+        || [
+            ".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".kdbx", ".tfvars", ".tfstate",
+            ".tfstate.backup",
+        ]
+        .iter()
+        .any(|s| name.ends_with(s))
+        || path == ".kube/config"
+        || path.ends_with("/.kube/config")
+}
+
 /// The class of a resolved absolute path a native request names
-/// ([`permission::PathClass`]): Cortex private state (the project's `.cortex`,
-/// `.cortex-dev` and dev owner files, the service state directory); credential
-/// and key material (a private file name anywhere, the home credential
-/// locations above, the engine's own credential files); Git control files and
-/// engine/Cortex configuration (every other runtime-protected target); else
-/// ordinary.
+/// ([`permission::PathClass`]): the live store files ([`live_store_file`]);
+/// Cortex private state (the project's `.cortex`, `.cortex-dev` and dev owner
+/// files, the service state directory); credential and key material (a private
+/// file name anywhere, the home credential locations above, the engine's own
+/// credential files); Git control files and engine/Cortex configuration (every
+/// other runtime-protected target); else ordinary.
 pub(crate) fn path_class(root: &Path, path: &Path) -> PathClass {
     if project_private(path) {
-        return PathClass::Private;
+        return if live_store_file(path) {
+            PathClass::LiveStore
+        } else {
+            PathClass::Private
+        };
     }
     let env: std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> =
         std::env::vars_os().collect();
@@ -329,6 +398,14 @@ mod tests {
         ] {
             assert_eq!(native_mode(engine, read_only, &all).unwrap(), expected);
         }
+        // The Cortex permission profile, when the engine defines it, is preferred for a
+        // writing Codex worker; a read-only channel keeps `read-only`.
+        let profiled = json!([{"id":"mode","options":[
+            {"group":"sandbox-modes","options":[{"value":"read-only"},{"value":"workspace-write"},{"value":"agent"}]},
+            {"group":"permission-profiles","options":[{"value":CODEX_WORKER_PROFILE_MODE}]}]}]);
+        assert_eq!(native_mode(EngineKind::Codex, false, &profiled).unwrap(), CODEX_WORKER_PROFILE_MODE);
+        assert_eq!(native_mode(EngineKind::Codex, true, &profiled).unwrap(), "read-only");
+        assert_eq!(CODEX_WORKER_PROFILE_MODE, format!("permission-profile:{CODEX_WORKER_PROFILE}"));
         // `agent` hands escalations to Codex's own reviewer; it is never a substitute.
         let agent_only = modes(&["agent", "read-only", "default"]);
         assert!(native_mode(EngineKind::Codex, false, &agent_only).is_err());
@@ -415,7 +492,13 @@ mod tests {
         for channel in [StoreChannel::Release, StoreChannel::Dev] {
             let key = ProjectKey::new(&linked, channel).unwrap();
             assert_eq!(key.root(), &foreign);
-            assert_eq!(path_class(&current, &key.database()), PathClass::Private);
+            // The live database is refused to native writes; the rest of the store is
+            // allowed on request.
+            assert_eq!(path_class(&current, &key.database()), PathClass::LiveStore);
+            for live in ["cortex.sqlite3-wal", "cortex.sqlite3-shm", ".access.lock"] {
+                assert_eq!(path_class(&current, &key.directory().join(live)), PathClass::LiveStore);
+            }
+            assert_eq!(path_class(&current, &key.directory().join("t_1/pipeline.md")), PathClass::Private);
             assert_eq!(
                 path_class(&current, &linked.join(channel.directory()).join("absent")),
                 PathClass::Private
@@ -443,7 +526,7 @@ mod tests {
         );
         assert_eq!(
             path_class(&root, &root.join(".cortex/cortex.sqlite3")),
-            PathClass::Private
+            PathClass::LiveStore
         );
         assert_eq!(
             path_class(&root, &root.join(".cortex-dev/x")),
@@ -457,6 +540,13 @@ mod tests {
             path_class(&root, &root.join("certs/server.pem")),
             PathClass::Credential
         );
+        // The gateway's credential files: by name, never source that mentions a token.
+        for name in [".env", "app/.env.local", ".git-credentials", "certs/server.pem", ".kube/config"] {
+            assert!(credential_file(name), "{name}");
+        }
+        for name in ["src/token.rs", "README.md", "env.md", "src/password_reset.ts"] {
+            assert!(!credential_file(name), "{name}");
+        }
         if let Some(home) = std::env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|h| h.is_absolute())
@@ -507,6 +597,13 @@ mod tests {
         }
         for kept in ["Read", "Grep", "Glob", "WebFetch", "WebSearch"] {
             assert!(!denied.contains(&kept), "{kept}");
+        }
+        // Cortex private state and credentials ask (the runtime decides); nothing is
+        // hard-denied to native reads.
+        let rules = &o["settings"]["permissions"];
+        assert!(rules.get("deny").is_none());
+        for rule in ["Read(./.cortex/**)", "Read(./.cortex-dev/**)", "Read(**/.env*)"] {
+            assert!(rules["ask"].as_array().unwrap().iter().any(|r| r == rule), "{rule}");
         }
     }
 }

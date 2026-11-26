@@ -25,6 +25,18 @@ fn effort_option() -> Option<&'static str> {
         None
     }
 }
+/// codex-acp's mode id of the Cortex worker permission profile.
+const PROFILE_MODE: &str = "permission-profile:cortex-workspace";
+/// Project-root names Codex 0.166 keeps read-only: its `:workspace` profile keeps
+/// `.git`, `.codex` and `.agents`; the Cortex worker profile adds Cortex state and
+/// fixed credential names (observed with the real binary; see SECURITY.md).
+fn sandbox_read_only(mode: &str, relative: &str) -> bool {
+    let first = relative.split('/').next().unwrap_or("");
+    [".git", ".codex", ".agents"].contains(&first)
+        || (mode == PROFILE_MODE
+            && [".cortex", ".cortex-dev", ".cortex-dev-owner.json", ".cortex-workspace-dev.json", ".env"]
+                .contains(&first))
+}
 fn config_with(value: &str, effort: &str) -> Value {
     let select = |id: &str, category: &str, current: &str, values: &[&str]| {
         json!({"id":id,"name":id,"category":category,"type":"select","currentValue":current,
@@ -41,6 +53,15 @@ fn config_with(value: &str, effort: &str) -> Value {
             "bypassPermissions"
         ]
         .map(|m| json!({"value":m,"name":m})));
+    }
+    // A project holding `codex-permission-profile` gets codex-acp's grouped mode list
+    // with the Cortex worker permission profile the native Codex launcher defines.
+    if std::path::Path::new("codex-permission-profile").exists() {
+        let flat = options[1]["options"].clone();
+        options[1]["options"] = json!([
+            {"group":"sandbox-modes","name":"Sandbox Modes","options":flat},
+            {"group":"permission-profiles","name":"Permission Profiles",
+             "options":[{"value":PROFILE_MODE,"name":"cortex-workspace"}]}]);
     }
     let list = options.as_array_mut().unwrap();
     // Each shape also advertises the real model id its owner catalog lists.
@@ -212,6 +233,39 @@ async fn steering_fixture(server: &Value, snapshot: &Value) -> String {
     format!("Steering reply: {}", messages.iter().filter_map(|m| m["text"].as_str()).collect::<Vec<_>>().join(" / "))
 }
 
+/// Fill the goal-outcome fields the advertised contract requires when a fixture
+/// call leaves them out: one outcome `goal`, delivered by every planned task and
+/// reported done, and a complete objective for an execution worker.
+fn contract_defaults(mut params: Value, mode: &str) -> Value {
+    let name = params["name"].as_str().map(str::to_owned);
+    let arguments = &mut params["arguments"];
+    match name.as_deref() {
+        Some("plan_submit") if arguments["plan"]["outcomes"].is_null() => {
+            arguments["plan"]["outcomes"] =
+                json!([{"id":"goal","statement":"The requested change is made"}]);
+            for task in arguments["plan"]["tasks"].as_array_mut().into_iter().flatten() {
+                if task["delivers"].is_null() {
+                    task["delivers"] = json!(["goal"]);
+                }
+            }
+        }
+        Some("synthesis_submit" | "answer_submit") if arguments["outcomes"].is_null() => {
+            arguments["outcomes"] = json!([{"id":"goal","status":"done","evidence":"fixture"}]);
+        }
+        Some("result_submit") if mode == "desktop-reviewer" || !arguments["verdict"].is_null() => {
+            if arguments["verdict"].as_str().is_some_and(|v| v.eq_ignore_ascii_case("APPROVE"))
+                && arguments["goal_coverage"].is_null()
+            {
+                arguments["goal_coverage"] = json!([{"id":"goal","delivered":true}]);
+            }
+        }
+        Some("result_submit") if arguments["objective_status"].is_null() => {
+            arguments["objective_status"] = json!("complete");
+        }
+        _ => {}
+    }
+    params
+}
 fn reconciliation_fixture(mode: &str, scenario: &str, context: &Value) -> Option<Value> {
     if mode != "desktop-coordinator" || !scenario.starts_with("reconcile-") {
         return None;
@@ -319,6 +373,7 @@ pub async fn main() {
     let mut external_entries = HashMap::new();
     // Each session's `session/new` `_meta`, checked by the `session-meta:` prompts.
     let mut session_metas: HashMap<String, Value> = HashMap::new();
+    let mut session_cwds: HashMap<String, String> = HashMap::new();
     let mut input = BufReader::new(tokio::io::stdin());
     let mut output = tokio::io::stdout();
     let mut count = 0;
@@ -331,6 +386,9 @@ pub async fn main() {
     let mut auto_roles = HashMap::<String, &'static str>::new();
     let mut models = HashMap::<String, String>::new();
     let mut efforts = HashMap::<String, String>::new();
+    // Each session's engine mode and the sandbox patches waiting for approval.
+    let mut session_modes = HashMap::<String, String>::new();
+    let mut patches = HashMap::<String, (std::path::PathBuf, String)>::new();
     // Frames come from one reader task, so the loop can also wake on a timer: a worker
     // prompt held by the plain `hold` scenario finishes its turn normally once
     // `scenario.txt` no longer names a hold, like a real worker that keeps running,
@@ -385,6 +443,13 @@ pub async fn main() {
                 // Only the offered allow option approves; a selected reject denies.
                 let selected = r["result"]["outcome"]["outcome"] == "selected"
                     && r["result"]["outcome"]["optionId"] != "no";
+                // An approved sandbox patch is applied like Codex's escalated retry, which
+                // writes the approved file but creates no missing parent directory.
+                let mut selected = selected;
+                if let Some((path, content)) = patches.remove(&id.to_string()) {
+                    selected = r["result"]["outcome"]["optionId"] == "allow-once"
+                        && std::fs::write(&path, content).is_ok();
+                }
                 wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":if selected{"approved"}else{"denied"}}}}})).await.unwrap();
                 wire::write_frame(
                     &mut output,
@@ -508,6 +573,7 @@ pub async fn main() {
                     Err(_) => acp,
                 };
                 session_metas.insert(sid.clone(), r["params"]["_meta"].clone());
+                session_cwds.insert(sid.clone(), r["params"]["cwd"].as_str().unwrap_or_default().to_owned());
                 servers.insert(sid.clone(), listed.first().cloned().unwrap_or(Value::Null));
                 external_entries.insert(
                     sid.clone(),
@@ -559,6 +625,7 @@ pub async fn main() {
                 );
                 if r["params"]["configId"] == "mode" {
                     options[1]["currentValue"] = json!(value);
+                    session_modes.insert(sid.clone(), value.clone());
                 }
                 let scenario = std::fs::read_to_string("scenario.txt").unwrap_or_default();
                 if scenario == "mode-not-confirmed" && r["params"]["configId"] == "mode" {
@@ -621,6 +688,9 @@ pub async fn main() {
                             .and_then(|prompt| prompt.rsplit_once("## Native capability boundary"))
                             .map_or("", |(_, boundary)| boundary);
                         std::fs::write("review-mcp-boundary", boundary).unwrap();
+                        // The session's whole `_meta.systemPrompt`, as JSON.
+                        std::fs::write("review-system-prompt", meta["systemPrompt"].to_string())
+                            .unwrap();
                     }
                     if matches!(expectation, "none" | "review-none") {
                         assert!(entries.is_empty());
@@ -819,7 +889,15 @@ pub async fn main() {
                         wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":reason}})).await.unwrap();
                         continue;
                     }
-                    let text = steering_fixture(&servers[&sid], &snapshot).await;
+                    // Owner task settings changed during execution reach the next coordinator
+                    // session, here the live steering session that takes the owner's prompt.
+                    let text = if full_scenario.trim() == "settings-ru" {
+                        assert!(base.contains("Owner-selected response language: ru."));
+                        assert_eq!(models.get(&sid).map(String::as_str), Some("fixture-other"));
+                        "Observed owner task model and language.".to_owned()
+                    } else {
+                        steering_fixture(&servers[&sid], &snapshot).await
+                    };
                     wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,
                         "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}}})).await.unwrap();
                     wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}})).await.unwrap();
@@ -889,6 +967,35 @@ pub async fn main() {
                     )
                     .await
                     .unwrap();
+                    continue;
+                }
+                // `tool-loop-twice`: every coordinator turn repeats the same refused
+                // submission through its Cortex MCP relay (more often than the runtime's
+                // per-turn bound allows), then waits until the runtime cancels the turn.
+                if mode == "desktop-coordinator" && full_scenario.trim() == "tool-loop-twice" {
+                    if let Some(command) = servers.get(&sid).and_then(|s| s["command"].as_str()) {
+                        let server = &servers[&sid];
+                        let mut relay = tokio::process::Command::new(command)
+                            .args(server["args"].as_array().into_iter().flatten().filter_map(|v| v.as_str()))
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::piped())
+                            .kill_on_drop(true)
+                            .spawn()
+                            .unwrap();
+                        let mut stdin = relay.stdin.take().unwrap();
+                        let mut stdout = BufReader::new(relay.stdout.take().unwrap());
+                        for call in 1..=8u64 {
+                            wire::write_frame(
+                                &mut stdin,
+                                &json!({"jsonrpc":"2.0","id":call,"method":"tools/call",
+                                    "params":{"name":"synthesis_submit","arguments":{"request_key":format!("loop-{call}"),"text":"done"}}}),
+                            )
+                            .await
+                            .unwrap();
+                            let _ = wire::read_frame(&mut stdout).await;
+                        }
+                    }
+                    held.insert(sid, id);
                     continue;
                 }
                 // A degenerate coordinator turn: the model streams its own prompt text back
@@ -1305,6 +1412,7 @@ pub async fn main() {
                         }
                         json!({"name":"result_submit","arguments":arguments})
                     };
+                    let params = contract_defaults(params, mode);
                     Some(format!("call:{params}"))
                 } else {
                     None
@@ -1350,6 +1458,10 @@ pub async fn main() {
                 {
                     let mut params: Value = serde_json::from_str(&text[5..]).unwrap();
                     let expected = params.as_object_mut().unwrap().remove("__fixture_expect");
+                    // A fixture that tests a missing contract field opts out of the defaults.
+                    if params.as_object_mut().unwrap().remove("__no_defaults").is_none() {
+                        params = contract_defaults(params, mode);
+                    }
                     // Fixture-only message chunks streamed before the tool call and after its reply.
                     let stream = |key: &str, params: &mut Value| {
                         params
@@ -1378,7 +1490,7 @@ pub async fn main() {
                     }
                     if mode.starts_with("desktop-") {
                         for update in [
-                            json!({"sessionUpdate":"tool_call","toolCallId":"fixture-call","title":"Fixture step","status":"in_progress","rawInput":{"private":"not-public"}}),
+                            json!({"sessionUpdate":"tool_call","toolCallId":"fixture-call","title":"Fixture step","status":"in_progress","rawInput":{"api_token":"not-public","path":"fixture.txt"}}),
                             json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Native fixture progress."}}),
                             json!({"sessionUpdate":"tool_call_update","toolCallId":"fixture-call","status":"completed"}),
                         ] {
@@ -1451,6 +1563,7 @@ pub async fn main() {
                         "check_preflight",
                         "sprint_graph",
                         "sprint_task_result",
+                        "sprint_revision_submit",
                         "read_batch"
                     ]
                     .contains(&v["name"].as_str().unwrap())));
@@ -1767,9 +1880,9 @@ pub async fn main() {
                     assert!(base.contains("## Skills already included"));
                     assert!(base.contains("# Cortex tool cheat sheet (code mode)"));
                     for update in [
-                        json!({"sessionUpdate":"tool_call","toolCallId":"same-call","title":"Fixture step","status":"in_progress","rawInput":{"secret":"private-fixture-value"}}),
+                        json!({"sessionUpdate":"tool_call","toolCallId":"same-call","title":"Fixture step","status":"in_progress","rawInput":{"secret":"private-fixture-value","query":"shown-fixture-input"}}),
                         json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"private-fixture-value"}}),
-                        json!({"sessionUpdate":"tool_call_update","toolCallId":"same-call","status":"completed","rawOutput":"private-fixture-value"}),
+                        json!({"sessionUpdate":"tool_call_update","toolCallId":"same-call","status":"completed","rawOutput":"shown-fixture-output"}),
                         json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Native public response."}}),
                     ] {
                         wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})).await.unwrap();
@@ -1780,6 +1893,20 @@ pub async fn main() {
                     )
                     .await
                     .unwrap();
+                    continue;
+                }
+                if mode == "native-host" && text == "native-cortex-tools" {
+                    // Cortex MCP calls as claude-agent-acp (split updates, content blocks) and codex-acp (`rawOutput.result`) report them.
+                    for update in [
+                        json!({"sessionUpdate":"tool_call","toolCallId":"claude-batch","title":"mcp__cortex__read_batch","kind":"other","status":"pending"}),
+                        json!({"sessionUpdate":"tool_call_update","toolCallId":"claude-batch","rawInput":{"items":[{"tool":"read_report","report_id":"r_fixture"}],"auth_token":"hidden-fixture-token"}}),
+                        json!({"sessionUpdate":"tool_call_update","toolCallId":"claude-batch","status":"completed","content":[{"type":"content","content":{"type":"text","text":"batch result text"}}]}),
+                        json!({"sessionUpdate":"tool_call","toolCallId":"codex-report","title":"mcp.cortex.read_report","kind":"other","status":"in_progress","rawInput":{"server":"cortex","tool":"read_report","arguments":{"report_id":"r_fixture"}}}),
+                        json!({"sessionUpdate":"tool_call_update","toolCallId":"codex-report","status":"completed","rawOutput":{"result":{"content":[{"type":"text","text":"report body text"}],"isError":false},"error":null}}),
+                    ] {
+                        wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})).await.unwrap();
+                    }
+                    wire::write_frame(&mut output, &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}})).await.unwrap();
                     continue;
                 }
                 if mode == "native-host" && text == "native-chunked-next" {
@@ -1817,6 +1944,93 @@ pub async fn main() {
                 }
                 if text == "exit" {
                     std::process::exit(17)
+                }
+                // `mcp-read:<tool>:<json arguments>`: as a launcher-backed Codex App
+                // Server would, starts each MCP server the launch handed over in
+                // `CORTEX_CODEX_MCP_SERVERS`, calls `<tool>` of the first one, reports
+                // that call as a tool call of that server and answers with its text
+                // (`error:` before a refusal); `no-mcp` when none was handed over.
+                if let Some(body) = text.strip_prefix("mcp-read:") {
+                    let (tool, arguments) = body.split_once(':').unwrap();
+                    let arguments: Value = serde_json::from_str(arguments).unwrap();
+                    let servers: Value = std::env::var("CORTEX_CODEX_MCP_SERVERS")
+                        .ok()
+                        .and_then(|raw| serde_json::from_str(&raw).ok())
+                        .unwrap_or(json!([]));
+                    let answer = if let Some(entry) = servers.get(0) {
+                        let args: Vec<&str> = entry["args"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+                        let mut child = tokio::process::Command::new(entry["command"].as_str().unwrap())
+                            .args(args)
+                            .env_clear()
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::piped())
+                            .kill_on_drop(true)
+                            .spawn()
+                            .unwrap();
+                        let mut stdin = child.stdin.take().unwrap();
+                        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+                        wire::write_frame(&mut stdin, &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})).await.unwrap();
+                        let _ = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                        wire::write_frame(&mut stdin, &json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await.unwrap();
+                        wire::write_frame(&mut stdin, &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":tool,"arguments":arguments}})).await.unwrap();
+                        let reply = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                        drop(stdin);
+                        let _ = child.wait().await;
+                        let server = entry["name"].as_str().unwrap();
+                        for update in [
+                            json!({"sessionUpdate":"tool_call","toolCallId":"mcp-call","title":format!("mcp.{server}.{tool}"),"status":"in_progress","rawInput":{"server":server,"tool":tool,"arguments":arguments}}),
+                            json!({"sessionUpdate":"tool_call_update","toolCallId":"mcp-call","status":"completed","rawOutput":{"result":reply["result"].clone(),"error":null}}),
+                        ] {
+                            wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})).await.unwrap();
+                        }
+                        let text = reply["result"]["content"][0]["text"].as_str().unwrap_or("").to_owned();
+                        if reply["result"]["isError"] == true { format!("error:{text}") } else { text }
+                    } else {
+                        "no-mcp".to_owned()
+                    };
+                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":answer}}}})).await.unwrap();
+                    wire::write_frame(&mut output, &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}})).await.unwrap();
+                    continue;
+                }
+                // `echo-instructions`: answers with the session's whole instructions
+                // (Claude `systemPrompt`, Codex `model_instructions_file`).
+                if text == "echo-instructions" {
+                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":base}}}})).await.unwrap();
+                    wire::write_frame(&mut output, &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}})).await.unwrap();
+                    continue;
+                }
+                // `working-folder`: answers with the session's `cwd` and the
+                // process's working directory, `session|process`.
+                // `tool-kind:<kind>`: one completed tool call of that ACP kind
+                // (`none` sends it without a kind), then an answer.
+                if text == "working-folder" || text.starts_with("tool-kind:") {
+                    let mut updates = Vec::new();
+                    if let Some(kind) = text.strip_prefix("tool-kind:") {
+                        let mut call = json!({"sessionUpdate":"tool_call","toolCallId":"kind-call","title":"Fixture tool","status":"in_progress"});
+                        if kind != "none" {
+                            call["kind"] = json!(kind);
+                        }
+                        updates.push(call);
+                        updates.push(json!({"sessionUpdate":"tool_call_update","toolCallId":"kind-call","status":"completed"}));
+                        updates.push(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Answered after a tool."}}));
+                    } else {
+                        let folder = format!(
+                            "{}|{}",
+                            session_cwds.get(&sid).cloned().unwrap_or_default(),
+                            std::env::current_dir().unwrap().display()
+                        );
+                        updates.push(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":folder}}));
+                    }
+                    for update in updates {
+                        wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})).await.unwrap();
+                    }
+                    wire::write_frame(
+                        &mut output,
+                        &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
+                    )
+                    .await
+                    .unwrap();
+                    continue;
                 }
                 if text == "malformed" {
                     output
@@ -1862,6 +2076,42 @@ pub async fn main() {
                     )
                     .await
                     .unwrap();
+                    continue;
+                }
+                // `sandbox-patch:<json>`: codex-acp's `apply_patch` under its sandbox. A
+                // path the sandbox keeps writable (inside the working directory, not
+                // read-only in the session's mode) is written without asking, as Codex
+                // does; a read-only or outside path becomes the `edit` approval request
+                // codex-acp sends, and only an approved patch is written.
+                if let Some(body) = text.strip_prefix("sandbox-patch:") {
+                    let edit: Value = serde_json::from_str(body).unwrap();
+                    let cwd = std::env::current_dir().unwrap();
+                    let path = cwd.join(edit["path"].as_str().unwrap());
+                    let content = edit["content"].as_str().unwrap().to_owned();
+                    let mode = session_modes.get(&sid).cloned().unwrap_or_default();
+                    let writable = path.strip_prefix(&cwd).is_ok_and(|relative| {
+                        !sandbox_read_only(&mode, &relative.to_string_lossy())
+                    });
+                    if writable {
+                        std::fs::write(&path, content).unwrap();
+                        wire::write_frame(
+                            &mut output,
+                            &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
+                        )
+                        .await
+                        .unwrap();
+                        continue;
+                    }
+                    static PATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let n = PATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let pid = json!(format!("patch-{sid}-{n}"));
+                    permissions.insert(pid.to_string(), (id, sid.clone()));
+                    patches.insert(pid.to_string(), (path.clone(), content));
+                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","id":pid,"method":"session/request_permission","params":{"sessionId":sid,
+                        "toolCall":{"toolCallId":format!("call-{n}"),"title":"Edit files","kind":"edit","status":"pending","locations":[{"path":path}]},
+                        "options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
+                            {"optionId":"allow-session","name":"Always","kind":"allow_always"},
+                            {"optionId":"reject","name":"Reject","kind":"reject_once"}]}})).await.unwrap();
                     continue;
                 }
                 // `native-write:<json>`: an engine-native file edit made inside the

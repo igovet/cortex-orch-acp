@@ -1,3 +1,4 @@
+import { LoadingBar } from "./skeleton";
 import { createSignal, For, onMount, Show } from "solid-js";
 import { useWs } from "./ctx";
 import { clock } from "./selectors";
@@ -30,7 +31,7 @@ export function ToolSearchPath() {
   onMount(() => { void call({ action: "tool_path.read" }).then(setPath, () => setError("The tool search path is shown by the local desktop service only.")); });
   const status = () => {
     const p = path();
-    if (!p) return "Reading…";
+    if (!p) return <LoadingBar label="Reading…" />;
     if (p.source === "shell") return `Read from your shell (${p.shell ?? "shell"}) ${clock(p.readAt ?? null)}.`;
     if (p.source === "pending") return "Still reading your shell. The usual tool folders are used meanwhile.";
     if (p.source === "fallback") return `Your shell could not be read: ${WHY[p.reason ?? ""] ?? p.reason ?? "unknown"}. The service's PATH and the usual tool folders found ${clock(p.readAt ?? null)} are used.`;

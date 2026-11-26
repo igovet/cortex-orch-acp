@@ -185,8 +185,13 @@ revision is an opaque 64-hex snapshot token: an edit names the revision it was m
 with `stale_graph_revision`, and after any change, stale refusal, lost reply or `graph_save_unconfirmed` the client
 reads again before another edit. The actions never write the approved plan, history or `materializedVersion`. The
 live read is routed on the read lane; the edits take the writer lane. Paired remote devices are refused all three,
-the generic sprint `patch` accepts no dependency, revision or priority field, and the ACP wire schema, the model
-tools and the model-facing `sprint_graph` contract are unchanged. Fields, rules and refusal codes:
+the generic sprint `patch` accepts no dependency, revision or priority field, and the ACP wire schema is unchanged.
+Two more owner actions decide a sprint revision a sprint task proposed after an owner change:
+`apply_revision {sprintId, revisionId, expectedGraphRevision}` and `reject_revision {sprintId, revisionId}`, both
+replying `{changed}` and refused to paired devices; the read carries the newest revisions as `revisions`. The
+model side has the coordinator-only `sprint_revision_submit` tool and `sprint_graph` `include: "pending_descriptions"`,
+whose contracts are their advertised schemas. See
+[re-checking the sprint after an owner change](local-task-execution.md#re-checking-the-sprint-after-an-owner-change). Fields, rules and refusal codes:
 [live sprint graph](local-task-execution.md#live-sprint-graph-and-execution-order); rationale:
 [live sprint graph ownership](adr-live-sprint-graph.md).
 
@@ -211,8 +216,10 @@ owner's home, links are resolved once, and `project_folder_missing` is returned 
 `projects.rename {projectId, displayName}` changes only the name shown. `projects.status` reports `state`
 (`ready`, `starting`, `recovering`, `failed` or `inactive`) with a stable `reason` code. An activated
 project with no working child stays registered and the service restarts its controller with backoff (never
-a task); `service.subscribe` announces `project_state` when a child starts or stops, and the desktop
-rereads capabilities. A change the service makes to a project's owner state in the background, such as a
+a task); `service.subscribe` announces `project_state` when a child starts or stops (or a merge settles), and
+the desktop rereads that project and its `projects.status`, and everything, capabilities included, only
+when the project's activation changed. `remote_state` (remote access changed) rereads only an open
+remote access page. A change the service makes to a project's owner state in the background, such as a
 sprint planner question or plan, a planning failure or a sprint queue change, is announced as
 `invalidation` for that project when it is saved, and the desktop rereads that project; the desktop has no
 facts poll to wait for. `native.pick_folder` is the desktop's own folder chooser. It is answered by the

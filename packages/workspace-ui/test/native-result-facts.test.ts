@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { acceptBlocked, stale } from "../src/review-model";
-import { editedFiles, verificationFace } from "../src/session-model";
+import { editedFiles, reviewLine, verificationFace } from "../src/session-model";
 import type { Task, Worker } from "@cortex/workspace-domain";
 
 const digest = "f".repeat(64);
@@ -25,6 +25,16 @@ describe("native result and worker facts", () => {
     const model = (source?: "runtime") => ({ view: { task: { observedPhase: null, result: { checks: [{ name: "awk", outcome: "passed", detail: "", ...(source ? { source } : {}) }] } } } }) as never;
     expect(verificationFace(model("runtime")).label).toBe("1 passed");
     expect(verificationFace(model()).label).toBe("Not run");
+  });
+  it("says when an approved stage missed the goal and that no verification follows", () => {
+    const reviewer = (review: Record<string, unknown>) => ({ id: "rv", review, superseded: false }) as unknown as Worker;
+    expect(reviewLine(reviewer({ verdict: "APPROVE" }))).toBe("Review approved");
+    expect(reviewLine(reviewer({ verdict: "APPROVE", goalNotMet: true }))).toBe("Stage approved, goal not met");
+    const model = (workers: Worker[]) => ({ workers, view: { task: { observedPhase: null, result: null } } }) as never;
+    expect(verificationFace(model([])).label).toBe("Not run");
+    expect(verificationFace(model([reviewer({ verdict: "APPROVE" })])).label).toBe("Not run");
+    for (const review of [{ verdict: "APPROVE", goalNotMet: true }, { verdict: "REQUEST_CHANGES" }, { verdict: "INCOMPLETE" }])
+      expect(verificationFace(model([reviewer({ verdict: "APPROVE" }), reviewer(review)])).label).toBe("Will not run: changes needed");
   });
   it("counts the edits a worker recorded", () => {
     const edit = (code: string, add: number, del: number, sequence: number) => ({ sequence, kind: "edit", text: "Edited", code, at: null, diff: { add, del, lines: [] } });

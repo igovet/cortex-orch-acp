@@ -8,6 +8,7 @@ mod consent_tests;
 mod grammar;
 mod grammar_data;
 mod policy;
+pub(crate) use policy::{coordinator_models_valid, tier_efforts_valid, COORDINATOR_MODELS};
 mod presentation;
 mod quota;
 pub mod short_text;
@@ -18,7 +19,7 @@ use cortex_core::{CoreError, CoreResult};
 use cortex_engine::environment::{CodexLauncher, EngineKind, LaunchSpec};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
     io::Read,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
@@ -47,7 +48,20 @@ pub(crate) fn is_concrete_effort(id: &str) -> bool {
     !id.is_empty() && !id.eq_ignore_ascii_case("default") && !id.eq_ignore_ascii_case("engine_default")
 }
 
-/// Python `portable.identity.route_fingerprint` over a stored catalog route.
+/// The Cortex-owned launch mode a Codex engine advertises once the worker permission profile is
+/// configured. It describes how Cortex launches the engine, not which route this is, so it never
+/// enters a route identity: hardening or loosening the launch must keep every saved id valid.
+fn launch_detail(pair: &(String, String)) -> bool {
+    pair.0 == "mode" && pair.1 == crate::native_engine_policy::CODEX_WORKER_PROFILE_MODE
+}
+fn route_hash(engine: &Value, connection_id: &Value, model: &Value, pairs: &[(String, String)]) -> String {
+    let body = json!({
+        "engine": engine, "connection_id": connection_id,
+        "model": model, "supported_parameters": pairs,
+    });
+    format!("xr_{}", &digest(&serde_json::to_vec(&body).unwrap())[..24])
+}
+/// Python `portable.identity.route_fingerprint` over a stored catalog route, minus launch details.
 /// Pairs are sorted, never deduplicated: claude-agent-acp advertises several
 /// `model_config` on/off selects, so a real Claude route repeats those pairs.
 pub(crate) fn catalog_route_id(
@@ -56,12 +70,53 @@ pub(crate) fn catalog_route_id(
     model: &Value,
     mut pairs: Vec<(String, String)>,
 ) -> String {
+    pairs.retain(|p| !launch_detail(p));
     pairs.sort();
-    let body = json!({
-        "engine": engine, "connection_id": connection_id,
-        "model": model, "supported_parameters": pairs,
-    });
-    format!("xr_{}", &digest(&serde_json::to_vec(&body).unwrap())[..24])
+    route_hash(engine, connection_id, model, &pairs)
+}
+/// The stable id of a stored route when its stored id is that id or the id an earlier build
+/// derived over every advertised pair (launch details included); `None`: not this route's id.
+pub(crate) fn accepted_route_id(
+    stored: &Value,
+    engine: &Value,
+    connection_id: &Value,
+    model: &Value,
+    mut pairs: Vec<(String, String)>,
+) -> Option<String> {
+    let stable = catalog_route_id(engine, connection_id, model, pairs.clone());
+    if stored == &json!(stable) {
+        return Some(stable);
+    }
+    pairs.sort();
+    (stored == &json!(route_hash(engine, connection_id, model, &pairs))).then_some(stable)
+}
+/// Every id the retained snapshots of one connection ever gave each model, for resolving a saved
+/// id the current catalogue no longer carries. Bounded: the newest snapshots only.
+pub(crate) fn retained_route_ids(state: &Path, connection_id: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let directory = state.join("cortex/catalog").join(connection_id);
+    let Ok(read) = std::fs::read_dir(&directory) else { return out };
+    let mut files: Vec<_> = read
+        .flatten()
+        .filter(|f| f.file_name().to_str().is_some_and(|s| s.starts_with("cs_") && s.ends_with(".json")))
+        .collect();
+    files.sort_by_key(|f| std::cmp::Reverse(f.metadata().and_then(|m| m.modified()).ok()));
+    for file in files.into_iter().take(64) {
+        let Ok(bytes) = std::fs::read(file.path()) else { continue };
+        if bytes.len() as u64 > MAX_JSON {
+            continue;
+        }
+        let Ok(snapshot) = serde_json::from_slice::<Value>(&bytes) else { continue };
+        for entry in snapshot["entries"].as_array().into_iter().flatten() {
+            let r = &entry["route"];
+            if let (Some(model), Some(id)) = (r["model"].as_str(), r["id"].as_str()) {
+                if r["connection_id"] == connection_id {
+                    out.entry(model.to_owned()).or_default().insert(id.to_owned());
+                }
+            }
+        }
+    }
+    out
 }
 const MAX_JSON: u64 = 4 * 1024 * 1024;
 /// Internal inputs and refusal details for a native worker dispatch or recovery probe.
@@ -92,13 +147,14 @@ pub fn valid_first_run_catalog_entry(entry: &Value, connection_id: &str) -> bool
     {
         return false;
     }
-    route["id"]
-        == catalog_route_id(
-            &route["engine"],
-            &route["connection_id"],
-            &route["model"],
-            pairs,
-        )
+    accepted_route_id(
+        &route["id"],
+        &route["engine"],
+        &route["connection_id"],
+        &route["model"],
+        pairs,
+    )
+    .is_some()
 }
 /// Startup-only first-run model observation of one registered connection
 /// (Python `connections.automatic.refresh_connection`), never a model prompt.
@@ -416,7 +472,7 @@ impl SelectedRoute {
             let record = self.candidate.connection.clone();
             launch.codex_launcher = Some(CodexLauncher::new(move || {
                 catalog::codex_session_launcher(&environment, &record)
-                    .map_err(|_| cortex_engine::Error::Invalid)
+                    .map_err(|reason| cortex_engine::Error::InvalidField { field: "codex_launcher".into(), reason })
             }));
         }
         Ok(launch)
@@ -564,9 +620,11 @@ impl RouteResolver {
                     let pairs: Vec<(String, String)> =
                         serde_json::from_value(r["supported_parameters"].clone())
                             .map_err(|_| CoreError::Refused("invalid_catalog_snapshot"))?;
-                    if r["id"] != catalog_route_id(&r["engine"], &json!(id), &r["model"], pairs) {
+                    let Some(stable) =
+                        accepted_route_id(&r["id"], &r["engine"], &json!(id), &r["model"], pairs)
+                    else {
                         return refuse("invalid_catalog_snapshot");
-                    }
+                    };
                     // A snapshot saved before aliases were dropped may still list one: it is
                     // never a candidate, so no route decision selects it or sends it to an engine.
                     if r["model"].as_str().is_some_and(is_alias_model) {
@@ -582,9 +640,11 @@ impl RouteResolver {
                     {
                         continue;
                     }
+                    let mut entry = entry.clone();
+                    entry["route"]["id"] = json!(stable);
                     candidates.push(Candidate {
                         connection: record.clone(),
-                        entry: entry.clone(),
+                        entry,
                     });
                 }
                 break;
@@ -631,6 +691,31 @@ impl RouteResolver {
                 parameters.insert("thought_level".into(), effort.into());
             }
         }
+        // A coordinator stays inside the profile: its effort is limited to the
+        // union of its model's tier ranges, a saved or inherited level moved to
+        // the nearest allowed one (the lower on a tie). Only a level the route
+        // offers is moved; an effort the model does not support at all is still
+        // refused below (`unsupported_dependent_setting`), never substituted.
+        if matches!(basis, "owner_default" | "owner_task") {
+            if let Some(allowed) = self.coordinator_efforts(c) {
+                if allowed.is_empty() {
+                    return refuse("native_task_route_unavailable");
+                }
+                if let Some(effort) = parameters
+                    .get("thought_level")
+                    .filter(|e| {
+                        !allowed.contains(e)
+                            && pairs.contains(&("thought_level".to_owned(), (*e).clone()))
+                    })
+                    .cloned()
+                {
+                    let nearest = presentation::nearest_effort(&allowed, Some(&effort))
+                        .unwrap_or_default()
+                        .to_owned();
+                    parameters.insert("thought_level".into(), nearest);
+                }
+            }
+        }
         if parameters
             .iter()
             .any(|(k, v)| !pairs.contains(&(k.clone(), v.clone())))
@@ -662,6 +747,7 @@ impl RouteResolver {
             .iter()
             .filter(|c| {
                 self.allowed(c, false)
+                    && self.coordinator_eligible(c)
                     && if portable.is_object() {
                         portable["engine"] == c.engine() && portable["model"] == c.model()
                     } else {
@@ -691,13 +777,14 @@ impl RouteResolver {
     /// An exact route id (a provider/cross-account choice) binds across
     /// connections and does not need a resolvable default; a bare model name
     /// stays on the default's connection, else it must name one route.
-    fn task_coordinator(&self, settings: &Value) -> CoreResult<SelectedRoute> {
+    pub(crate) fn task_coordinator(&self, settings: &Value) -> CoreResult<SelectedRoute> {
         let base = self.coordinator();
-        let chosen = settings["model"].as_str().filter(|s| !s.is_empty());
+        let resolved = settings["model"].as_str().map(|m| self.current_route_id(m));
+        let chosen = resolved.as_deref().filter(|s| !s.is_empty());
         let allowed: Vec<_> = self
             .candidates
             .iter()
-            .filter(|c| self.allowed(c, false))
+            .filter(|c| self.allowed(c, false) && self.coordinator_eligible(c))
             .collect();
         let matches: Vec<_> = match (chosen, &base) {
             (Some(m), _) if allowed.iter().any(|c| c.route_id() == m) => {
@@ -726,6 +813,28 @@ impl RouteResolver {
         }
         self.selected(matches[0], serde_json::to_value(parameters)?, "owner_task")
     }
+    /// A saved route id the catalogue no longer carries, resolved to the one current route of the
+    /// same connection and model that an earlier snapshot gave that id. Anything else (a current id,
+    /// a bare model name, an id no retained snapshot knows, or an ambiguous one) comes back unchanged.
+    pub(crate) fn current_route_id(&self, saved: &str) -> String {
+        if !saved.starts_with("xr_") || self.candidates.iter().any(|c| c.route_id() == saved) {
+            return saved.to_owned();
+        }
+        let mut found = BTreeSet::new();
+        let mut seen = BTreeSet::new();
+        for c in &self.candidates {
+            if !seen.insert(c.connection_id().to_owned()) {
+                continue;
+            }
+            let history = retained_route_ids(&self.environment.state, c.connection_id());
+            for other in self.candidates.iter().filter(|o| o.connection_id() == c.connection_id()) {
+                if history.get(other.model()).is_some_and(|ids| ids.contains(saved)) {
+                    found.insert(other.route_id().to_owned());
+                }
+            }
+        }
+        if found.len() == 1 { found.into_iter().next().unwrap() } else { saved.to_owned() }
+    }
     /// A coordinator resolved at task start, kept as its exact route identity.
     fn pin(&self, settings: &Value) -> CoreResult<Value> {
         let selected = self.task_coordinator(settings)?;
@@ -738,10 +847,12 @@ impl RouteResolver {
             .as_str()
             .filter(|s| !s.is_empty())
             .ok_or(CoreError::Refused("native_task_route_unavailable"))?;
+        let id = self.current_route_id(id);
+        let id = id.as_str();
         let matches: Vec<_> = self
             .candidates
             .iter()
-            .filter(|c| self.allowed(c, false) && c.route_id() == id)
+            .filter(|c| self.allowed(c, false) && c.route_id() == id && self.coordinator_eligible(c))
             .collect();
         if matches.len() != 1 {
             return refuse("native_task_route_unavailable");
@@ -760,6 +871,7 @@ impl RouteResolver {
         let mut options = Vec::new();
         for c in self.candidates.iter().filter(|c| {
             self.allowed(c, false)
+                && self.coordinator_eligible(c)
                 && !c.route_id().is_empty()
                 && !(c.connection_id() == connection && c.model() == model)
         }) {
@@ -1131,6 +1243,9 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
     fn mcp_registry(&self) -> CoreResult<crate::native_mcp::Registry> {
         crate::native_mcp::Registry::load(&self.environment)
     }
+    fn mcp_registry_for(&self, root: &Path) -> CoreResult<crate::native_mcp::Registry> {
+        crate::native_mcp::Registry::load_for_project(&self.environment, root)
+    }
     /// Python `build_config_options` provider/model/thought_level options over
     /// the qualified, launchable owner routes (see `presentation`).
     fn options(&self, root: &Path, settings: &Value) -> Value {
@@ -1140,6 +1255,10 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
             Ok(json!(resolver.view(root, settings).options))
         };
         read().unwrap_or_else(|_| json!([]))
+    }
+    fn sprint_route(&self, root: &Path, complexity: &str) -> CoreResult<Option<Value>> {
+        let key = super::native_runtime::key(root)?;
+        RouteResolver::load(root, &key.directory(), self.environment.clone())?.sprint_route(complexity)
     }
     fn select(&self, root: &Path, settings: &Value, id: &str, value: &str) -> CoreResult<Value> {
         let key = super::native_runtime::key(root)?;
@@ -1270,4 +1389,76 @@ fn valid_tiers(v: &Value) -> bool {
     values
         .iter()
         .all(|s| ["flagship", "deep", "standard", "light"].contains(s))
+}
+
+#[cfg(test)]
+mod route_identity_tests {
+    use super::*;
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect()
+    }
+    /// Pairs the Codex engine advertised before and after the worker permission profile existed.
+    fn codex(with_profile: bool) -> Vec<(String, String)> {
+        let mut list = vec![
+            ("mode", "agent"),
+            ("mode", "agent-full-access"),
+            ("mode", "read-only"),
+            ("mode", "workspace-write"),
+            ("model_config", "off"),
+            ("model_config", "on"),
+            ("thought_level", "high"),
+            ("thought_level", "low"),
+            ("thought_level", "max"),
+            ("thought_level", "medium"),
+            ("thought_level", "ultra"),
+            ("thought_level", "xhigh"),
+        ];
+        if with_profile {
+            list.insert(2, ("mode", "permission-profile:cortex-workspace"));
+        }
+        pairs(&list)
+    }
+    const GOLDEN: &str = "xr_5f46d413ac842d86e4b25f1a";
+    const WITH_PROFILE_BUILD: &str = "xr_03485bd94a43755028acf08a";
+    fn id(p: Vec<(String, String)>) -> String {
+        catalog_route_id(&json!("codex-acp"), &json!("cn_8944f22487be"), &json!("gpt-6.2-sol"), p)
+    }
+    #[test]
+    fn a_route_id_ignores_the_cortex_launch_profile_mode() {
+        assert_eq!(id(codex(false)), GOLDEN);
+        assert_eq!(id(codex(true)), GOLDEN);
+        // Reordered input and other launch-independent pairs still change the id.
+        let mut reversed = codex(true);
+        reversed.reverse();
+        assert_eq!(id(reversed), GOLDEN);
+        let mut other = codex(false);
+        other.push(("mode".into(), "permission-profile:other".into()));
+        assert_ne!(id(other), GOLDEN);
+    }
+    #[test]
+    fn an_id_derived_with_the_profile_mode_is_accepted_and_normalised() {
+        let (e, c, m) = (json!("codex-acp"), json!("cn_8944f22487be"), json!("gpt-6.2-sol"));
+        for stored in [GOLDEN, WITH_PROFILE_BUILD] {
+            assert_eq!(
+                accepted_route_id(&json!(stored), &e, &c, &m, codex(true)).as_deref(),
+                Some(GOLDEN)
+            );
+        }
+        assert_eq!(accepted_route_id(&json!("xr_000000000000000000000000"), &e, &c, &m, codex(true)), None);
+    }
+    #[test]
+    fn retained_snapshots_map_an_old_id_to_its_model() {
+        let state = std::env::temp_dir().join(format!("route-history-{}", std::process::id()));
+        let directory = state.join("cortex/catalog/cn_8944f22487be");
+        std::fs::create_dir_all(&directory).unwrap();
+        let entry = |id: &str| json!({"route":{"id":id,"model":"gpt-6.2-sol","connection_id":"cn_8944f22487be"}});
+        std::fs::write(
+            directory.join("cs_000000000001.json"),
+            json!({"entries":[entry("xr_aaaaaaaaaaaaaaaaaaaaaaaa")]}).to_string(),
+        )
+        .unwrap();
+        let history = retained_route_ids(&state, "cn_8944f22487be");
+        assert!(history["gpt-6.2-sol"].contains("xr_aaaaaaaaaaaaaaaaaaaaaaaa"));
+        let _ = std::fs::remove_dir_all(&state);
+    }
 }

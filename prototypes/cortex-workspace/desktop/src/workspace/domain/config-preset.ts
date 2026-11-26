@@ -19,6 +19,11 @@ export const newCatalogue = (): Record<EngineKey, EngineCatalogue> => {
 };
 
 const pol = (p: Partial<ModelPolicy>): ModelPolicy => ({ ...NEUTRAL_POLICY, ...p });
+/** Sonnet's and Sol's per-tier worker effort ranges from the preset (Sol has no light tier). */
+const WORKER_RANGES = { deep: { min: "high", max: "xhigh" }, standard: { min: "medium", max: "xhigh" }, light: { min: "medium", max: "high" } };
+const SOL_RANGES = { deep: WORKER_RANGES.deep, standard: WORKER_RANGES.standard };
+/** The coordinator's categories and ranges from the preset, apart from the worker tiers. */
+const COORDINATOR_RANGES = { flagship: { min: "high", max: "xhigh" }, deep: { min: "medium", max: "high" }, standard: { min: "medium", max: "medium" }, light: { min: "low", max: "low" } };
 const emptyEngine = (): EngineRules => ({ enabled: [], auto: [], tiers: {}, policy: {}, quota: [] });
 export const presetRouting = (): RoutingRules => ({
   version: 2,
@@ -26,14 +31,14 @@ export const presetRouting = (): RoutingRules => ({
   providers: ["claude-agent-acp", "codex-acp"],
   engines: {
     "claude-agent-acp": {
-      enabled: ["opus", "fable", "haiku", "sonnet"],
+      enabled: ["opus", "haiku", "sonnet"],
       auto: ["opus", "fable", "haiku", "sonnet"],
-      tiers: { "fable": ["flagship"], "haiku": ["light"], "opus": ["flagship", "deep"], "sonnet": ["standard", "light"] },
+      tiers: { "fable": ["flagship"], "haiku": ["light"], "opus": ["flagship", "deep"], "sonnet": ["deep", "standard", "light"] },
       policy: {
         "fable": pol({ effortFloor: "low", maxEffort: "high", preferredFor: ["design"], requestNames: ["fable", "фейбл", "фэйбл"] }),
         "haiku": pol({ effortFloor: "high", maxEffort: "max", effortLadder: ["high", "xhigh", "max"], preferredFor: ["investigation"] }),
-        "opus": pol({ effortFloor: "medium", maxEffort: "xhigh", preferredFor: ["design", "planning", "implementation_frontend_design", "debugging", "analysis", "implementation_backend", "implementation_frontend", "writing", "operations", "testing", "review"], preferredWhen: "Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For other works use only for very complex, narrowly scoped tasks.", requestNames: ["opus", "опус"] }),
-        "sonnet": pol({ effortFloor: "medium", maxEffort: "xhigh", preferredFor: ["implementation_backend", "implementation_frontend", "operations", "debugging", "design", "planning", "analysis", "review", "testing", "writing"] }),
+        "opus": pol({ effortFloor: "medium", maxEffort: "xhigh", preferredFor: ["design", "planning", "implementation_frontend_design", "review", "implementation_backend", "implementation_frontend", "consultation"], requestNames: ["opus", "опус"] }),
+        "sonnet": pol({ effortFloor: "medium", maxEffort: "xhigh", tierEfforts: WORKER_RANGES, preferredFor: ["implementation_backend", "implementation_frontend", "operations", "debugging", "planning", "analysis", "review", "testing", "writing", "implementation_frontend_design"] }),
       },
       quota: [{ window: "seven_day_opus", models: ["opus"] }, { window: "seven_day_sonnet", models: ["sonnet"] }, { window: "seven_day_fable", models: ["fable"] }, { window: "seven_day_haiku", models: ["haiku"] }],
     },
@@ -44,14 +49,18 @@ export const presetRouting = (): RoutingRules => ({
       policy: {
         "gpt-6-luna": pol({ effortFloor: "high", maxEffort: "max", effortLadder: ["high", "xhigh", "max"], preferredFor: ["investigation"] }),
         "gpt-6.1-terra": pol({ effortFloor: "medium", maxEffort: "high", preferredFor: ["testing", "debugging", "implementation_backend", "implementation_frontend", "operations", "investigation", "review", "design", "planning", "analysis"] }),
-        "gpt-6.2-astra": pol({ effortFloor: "low", maxEffort: "high", preferredFor: ["design", "implementation_backend", "implementation_frontend", "planning", "writing", "review", "testing", "debugging", "operations", "analysis", "implementation_frontend_design"], preferredWhen: "For use only for very complex, narrowly scoped tasks.", requestNames: ["astra", "астр"] }),
-        "gpt-6.2-sol": pol({ effortFloor: "medium", maxEffort: "xhigh", preferredFor: ["implementation_backend", "implementation_frontend", "planning", "design", "review", "operations", "analysis", "investigation", "writing", "debugging", "testing"] }),
+        "gpt-6.2-astra": pol({ effortFloor: "low", maxEffort: "high", preferredFor: ["design", "planning", "review", "implementation_frontend_design", "implementation_backend", "implementation_frontend", "consultation"], requestNames: ["astra", "астр"] }),
+        "gpt-6.2-sol": pol({ effortFloor: "medium", maxEffort: "xhigh", tierEfforts: SOL_RANGES, preferredFor: ["implementation_backend", "implementation_frontend", "planning", "review", "operations", "analysis", "investigation", "writing", "debugging", "testing", "implementation_frontend_design"] }),
       },
       quota: [],
     },
     opencode: emptyEngine(),
   },
   pins: {}, affinity: {}, autoAllow: [], legacyTiers: [],
+  coordinatorModels: [
+    { engine: "claude-agent-acp", model: "opus", tiers: COORDINATOR_RANGES },
+    { engine: "codex-acp", model: "gpt-6.2-astra", tiers: COORDINATOR_RANGES },
+  ],
 });
 
 export const presetDefaults = (): UserDefaults => ({

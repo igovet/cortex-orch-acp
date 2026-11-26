@@ -1122,7 +1122,7 @@ done
                             cortex_core::lifecycle::reconciliation::submit_synthesis_tx(
                                 db,
                                 "t",
-                                &json!({"text":"Final synthesis","not_verified":[]}),
+                                &json!({"text":"Final synthesis","not_verified":[],"outcomes":[{"id":"goal","status":"done","evidence":"fixture"}]}),
                             )?;
                         }
                     }
@@ -1472,6 +1472,11 @@ done
             assert!(owed.external);
             assert_eq!(owed.evidence["strategy"], "retry_unblocked");
             let probe = &owed.evidence["worker_route"];
+            // The owner sees the recorded code (a review block reads as its own code).
+            assert_eq!(
+                automatic::projection(db, &task)?.unwrap()["pause"]["reason"],
+                automatic::NO_MODEL_LISTED_FOR_WORK_KIND
+            );
             assert_eq!(probe["escalated"], false);
             assert_eq!(probe["work_kind_block"]["work_kind"], "operations");
             assert_eq!(probe["work_kind_block"]["target_tier"], "standard");
@@ -2054,6 +2059,12 @@ pub trait NativeRoutes: Send + Sync {
         Ok(false)
     }
     fn route(&self, root: &Path, role: &str) -> CoreResult<SessionRoute>;
+    /// The automatic route of a sprint task of `complexity` (low, normal, high),
+    /// from the owner's routing profile (`RouteResolver::sprint_route`); None
+    /// leaves the owner's default coordinator.
+    fn sprint_route(&self, _root: &Path, _complexity: &str) -> CoreResult<Option<Value>> {
+        Ok(None)
+    }
     /// The exact coordinator route a task starting with `settings` resolves to, as
     /// a durable pin `{route_id, parameters}`. Persisted at start so a later change
     /// of the owner default never re-routes a running task. None: not pinnable.
@@ -2120,6 +2131,11 @@ pub trait NativeRoutes: Send + Sync {
     }
     fn mcp_registry(&self) -> CoreResult<crate::native_mcp::Registry> {
         Ok(crate::native_mcp::Registry::default())
+    }
+    /// The registry for sessions of the project at `root`: the global registry with
+    /// that project's owner-private overrides applied.
+    fn mcp_registry_for(&self, _root: &Path) -> CoreResult<crate::native_mcp::Registry> {
+        self.mcp_registry()
     }
     /// Only host-qualified identities may be exposed to an incoming client.
     fn options(&self, root: &Path, settings: &Value) -> Value {
@@ -2307,9 +2323,9 @@ impl Runtime {
         use rusqlite::OptionalExtension;
 
         let host = match (shared, workspace_state) {
-            (true, None) => NativeHost::open_shared_for_recovery(key(root)?, routes.mcp_registry()?)?,
-            (false, Some(state)) => NativeHost::open_workspace(key(root)?, routes.mcp_registry()?, state)?,
-            (false, None) => NativeHost::open_for_recovery(key(root)?, routes.mcp_registry()?)?,
+            (true, None) => NativeHost::open_shared_for_recovery(key(root)?, routes.mcp_registry_for(root)?)?,
+            (false, Some(state)) => NativeHost::open_workspace(key(root)?, routes.mcp_registry_for(root)?, state)?,
+            (false, None) => NativeHost::open_for_recovery(key(root)?, routes.mcp_registry_for(root)?)?,
             (true, Some(_)) => return Err(CoreError::Refused("invalid_workspace_host")),
         };
         *host.routes.write().unwrap() = Some(routes.clone());
@@ -2953,6 +2969,21 @@ a question to the owner (question text and option labels). Write reports, report
                     Ok(Some(summary)) => prompt.push_str(&format!("\n\nSprint dependencies (Workspace records). Use sprint_graph to explore the graph and sprint_task_result to read a member’s outcome.\n{summary}")),
                     Ok(None) => {},
                     Err(error) => prompt.push_str(&format!("\n\nSprint context unavailable ({}).", error.code())),
+                }
+                // An owner change of a sprint member: settle reviewed revisions and
+                // point the coordinator at an open impact check (`sprint_impact`).
+                let (t, state) = (task.to_owned(), self.host.workspace_state.clone());
+                let routes = self.routes.clone();
+                if let Some(state) = state {
+                    match self.host.executor.publication_wait(move |store| {
+                        let root = store.key().root().to_owned();
+                        crate::machine::sprint_revision::coordinator_turn(store, &state, &t,
+                            &|c| routes.sprint_route(&root, c).ok().flatten())
+                    }).await {
+                        Ok(note) if !note.is_empty() => prompt.push_str(&format!("\n\n{note}")),
+                        Ok(_) => {}
+                        Err(error) => prompt.push_str(&format!("\n\nSprint impact check unavailable ({}).", error.code())),
+                    }
                 }
             }
             let t = task.to_owned();
@@ -3602,7 +3633,7 @@ a question to the owner (question text and option labels). Write reports, report
     ) -> CoreResult<()> {
         // SessionDriver rebuilds the capsule on its serial writer lane immediately
         // before delivery; never reuse a snapshot captured before replacement.
-        let mut goal=String::from("Coordinator recovery on a new engine session. The prior process has a confirmed terminal observation. Do not replay commands, permissions or claimed deliveries. Continue from the fresh retained-state capsule; missing outcomes remain unresolved.");
+        let mut goal=String::from("Coordinator recovery on a new engine session. The prior process has a confirmed terminal observation. Do not replay commands, permissions or claimed deliveries. Continue from the fresh retained-state capsule; missing outcomes remain unresolved. A new plan keeps every goal outcome of the plan in force, listed verbatim in the capsule's plan_summary.outcomes: repeat each id with its exact statement, or send only the id and the runtime fills the recorded statement. Verification commands that are still owed (the capsule's plan_summary.required_verification, argv verbatim) are appended to the plan by the runtime when left out; list them yourself with the same argv.");
         goal.push_str(&self.recovery_failure_guidance(task).await?);
         let route = self.coordinator_route(task, None).await?;
         self.drive(task, owner, &goal, route, cancelled, None).await
@@ -3620,10 +3651,15 @@ a question to the owner (question text and option labels). Write reports, report
             )?;
             let mut reports = stmt.query_map([&task], |r| r.get::<_,String>(0))?
                 .collect::<Result<Vec<_>,_>>()?;
-            if reports.is_empty() { return Ok(String::new()); }
+            // An approved stage that left a goal outcome undelivered came back to plan the rest.
+            let goal:Option<String>=db.query_row("SELECT json_extract(payload_json,'$.undelivered') FROM runtime_events WHERE task_id=?1 AND type='REVIEW_GOAL_NOT_MET'
+                AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='PLAN_ACCEPTED'),0) ORDER BY id DESC LIMIT 1",[&task],|r|r.get(0))
+                .or_else(|e|match e{rusqlite::Error::QueryReturnedNoRows=>Ok(None),e=>Err(e)})?;
+            let goal=goal.map(|g|format!("\nThe independent review approved the stage, but these goal outcomes are not delivered: {g}. Submit a plan whose tasks deliver them; keep every outcome (plan_summary.outcomes in the capsule lists them verbatim; an id-only entry keeps one unchanged) and the previous plan's verification commands, which have not run yet (plan_summary.required_verification lists their argv verbatim; the runtime appends any you leave out).")).unwrap_or_default();
+            if reports.is_empty() { return Ok(goal); }
             let more = reports.len() > 8;
             reports.truncate(8);
-            Ok(format!("\nPreviously failed worker reports: {}. {}Read relevant reports, assign in-scope fixes to a writer, and rerun each outstanding check with the same argv and working directory. A passing final check can cover a project command at the same working directory.", reports.join(", "),
+            Ok(format!("{goal}\nPreviously failed worker reports: {}. {}Read relevant reports, assign in-scope fixes to a writer, and rerun each outstanding check with the same argv and working directory. A passing final check can cover a project command at the same working directory.", reports.join(", "),
                 if more { "More reports are available in the task catalogue. " } else { "" }))
         })?.await.map_err(|_| CoreError::Refused("native_host_closed"))?
     }
@@ -3802,13 +3838,13 @@ a question to the owner (question text and option labels). Write reports, report
                     }
                     let count:i64=db.query_row("SELECT count(*) FROM runtime_events WHERE task_id=? AND type='NATIVE_COORDINATOR_CONTINUED'
                         AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=? AND type IN
-                        ('PLAN_ACCEPTED','VERIFICATION_PASSED','VERIFICATION_FAILED','REPLAN_REQUEST_ACCEPTED','USER_ANSWER_RECEIVED','USER_STEERING','AUTOMATIC_RESUMED')),0)",(&t,&t),|r|r.get(0))?;
+                        ('PLAN_ACCEPTED','VERIFICATION_PASSED','VERIFICATION_FAILED','REPLAN_REQUEST_ACCEPTED','USER_ANSWER_RECEIVED','USER_STEERING','AUTOMATIC_RESUMED','OWNER_TASK_RESUMED')),0)",(&t,&t),|r|r.get(0))?;
                     if count>=3 { return Err(CoreError::Refused("coordinator_no_progress_limit")); }
                     let messages=cortex_core::lifecycle::steering::deliver_tx(db,&t)?;
                     cortex_core::lifecycle::event_tx(db,&t,"NATIVE_COORDINATOR_CONTINUED",json!({"state":cortex_core::lifecycle::domain::task_tx(db,&t)?.0}))?;
                     Ok(messages)
                 })?.await.map_err(|_|CoreError::Refused("native_host_closed"))??;
-                let mut prompt = String::from("Continue from the retained-state capsule. Reconcile verified work with synthesis_submit, ask a structured user question only for a decision about the work itself (never about runtime failures, retries or limits) and keep working on everything it does not block, propose a scoped repair plan for failing project code and keep each unresolved verification command in it. Use verification_submit only to correct the verification procedure or rerun the reviewed work. Never certify missing evidence.");
+                let mut prompt = String::from("Continue from the retained-state capsule. First compare the verified work with the original goal, the owner's messages and every plan outcome. Reconcile with synthesis_submit only when every outcome is done; when any is not done, do not synthesize: continue with replan_request and a plan that delivers the remaining outcomes (the capsule's plan_summary.outcomes lists every outcome verbatim; a new plan keeps each by its id). Ask a structured user question only for a decision about the work itself (never about runtime failures, retries or limits) and keep working on everything it does not block, propose a scoped repair plan for failing project code and keep each unresolved verification command in it (plan_summary.required_verification lists their argv verbatim; the runtime appends any you leave out). Use verification_submit only to correct the verification procedure or rerun the reviewed work. Never certify missing evidence.");
                 if step["state"] != "RECONCILING" {
                     prompt.push_str(&self.recovery_failure_guidance(task).await?);
                 }

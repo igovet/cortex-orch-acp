@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { createPhoneShell, createPhoneVoice, type PhoneNative } from "../src/shell";
+import { createPhoneNotifications, createPhoneShell, createPhoneVoice, parseTap, type PhoneNative } from "../src/shell";
+import { workspaceCopy } from "../../../packages/workspace-ui/src/copy";
+import { notificationWords } from "../../../packages/workspace-ui/src/phone-shell";
 
 function fake(over: Partial<PhoneNative["scanner"]> = {}) {
   const listeners = new Map<string, (payload: unknown) => void>();
@@ -69,5 +71,48 @@ describe("phone shell", () => {
     await expect(voice.read("b")).rejects.toThrow("Nothing was heard");
     await voice.start("c"); refuse("speech_unavailable"); await settle();
     await expect(voice.stop("c")).rejects.toThrow("not available on this phone");
+  });
+  it("opens a notification tap only for a machine id and a target of the closed shapes", () => {
+    const target = { kind: "question", project: "p", task: "t", decision: "d" };
+    expect(parseTap({ machineId: "m1", target })).toEqual({ machineId: "m1", target });
+    expect(parseTap({ machineId: "m1", target: { kind: "sprint", project: "p", sprint: "s" } })?.target).toEqual({ kind: "sprint", project: "p", sprint: "s" });
+    for (const bad of [
+      null, "m1", { machineId: "m1" }, { target },
+      { machineId: "", target }, { machineId: "a b", target }, { machineId: "x".repeat(257), target },
+      { machineId: "m1", target, extra: 1 },
+      { machineId: "m1", target: { ...target, url: "https://example.org" } },
+      { machineId: "m1", target: { kind: "question", project: "p", task: "t" } },
+      { machineId: "m1", target: JSON.stringify(target) },
+      { machineId: "m1", target: { kind: "open", project: "p", task: "t" } },
+    ]) expect(parseTap(bad), JSON.stringify(bad)).toBeNull();
+  });
+  it("reads taps one at a time until stopped, and turns notifications on and off natively", async () => {
+    const taps = [{ machineId: "m1", target: { kind: "result", project: "p", task: "t" } }, { machineId: "m1", target: "junk" }, { machineId: "m2", target: { kind: "task", project: "p", task: "u" } }];
+    let pending: ((value: unknown) => void) | null = null;
+    const invoke = vi.fn((command: string, args?: Record<string, unknown>) => {
+      if (command === "phone_notifications") return Promise.resolve({ enabled: args?.enabled, permission: "granted", batteryExempt: false, extra: "x" });
+      if (command === "phone_notification_next") {
+        const next = taps.shift();
+        return next ? Promise.resolve(next) : new Promise(resolve => { pending = resolve; });
+      }
+      return Promise.resolve(undefined);
+    });
+    const waits: number[] = [];
+    const notifications = createPhoneNotifications({ invoke: invoke as PhoneNative["invoke"] }, async ms => { waits.push(ms); });
+    const words = notificationWords(key => workspaceCopy(key, "ru"));
+    expect(words.ongoingTitle).toBe("На связи с компьютерами");
+    await expect(notifications.set(true, words)).resolves.toEqual({ enabled: true, permission: "granted", batteryExempt: false });
+    expect(invoke).toHaveBeenCalledWith("phone_notifications", { enabled: true, words });
+    const seen: unknown[] = [];
+    const stop = notifications.taps(tap => seen.push(tap));
+    for (let i = 0; i < 10; i++) await settle();
+    // The malformed tap leads nowhere and the next read waits a moment first.
+    expect(seen).toEqual([{ machineId: "m1", target: { kind: "result", project: "p", task: "t" } }, { machineId: "m2", target: { kind: "task", project: "p", task: "u" } }]);
+    expect(waits).toEqual([250]);
+    stop();
+    pending!({ machineId: "m1", target: { kind: "task", project: "p", task: "late" } });
+    await settle();
+    expect(seen).toHaveLength(2);
+    expect(createPhoneShell(fake().native, info).notifications).toBeDefined();
   });
 });

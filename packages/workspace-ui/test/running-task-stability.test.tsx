@@ -232,3 +232,61 @@ it("a task whose state moves reads its workers at once, not a facts interval lat
     await vi.waitFor(() => expect(store.state().workers.map(w => w.id)).toEqual(["w1"]), { timeout: 2000 });
   } finally { stop(); }
 }, 15_000);
+
+it("a running task's details read that a newer event overtook still shows its question at once, not one read later", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  let stop: (() => void) | undefined;
+  try {
+    const { s, work } = runningService();
+    const store = createRoot(d => { stop = d; return createWorkspaceStore(createRealPort({ transport: s.transport, actorId: "owner", registry: true })); });
+    await vi.advanceTimersByTimeAsync(500);
+    const asks = () => (store.state().sessions.find(x => x.taskId === "task-1")?.timeline ?? []).some(e => e.kind === "decision");
+    expect(asks()).toBe(false);
+    // The task asks; its questions take a moment to read, and the task streams on meanwhile.
+    const question = wireDecision({ decisionId: "ask", executionId: "execution", prompt: "Which token store?", options: [{ optionId: "mem", label: "Memory" }], createdAt: "2026-11-17T10:00:02.500000+00:00" } as Partial<WireDecision>);
+    s.answers["decisions.list"] = () => new Promise(resolve => setTimeout(() => resolve({ items: [question], nextCursor: null, highWatermark: "2" }), 100));
+    const at = work("Step 0");
+    await vi.advanceTimersByTimeAsync(30);
+    const later = work("Step 1");
+    await vi.advanceTimersByTimeAsync(30);
+    expect(store.version("project:p")).toBe(later);
+    expect(at).not.toBe(later);
+    expect(asks()).toBe(false);
+    // The details read ends overtaken: what it read is shown with the board as it is now, without another read first.
+    await vi.advanceTimersByTimeAsync(60);
+    expect(asks()).toBe(true);
+    expect(store.version("project:p")).toBe(later);
+  } finally { stop?.(); vi.useRealTimers(); }
+});
+
+it("a running task's facts asked for during a long read follow that read, not a whole interval after it", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try {
+    const { s, work } = runningService();
+    const original = s.answers["machine.call"]!;
+    let slow = 0;
+    const starts: number[] = [];
+    s.answers["machine.call"] = raw => {
+      if ((raw as { op: string }).op !== "product.read" || !slow) return original(raw);
+      starts.push(Date.now());
+      return new Promise(resolve => setTimeout(() => resolve(original(raw)), slow));
+    };
+    const port = createRealPort({ transport: s.transport, actorId: "owner", registry: true, streamFactsMs: 1000 });
+    const stop = port.subscribe(() => {});
+    await port.query("capabilities.get", {});
+    await port.query("project.snapshot", {});
+    await port.query("project.facts", {});
+    const release = port.interest!("p", "facts", "task-1");
+    await vi.advanceTimersByTimeAsync(200);
+    slow = 1500;
+    const origin = Date.now();
+    // The first step reads at once; the next arrives while that read runs.
+    work("Step 0");
+    await vi.advanceTimersByTimeAsync(100);
+    work("Step 1");
+    await vi.advanceTimersByTimeAsync(3000);
+    // Due one interval after the waiting request (1100 ms), so as soon as the long read ended (1500 ms); not at 2100 ms.
+    expect(starts.map(t => t - origin)).toEqual([0, 1500]);
+    release(); stop();
+  } finally { vi.useRealTimers(); }
+});

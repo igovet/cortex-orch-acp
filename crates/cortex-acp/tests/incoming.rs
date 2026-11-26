@@ -1029,7 +1029,8 @@ async fn journey() {
 /// The tool activity a client saw, checked against the native display contract:
 /// one `tool_call` per engine call before any `tool_call_update` of it, ids
 /// namespaced by attempt, role-prefixed titles, statuses moving from
-/// in_progress to completed, and never engine inputs, outputs or content.
+/// in_progress to completed, the call's arguments with secret-named values masked, and never
+/// engine outputs or content.
 fn tool_activity(frames: &[Value], sid: &str) -> Vec<Value> {
     let mut activity = Vec::new();
     let mut calls: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -1054,7 +1055,9 @@ fn tool_activity(frames: &[Value], sid: &str) -> Vec<Value> {
         let seen = calls.entry(id).or_default();
         if kind == "tool_call" {
             assert!(seen.is_empty(), "a card is created once, first: {update}");
-            assert_eq!(keys, ["sessionUpdate", "status", "title", "toolCallId"]);
+            assert_eq!(keys, ["rawInput", "sessionUpdate", "status", "title", "toolCallId"]);
+            // The owner sees each call's arguments; secret-named values stay masked.
+            assert_eq!(update["rawInput"]["path"], "fixture.txt", "{update}");
             let title = update["title"].as_str().unwrap();
             assert!(
                 title.ends_with(": Fixture step") && !title.starts_with(':'),
@@ -1838,7 +1841,7 @@ async fn paseo_cancel_hold() {
         assert_eq!(call["rawInput"]["question"], "How should we finish?");
         assert_eq!(
             card["params"]["options"],
-            json!([{"optionId":"cortex-question-1","name":"Explain and finish","kind":"allow_once"},
+            json!([{"optionId":"cortex-question-1","name":"Explain and finish (Recommended)","kind":"allow_once"},
                 {"optionId":"cortex-question-2","name":"Plan changes","kind":"allow_once"}])
         );
         if answer_by_command {

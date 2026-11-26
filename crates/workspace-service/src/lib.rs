@@ -55,6 +55,7 @@ pub mod native_mcp;
 mod native_owner_controls;
 mod native_owner_decisions;
 // Owner actions: access a task lacks (a login, a token, sudo), resolved by the owner.
+mod native_mcp_signin;
 mod native_owner_actions;
 mod native_pipeline;
 // Environment preflight facts recorded at task start (no model call).
@@ -71,7 +72,9 @@ pub mod native_sessions;
 mod native_skills;
 mod native_sources;
 mod native_sprint_plan;
+mod native_sprint_revision;
 mod native_tool_errors;
+mod native_turn_guard;
 mod native_work_set;
 mod notifier;
 mod project_guard;
@@ -80,6 +83,7 @@ pub mod remote_policy;
 mod storage_retention;
 mod session_bus;
 pub mod short_text_engine;
+pub mod side_chat_files;
 mod terminal;
 pub mod tool_path;
 mod voice;
@@ -1151,6 +1155,21 @@ impl Service {
                 }
                 _ => return Err(failure("invalid_request")),
             };
+            // A paired phone's owner-moment subscription holds the rest of this connection.
+            if request.method == "notifications.subscribe" && request.params == json!({}) {
+                self.accepting()?;
+                let moments = self.notifier.moments();
+                timeout(
+                    self.config.request_timeout,
+                    write_frame(
+                        &mut writer,
+                        &json!({"jsonrpc":"2.0","id":request.id,"result":{"subscribed":true}}),
+                    ),
+                )
+                .await
+                .map_err(|_| failure("client_write_timeout"))??;
+                return self.serve_moments(reader, writer, moments).await;
+            }
             let stopping = request.method == "service.stop" && request.params == json!({});
             let workspace_start =
                 request.method == "workspace" && request.params["operation"] == "tasks.start";

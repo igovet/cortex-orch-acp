@@ -1,6 +1,6 @@
 # CW-P01: Push gateway as a self-hosted container (stateless forwarder; FCM credential as a Docker secret); metadata-only payload schema enforced (no plaintext title/body)
 
-**Status:** Not implemented; no push gateway exists · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented; no push gateway exists. Not needed for phone notifications: by the owner's decision of 2026-11-25 the Android app raises its own notifications from its paired machines' owner moments, kept connected by a foreground service while the owner has them on ([phone notifications](../remote-access.md#phone-notifications), [platforms](../platforms.md#android-phone-notifications)). This item remains for a possible FCM wake-up path. · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Provide a stateless push gateway that runs as a container service on the owner's server ([ADR 0011](../adr/0011-self-hosted-relay-and-push-gateway.md)). It accepts only the closed metadata schema from paired desktops, authenticates the calling desktop, and forwards an FCM high-priority data message. The FCM sender credential is available only as a Docker secret file on the owner's server. The gateway is not deployed to Cloudflare, and no Cloudflare account is needed.

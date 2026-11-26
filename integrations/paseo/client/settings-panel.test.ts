@@ -1665,3 +1665,17 @@ test("the affinity field's work-kind choices and help list the three implementat
   assert.ok(texts.some((text) => text.includes("implementation_backend, implementation_frontend, implementation_frontend_design, testing, review")),
     "affinity help names the three exact new work-kind ids");
 });
+
+test("the senior consultation work kind gets its own help text and the consultant as its agent", async () => {
+  const data = fixtures();
+  (data.routing.builtin as any).work_kinds = ["design", "consultation"];
+  (data.routing.builtin as any).work_kind_labels = { design: "Design and architecture", consultation: "Senior consultation" };
+  (data.routing.builtin as any).work_kind_roles = { design: ["worker-architect"], consultation: ["worker-senior-consultant"] };
+  (data.routing.builtin as any).builtin_affinity = { design: "claude-agent-acp", consultation: "claude-agent-acp" };
+  const screen = await openScreen(data);
+  await screen.section("Engines & models");
+  const texts = screen.texts();
+  assert.ok(texts.some((text) => text.startsWith("Senior consultant only: second opinions requested by the coordinator.")
+    && text.includes("• worker-senior-consultant")), "consultation kind has its own help");
+  assert.ok(!texts.some((text) => text.includes("Work of kind consultation.")), "consultation does not fall back to the generic text");
+});

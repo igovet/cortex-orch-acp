@@ -63,7 +63,7 @@ it("shows each answer's consequence and the recommendation, and opens the review
   expect(location.pathname).toBe(`/m/${LOCAL_MACHINE_ID}/t/t2`);
 });
 
-it.each([["en-US", "Recommended", ""], ["ru-RU", "Рекомендуется", "fullstack-dev"]])(
+it.each([["en-US", "Recommended", ""], ["ru-RU", "Рекомендую", "fullstack-dev"]])(
   "marks but does not select the recommended option in an ordinary %s question",
   async (locale, badge, askedBy) => {
     vi.spyOn(navigator, "language", "get").mockReturnValue(locale);

@@ -1,5 +1,5 @@
-import type { Ceiling, EngineCatalogue, EngineKey, EngineRules, ModelPolicy, Problem, RoutePin, RoutingRules, Tier } from "./types";
-import { EFFORT_BY_TIER, EFFORT_LEVELS, engineLabel, ENGINE_KEYS, ENGINES, FALLBACK_ORDER, HOT_PERCENT, NEUTRAL_POLICY, RESERVED_WORDS, ROLE_CATALOG, TIERS, WORK_KINDS } from "./catalog";
+import type { Ceiling, CoordinatorModel, EffortRange, EngineCatalogue, EngineKey, EngineRules, ModelPolicy, Problem, RoutePin, RoutingRules, SprintRoute, Tier } from "./types";
+import { EFFORT_BY_TIER, EFFORT_LEVELS, effortLabel, engineLabel, ENGINE_KEYS, ENGINES, FALLBACK_ORDER, HOT_PERCENT, NEUTRAL_POLICY, RESERVED_WORDS, ROLE_CATALOG, TIER_LABELS, TIERS, WORK_KINDS } from "./catalog";
 
 type Catalogue = Record<EngineKey, EngineCatalogue>;
 const copy = (rules: RoutingRules): RoutingRules => structuredClone(rules);
@@ -52,9 +52,21 @@ export const setModelAuto = (rules: RoutingRules, engine: EngineKey, model: stri
 export const setTier = (rules: RoutingRules, engine: EngineKey, model: string, tier: Tier, on: boolean) => edit(rules, engine, e => {
   const now = e.tiers[model] ?? [], next = on ? (now.includes(tier) ? now : TIERS.filter(t => t === tier || now.includes(t))) : without(now, tier);
   if (next.length) e.tiers[model] = next; else delete e.tiers[model];
+  // A range belongs to a tier the model is placed in, so taking the tier away takes its range too.
+  const ranges = e.policy[model]?.tierEfforts;
+  if (!on && ranges?.[tier]) { const { [tier]: _gone, ...rest } = ranges; e.policy[model] = { ...e.policy[model], tierEfforts: Object.keys(rest).length ? rest : null }; }
 });
 export const policyOf = (rules: RoutingRules, engine: EngineKey, model: string): ModelPolicy => rules.engines[engine].policy[model] ?? NEUTRAL_POLICY;
+/** True when any model lists the senior-consultant kind; otherwise the consultant uses the Design list. */
+export const consultationListed = (rules: RoutingRules): boolean => ENGINE_KEYS.some(e => Object.values(rules.engines[e].policy).some(p => p.preferredFor?.includes("consultation")));
 export const setPolicy = (rules: RoutingRules, engine: EngineKey, model: string, patch: Partial<ModelPolicy>) => edit(rules, engine, e => { e.policy[model] = { ...NEUTRAL_POLICY, ...e.policy[model], ...patch }; });
+/** The effort range this model has on this tier, or null when the tier keeps the floor and max rules. */
+export const tierRange = (rules: RoutingRules, engine: EngineKey, model: string, tier: Tier): EffortRange | null => policyOf(rules, engine, model).tierEfforts?.[tier] ?? null;
+export function setTierRange(rules: RoutingRules, engine: EngineKey, model: string, tier: Tier, range: EffortRange | null) {
+  const { [tier]: _was, ...rest } = policyOf(rules, engine, model).tierEfforts ?? {};
+  const next = range ? { ...rest, [tier]: { min: range.min, max: range.max } } : rest;
+  return setPolicy(rules, engine, model, { tierEfforts: Object.keys(next).length ? next : null });
+}
 const flip = (list: string[] | null, item: string, on: boolean) => { const next = on ? [...(list ?? []).filter(x => x !== item), item] : (list ?? []).filter(x => x !== item); return next.length ? next : null; };
 export const setPreferred = (rules: RoutingRules, engine: EngineKey, model: string, kind: string, on: boolean) => setPolicy(rules, engine, model, { preferredFor: flip(policyOf(rules, engine, model).preferredFor, kind, on) });
 export const setStretch = (rules: RoutingRules, engine: EngineKey, model: string, kind: string, on: boolean) => setPolicy(rules, engine, model, { alsoStandardFor: flip(policyOf(rules, engine, model).alsoStandardFor, kind, on) });
@@ -72,6 +84,8 @@ export const leanOf = (rules: RoutingRules, kind: string): EngineKey | null => k
 /** An id the owner reads when nothing names it better. The engine alias `default` (no longer offered) names no concrete model. */
 export const plainModel = (id: string) => id.toLowerCase() === "default" ? "Default (engine alias)" : id;
 export const modelLabel = (catalogue: Catalogue, engine: EngineKey, id: string) => catalogue[engine].models.find(m => m.id === id)?.label ?? plainModel(id);
+/** The route a sprint plan assigned, as a card shows it: model · tier · effort. */
+export const sprintRouteLabel = (catalogue: Catalogue, route: SprintRoute) => `${catalogue[route.engine] ? modelLabel(catalogue, route.engine, route.model) : plainModel(route.model)} · ${TIER_LABELS[route.tier] ?? route.tier} · ${effortLabel(route.effort)}`;
 /** Enabled ids the engine no longer lists. Nothing is inferred: the owner removes them or waits. */
 export const notOffered = (rules: RoutingRules, catalogue: Catalogue, engine: EngineKey) => rules.engines[engine].enabled.filter(id => !catalogue[engine].models.some(m => m.id === id));
 
@@ -111,6 +125,13 @@ export function routingProblems(rules: RoutingRules, catalogue: Catalogue): Prob
         seen.add(name); if (!names.has(name)) names.set(name, label);
       }
       if ((p.requestNames?.length ?? 0) > 16) add(`${at}.request_names`, "Up to 16 names.");
+      for (const [tier, range] of Object.entries(p.tierEfforts ?? {})) {
+        const path = `${at}.tier_efforts.${tier}`;
+        if (!(TIERS as readonly string[]).includes(tier)) add(path, `"${tier}" is not a tier.`);
+        else if (!(e.tiers[model] ?? []).includes(tier as Tier)) add(path, "Place the model in this tier first, or remove its range.");
+        else if (!range || rank(range.min) < 0 || rank(range.max) < 0) add(path, "Choose a lowest and a highest effort.");
+        else if (rank(range.min) > rank(range.max)) add(path, "Lowest must not be above highest.");
+      }
     }
     const windows = new Set<string>();
     e.quota.forEach((q, i) => {
@@ -121,6 +142,24 @@ export function routingProblems(rules: RoutingRules, catalogue: Catalogue): Prob
     });
   }
   for (const [role, pin] of Object.entries(rules.pins)) if (!rules.engines[pin.engine].enabled.includes(pin.model)) add(`pin.${role}`, "This model is off.");
+  if (rules.coordinatorModels) {
+    // The save refuses an empty or malformed list; a model that is off or not offered stays listed, marked where it is shown.
+    if (!rules.coordinatorModels.length) add("coordinator_models", "Keep at least one model, so a task can start.");
+    if (rules.coordinatorModels.length > 64) add("coordinator_models", "Up to 64 models.");
+    const seen = new Set<string>();
+    for (const c of rules.coordinatorModels) {
+      const at = `coordinator_models.${c.engine}.${c.model}`;
+      if (seen.has(at)) add(at, "Listed twice.");
+      seen.add(at);
+      if (!Object.keys(c.tiers).length) add(at, "Choose at least one category.");
+      for (const [tier, range] of Object.entries(c.tiers)) {
+        const path = `${at}.${tier}`;
+        if (!(TIERS as readonly string[]).includes(tier)) add(path, `"${tier}" is not a category.`);
+        else if (!range || rank(range.min) < 0 || rank(range.max) < 0) add(path, "Choose a lowest and a highest effort.");
+        else if (rank(range.min) > rank(range.max)) add(path, "Lowest must not be above highest.");
+      }
+    }
+  }
   return out;
 }
 
@@ -154,13 +193,100 @@ function refusal(ctx: PreviewContext, engine: EngineKey, model: string): string 
   if (c.allowedRoutes && !c.allowedRoutes.includes(routeIdOf(engine, model))) return "Route is outside the limits";
   return null;
 }
-function permitted(p: ModelPolicy, efforts: string[], served: Tier) {
+/**
+ * The offered efforts this model may run at on this tier: inside the tier's range when it has one (max too, when the range
+ * reaches it), else above the floor and below max, where a flagship stops at high and max is for light work only.
+ */
+export function permitted(p: ModelPolicy, efforts: readonly string[], served: Tier) {
+  const range = p.tierEfforts?.[served];
+  if (range) return efforts.filter(e => rank(e) >= 0 && rank(e) >= rank(range.min) && rank(e) <= rank(range.max));
   const top = p.maxEffort ?? (served === "flagship" ? "high" : null);
   return efforts.filter(e => (e !== "max" || served === "light") && (!p.effortFloor || rank(e) >= rank(p.effortFloor)) && (!top || rank(e) <= rank(top)));
 }
-function nearest(target: string, list: string[]) {
+/** The level of `list` closest to `target`; a tie goes to the lower one. */
+export function nearest(target: string, list: readonly string[]) {
   return list.length ? list.reduce((best, e) => Math.abs(rank(e) - rank(target)) < Math.abs(rank(best) - rank(target)) ? e : best, list[0]) : target;
 }
+/** What automatic routing starts this model at on this tier: the tier's usual effort, moved into what is permitted. */
+export const tierEffort = (p: ModelPolicy, efforts: readonly string[], tier: Tier) => nearest(EFFORT_BY_TIER[tier], permitted(p, orderedLevels(efforts), tier));
+const orderedLevels = (efforts: readonly string[]) => [...efforts].sort((a, b) => rank(a) - rank(b));
+
+/** The coordinator list of these rules, or null for a profile written before it (the coordinator then follows the worker tiers). */
+export const coordinatorModelsOf = (rules: RoutingRules): CoordinatorModel[] | null => rules.coordinatorModels ?? null;
+export const coordinatorEntry = (rules: RoutingRules, engine: EngineKey, model: string) => rules.coordinatorModels?.find(c => c.engine === engine && c.model === model) ?? null;
+/** The profile constrains the coordinator: with its coordinator list, or (a profile without one) once any engine places a model in a tier. */
+export const profileConstrained = (rules: RoutingRules) => !!rules.coordinatorModels || ENGINE_KEYS.some(e => Object.values(rules.engines[e]?.tiers ?? {}).some(t => t.length > 0));
+/** The offered levels inside one range; nothing when the model does not offer both of its ends, as the runtime refuses that range. */
+export function rangeLevels(range: EffortRange | undefined, levels: readonly string[]) {
+  if (!range || !levels.includes(range.min) || !levels.includes(range.max)) return [];
+  return levels.filter(x => rank(x) >= rank(range.min) && rank(x) <= rank(range.max));
+}
+/**
+ * The efforts the coordinator may use on this model, among the levels it offers: the union of its ranges in the coordinator list,
+ * or (a profile without one) every level the model may run at on any of its worker tiers. Null when the profile names no
+ * coordinator model at all, so nothing narrows the choice; empty when the model is outside it (off, refused or not listed).
+ */
+export function coordinatorAllowed(rules: RoutingRules, engine: EngineKey, model: string, offered: readonly string[]): string[] | null {
+  if (!profileConstrained(rules)) return null;
+  const e = rules.engines[engine];
+  if (!e || !e.enabled.includes(model) || denyTokens(rules, engine, model).length) return [];
+  const levels = orderedLevels(offered);
+  if (rules.coordinatorModels) {
+    const entry = coordinatorEntry(rules, engine, model);
+    if (!entry) return [];
+    return levels.filter(x => TIERS.some(t => rangeLevels(entry.tiers[t], levels).includes(x)));
+  }
+  const tiers = e.tiers[model] ?? [];
+  if (!tiers.length) return [];
+  const p = policyOf(rules, engine, model);
+  return levels.filter(x => tiers.some(t => permitted(p, levels, t).includes(x)));
+}
+export type CoordinatorOption = { engine: EngineKey; model: string; label: string; efforts: string[] };
+/** Every offered model the coordinator may be, with its allowed efforts. Null when the profile does not constrain it. */
+export function coordinatorChoices(rules: RoutingRules, catalogue: Catalogue): CoordinatorOption[] | null {
+  if (!profileConstrained(rules)) return null;
+  return ENGINE_KEYS.flatMap(engine => (catalogue[engine]?.models ?? []).flatMap(m => {
+    const efforts = coordinatorAllowed(rules, engine, m.id, m.efforts) ?? [];
+    return efforts.length ? [{ engine, model: m.id, label: m.label, efforts }] : [];
+  }));
+}
+/** What sprint planning assigns for a complexity: its categories in the order they are tried (high: Frontier, then Deep). */
+export const SPRINT_TIERS: Record<Complexity, Tier[]> = { low: ["light", "standard"], normal: ["standard", "deep", "light"], high: ["flagship", "deep"] };
+/**
+ * The coordinator list this profile would start from: every enabled model with a worker tier, at those tiers, each with its tier
+ * range or else the levels its floor and max allow there. A model offering no level gets no category.
+ */
+export function coordinatorSeed(rules: RoutingRules, catalogue: Catalogue): CoordinatorModel[] {
+  return ENGINE_KEYS.flatMap(engine => rules.engines[engine].enabled.filter(id => !denyTokens(rules, engine, id).length && (rules.engines[engine].tiers[id]?.length ?? 0) > 0).map(model => {
+    const levels = orderedLevels(catalogue[engine].models.find(m => m.id === model)?.efforts ?? []), p = policyOf(rules, engine, model);
+    const tiers: Partial<Record<Tier, EffortRange>> = {};
+    for (const t of TIERS.filter(t => rules.engines[engine].tiers[model]!.includes(t))) {
+      const own = p.tierEfforts?.[t], allowed = own ? rangeLevels(own, levels) : permitted(p, levels, t).filter(x => rank(x) >= 0);
+      if (allowed.length) tiers[t] = { min: allowed[0], max: allowed[allowed.length - 1] };
+    }
+    return { engine, model, tiers };
+  }));
+}
+const coordinatorEdit = (rules: RoutingRules, fn: (list: CoordinatorModel[]) => CoordinatorModel[]) => { const next = copy(rules); next.coordinatorModels = fn(next.coordinatorModels ?? []); return next; };
+/** Adds a model with one Standard category over the levels it offers nearest medium to high, or none when it offers no level. */
+export function addCoordinatorModel(rules: RoutingRules, catalogue: Catalogue, engine: EngineKey, model: string) {
+  if (coordinatorEntry(rules, engine, model)) return rules;
+  const levels = orderedLevels(catalogue[engine].models.find(m => m.id === model)?.efforts ?? []).filter(x => rank(x) >= 0);
+  const range = levels.length ? { min: nearest("medium", levels), max: nearest("high", levels) } : null;
+  return coordinatorEdit(rules, list => [...list, { engine, model, tiers: range ? { standard: range } : {} }]);
+}
+export const removeCoordinatorModel = (rules: RoutingRules, engine: EngineKey, model: string) => coordinatorEdit(rules, list => list.filter(c => !(c.engine === engine && c.model === model)));
+/** Ticks or clears one category of a listed model; a range replaces that category's range. */
+export function setCoordinatorTier(rules: RoutingRules, engine: EngineKey, model: string, tier: Tier, range: EffortRange | null) {
+  return coordinatorEdit(rules, list => list.map(c => {
+    if (c.engine !== engine || c.model !== model) return c;
+    const { [tier]: _was, ...rest } = c.tiers;
+    const next: Partial<Record<Tier, EffortRange>> = range ? { ...rest, [tier]: { min: range.min, max: range.max } } : rest;
+    return { ...c, tiers: Object.fromEntries(TIERS.filter(t => next[t]).map(t => [t, next[t]!])) };
+  }));
+}
+/** Starts the coordinator list of a profile written before it, from what the worker tiers allow now. */
+export const startCoordinatorList = (rules: RoutingRules, catalogue: Catalogue) => coordinatorEdit(rules, () => coordinatorSeed(rules, catalogue));
 /**
  * What the router would do with this work, read from the rules alone. Live availability, retries and plan hints are only
  * known at dispatch, so the preview says what it can know and nothing else.
@@ -205,7 +331,7 @@ export function previewRoute(input: PreviewInput, ctx: PreviewContext): RoutePre
   const order = (c: Candidate) => [preferred(c) ? 0 : 1, hot(c) ? 1 : 0, c.engine === lean ? 0 : 1, allKnown ? c.usage! : 0, ENGINE_KEYS.indexOf(c.engine)];
   const ranked = inTier.map((c, i) => ({ c, key: [...order(c), i] })).sort((a, b) => { for (let i = 0; i < a.key.length; i++) if (a.key[i] !== b.key[i]) return a.key[i] - b.key[i]; return 0; }).map(x => x.c);
   const effortOf = (c: Candidate) => {
-    const list = permitted(c.policy, c.efforts, served);
+    const list = permitted(c.policy, orderedLevels(c.efforts), served);
     if (stretch(c) && c.policy.effortLadder && served === "standard") return nearest(c.policy.effortLadder[escalate ? Math.min(1, c.policy.effortLadder.length - 1) : 0], list);
     let target = EFFORT_BY_TIER[served];
     if (escalate && tierFor(input.role, false, input.complexity) === tier) target = (EFFORT_LEVELS as readonly string[])[Math.min(rank(target) + 1, rank("high"))];

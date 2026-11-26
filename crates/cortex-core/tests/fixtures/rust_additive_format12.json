@@ -52,5 +52,11 @@
     "type": "table",
     "tbl_name": "native_worktree_starts",
     "sql": "CREATE TABLE native_worktree_starts (\n project_id TEXT NOT NULL, actor_id TEXT NOT NULL, request_id TEXT NOT NULL,\n draft_id TEXT NOT NULL, draft_version INTEGER NOT NULL, digest TEXT NOT NULL,\n intent_version INTEGER NOT NULL CHECK(intent_version=1),\n state TEXT NOT NULL CHECK(state IN ('pending','bound','failed-known','uncertain')),\n plan_json TEXT, witness_json TEXT, runtime_task_id TEXT UNIQUE, error_code TEXT,\n close_cleanup TEXT, purge_cleanup TEXT,\n PRIMARY KEY(project_id,actor_id,request_id)\n)"
+  },
+  {
+    "name": "host_transcript_by_message",
+    "type": "index",
+    "tbl_name": "host_transcript",
+    "sql": "CREATE INDEX host_transcript_by_message ON host_transcript(session_id, kind, message_id)"
   }
 ]

@@ -10,7 +10,8 @@
 //!
 //! Environment: `PERF_ROOT`, `PERF_STATE` (a private state directory holding a copied
 //! `product/<projectId>.json`), `PERF_PROJECT`, optional `PERF_TASK` (one task's `workers`
-//! read) and `PERF_ROUNDS` (default 3).
+//! read, and that task's scoped `product.facts`), `PERF_ROUNDS` (default 3) and `PERF_SQL`
+//! (any value: the total time and count of each SQL statement, per read).
 use crate::native_runtime::{Runtime, UnqualifiedRoutes};
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::Arc, time::Instant};
@@ -32,6 +33,9 @@ async fn owner_facts_timings_on_a_store_copy() {
     let state = PathBuf::from(var("PERF_STATE").expect("PERF_STATE"));
     let project = var("PERF_PROJECT").expect("PERF_PROJECT");
     let rounds: usize = var("PERF_ROUNDS").and_then(|r| r.parse().ok()).unwrap_or(3);
+    if var("PERF_SQL").is_some() {
+        sql_profile::install();
+    }
     // A copied store has a new directory identity: bind the copy's own dev marker, exactly as
     // `project_guard::reserve` would for a fresh store.
     {
@@ -79,6 +83,7 @@ async fn owner_facts_timings_on_a_store_copy() {
     let mut reads = vec![("product.facts", json!({"taskIds":started}))];
     if let Some(task) = &task {
         reads.push(("workers", json!({"taskIds":[task]})));
+        reads.push(("product.facts", json!({"taskIds":[task]})));
     }
     for round in 0..rounds {
         for (op, params) in &reads {
@@ -110,6 +115,7 @@ async fn owner_facts_timings_on_a_store_copy() {
                 .flatten()
                 .map(|w| w["activity"].as_array().map_or(0, Vec::len))
                 .sum();
+            sql_profile::dump(op);
             eprintln!(
                 "perf round={round} op={op} saved_ms={saved_ms} facts_ms={facts_ms} total_ms={} workers={workers} activity={activity} bytes={} partial={}",
                 t.elapsed().as_millis(),
@@ -231,4 +237,42 @@ async fn owner_facts_timings_on_a_store_copy() {
         std::fs::write(out, serde_json::to_vec(&all).unwrap()).unwrap();
     }
     runtime.shutdown().await;
+}
+// PERF_SQL: per-statement SQLite profile (count, total ms) of every connection opened after this.
+mod sql_profile {
+    use rusqlite::ffi;
+    use std::{collections::HashMap, ffi::CStr, os::raw::{c_int, c_uint, c_void, c_char}, sync::Mutex};
+    pub static STATS: Mutex<Option<HashMap<String, (u64, u64)>>> = Mutex::new(None);
+    unsafe extern "C" fn cb(kind: c_uint, _ctx: *mut c_void, p: *mut c_void, x: *mut c_void) -> c_int {
+        if kind == ffi::SQLITE_TRACE_PROFILE as c_uint {
+            let sql = ffi::sqlite3_sql(p as *mut ffi::sqlite3_stmt);
+            let ns = *(x as *const i64) as u64;
+            if !sql.is_null() {
+                let text = CStr::from_ptr(sql).to_string_lossy().split_whitespace().collect::<Vec<_>>().join(" ");
+                let mut g = STATS.lock().unwrap();
+                let e = g.get_or_insert_with(HashMap::new).entry(text).or_default();
+                e.0 += 1;
+                e.1 += ns;
+            }
+        }
+        0
+    }
+    unsafe extern "C" fn init(db: *mut ffi::sqlite3, _e: *mut *mut c_char, _api: *const ffi::sqlite3_api_routines) -> c_int {
+        ffi::sqlite3_trace_v2(db, ffi::SQLITE_TRACE_PROFILE as c_uint, Some(cb), std::ptr::null_mut());
+        0
+    }
+    pub fn install() {
+        unsafe {
+            let f: unsafe extern "C" fn(*mut ffi::sqlite3, *mut *mut c_char, *const ffi::sqlite3_api_routines) -> c_int = init;
+            ffi::sqlite3_auto_extension(Some(std::mem::transmute(f as *const ())));
+        }
+    }
+    pub fn dump(label: &str) {
+        let mut g = STATS.lock().unwrap();
+        let mut rows: Vec<_> = g.take().unwrap_or_default().into_iter().collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1 .1));
+        for (sql, (n, ns)) in rows.into_iter().take(25) {
+            eprintln!("sql[{label}] total_ms={} n={n} :: {}", ns / 1_000_000, sql.chars().take(400).collect::<String>());
+        }
+    }
 }

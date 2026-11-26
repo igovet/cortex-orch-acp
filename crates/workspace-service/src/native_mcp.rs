@@ -22,6 +22,21 @@ use std::{
 fn invalid() -> CoreError {
     CoreError::Refused("invalid_mcp_registry")
 }
+/// Where the owner's MCP registry for one project lives: `cortex_dir` is the
+/// owner's Cortex configuration directory (the folder that holds the global
+/// `mcp-servers.json`). The folder name is a digest of the project's logical
+/// root (a linked checkout shares its main project's registry), so it never
+/// sits in the project tree and its contents cannot be changed by the project.
+pub fn project_registry_path(cortex_dir: &Path, root: &Path) -> CoreResult<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let logical = crate::native_runtime::key(root)?;
+    let digest = Sha256::digest(logical.root().as_os_str().as_encoded_bytes());
+    let name: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+    Ok(cortex_dir
+        .join("projects")
+        .join(name)
+        .join("mcp-servers.json"))
+}
 fn strings(v: Option<&Value>) -> CoreResult<Vec<String>> {
     match v {
         None | Some(Value::Null) => Ok(vec![]),
@@ -105,6 +120,9 @@ impl Server {
 #[derive(Clone, Default)]
 pub struct Registry {
     servers: Vec<Server>,
+    /// Machine entries the owner switched off (`enabled: false`) that are otherwise valid:
+    /// a project may switch one on for itself, and only through this list.
+    dormant: Vec<Server>,
     home: PathBuf,
     /// The Cortex process's own XDG_RUNTIME_DIR, passed only to uncontained servers.
     owner_runtime: Option<PathBuf>,
@@ -121,8 +139,66 @@ impl Registry {
             .filter(|p| p.is_absolute());
         Ok(registry)
     }
+    /// The owner-global registry plus the owner's registry for the project at
+    /// `root` (see [`project_registry_path`]). The project file lives in Cortex's
+    /// own owner-private configuration, never in the project tree, so project
+    /// contents cannot install an executable capability.
+    pub fn load_for_project(env: &RouteEnvironment, root: &Path) -> CoreResult<Self> {
+        let registry = Self::load(env)?;
+        let path = project_registry_path(&env.config.join("cortex"), root)?;
+        let raw = crate::native_routes::read(&path, true)?;
+        registry.with_project(raw.as_ref())
+    }
+    /// Effective servers for one project: every global server, adjusted by the project
+    /// file. A project entry in `servers` replaces the machine entry of that name as a
+    /// whole (even when the project entry is disabled). `overrides` maps a machine server
+    /// name to `false` (off for this project) or `true` (on for this project, using the
+    /// machine entry unchanged, including a machine entry that is switched off). Project
+    /// entries pass the same validation, grants and containment as machine ones. A
+    /// malformed project file refuses; it never falls back to the machine registry, which
+    /// could re-enable a server the project switched off.
+    pub fn with_project(mut self, raw: Option<&Value>) -> CoreResult<Self> {
+        let Some(raw) = raw else { return Ok(self) };
+        let overrides = match raw.get("overrides") {
+            None | Some(Value::Null) => BTreeMap::new(),
+            Some(v) => v
+                .as_object()
+                .ok_or_else(invalid)?
+                .iter()
+                .map(|(k, v)| match v.as_bool() {
+                    Some(on) if !k.is_empty() && !["cortex", "coordinator", "worker"].contains(&k.as_str()) => Ok((k.clone(), on)),
+                    _ => Err(invalid()),
+                })
+                .collect::<CoreResult<BTreeMap<_, _>>>()?,
+        };
+        let own = Self::parse(Some(raw), self.home.clone())?;
+        let named: BTreeSet<&str> = raw
+            .get("servers")
+            .or_else(|| raw.get("mcpServers"))
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|m| m.keys().map(String::as_str))
+            .collect();
+        if overrides.keys().any(|k| named.contains(k.as_str())) {
+            return Err(invalid());
+        }
+        let mut dormant = std::mem::take(&mut self.dormant);
+        let mut servers = std::mem::take(&mut self.servers);
+        servers.retain(|s| !named.contains(s.name.as_str()) && overrides.get(&s.name) != Some(&false));
+        for (name, on) in &overrides {
+            if *on {
+                if let Some(at) = dormant.iter().position(|s| &s.name == name) {
+                    servers.push(dormant.remove(at));
+                }
+            }
+        }
+        servers.extend(own.servers);
+        self.servers = servers;
+        Ok(self)
+    }
     fn parse(raw: Option<&Value>, home: PathBuf) -> CoreResult<Self> {
         let mut servers = vec![];
+        let mut dormant = vec![];
         if let Some(raw) = raw {
             // Registry-wide default for entries without their own `containment`.
             let default = mode(raw.get("containment"), Mode::Contained)?;
@@ -139,6 +215,19 @@ impl Registry {
                     return Err(invalid());
                 }
                 if spec.get("enabled") == Some(&Value::Bool(false)) {
+                    // Kept apart, so a project can switch it on. An entry that would not
+                    // load if enabled is dropped here and cannot be switched on.
+                    let mut on = spec.clone();
+                    on["enabled"] = Value::Bool(true);
+                    let mut single = serde_json::Map::new();
+                    single.insert(name.clone(), on);
+                    let mut one = serde_json::json!({ "servers": single });
+                    if let Some(default) = raw.get("containment") {
+                        one["containment"] = default.clone();
+                    }
+                    if let Ok(one) = Self::parse(Some(&one), home.clone()) {
+                        dormant.extend(one.servers);
+                    }
                     continue;
                 }
                 let command = spec["command"]
@@ -239,6 +328,7 @@ impl Registry {
         }
         Ok(Self {
             servers,
+            dormant,
             home,
             owner_runtime: None,
         })
@@ -348,6 +438,7 @@ impl Registry {
                 withheld.push(Withheld {
                     server: server.name.clone(),
                     reason,
+                    detail: None,
                 });
             }
         }
@@ -452,7 +543,10 @@ impl Registry {
                 None
             }
             Mode::Contained => {
-                environment.insert("PATH".into(), "/usr/bin:/bin".into());
+                // A script launcher (`#!/usr/bin/env node`, as npx under NVM) finds its
+                // interpreter beside itself: the executable's own directory leads the
+                // system path. It is readable only when the owner granted it in `read_paths`.
+                environment.insert("PATH".into(), contained_path(&executable));
                 environment.insert("TMPDIR".into(), runtime.to_string_lossy().into());
                 for k in std::iter::once("XDG_RUNTIME_DIR")
                     .chain(server.runtime_env.iter().map(String::as_str))
@@ -471,6 +565,14 @@ impl Registry {
             },
             sandbox,
         ))
+    }
+    /// A grant may not be, contain or sit inside Cortex private state or the
+    /// owner's Cortex configuration. Checked on the grant itself, its direct
+    /// children and well-known private locations, never by walking the tree: a
+    /// runtime install (for example Node under NVM) legitimately holds many
+    /// symlinks and ordinary files, and the sandbox enforces what a symlink may reach.
+    fn guard(&self, p: &Path) -> Result<(), Error> {
+        guard_grant(p, &self.home)
     }
     fn contain(
         &self,
@@ -516,7 +618,7 @@ impl Registry {
         }
         // Reject protected descendants rather than granting them via a parent directory.
         for p in reads.iter().chain(&writes) {
-            no_private_tree(p).map_err(|_| "protected_path_refused")?;
+            self.guard(p).map_err(|_| "protected_path_refused")?;
         }
         Sandbox::external(root, runtime, &reads, &writes, server.network)
             .map_err(|_| "containment_unavailable")
@@ -526,6 +628,8 @@ impl Registry {
 pub(crate) struct Withheld {
     pub server: String,
     pub reason: &'static str,
+    /// The server's last stderr line (secret-filtered), when it exited on its own.
+    pub detail: Option<String>,
 }
 pub(crate) struct CorePort {
     pub executor: Arc<cortex_core::store::executor::StoreExecutor>,
@@ -745,15 +849,24 @@ fn grant(p: &Path, root: &Path) -> Result<PathBuf, Error> {
     }
     Ok(p.to_path_buf())
 }
-fn no_private_tree(p: &Path) -> Result<(), Error> {
+/// Bounded protected-path decision for one contained-server grant.
+fn guard_grant(p: &Path, home: &Path) -> Result<(), Error> {
     safe(p)?;
+    let config = home.join(".config/cortex");
+    let data = home.join(".local/share/cortex");
+    let state = home.join(".local/state/cortex");
+    // Inside the owner's Cortex configuration, or containing it or the stores.
+    if p.starts_with(&config)
+        || [&config, &data, &state].iter().any(|d| d.starts_with(p))
+    {
+        return Err(Error::Forbidden);
+    }
+    // A directory that directly holds private state (live stores, VCS, keys).
     if p.is_dir() {
         for e in std::fs::read_dir(p)? {
-            let p = e?.path();
-            if p.symlink_metadata()?.file_type().is_symlink() {
+            if private(Path::new(&e?.file_name())) {
                 return Err(Error::Forbidden);
             }
-            no_private_tree(&p)?;
         }
     }
     Ok(())
@@ -761,6 +874,16 @@ fn no_private_tree(p: &Path) -> Result<(), Error> {
 /// PATH for an uncontained server: the registry executable's own directory
 /// (for example a Node install's `bin`), the owner's user bin directories and
 /// the system ones. Built, never inherited from the Cortex process.
+/// The contained server's search path: its executable's directory, then the
+/// system directories.
+fn contained_path(executable: &Path) -> String {
+    match executable.parent().and_then(Path::to_str) {
+        Some(d) if !d.is_empty() && !d.contains(':') && d != "/usr/bin" && d != "/bin" => {
+            format!("{d}:/usr/bin:/bin")
+        }
+        _ => "/usr/bin:/bin".into(),
+    }
+}
 pub(crate) fn owner_path(executable: &Path, home: &Path) -> String {
     let mut dirs: Vec<PathBuf> = vec![];
     dirs.extend(executable.parent().map(Path::to_path_buf));
@@ -823,6 +946,9 @@ impl Attachment {
     /// Observed exit of the contained server before or during this session.
     pub fn exited(&self) -> bool {
         self.proxy.as_ref().is_some_and(|p| p.exited())
+    }
+    pub fn stderr_line(&self) -> Option<String> {
+        self.proxy.as_ref().and_then(|p| p.stderr_line())
     }
     pub fn name(&self) -> Option<String> {
         serde_json::to_value(self.entry.as_ref()?).ok()?["name"]
@@ -922,6 +1048,190 @@ mod tests {
         .servers
         .is_empty());
     }
+    fn names(registry: &Registry) -> Vec<(String, String)> {
+        let mut v: Vec<_> = registry
+            .servers
+            .iter()
+            .map(|s| (s.name.clone(), s.command.clone()))
+            .collect();
+        v.sort();
+        v
+    }
+    fn global() -> Registry {
+        let tools = json!(["read"]);
+        Registry::parse(
+            Some(&json!({"servers":{
+                "a":{"command":"/bin/a","allowed_tools":tools},
+                "b":{"command":"/bin/b","allowed_tools":tools},
+                "c":{"command":"/bin/c","allowed_tools":tools,"containment":"none"}}})),
+            "/nonexistent".into(),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn project_registry_adds_overrides_and_disables_machine_servers() {
+        let tools = json!(["read"]);
+        let project = json!({"servers":{
+            "b":{"command":"/bin/b-project","allowed_tools":tools},
+            "c":{"command":"/bin/c-project","allowed_tools":tools,"enabled":false},
+            "d":{"command":"/bin/d","allowed_tools":tools}},"overrides":{"a":false}});
+        let merged = global().with_project(Some(&project)).unwrap();
+        // The project entry replaces the machine entry as a whole; a disabled project
+        // entry hides the machine one; an `overrides` false hides a machine server.
+        assert_eq!(
+            names(&merged),
+            [("b".into(), "/bin/b-project".into()), ("d".into(), "/bin/d".into())]
+        );
+        // Another project (no file) and an empty project file keep the machine registry.
+        let all = ["a", "b", "c"].map(|n| (n.to_owned(), format!("/bin/{n}")));
+        assert_eq!(names(&global().with_project(None).unwrap()), all);
+        assert_eq!(
+            names(&global().with_project(Some(&json!({"servers":{}}))).unwrap()),
+            all
+        );
+        // An override naming a server the machine does not have is harmless.
+        assert_eq!(
+            names(&global().with_project(Some(&json!({"servers":{},"overrides":{"zzz":false,"yyy":true}}))).unwrap()),
+            all
+        );
+        // Client-supplied entries are validated against the effective registry.
+        assert!(merged.validate_client(&json!([{"name":"d","command":"/never"}])).is_ok());
+        assert_eq!(
+            merged
+                .validate_client(&json!([{"name":"a","command":"/never"}]))
+                .unwrap_err()
+                .code(),
+            "external_mcp_server_unconfigured"
+        );
+    }
+    #[test]
+    fn a_project_can_switch_on_a_machine_server_that_is_switched_off() {
+        let tools = json!(["read"]);
+        let machine = Registry::parse(
+            Some(&json!({"containment":"none","servers":{
+                "kling":{"command":"/bin/kling","allowed_tools":tools,"enabled":false},
+                "broken":{"command":"/bin/broken","enabled":false},
+                "on":{"command":"/bin/on","allowed_tools":tools}}})),
+            "/nonexistent".into(),
+        )
+        .unwrap();
+        let list = |r: &Registry| names(r).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        assert_eq!(list(&machine), ["on"]);
+        let project = |overrides: Value| json!({"servers":{},"overrides":overrides});
+        let kling = machine.clone().with_project(Some(&project(json!({"kling":true})))).unwrap();
+        assert_eq!(list(&kling), ["kling", "on"]);
+        // The machine entry is used unchanged, including its containment default.
+        assert_eq!(kling.servers.iter().find(|s| s.name == "kling").unwrap().containment, Mode::Uncontained);
+        // A machine entry that would not load is never switched on by a project.
+        let broken = machine.clone().with_project(Some(&project(json!({"broken":true,"kling":true,"on":false})))).unwrap();
+        assert_eq!(list(&broken), ["kling"]);
+    }
+    #[test]
+    fn project_registry_keeps_the_same_validation_and_containment_rules() {
+        let tools = json!(["read"]);
+        let entry = json!({"command":"/bin/d","allowed_tools":tools});
+        for (project, why) in [
+            (json!({"servers":{"d":{"command":"/bin/d"}}}), "explicit tool grants"),
+            (json!({"servers":{"d":{"command":"/bin/d","allowed_tools":[]}}}), "empty grants"),
+            (json!({"servers":{"cortex":entry}}), "reserved name"),
+            (json!({"servers":{"d":entry},"overrides":{"cortex":false}}), "reserved override"),
+            (json!({"servers":{"d":entry},"overrides":{"a":"no"}}), "override shape"),
+            (json!({"servers":{"d":entry},"overrides":["a"]}), "override container"),
+            (json!({"servers":{"d":entry},"overrides":{"d":false}}), "override and project entry"),
+            (json!({"servers":{"d":entry},"containment":"maybe"}), "containment value"),
+            (json!({"servers":{"d":{"command":"/bin/d","allowed_tools":tools,"read_only_tools":["x"]}}}), "subset"),
+            (json!({"overrides":{"a":false}}), "no servers object"),
+        ] {
+            assert!(global().with_project(Some(&project)).is_err(), "{why}");
+        }
+        // The project file's registry default applies to project entries only.
+        let merged = global()
+            .with_project(Some(&json!({"containment":"none","servers":{"d":entry,
+                "e":{"command":"/bin/e","allowed_tools":tools,"containment":"contained"}}})))
+            .unwrap();
+        let mode = |n: &str| merged.servers.iter().find(|s| s.name == n).unwrap().containment;
+        assert_eq!(mode("a"), Mode::Contained);
+        assert_eq!(mode("c"), Mode::Uncontained);
+        assert_eq!(mode("d"), Mode::Uncontained);
+        assert_eq!(mode("e"), Mode::Contained);
+        // Without an explicit opt-out a project server is contained.
+        let merged = global().with_project(Some(&json!({"servers":{"d":entry}}))).unwrap();
+        assert_eq!(
+            merged.servers.iter().find(|s| s.name == "d").unwrap().containment,
+            Mode::Contained
+        );
+    }
+    #[test]
+    fn a_session_in_project_a_gets_its_server_and_project_b_does_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = scratch("project-registry");
+        let private = |p: &Path| {
+            std::fs::create_dir_all(p).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        let (a, b) = (base.join("a"), base.join("b"));
+        for root in [&a, &b] {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        let (a, b) = (a.canonicalize().unwrap(), b.canonicalize().unwrap());
+        let config = base.join("config");
+        private(&config);
+        private(&config.join("cortex"));
+        private(&config.join("cortex/projects"));
+        let write = |path: &Path, body: Value| {
+            private(path.parent().unwrap());
+            std::fs::write(path, serde_json::to_vec(&body).unwrap()).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        let tools = json!(["read"]);
+        write(
+            &config.join("cortex/mcp-servers.json"),
+            json!({"version":1,"servers":{"shared":{"command":"/bin/shared","allowed_tools":tools},
+                "kling":{"command":"/bin/kling","allowed_tools":tools}}}),
+        );
+        let env = RouteEnvironment {
+            home: base.clone(),
+            config: config.clone(),
+            state: base.join("state"),
+            routing_override: None,
+        };
+        // Machine-wide Kling is moved to project A: switched off in B, defined for A.
+        write(
+            &project_registry_path(&config.join("cortex"), &a).unwrap(),
+            json!({"version":1,"servers":{},"overrides":{}}),
+        );
+        write(
+            &project_registry_path(&config.join("cortex"), &b).unwrap(),
+            json!({"version":1,"servers":{"extra":{"command":"/bin/extra","allowed_tools":tools}},
+                "overrides":{"kling":false}}),
+        );
+        let in_a = Registry::load_for_project(&env, &a).unwrap();
+        let in_b = Registry::load_for_project(&env, &b).unwrap();
+        let list = |r: &Registry| names(r).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        assert_eq!(list(&in_a), ["kling", "shared"]);
+        assert_eq!(list(&in_b), ["extra", "shared"]);
+        // A project with no file sees the machine registry; the machine load is unchanged.
+        let other = base.join("c");
+        std::fs::create_dir_all(&other).unwrap();
+        let other = other.canonicalize().unwrap();
+        assert_eq!(list(&Registry::load_for_project(&env, &other).unwrap()), ["kling", "shared"]);
+        assert_eq!(list(&Registry::load(&env).unwrap()), ["kling", "shared"]);
+        // The file sits outside the project tree and differs per project.
+        let (fa, fb) = (
+            project_registry_path(&config.join("cortex"), &a).unwrap(),
+            project_registry_path(&config.join("cortex"), &b).unwrap(),
+        );
+        assert_ne!(fa, fb);
+        assert!(!fa.starts_with(&a) && fa.starts_with(config.join("cortex/projects")));
+        // A malformed project file refuses; it never falls back to the machine registry.
+        write(&fa, json!({"servers":[]}));
+        assert!(Registry::load_for_project(&env, &a).is_err());
+        // A project file that is not private is refused as well.
+        write(&fa, json!({"servers":{}}));
+        std::fs::set_permissions(&fa, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(Registry::load_for_project(&env, &a).is_err());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
     #[test]
     fn containment_is_explicit_with_a_contained_default() {
         let server = json!({"command":"/bin/true","allowed_tools":["read"]});
@@ -1007,6 +1317,14 @@ mod tests {
         std::fs::create_dir_all(base.join("runtime")).unwrap();
         std::fs::write(base.join("project/src/file"), "x").unwrap();
         base
+    }
+    #[test]
+    fn contained_path_leads_with_the_executable_directory() {
+        assert_eq!(
+            contained_path(Path::new("/home/o/.nvm/v/bin/npx")),
+            "/home/o/.nvm/v/bin:/usr/bin:/bin"
+        );
+        assert_eq!(contained_path(Path::new("/usr/bin/true")), "/usr/bin:/bin");
     }
     #[test]
     fn uncontained_launch_skips_the_walk_and_uses_the_owner_environment() {
@@ -1099,6 +1417,115 @@ mod tests {
                 .err(),
             Some("grant_path_refused")
         );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+    #[test]
+    fn contained_grants_with_symlinks_and_auth_dirs_attach_but_private_state_is_refused() {
+        use std::os::unix::fs::symlink;
+        let base = scratch("nvm");
+        let (root, runtime, home) = (
+            base.join("project"),
+            base.join("runtime"),
+            base.join("home"),
+        );
+        // An NVM-like install: symlinked bin entries, node_modules/.bin links, dotfiles.
+        let node = home.join(".nvm/versions/node/v1");
+        std::fs::create_dir_all(node.join("bin")).unwrap();
+        std::fs::create_dir_all(node.join("lib/node_modules/npm/bin")).unwrap();
+        std::fs::create_dir_all(node.join("lib/node_modules/mcp-remote/node_modules/.bin"))
+            .unwrap();
+        std::fs::write(node.join("lib/node_modules/npm/bin/npm-cli.js"), "x").unwrap();
+        std::fs::write(node.join("lib/node_modules/npm/.npmrc"), "x").unwrap();
+        symlink("../lib/node_modules/npm/bin/npm-cli.js", node.join("bin/npm")).unwrap();
+        symlink(
+            "/nonexistent/outside",
+            node.join("lib/node_modules/mcp-remote/node_modules/.bin/x"),
+        )
+        .unwrap();
+        let kling = home.join(".local/share/cortex/mcp/kling");
+        std::fs::create_dir_all(kling.join("auth")).unwrap();
+        std::fs::create_dir_all(kling.join("npm-cache")).unwrap();
+        std::fs::write(kling.join("auth/credentials"), "x").unwrap();
+        let decide = |reads: Vec<PathBuf>, writes: Vec<PathBuf>| {
+            let raw = json!({"servers":{"s":{"command":"/bin/true","allowed_tools":["read"],
+                "read_paths":reads,"write_paths":writes,"network":true}}});
+            let registry = Registry::parse(Some(&raw), home.clone()).unwrap();
+            registry
+                .prepare(
+                    &registry.servers[0],
+                    "/usr/bin/true".into(),
+                    &worker(),
+                    &root,
+                    &[],
+                    &runtime,
+                )
+                .map(|_| ())
+                .err()
+        };
+        // Attached, or withheld only because this host lacks Landlock.
+        let ok = decide(vec![node.clone()], vec![kling.clone()]);
+        assert!(
+            matches!(ok, None | Some("containment_unavailable")),
+            "{ok:?}"
+        );
+        // Private state is still refused.
+        std::fs::create_dir_all(home.join("proj/.cortex")).unwrap();
+        for bad in [
+            home.join("proj"),
+            home.join(".config/cortex"),
+            home.clone(),
+            home.join(".local/share"),
+        ] {
+            std::fs::create_dir_all(&bad).unwrap();
+            assert_eq!(
+                decide(vec![bad.clone()], vec![]),
+                Some("protected_path_refused"),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            decide(vec![home.join("proj/.cortex")], vec![]),
+            Some("grant_path_refused")
+        );
+        assert_eq!(decide(vec![root.clone()], vec![]), Some("grant_path_refused"));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+    /// Owner dry-check, never in the default suite: loads the owner's real registry
+    /// read-only (`CORTEX_OWNER_MCP_PROBE_HOME=<owner home>`) and prints, per server,
+    /// the attach/withhold decision of the contained path. Nothing is launched.
+    #[test]
+    #[ignore = "owner dry-check: reads the owner's registry, launches nothing"]
+    fn owner_registry_decision() {
+        let home = PathBuf::from(std::env::var("CORTEX_OWNER_MCP_PROBE_HOME").expect("owner home"));
+        let env = RouteEnvironment {
+            config: home.join(".config"),
+            state: home.join(".local/state"),
+            home,
+            routing_override: None,
+        };
+        let registry = Registry::load(&env).unwrap();
+        let base = scratch("owner-decision");
+        for server in &registry.servers {
+            let decision = match resolve(&server.command) {
+                Err(_) => Err("executable_unavailable"),
+                Ok(executable) => registry
+                    .prepare(
+                        server,
+                        executable,
+                        &worker(),
+                        &base.join("project"),
+                        &[],
+                        &base.join("runtime"),
+                    )
+                    .map(|_| ()),
+            };
+            println!(
+                "decision server={} containment={:?} -> {}",
+                server.name,
+                server.containment,
+                decision.map_or_else(|r| format!("withhold {r}"), |()| "attach".into())
+            );
+        }
         std::fs::remove_dir_all(&base).unwrap();
     }
     /// Owner-run probe, never part of the default suite: loads the owner's real
@@ -1268,5 +1695,184 @@ mod tests {
             }
         );
         std::fs::remove_dir_all(&base).unwrap();
+    }
+    /// Owner-run contained probe, never in the default suite: launches one real
+    /// registry server inside its prepared containment, captures its stderr and
+    /// sends `initialize` and `tools/list` only (never a tool call). Prints the
+    /// argv, environment names (never values) and the server's stderr.
+    /// Same variables as `owner_registry_probe`.
+    #[test]
+    #[ignore = "owner probe: reads the owner's registry and runs a real contained server"]
+    fn owner_contained_probe() {
+        use std::io::{BufRead, Read, Write};
+        use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+        let name = std::env::var("CORTEX_OWNER_MCP_PROBE").expect("server name");
+        let root = PathBuf::from(std::env::var("CORTEX_OWNER_MCP_PROBE_ROOT").expect("project"));
+        let home = PathBuf::from(std::env::var("CORTEX_OWNER_MCP_PROBE_HOME").expect("owner home"));
+        let env = RouteEnvironment {
+            config: home.join(".config"),
+            state: home.join(".local/state"),
+            home,
+            routing_override: None,
+        };
+        let mut registry = Registry::load(&env).unwrap();
+        // A project registry file (`CORTEX_OWNER_MCP_PROBE_PROJECT_REGISTRY`), read only.
+        if let Some(file) = std::env::var_os("CORTEX_OWNER_MCP_PROBE_PROJECT_REGISTRY") {
+            let raw: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+            registry = registry.with_project(Some(&raw)).unwrap();
+        }
+        let mut forced = registry.servers.iter().find(|s| s.name == name).unwrap().clone();
+        let open = std::env::var("CORTEX_OWNER_MCP_PROBE_MODE").as_deref() == Ok("none");
+        if open {
+            forced.containment = Mode::Uncontained;
+        }
+        let server = &forced;
+        let base = scratch("owner-contained");
+        let runtime = base.join("runtime");
+        for p in [&base, &runtime] {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let (launch, sandbox) = registry
+            .prepare(server, resolve(&server.command).unwrap(), &worker(), &root, &[], &runtime)
+            .unwrap();
+        let sandbox = sandbox.filter(|_| !open);
+        println!(
+            "argv={:?} env_names={:?} path={}",
+            launch.args,
+            launch.environment.keys().collect::<Vec<_>>(),
+            launch.environment["PATH"]
+        );
+        let mut command = std::process::Command::new(&launch.executable);
+        if let Some(sandbox) = sandbox {
+            unsafe { command.pre_exec(move || sandbox.enter()) };
+        }
+        let mut child = command
+            .args(&launch.args)
+            .current_dir(&launch.cwd)
+            .env_clear()
+            .envs(&launch.environment)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        let errors = std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            text
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            while out.read_line(&mut line).unwrap_or(0) > 0 {
+                let _ = tx.send(std::mem::take(&mut line));
+            }
+        });
+        let deadline = std::time::Duration::from_secs(120);
+        let mut ask = |request: Value| {
+            writeln!(stdin, "{request}").unwrap();
+            stdin.flush().unwrap();
+            let id = request.get("id").cloned();
+            while id.is_some() {
+                match rx.recv_timeout(deadline) {
+                    Ok(line) => {
+                        let v: Value = serde_json::from_str(line.trim()).unwrap_or(Value::Null);
+                        if v.get("id") == id.as_ref() {
+                            return Some(v);
+                        }
+                    }
+                    Err(_) => return None,
+                }
+            }
+            None
+        };
+        let init = ask(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-06-18","capabilities":{},
+            "clientInfo":{"name":"cortex-owner-probe","version":"1.0.6"}}}));
+        let list = init.as_ref().and_then(|_| {
+            ask(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+            ask(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
+        });
+        let status = child.try_wait().ok().flatten();
+        println!(
+            "initialize_ok={} serverInfo.name={} tools_listed={:?} exit={status:?}",
+            init.is_some(),
+            init.as_ref().map_or(Value::Null, |v| v["result"]["serverInfo"]["name"].clone()),
+            list.as_ref().and_then(|v| v["result"]["tools"].as_array().map(Vec::len)),
+        );
+        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+        let _ = child.kill();
+        let _ = child.wait();
+        let text = errors.join().unwrap();
+        // Stderr of the server (npm/mcp-remote diagnostics); the owner reviews it
+        // for secrets before sharing.
+        println!("stderr<<\n{}\n>>", text.chars().take(4000).collect::<String>());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+}
+
+/// One enabled server as a sign-in check starts it: no channel and no tool grant.
+pub(crate) struct ProbeTarget {
+    pub name: String,
+    /// Stable identity of the entry (name, command, arguments), never its environment.
+    pub fingerprint: String,
+    pub launch: ExternalLaunch,
+    pub sandbox: Option<Sandbox>,
+}
+impl Registry {
+    /// The enabled servers of this (project-adjusted) registry, prepared exactly as a
+    /// session would start them, for the sign-in check. `runtime` is a private scratch
+    /// directory the contained servers use as their temporary place.
+    pub(crate) fn probe_targets(&self, root: &Path, runtime: &Path) -> Vec<ProbeTarget> {
+        let channel = Channel {
+            task: "sign-in-check".into(),
+            attempt: "sign-in-check".into(),
+            owner_epoch: 0,
+            principal: "sign-in-check".into(),
+            role: "coordinator".into(),
+            profile: None,
+            stage: None,
+        };
+        let mut out = Vec::new();
+        for server in &self.servers {
+            if server.containment == Mode::Contained
+                && server.reads.iter().chain(&server.writes).any(|p| !p.exists())
+            {
+                continue;
+            }
+            let Ok(executable) = resolve(&server.command).or_else(|e| match server.containment {
+                Mode::Uncontained => owner_resolve(&server.command).ok_or(e),
+                Mode::Contained => Err(e),
+            }) else {
+                continue;
+            };
+            let Ok((launch, sandbox)) = self.prepare(server, executable, &channel, root, &[], runtime) else {
+                continue;
+            };
+            let fingerprint = {
+                use sha2::{Digest, Sha256};
+                let mut h = Sha256::new();
+                h.update(server.name.as_bytes());
+                h.update([0]);
+                h.update(server.command.as_bytes());
+                for a in &server.args {
+                    h.update([0]);
+                    h.update(a.as_bytes());
+                }
+                format!("{}:{:x}", server.name, h.finalize())[..server.name.len() + 17].to_owned()
+            };
+            out.push(ProbeTarget { name: server.name.clone(), fingerprint, launch, sandbox });
+        }
+        out
+    }
+}
+impl Attachment {
+    /// The server's stderr shows it waits for the owner to sign in.
+    pub fn needs_sign_in(&self) -> bool {
+        self.proxy.as_ref().is_some_and(|p| p.needs_sign_in())
     }
 }

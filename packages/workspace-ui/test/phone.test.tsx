@@ -3,6 +3,9 @@ import { createRoot } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mountPhone, PAIR_WORDS, Workspace, type PhoneMachine, type PhoneShell, type PhoneState } from "../src";
+import type { PhoneNotificationWords, PhoneTap } from "../src/phone-shell";
+import { workspaceCopy } from "../src/copy";
+import { notificationWords } from "../src/phone-shell";
 import { createRealPort } from "../src/port/real";
 import { capabilitiesWire, flush, scriptedPort, scriptedTransport } from "./support";
 
@@ -249,6 +252,36 @@ describe("machines on a phone", () => {
     expect(f.shell.relay!.write).not.toHaveBeenCalled();
     type("Relay server address", "https://relay.mine.example"); button("Save")!.click(); await settle();
     expect(f.shell.relay!.write).toHaveBeenCalledWith("https://relay.mine.example");
+  });
+  it("turns its own notifications on once a machine is paired, off from Settings, and a tap opens its machine", async () => {
+    const f = fakeShell({ active: "a", machines: [machine("a", "Workstation"), machine("b", "Laptop")] });
+    let tap: ((tap: PhoneTap) => void) | null = null;
+    const set = vi.fn(async (enabled: boolean, _words: PhoneNotificationWords) => ({ enabled, permission: "granted" as const, batteryExempt: false }));
+    f.shell.notifications = { set, battery: vi.fn(async () => undefined), taps: listener => { tap = listener; return () => { tap = null; }; } };
+    await mount(f.shell);
+    expect(set.mock.calls.map(c => c[0])).toEqual([true]);
+    // Android shows the words in the interface's language; this test runs in English.
+    expect(set.mock.calls[0][1]).toMatchObject({ ongoingTitle: "Connected to your computers", kinds: { failed: "Task failed" }, channels: { answer: { name: "Needs your answer" } } });
+    expect(notificationWords(key => workspaceCopy(key, "ru-RU"))).toMatchObject({ ongoingTitle: "На связи с компьютерами",
+      kinds: { question: "Нужен ваш ответ", result: "Задача завершена", failed: "Сбой задачи" } });
+    // A connection change is not a new wish: nothing is applied again.
+    f.publish({ ...f.state, machines: [machine("a", "Workstation", { state: "offline", path: null }), machine("b", "Laptop")] }); await settle();
+    expect(set).toHaveBeenCalledTimes(1);
+    button("Menu")!.click(); await settle();
+    button("Settings")!.click(); await settle();
+    expect(text()).toContain("Phone notifications");
+    expect(text()).toContain("without battery optimisation");
+    button("Battery settings")!.click(); await settle();
+    expect(f.shell.notifications.battery).toHaveBeenCalled();
+    const toggle = document.querySelector<HTMLInputElement>('[aria-label="Phone notifications"]')!;
+    expect(toggle.checked).toBe(true);
+    toggle.checked = false; toggle.dispatchEvent(new Event("change", { bubbles: true })); await settle();
+    expect(set.mock.calls.at(-1)?.[0]).toBe(false);
+    expect(localStorage.getItem("cw.ws.notifications")).toBe("false");
+    // A tap on another machine's notification closes Settings and opens that machine.
+    tap!({ machineId: "b", target: { kind: "task", project: "p", task: "t" } }); await settle();
+    expect(f.shell.select).toHaveBeenCalledWith("b");
+    expect(all(".ph-screen")).toHaveLength(0);
   });
 });
 

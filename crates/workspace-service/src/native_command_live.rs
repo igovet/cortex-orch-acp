@@ -24,6 +24,7 @@ pub(crate) struct Sandbox {
     pins: Vec<std::sync::Arc<fs::File>>,
     guard: Option<policy::GitGuard>,
     overlay: bool,
+    auto: bool,
     ssh_environment: BTreeMap<OsString, OsString>,
 }
 
@@ -195,6 +196,7 @@ impl Sandbox {
             pins: Vec::new(),
             guard: None,
             overlay: false,
+            auto: profile == Profile::Auto,
             ssh_environment: BTreeMap::new(),
         };
         fs::create_dir(s.scratch.join("var-tmp"))?;
@@ -220,7 +222,7 @@ impl Sandbox {
         // Only the filtered owner environment reaches the child.
         // HOME is intentionally the real owner's home; its cache grants are mounts.
         s.mount(
-            if profile == Profile::Development {
+            if profile.wide() {
                 "--bind"
             } else {
                 "--ro-bind"
@@ -231,7 +233,7 @@ impl Sandbox {
         s.args
             .extend(["--proc", "/proc", "--dev-bind", "/dev", "/dev"].map(OsString::from));
         s.mount("--bind", Path::new("/tmp"), Path::new("/tmp"))?;
-        if profile != Profile::Development {
+        if !profile.wide() {
             s.mount("--bind", &s.scratch.join("var-tmp"), Path::new("/var/tmp"))?;
         }
         let home = s
@@ -465,10 +467,24 @@ impl Sandbox {
         if real == Path::new("/") {
             return Err(unavailable("control_path_overlaps_host"));
         }
-        if p.file_name()
+        let store = p
+            .file_name()
             .is_some_and(|n| n == ".cortex" || n == ".cortex-dev")
-            && real.is_dir()
-        {
+            && real.is_dir();
+        if store && self.auto {
+            // Auto may write the store directory (the owner allowed model writes
+            // on request); the live store files stay out of reach: an empty,
+            // unreadable file is bound over each, so a command can neither read the
+            // runtime's private database nor write, remove or rename it. A live file
+            // that does not exist yet cannot be masked without creating it.
+            let sealed = sealed_file()?;
+            for e in fs::read_dir(&real)? {
+                let path = e?.path();
+                if crate::native_engine_policy::live_store_file(&path) {
+                    self.mount("--ro-bind", &sealed, &path)?;
+                }
+            }
+        } else if store {
             self.args.extend([
                 OsString::from("--tmpfs"),
                 real.as_os_str().into(),
@@ -993,6 +1009,64 @@ mod tests {
         );
     }
     #[test]
+    fn auto_writes_the_store_directory_but_not_live_store_files() {
+        if !capability() {
+            eprintln!("namespace capability unavailable; auto store view not exercised");
+            return;
+        }
+        let f = Fixture::new();
+        let root = f.root();
+        for dir in [".cortex", ".cortex-dev"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+            for name in ["cortex.sqlite3", "cortex.sqlite3-wal", "cortex.sqlite3-shm", ".store.lock"] {
+                fs::write(root.join(dir).join(name), "live").unwrap();
+            }
+            fs::write(root.join(dir).join("notes.md"), "old").unwrap();
+        }
+        let s = f.prepare(Profile::Auto, &[root.clone()], &[]).unwrap();
+        run(
+            &s,
+            r#"
+            for d in .cortex .cortex-dev; do
+                echo new > $d/x
+                echo changed > $d/notes.md
+                mkdir $d/sub; echo n > $d/sub/y
+                for n in cortex.sqlite3 cortex.sqlite3-wal cortex.sqlite3-shm .store.lock; do
+                    ! sh -c 'echo bad >> "$1"' fixture $d/$n
+                    ! rm $d/$n
+                    ! mv $d/x $d/$n
+                done
+            done
+        "#,
+            &[],
+        );
+        for dir in [".cortex", ".cortex-dev"] {
+            assert_eq!(fs::read_to_string(root.join(dir).join("x")).unwrap(), "new\n");
+            assert_eq!(fs::read_to_string(root.join(dir).join("notes.md")).unwrap(), "changed\n");
+            assert_eq!(fs::read_to_string(root.join(dir).join("cortex.sqlite3")).unwrap(), "live");
+            assert_eq!(fs::read_to_string(root.join(dir).join(".store.lock")).unwrap(), "live");
+        }
+    }
+    #[test]
+    fn guarded_and_development_keep_the_store_directory_read_only() {
+        if !capability() {
+            eprintln!("namespace capability unavailable; store view not exercised");
+            return;
+        }
+        let f = Fixture::new();
+        let root = f.root();
+        fs::create_dir(root.join(".cortex")).unwrap();
+        fs::write(root.join(".cortex/cortex.sqlite3"), "live").unwrap();
+        for profile in [Profile::Guarded, Profile::Development] {
+            let s = f.prepare(profile, &[root.clone()], &[]).unwrap();
+            let argv = ["/bin/sh".into(), "-c".into(), "echo x > .cortex/x".into()];
+            let out = s.command(&argv).unwrap().output().unwrap();
+            assert!(!out.status.success());
+            assert!(String::from_utf8_lossy(&out.stderr).contains("Read-only file system"));
+            assert!(!root.join(".cortex/x").exists());
+        }
+    }
+    #[test]
     fn ignored_grants_relocated_caches_and_project_toolchain() {
         let f = Fixture::new();
         let root = f.root();
@@ -1202,4 +1276,22 @@ impl Drop for Sandbox {
         // Only this launch's private, randomly named scratch; never a caller path.
         let _ = policy::cleanup_scratch(&self.scratch);
     }
+}
+
+/// One empty file with no permissions, bound over a live store file in Auto
+/// command sandboxes so its bytes are neither readable nor writable.
+fn sealed_file() -> io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    static SEALED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    if let Some(p) = SEALED.get() {
+        return Ok(p.clone());
+    }
+    let dir = std::env::temp_dir().join(format!("cortex-sealed-{}", std::process::id()));
+    fs::create_dir_all(&dir)?;
+    let p = dir.join("sealed");
+    if !p.exists() {
+        fs::write(&p, b"")?;
+    }
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o000))?;
+    Ok(SEALED.get_or_init(|| p).clone())
 }

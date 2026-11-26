@@ -124,6 +124,9 @@ fn routing(r: &Value) -> Value {
             policy[m] = json!({"effortFloor":p["effort_floor"],"maxEffort":p["max_effort"],
                 "effortLadder":p["effort_ladder"],"alsoStandardFor":p["also_standard_for"],
                 "preferredFor":p["preferred_for"],"preferredWhen":p["preferred_when"],"requestNames":p["request_names"]});
+            if !p["tier_efforts"].is_null() {
+                policy[m]["tierEfforts"] = p["tier_efforts"].clone();
+            }
         }
         let mut tiers = json!({});
         for (m, t) in pairs(&c["tiers"]) {
@@ -140,9 +143,14 @@ fn routing(r: &Value) -> Value {
         pins[role] = json!({"engine":engine,"model":model,"effort":if effort.is_empty(){Value::Null}else{json!(effort)}});
     }
     let legacy: Vec<_> = pairs(&r["tiers"]).map(|(k, _)| k).collect();
-    json!({"version":or(&r["model_policy_version"],json!(2)),"deny":or(&r["deny"],json!([])),
+    let mut view = json!({"version":or(&r["model_policy_version"],json!(2)),"deny":or(&r["deny"],json!([])),
         "providers":or(&r["providers"],json!(ENGINES)),"engines":engines,"pins":pins,
-        "affinity":or(&r["engine_affinity"],json!({})),"autoAllow":or(&r["auto_allow"],json!([])),"legacyTiers":legacy})
+        "affinity":or(&r["engine_affinity"],json!({})),"autoAllow":or(&r["auto_allow"],json!([])),"legacyTiers":legacy});
+    // The coordinator list only when the profile has one (legacy profiles fall back to worker tiers).
+    if r[crate::native_routes::COORDINATOR_MODELS].is_array() {
+        view["coordinatorModels"] = r[crate::native_routes::COORDINATOR_MODELS].clone();
+    }
+    view
 }
 fn ceiling(r: &Value) -> Value {
     let f = &r["fallback_policy"];
@@ -171,7 +179,7 @@ fn defaults(v: &Value, workspace: &Value) -> Value {
         "mode":workspace.get("mode").unwrap_or(&json!("guarded")),"checkout":workspace.get("checkout").unwrap_or(&json!("main")),
         "ceiling":ceiling(&v["ceiling"]),"preserved":or(&v["preserved_keys"],json!([]))})
 }
-fn mcp(v: &Value) -> Value {
+pub(super) fn mcp(v: &Value) -> Value {
     json!(rows(&v["servers"]).map(|e| {
         let c = &e["config"];
         let env: Vec<_> = rows(&c["env"]).map(|v| json!({"name":v["name"],"stored":truth(&v["value_set"]),"action":"keep","value":""})).collect();
@@ -332,6 +340,9 @@ pub fn settings_view(o: &Value) -> ModelResult<Value> {
             .unwrap_or(&Value::Null);
         let mut model = json!({"id":route["model"],"routeId":route["route_id"],"label":or(&route["model_name"],route["model"].clone()),
             "efforts":entry.get("efforts").cloned().unwrap_or(json!([])),"observed":truth(&route["observed"])});
+        if route["previous_route_ids"].as_array().is_some_and(|a| !a.is_empty()) {
+            model["previousRouteIds"] = route["previous_route_ids"].clone();
+        }
         if truth(&entry["context_window"]) {
             model["contextWindow"] = entry["context_window"].clone();
         }

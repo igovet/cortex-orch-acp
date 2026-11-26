@@ -86,6 +86,7 @@ pub(crate) fn capture(section: &str, bytes: Option<&[u8]>) -> Result<Value, Valu
                 "engine_affinity",
                 "models",
                 "quota_windows",
+                "coordinator_models",
             ] {
                 if let Some(v) = d.get(k) {
                     rules[k] = v.clone();
@@ -550,5 +551,24 @@ impl ConfigurationReader {
         o["surfaces"]["user_defaults"] = self.user_defaults_management_observation()?;
         o["surfaces"]["routing_profiles"] = self.profiles_management_observation(project)?;
         self.settings_with_routing_readers(&o, now, project)
+    }
+}
+
+#[cfg(test)]
+mod coordinator_list_tests {
+    use super::*;
+    /// A profile stores the coordinator list with the rest of the routing section.
+    #[test]
+    fn a_profile_capture_keeps_the_coordinator_list() {
+        let list = json!([{"engine":"claude-agent-acp","model":"opus",
+            "tiers":{"flagship":{"min":"low","max":"high"}}}]);
+        let rules = json!({"model_policy_version":2,"enabled":{"claude-agent-acp":["opus"]},
+            "coordinator_models":list,"unmanaged":true});
+        let captured = capture("routing", Some(&serde_json::to_vec(&rules).unwrap())).unwrap();
+        assert_eq!(captured["coordinator_models"], list);
+        assert!(captured.get("unmanaged").is_none());
+        let mut bad = rules.clone();
+        bad["coordinator_models"] = json!([]);
+        assert!(capture("routing", Some(&serde_json::to_vec(&bad).unwrap())).is_err());
     }
 }

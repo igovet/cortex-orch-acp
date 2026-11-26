@@ -144,7 +144,7 @@ async fn channel_restriction_filters_discovery_and_calls() {
 async fn result_submit_rejects_extra_fields_without_echoing_values() {
     let c = core();
     let g = Gateway::new(c.clone(), credentials());
-    let valid = json!({"report":"# Report","summary":"Summary","checks":[],"request_key":"r"});
+    let valid = json!({"report":"# Report","summary":"Summary","checks":[],"request_key":"r","objective_status":"complete"});
     let value = "unexpected-value-not-for-diagnostics";
     let mut top = valid.clone();
     top["artifacts"] = json!(value);

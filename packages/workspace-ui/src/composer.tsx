@@ -1,4 +1,5 @@
-import { plainChoice, classifiedPlanningFailure, stoppedPlanningComposerText } from "./selectors";
+import { LoadingBar } from "./skeleton";
+import { currentModelId, plainChoice, classifiedPlanningFailure, stoppedPlanningComposerText } from "./selectors";
 import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, useContext, type Accessor, type JSX } from "solid-js";
 import { capabilityOf, FEATURES, machineDefaults, machineEffort, orderedEfforts, resolveEffort, type Attachment, type AttachmentInput, type AttachmentRef, type Message, type SessionOptions, type TaskSettings, type WorkspaceCommand } from "@cortex/workspace-domain";
 import { attachmentFile, attachmentName, attachmentPreview, attachmentRef, keepBytes, readAttachments, wireAttachments } from "./attachments";
@@ -75,7 +76,7 @@ export function attachmentEvents(a: Attachments, enabled: () => boolean = () => 
   };
 }
 export const AttachmentStatus = (props: { a: Attachments }) => <>
-  <Show when={props.a.busy()}><div class="cap muted" role="status">Reading attachments…</div></Show>
+  <Show when={props.a.busy()}><LoadingBar label="Reading attachments…" /></Show>
   <Show when={props.a.error()}><div class="cap st-warn" role="alert">{props.a.error()}</div></Show>
 </>;
 /** Attach keeps its place in every composer. When files cannot be added it stays, unusable, with the reason. */
@@ -155,7 +156,7 @@ export function CBar(props: { children: JSX.Element }) {
  * Model, effort, then Settings for access and language: the same choices on a new task and in every composer that calls an
  * engine. `compact` leaves Settings out where only the model and effort apply.
  */
-export function RouteBar(props: { id: string; settings: TaskSettings; onChange: (patch: Partial<TaskSettings>) => void; up?: boolean; disabled?: string; compact?: boolean; needs?: WorkspaceCommand["type"]; options?: SessionOptions }) {
+export function RouteBar(props: { id: string; hint?: string; settings: TaskSettings; onChange: (patch: Partial<TaskSettings>) => void; up?: boolean; disabled?: string; compact?: boolean; needs?: WorkspaceCommand["type"]; options?: SessionOptions }) {
   const ws = useWs();
   const options = () => props.options ?? ws.store.state().options;
   const effortsFor = (model: string) => {
@@ -163,9 +164,10 @@ export function RouteBar(props: { id: string; settings: TaskSettings; onChange: 
     const choices = options().efforts.filter(e => !offered || offered.includes(e.id));
     return orderedEfforts(choices.map(e => e.id)).map(id => choices.find(e => e.id === id)!);
   };
-  const efforts = () => effortsFor(props.settings.model);
-  const effortFor = (model: string) => resolveEffort(props.settings.effort, machineEffort(ws.machine()),
-    effortsFor(model).filter(e => !e.unavailable).map(e => e.id));
+  const model = () => currentModelId(options().models, props.settings.model);
+  const efforts = () => effortsFor(model());
+  const effortFor = (id: string) => resolveEffort(props.settings.effort, machineEffort(ws.machine()),
+    effortsFor(id).filter(e => !e.unavailable).map(e => e.id));
   const align = () => props.up ? "up" as const : "left" as const;
   const cls = () => props.up ? "pop-up" : "pop-anchor";
   // A session that offers no list leaves its control off. A choice is never filled in for it.
@@ -173,26 +175,27 @@ export function RouteBar(props: { id: string; settings: TaskSettings; onChange: 
     const off = () => list().length ? (props.disabled ?? (props.needs && ws.gate(props.needs) ? ws.t("machineRoute") : undefined)) : ws.store.optionsKnown() ? ws.t("noOptions") : ws.t("optionLoading");
     const text = () => list().length && id() ? label(list(), id()) : ws.store.optionsKnown() ? ws.t("optionUnavailable") : ws.t("optionLoading");
     return <button class="sel" popovertarget={off() ? undefined : `m-${kind}-${props.id}`} aria-disabled={off() ? "true" : undefined} data-why={off()} aria-label={`${title}: ${text()}`}>
-      <I n={icon} s={14} /><span class="sel-t">{text()}</span><I n="chevron-down" s={12} />
+      <I n={icon} s={14} /><span class="sel-t"><Show when={list().length && id() || ws.store.optionsKnown()} fallback={<LoadingBar label={text()} />}>{text()}</Show></span><I n="chevron-down" s={12} />
     </button>;
   };
   // Access and language share one Settings control: they are set once per task and rarely changed while writing.
   const settingsOff = () => options().modes.length || options().languages.length ? (props.disabled ?? (props.needs && ws.gate(props.needs) ? ws.t("machineRoute") : undefined)) : ws.t("noOptions");
   const settingsText = () => [options().modes.length ? `Access mode: ${label(options().modes, props.settings.mode)}` : "", options().languages.length ? `Message language: ${label(options().languages, props.settings.language)}` : ""].filter(Boolean).join(", ");
   return <div class="c-route">
-    {trigger("model", "Coordinator model", "cpu", () => options().models, () => props.settings.model)}
-    {trigger("effort", "Reasoning effort", "gauge", efforts, () => effortFor(props.settings.model))}
+    {trigger("model", "Coordinator model", "cpu", () => options().models, model)}
+    {trigger("effort", "Reasoning effort", "gauge", efforts, () => effortFor(model()))}
+    <Show when={props.hint}><span class="c-hint" role="status">{props.hint}</span></Show>
     <Show when={!props.compact}>
       <button data-tooltip="" type="button" class="ib c-set" popovertarget={settingsOff() ? undefined : `m-set-${props.id}`} aria-disabled={settingsOff() ? "true" : undefined} data-why={settingsOff()} aria-label={`Settings${settingsText() ? `. ${settingsText()}` : ""}`}><I n="sliders" /></button>
     </Show>
     <Show when={!props.needs || !ws.gate(props.needs)}>
     <Pop id={`m-model-${props.id}`} class={cls()} align={align()} label="Coordinator model" style={{ width: "280px" }}>
       <div class="mi-h">Coordinator model for this task</div>
-      <For each={options().models}>{m => <MenuItem label={m.label} sub={m.unavailable ?? m.engine} disabled={m.unavailable} check={m.id === props.settings.model} onSelect={() => props.onChange({ model: m.id, effort: effortFor(m.id) })} />}</For>
+      <For each={options().models}>{m => <MenuItem label={m.label} sub={m.unavailable ?? m.engine} disabled={m.unavailable} check={m.id === model()} onSelect={() => props.onChange({ model: m.id, effort: effortFor(m.id) })} />}</For>
     </Pop>
     <Pop id={`m-effort-${props.id}`} class={cls()} align={align()} label="Effort">
       <div class="mi-h">Effort</div>
-      <For each={efforts()}>{e => <MenuItem label={e.label} sub={e.unavailable} disabled={e.unavailable} check={e.id === effortFor(props.settings.model)} onSelect={() => props.onChange({ effort: e.id })} />}</For>
+      <For each={efforts()}>{e => <MenuItem label={e.label} sub={e.unavailable} disabled={e.unavailable} check={e.id === effortFor(model())} onSelect={() => props.onChange({ effort: e.id })} />}</For>
     </Pop>
     <Show when={!props.compact}>
       <Pop id={`m-set-${props.id}`} class={cls()} align={align()} label="Settings" style={{ width: "300px" }}>
@@ -267,7 +270,7 @@ export function MicBar(props: { mic: Dictation; onInsert: (text: string) => void
     <Show when={props.mic.on()}>
       <div class="micbar" role="group" aria-label={ws.t("voiceLabel")}>
         <I n="mic" s={14} class="st-bad" /><span class="mic-time">{time(props.mic.seconds())}</span>
-        <span class="cap muted" role="status">{status()}</span>
+        <span class="cap muted"><Show when={["starting", "loading"].includes(props.mic.phase())} fallback={<span role="status">{status()}</span>}><LoadingBar label={status()!} /></Show></span>
         <span class="mic-text" aria-live="polite">{props.mic.text()}</span>
         <span class="cap faint">{ws.voice ? ws.voice.badge ?? ["On-device", language(), "not sent"].filter(Boolean).join(" · ") : ws.t("voiceBadge")}</span>
         <button class="btn btn-sm" onClick={() => props.mic.stop()}>Cancel</button>
@@ -474,6 +477,9 @@ export function Composer(props: { model: Accessor<SessionModel | null>; team?: J
   const m = () => props.model()!;
   const id = () => m().view.id;
   const mode = () => props.model()?.mode;
+  // A route chosen while the task works applies from its next turn: said quietly beside the choice, never waited for.
+  const [nextTurn, setNextTurn] = createSignal(false);
+  createEffect(on(() => props.model()?.view.id, () => setNextTurn(false), { defer: true }));
   const draftKey = () => { const s = planning(); return s ? `sprint:${s.id}` : id(); };
   const [text, setText] = createSignal(ws.drafts.get(draftKey()) ?? "");
   const write = (value: string) => { setText(value); ws.drafts.set(draftKey(), value); };
@@ -571,6 +577,9 @@ export function Composer(props: { model: Accessor<SessionModel | null>; team?: J
   // interruption, runs nothing, so it has no Stop here.
   const running = () => mode() === "live" && !props.folded && workingNow(m()) && m().view.task.status !== "needs_you" && m().view.task.observedPhase !== "recovery";
   const resumable = () => ws.can(capabilityOf("continue_task"));
+  // A task the owner paused in an Automatic sprint is paused like any other: Resume is offered here too. A runtime hold (a recorded
+  // automatic pause) is not: the service refuses Resume there, so the composer sends a message instead.
+  const automaticPause = () => mode() === "automatic" && m().view.task.status === "paused" && !m().view.task.automaticContinuation?.pause;
   const stopPlanning = () => { const s = planning(); if (s) void ws.run({ type: "cancel_planning", sprintId: s.id }); };
   const resumePlanning = () => { const s = planning(); if (s) void ws.run({ type: "resume_planning", sprintId: s.id }); };
   /** The planning task's run control: Stop while it works, Resume once stopped, nothing once its tasks are created. */
@@ -590,7 +599,7 @@ export function Composer(props: { model: Accessor<SessionModel | null>; team?: J
     : mode() === "stopping" && empty() ? { label: "Stopping", icon: "loader", why: STOPPING, go: () => undefined, effect: "Stopping the task. Messages can be sent once the stop is confirmed." }
     : running() && empty() ? { label: stopLabel(resumable()), icon: "stop", needs: "stop_task", go: () => ws.stopTask(id()),
       effect: resumable() ? "Stop pauses the task and keeps everything; Resume continues it. Write a message to send it instead." : "End run stops this task. Write a message to send it instead." }
-    : mode() === "paused" && empty() ? resumeState(m().view)?.action === "continue_task"
+    : (mode() === "paused" || automaticPause()) && empty() ? resumeState(m().view)?.action === "continue_task"
       ? { label: "Resume", icon: "play", needs: "continue_task", go: () => void ws.run({ type: "continue_task", taskId: id(), now: now() }), effect: "Resume continues the task. Write a message to send it and resume." }
       // A pause whose stop or process exit is not confirmed cannot be resumed yet: Resume stays off and says why.
       : { label: "Resume", icon: "play", why: resumeState(m().view)?.why || "This task cannot be resumed now", go: () => undefined, effect: resumeState(m().view)?.why || "This task cannot be resumed now" }
@@ -630,7 +639,7 @@ export function Composer(props: { model: Accessor<SessionModel | null>; team?: J
       ...(mode() === "live" ? [{ name: "stop", label: `${stopLabel(ws.can(capabilityOf("continue_task")))} this task`, why: ws.gate("stop_task"), run: () => ws.stopTask(id()) },
         { name: "queue", label: "Queue messages until the coordinator is free", why: ws.gate("send_message"), run: () => setDelivery("queue") },
         { name: "now", label: "Send messages now", why: ws.gate("send_message"), run: () => setDelivery("send_now") }] : []),
-      ...(mode() === "paused" ? [{ name: "resume", label: "Resume this task", why: ws.gate("continue_task"), run: () => void ws.run({ type: "continue_task", taskId: id(), now: now() }) }] : []),
+      ...(mode() === "paused" || automaticPause() ? [{ name: "resume", label: "Resume this task", why: ws.gate("continue_task"), run: () => void ws.run({ type: "continue_task", taskId: id(), now: now() }) }] : []),
       { name: "details", label: "Open Work details", run: at("workers") },
       ...(demo || ws.can(capabilityOf("accept_result")) || ws.can(capabilityOf("request_changes")) ? [{ name: "changes", label: "Open Changes", run: at("changes") }] : []),
       ...(demo || ws.can(capabilityOf("git_fetch")) || ws.can(FEATURES.editFiles) ? [{ name: "code", label: "Open Code", run: at("code") }] : []),
@@ -677,8 +686,8 @@ export function Composer(props: { model: Accessor<SessionModel | null>; team?: J
         suggest={{ projectId: planning()?.projectId ?? m().view.project.id, taskId: props.model()?.view.id, commands: props.model() ? commands : undefined, skills: true }}
         effect={effect()} off={readOnly()} attachOff={mode() === "stopping" ? STOPPING : undefined} voiceOff={mode() === "stopping" ? STOPPING : undefined}
         inputRef={el => { input = el; }}
-        route={<Show when={planning()} fallback={<RouteBar id="task" up needs="set_task_settings" settings={taskSettings(m())} disabled={readOnly() || mode() === "stopping" ? "Unavailable for this task now" : undefined}
-          onChange={settings => ws.run({ type: "set_task_settings", taskId: id(), settings: { ...taskSettings(m()), ...settings } })} />}>{s =>
+        route={<Show when={planning()} fallback={<RouteBar id="task" up needs="set_task_settings" settings={taskSettings(m())} hint={nextTurn() && mode() === "live" ? "Applies from the next turn" : undefined} disabled={readOnly() || mode() === "stopping" ? "Unavailable for this task now" : undefined}
+          onChange={settings => { setNextTurn(true); void ws.run({ type: "set_task_settings", taskId: id(), settings: { ...taskSettings(m()), ...settings } }); }} />}>{s =>
           // The planner's model is the sprint's, changed for the planning task and every later planning pass at once.
           <RouteBar id="task" up needs="set_sprint_settings" settings={props.model() ? taskSettings(m()) : { ...machineDefaults(ws.machine()).settings, ...s().settings }} disabled={(props.model() && readOnly()) || mode() === "stopping" ? "Unavailable for planning now" : undefined}
             onChange={settings => ws.run({ type: "set_sprint_settings", sprintId: s().id, settings })} />}</Show>}

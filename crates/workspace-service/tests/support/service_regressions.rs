@@ -556,6 +556,7 @@ pub(super) async fn peer() {
 
 async fn call_tool(relay: &Value, call: Value) {
     use std::process::Stdio;
+    let call = super::fixture_defaults(call);
     let mut child = tokio::process::Command::new(relay["command"].as_str().unwrap())
         .args(
             relay["args"]

@@ -1,4 +1,4 @@
-import type { AutomaticContinuation, AutomaticQueue, Check, HoldActor, LiveSprintGraph, LiveSprintMember, OwnerHoldAction, PlanItem, ProjectRepo, RepoCheckout, Sprint, SprintEntry, SprintOrderPending, SprintOrderWorking, SprintRunMode, Task, TaskSession, WorkspaceState } from "./types";
+import type { AutomaticContinuation, AutomaticQueue, Check, HoldActor, LiveSprintGraph, LiveSprintMember, OwnerHoldAction, PlanItem, ProjectRepo, RepoCheckout, Sprint, SprintEntry, SprintOrderPending, SprintOrderWorking, SprintRevision, SprintRevisionChange, SprintRunMode, Task, TaskSession, WorkspaceState } from "./types";
 import { DomainError, entity, machineFor, nonempty, projectFor, requireFact } from "./core";
 
 /**
@@ -82,6 +82,7 @@ export function validatePlan(items: PlanItem[]) {
   items.forEach(item => {
     nonempty(item.description, "Description");
     if (item.title !== undefined) nonempty(item.title, "Task title");
+    if (item.complexity !== undefined) requireFact(["low", "normal", "high"].includes(item.complexity), "Complexity must be low, normal or high: " + item.key);
     item.dependsOn.forEach(key => requireFact(key !== item.key && byKey.has(key), "Self or missing dependency: " + item.key + " → " + key));
   });
   const visiting = new Set<string>(), visited = new Set<string>();
@@ -252,7 +253,25 @@ export function parseLiveSprintGraph(value: unknown): LiveSprintGraph | null {
   // At most one current candidate, and only a ranked one.
   if (notStarted.filter(p => p.next).length > 1 || notStarted.some(p => p.next && p.rank === null)) return null;
   return { contractVersion: 1, sprintId: value.sprintId, graphRevision: value.graphRevision, complete: value.complete, members, priority: [...value.priority],
-    order: { mode: o.mode, queueState: o.queueState as LiveSprintGraph["order"]["queueState"], working, notStarted } };
+    order: { mode: o.mode, queueState: o.queueState as LiveSprintGraph["order"]["queueState"], working, notStarted },
+    ...(Array.isArray(value.revisions) ? { revisions: parseRevisions(value.revisions) } : {}) };
+}
+const REVISION_STATUS = ["review", "changes_requested", "approved", "awaiting_owner", "applied", "rejected", "apply_refused", "superseded"];
+const text = (v: unknown, max: number): string | null => typeof v === "string" ? v.slice(0, max) : null;
+const ids = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && LIVE_ID.test(x)) : [];
+/** Revisions the service named; a malformed one is left out rather than guessed. */
+function parseRevisions(rows: unknown[]): SprintRevision[] {
+  const out: SprintRevision[] = [];
+  for (const r of rows.slice(-20)) {
+    if (!record(r) || typeof r.revisionId !== "string" || !REVISION_STATUS.includes(r.status as string)) continue;
+    const changes: SprintRevisionChange[] = (Array.isArray(r.changes) ? r.changes : []).filter(record).filter(c => ["update", "add", "propose_cancel"].includes(c.op as string)).map(c => ({
+      op: c.op as SprintRevisionChange["op"], memberId: text(c.member_id, 128), key: text(c.key, 100), title: text(c.title, 200),
+      description: text(c.description, 8000), dependsOn: Array.isArray(c.dependsOn) ? c.dependsOn.filter((d): d is string => typeof d === "string") : null, reason: text(c.reason, 2000),
+    }));
+    out.push({ revisionId: r.revisionId, taskId: typeof r.taskId === "string" ? r.taskId : null, status: r.status as SprintRevision["status"], applied: r.applied === true,
+      reason: text(r.reason, 2000) ?? "", changes, held: ids(r.held), updated: ids(r.updated), added: ids(r.added) });
+  }
+  return out;
 }
 /** Why a not-started member has no place in the order, in words. Unknown codes stay generic rather than guessed. */
 export function orderReasonText(reason: string | null): string | null {
@@ -261,5 +280,6 @@ export function orderReasonText(reason: string | null): string | null {
     task_missing: "Task details not loaded", task_state_unknown: "Task state unknown", sprint_closed: "Sprint closed",
     queue_paused: "Queue paused", queue_held: "Queue held", queue_complete: "Queue complete", queue_blocked: "Queue blocked",
     dependencies_blocked: "Waits for a prerequisite", native_worktree_unavailable: "Worktree unavailable",
+    sprint_revision_pending: "Waits for a sprint revision",
   } as Record<string, string>)[reason] ?? "Not in the order";
 }

@@ -27,7 +27,7 @@ mod mcp_discovery;
 mod mcp_redact;
 pub(crate) mod usage_refresh;
 // Display activity redacts selected tool inputs with the same credential rules.
-pub(crate) use mcp_redact::redact as redact_display_text;
+pub(crate) use mcp_redact::{redact as redact_display_text, secret_name};
 pub(crate) mod native;
 // The native owner read and its result identity use the same saved task records.
 pub(crate) use native::{product as native_product, queue_driven_mode};
@@ -47,9 +47,11 @@ pub(crate) mod retention;
 pub(crate) mod settings;
 pub mod settings_api;
 pub(crate) mod short_text;
+pub(crate) mod side_chat;
 pub(crate) mod sprint_graph;
 mod sprint_dag;
 pub(crate) mod sprint_live;
+pub(crate) mod sprint_revision;
 mod sprint_materialize;
 pub(crate) mod sprint_result;
 mod task_actions;
@@ -164,8 +166,51 @@ const PROJECT_OPERATIONS: &[&str] = &[
     "product.message",
     "product.comment",
 ];
-/// Git over a network and engine discovery can be slow, and they still answer inside the bridge's own deadline.
+/// The deadline of a machine action (a write, a Git or engine action). Owner reads
+/// ([`owner_read`]) have none: a slow read is never refused for being slow.
 const HELPER_DEADLINE: Duration = Duration::from_secs(30);
+/// Saved-facts reads of one project that may run at once. A read whose caller gave up
+/// keeps its thread (and slot) until the filesystem answers, so a stalled disk holds
+/// at most this many threads for its project; the screen's automatic retries wait for
+/// a slot instead of each starting another blocked read. Other projects never share it.
+const PROJECT_READS: usize = 2;
+
+/// Owner reads: they answer the owner's screen, start no task process and change no
+/// saved state. A read waits for a slot of its bounded lane and then runs until it
+/// completes, however slow its store, product records, files or Git are; only a genuine
+/// failure (unreadable, refused, the service stopping) ends it early. Actions keep
+/// [`HELPER_DEADLINE`].
+/// The set is shared with the clients (`workspace_protocol::read::owner_read_op`), which
+/// wait for these answers without a request deadline.
+pub(crate) fn owner_read(op: &str, params: &Value) -> bool {
+    workspace_protocol::read::owner_read_op(op, params)
+}
+
+/// A test-only delay inside an owner read of `op`, standing in for a slow store or disk.
+#[cfg(test)]
+static READ_DELAY: std::sync::Mutex<Option<(&'static str, Duration)>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+fn slow_read(op: &str) {
+    let delay = *READ_DELAY.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, delay)) = delay.filter(|(slow, _)| *slow == op) {
+        std::thread::sleep(delay);
+    }
+}
+#[cfg(not(test))]
+fn slow_read(_: &str) {}
+
+/// The saved-facts read slots of `project` (see [`PROJECT_READS`]).
+fn project_read_slots(project: &str) -> std::sync::Arc<Semaphore> {
+    static SLOTS: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Semaphore>>>,
+    > = std::sync::LazyLock::new(Default::default);
+    SLOTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(project.to_owned())
+        .or_insert_with(|| std::sync::Arc::new(Semaphore::new(PROJECT_READS)))
+        .clone()
+}
 
 /// Whether a successful call can change what a sprint does next, so the sprint loop looks at that project now.
 /// Reads never do; neither does an automatic settle that accepted nothing (the loop's own retry) nor a short model text.
@@ -174,7 +219,7 @@ fn sprint_wake(call: &MachineCall) -> bool {
         "product.sprint" => call.params["action"] != "live_graph",
         "product.integrate" => true,
         // An automatic settle that did accept is decided by the reply (see `machine`).
-        "product.task" => !short_text::handles(&call.params),
+        "product.task" => !short_text::handles(&call.params) && !side_chat::handles(&call.params),
         _ => false,
     }
 }
@@ -235,12 +280,20 @@ impl crate::Service {
                 // A planning turn of the sprint being deleted stops on the next pass.
                 self.sprint_wake.project(project);
             }
-            return match tokio::time::timeout(Duration::from_secs(24), self.delete_sprint(call))
-                .await
+            // The answer the deletion has reached so far: a timeout answers with its concrete
+            // blocker when one is known, never a bare "not confirmed".
+            let reached = std::sync::Mutex::new(None::<Value>);
+            return match tokio::time::timeout(
+                Duration::from_secs(24),
+                self.delete_sprint(call, &reached),
+            )
+            .await
             {
                 Ok(reply) => reply,
-                Err(_) => Ok(json!({"ok":true,"result":{"done":false,
-                    "reason":"Deletion is not confirmed yet. The queue stays stopped. Retry Delete sprint."}})),
+                Err(_) => Ok(reached.into_inner().unwrap_or_else(|e| e.into_inner()).unwrap_or_else(|| {
+                    json!({"ok":true,"result":{"done":false,
+                        "reason":"Cortex is still stopping this sprint's runs or deleting its tasks. The queue stays stopped, and this screen updates when that pass ends. Retry Delete sprint if it still shows as deleting."}})
+                })),
             };
         }
         // Owner Git mutations share the execution control lane: a Resume or
@@ -302,7 +355,7 @@ impl crate::Service {
         if let (true, Some(project), Ok(reply)) = (wakes, project.as_deref(), reply.as_ref()) {
             let idle_settle =
                 call_action.as_deref() == Some("auto_ready") && reply["result"]["accepted"] != true;
-            let graph_write = matches!(call_action.as_deref(), Some("set_dependency" | "move_priority"));
+            let graph_write = matches!(call_action.as_deref(), Some("set_dependency" | "move_priority" | "apply_revision" | "reject_revision"));
             if reply["ok"] == true && !idle_settle && (!graph_write || reply["result"]["changed"] == true) {
                 self.sprint_wake.project(project);
                 if graph_write {
@@ -437,7 +490,11 @@ impl crate::Service {
         Ok(Ok(()))
     }
 
-    async fn delete_sprint(&self, call: MachineCall) -> io::Result<Value> {
+    async fn delete_sprint(
+        &self,
+        call: MachineCall,
+        reached: &std::sync::Mutex<Option<Value>>,
+    ) -> io::Result<Value> {
         let project = call
             .project_id
             .as_deref()
@@ -457,8 +514,11 @@ impl crate::Service {
         if prepared["ok"] != true || prepared["result"]["done"] == true {
             return Ok(prepared);
         }
-        let mut stop_failed = false;
+        let mut unconfirmed = 0usize;
         if let Some(executions) = prepared["result"]["executionIds"].as_array() {
+            *reached.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!({"ok":true,"result":{"done":false,
+                "reason":format!("Cortex is still stopping {} run{} of this sprint. The queue stays stopped, and this screen updates when the deletion pass ends. Retry Delete sprint if it still shows as deleting.",
+                    executions.len(), if executions.len() == 1 { "" } else { "s" })}}));
             for execution in executions {
                 let id = execution
                     .as_str()
@@ -469,14 +529,13 @@ impl crate::Service {
                     .await
                     .is_err()
                 {
-                    stop_failed = true;
+                    unconfirmed += 1;
                 }
             }
         }
-        if stop_failed {
-            return Ok(json!({"ok":true,"result":{"done":false,
-                "reason":"An execution could not be stopped or confirmed. The queue stays stopped. Retry Delete sprint."}}));
-        }
+        // A stop that was refused or not confirmed does not end the pass: the purge itself
+        // refuses every task that is not quiet and names it, and every other task is
+        // deleted now instead of on some later retry.
         params["action"] = json!("delete_finish");
         let until = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
@@ -490,12 +549,22 @@ impl crate::Service {
                     false,
                 )
                 .await?;
+            let mut reply = reply;
+            if unconfirmed > 0 && reply["ok"] == true && reply["result"]["done"] != true {
+                if let Some(reason) = reply["result"]["reason"].as_str() {
+                    reply["result"]["reason"] = json!(format!(
+                        "{reason} {unconfirmed} run{} did not confirm its stop when asked.",
+                        if unconfirmed == 1 { "" } else { "s" }
+                    ));
+                }
+            }
             if reply["ok"] != true
                 || reply["result"]["done"] == true
                 || tokio::time::Instant::now() >= until
             {
                 return Ok(reply);
             }
+            *reached.lock().unwrap_or_else(|e| e.into_inner()) = Some(reply);
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
     }
@@ -581,13 +650,13 @@ impl crate::Service {
                     // observation and the result reviews are product facts a worker read
                     // never returns. The project/store binding is still enforced first.
                     let bound = root.clone();
+                    // An owner read: it waits for the disk however long that takes.
                     let check = tokio::task::spawn_blocking(move || {
+                        let _disk = cortex_core::io_priority::raised();
+                        let _waits = context::owner_read();
                         task_facts::materialized(&bound, "").map_err(|e| failure(e.code))
                     });
-                    tokio::time::timeout(HELPER_DEADLINE, check)
-                        .await
-                        .map_err(|_| failure("machine_tool_timeout"))?
-                        .map_err(|_| failure("machine_tool_failed"))??;
+                    check.await.map_err(|_| failure("machine_tool_failed"))??;
                     let workers = runtime
                         .owner_workers(call.project_id.as_deref().unwrap(), call.params)
                         .await
@@ -601,14 +670,25 @@ impl crate::Service {
                 // The folder observation results are compared with depends on neither:
                 // it runs while they are read (see `owner_facts_observed`). A recent
                 // observation of the unchanged folder is reused (`recent_observation`).
+                let project = call.project_id.clone().unwrap();
+                // Bounded per project: retries of a stalled read queue here, not as threads.
+                // An owner read has no deadline: it waits for a slot, then for the read.
+                let slot = project_read_slots(&project)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| failure("service_stopping"))?;
                 let observing = tokio::spawn(task_facts::recent_observation(root.clone()));
                 let config = self.config.clone();
-                let project = call.project_id.clone().unwrap();
                 // A deferring read (the screen's first read of what it shows) never waits
                 // for the Ready-to-merge inspection or a slow folder observation: those parts
                 // say they are pending, and the screen's next read settles them.
                 let defer = call.params["defer"] == true;
                 let read = tokio::task::spawn_blocking(move || -> io::Result<Value> {
+                    let _slot = slot;
+                    // The owner's read runs at the session's disk priority, not the
+                    // lowest level the service unit gives task processes; restored after.
+                    let _waits = context::owner_read();
+                    let _disk = cortex_core::io_priority::raised();
                     let runtime = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()?;
@@ -617,15 +697,14 @@ impl crate::Service {
                             &root,
                             &config.state_dir,
                             &project,
-                            &mut git::Git::for_service(&config),
+                            &mut git::Git::for_service(&config).owner_read(),
                             defer,
                         ))
                         .map_err(|e| failure(e.code))
                 });
-                let saved = tokio::time::timeout(HELPER_DEADLINE, read)
+                let saved = read
                     .await
-                    .map_err(|_| failure("machine_tool_timeout"))
-                    .and_then(|r| r.map_err(|_| failure("machine_tool_failed")))
+                    .map_err(|_| failure("machine_tool_failed"))
                     .and_then(|r| r);
                 let saved = match saved {
                     Ok(saved) => saved,
@@ -661,7 +740,9 @@ impl crate::Service {
         if !native_supported {
             return Err(failure("unsupported_operation"));
         }
-        let scoped = PROJECT_OPERATIONS.contains(&call.op.as_str());
+        // A server drafted in a project's editor is discovered against that project's registry.
+        let scoped = PROJECT_OPERATIONS.contains(&call.op.as_str())
+            || (call.op == "config.mcp.discover" && call.project_id.is_some());
         let (root, projects, archive_runtime) = {
             let state = self.state.lock().await;
             let root = if scoped {
@@ -696,7 +777,12 @@ impl crate::Service {
         if let Some(root) = &root {
             crate::project_guard::check(root)?;
         }
+        // Reads, settings and repository inspections answer the owner's screen and start
+        // no task process: they run at the session's disk priority (`io_priority`), and
+        // they have no deadline (`owner_read`). Only an action's deadline is used below.
+        let owner_read = owner_read(&call.op, &call.params);
         let deadline = tokio::time::Instant::now() + HELPER_DEADLINE;
+        // Every read has a lane of its own, so a slow read never holds an action's slot.
         let slots = match call.op.as_str() {
             "overview" | "project.config.read" | "config.read" => self.helper.settings.clone(),
             "repo.snapshot" => self.helper.inspections.clone(),
@@ -704,8 +790,8 @@ impl crate::Service {
             "engine.connection" if call.params["action"] == "login_command" => {
                 self.helper.inspections.clone()
             }
-            "repo.file" | "repo.file.lease.status" | "repo.locate" | "repo.list" | "repo.skills" | "product.read"
-            | "product.facts" | "workers" | "command.output" => self.helper.reads.clone(),
+            "repo.file" | "repo.file.lease.status" | "repo.locate" | "repo.list" | "repo.skills" | "repo.context"
+            | "product.read" | "product.facts" | "product.board" | "workers" | "command.output" => self.helper.reads.clone(),
             _ => self.helper.actions.clone(),
         };
         let sprint_link = call.op == "product.task" && call.params["action"] == "sprint";
@@ -714,6 +800,9 @@ impl crate::Service {
             // unbounded queue of threads blocked on the machine-state lock.
             self.helper.sprint_links.clone().try_acquire_owned()
                 .map_err(|_| failure("machine_busy"))?
+        } else if owner_read {
+            // A read queues for its lane however long that takes: never `machine_busy`.
+            slots.acquire_owned().await.map_err(|_| failure("service_stopping"))?
         } else {
             tokio::time::timeout_at(deadline, slots.acquire_owned())
                 .await
@@ -723,11 +812,18 @@ impl crate::Service {
         let config = self.config.clone();
         let state = config.state_dir.clone();
         let editor = self.editor.clone();
+        // A sprint deletion pass can outlive the caller that asked for it (its bounded owner
+        // action may answer first, and a purge in progress is never cut short). Whatever it
+        // changed is announced when it ends, so no screen keeps a read from part-way through.
+        let deletion_pass = (call.op == "product.sprint" && call.params["action"] == "delete_finish")
+            .then(|| (self.events.clone(), call.project_id.clone().unwrap_or_default()));
         let (mut send, receive) = tokio::sync::oneshot::channel();
         // Bounded native lanes retain their permit even if a filesystem call is stuck.
         // A stuck mount cannot occupy the async reactor or delay runtime shutdown.
         std::thread::Builder::new().name("machine-native".into()).spawn(move || {
             let _slot = slot;
+            let _disk = owner_read.then(cortex_core::io_priority::raised);
+            let _waits = owner_read.then(context::owner_read);
             let result = (|| {
                 let intent = if matches!(call.op.as_str(), "git" | "git_init") {
                     if send.is_closed() { return Err(failure("machine_tool_cancelled")); }
@@ -739,21 +835,28 @@ impl crate::Service {
                 } else {None};
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
                 let result = runtime.block_on(async {
+                    // An owner read runs until it completes; an action until its deadline.
+                    let until = async {
+                        if owner_read { std::future::pending::<()>().await } else { tokio::time::sleep_until(deadline).await }
+                    };
                     tokio::select! {
-                        reply = tokio::time::timeout_at(deadline, async {
+                        reply = async {
+                            slow_read(&call.op);
                             let project = call.project_id.as_deref().unwrap_or("");
                             if editor::handles(&call.op) {
                                 let root = root.as_deref().ok_or_else(|| native::refuse("project_required", "Unknown project."))?;
-                                editor::run(&editor, &call.op, root, &state, project, &call.params, &mut git::Git::for_service(&config)).await
+                                let git = git::Git::for_service(&config);
+                                let mut git = if owner_read { git.owner_read() } else { git };
+                                editor::run(&editor, &call.op, root, &state, project, &call.params, &mut git).await
                             } else if call.op == "product.task" && call.params["action"] == "archive" {
                                 let root = root.as_deref().ok_or_else(|| native::refuse("project_required", "Unknown project."))?;
                                 task_actions::run_archive(root, project, &state, &call.params, archive_runtime.as_ref()).await
                             } else {
                                 native::run(&call.op, root.as_deref(), project, &state, &call.params, &projects, &config, None, deadline.into_std()).await
                             }
-                        }) =>
-                            reply.unwrap_or_else(|_|Err(native::refuse("machine_tool_timeout",
-                                "The operation deadline expired. A write may have completed; inspect before retrying."))),
+                        } => reply,
+                        _ = until => Err(native::refuse("machine_tool_timeout",
+                            "The operation deadline expired. A write may have completed; inspect before retrying.")),
                         _ = send.closed() => Err(native::refuse("machine_tool_cancelled",
                             "The caller disconnected. Inspect Git before retrying a write.")),
                     }
@@ -767,7 +870,13 @@ impl crate::Service {
                         || (call.op == "engine.connection" && e.message == "InstallUnresolvable"))) {
                     return Err(failure("machine_tool_failed"));
                 }
-                let reply = native::envelope(result);
+                let mut reply = native::envelope(result);
+                if let Some((events, project)) = &deletion_pass {
+                    let progressed = reply["result"].as_object_mut().and_then(|r| r.remove("progressed"));
+                    if reply["ok"] == true && progressed == Some(Value::Bool(true)) {
+                        let _ = events.send(json!({"projectId":project,"type":"invalidation"}));
+                    }
+                }
                 if let Some(intent) = intent {
                     if intent.finish(&state, &reply).is_err() {
                         return Err(failure("machine_outcome_unknown"));
@@ -778,10 +887,15 @@ impl crate::Service {
             })();
             let _ = send.send(result);
         })?;
-        let reply = tokio::time::timeout_at(deadline, receive)
-            .await
-            .map_err(|_| failure("machine_tool_timeout"))?
-            .map_err(|_| failure("machine_tool_failed"))??;
+        // The helper answers by its own deadline (an action) or when it completes (a read).
+        let reply = if owner_read {
+            receive.await.map_err(|_| failure("machine_tool_failed"))??
+        } else {
+            tokio::time::timeout_at(deadline, receive)
+                .await
+                .map_err(|_| failure("machine_tool_timeout"))?
+                .map_err(|_| failure("machine_tool_failed"))??
+        };
         Ok(reply)
     }
 }
@@ -830,5 +944,86 @@ mod lane_tests {
         assert_eq!(reply["ok"], true, "{reply}");
         drop(held);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A slow read is never refused for being slow: it waits for its lane's slot past the
+    /// action deadline (no `machine_busy`), and a read that itself runs past the deadline
+    /// answers when it completes (no `machine_tool_timeout`). The clock is paused, so the
+    /// deadline passes in virtual time while the read is held.
+    #[tokio::test(start_paused = true)]
+    async fn a_read_slower_than_the_action_deadline_completes() {
+        let base = std::env::temp_dir().join(format!("cw-slow-read-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::set_permissions(&base, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        let service = Service::bind(Config {
+            runtime_dir: base.join("runtime"),
+            state_dir: base.join("state"),
+            allowed_root: base.clone(),
+            launch: LaunchSpec::bare(),
+            request_timeout: Duration::from_secs(30),
+            shutdown_timeout: Duration::from_millis(100),
+            event_capacity: 16,
+        })
+        .await
+        .unwrap();
+        let read = || {
+            service.machine(MachineCall {
+                op: "overview".into(),
+                project_id: None,
+                params: json!({}),
+            })
+        };
+        // Every settings slot is held for twice the deadline: the read queues, then runs.
+        let held = service.helper.settings.clone().acquire_many_owned(2).await.unwrap();
+        let began = tokio::time::Instant::now();
+        let (reply, ()) = tokio::join!(read(), async {
+            tokio::time::sleep(HELPER_DEADLINE * 2).await;
+            drop(held);
+        });
+        assert!(began.elapsed() >= HELPER_DEADLINE * 2);
+        assert_eq!(reply.unwrap()["ok"], true);
+        // The read itself is slow: the deadline passes while it runs, and it still answers.
+        *READ_DELAY.lock().unwrap() = Some(("overview", Duration::from_millis(300)));
+        let began = tokio::time::Instant::now();
+        let (reply, ()) = tokio::join!(read(), tokio::time::sleep(HELPER_DEADLINE * 2));
+        *READ_DELAY.lock().unwrap() = None;
+        assert!(began.elapsed() >= HELPER_DEADLINE * 2);
+        assert_eq!(reply.unwrap()["ok"], true);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn reads_have_no_deadline_and_actions_keep_theirs() {
+        for op in ["product.read", "product.facts", "product.board", "workers", "repo.snapshot", "repo.context", "config.read"] {
+            assert!(owner_read(op, &json!({})), "{op}");
+        }
+        assert!(owner_read("product.sprint", &json!({"action":"live_graph"})));
+        for (op, action) in [("product.sprint", "delete"), ("product.task", "close"), ("git", "push"), ("config.save", "")] {
+            assert!(!owner_read(op, &json!({"action":action})), "{op} {action}");
+        }
+    }
+
+    /// A project whose saved-facts reads are stalled on its disk holds at most
+    /// `PROJECT_READS` threads: further retries wait for a slot instead of starting
+    /// another blocked read, and another project's reads never wait for its slots.
+    #[tokio::test]
+    async fn stalled_project_reads_are_bounded_per_project() {
+        let stalled = format!("wp_stalled_{}", std::process::id());
+        let other = format!("wp_other_{}", std::process::id());
+        let held = project_read_slots(&stalled)
+            .acquire_many_owned(PROJECT_READS as u32)
+            .await
+            .unwrap();
+        assert!(
+            project_read_slots(&stalled).try_acquire_owned().is_err(),
+            "the same project shares one bounded set of slots"
+        );
+        let free = project_read_slots(&other)
+            .try_acquire_many_owned(PROJECT_READS as u32)
+            .expect("another project's reads do not share the stalled project's slots");
+        drop(free);
+        drop(held);
+        assert!(project_read_slots(&stalled).try_acquire_owned().is_ok());
     }
 }

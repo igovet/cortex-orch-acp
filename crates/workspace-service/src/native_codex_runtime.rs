@@ -47,6 +47,63 @@ pub(crate) const BASE: &[&str] = &[
 ];
 const FAILURE: &str = "cortex codex native feature/MCP check failed";
 
+/// Project-root paths the Cortex worker permission profile keeps read-only on top
+/// of Codex's `:workspace` profile (which already keeps `.git`, `.codex` and
+/// `.agents` read-only): Cortex private state and fixed credential file names.
+/// Codex 0.166 accepts only exact paths (or a trailing `/**`) for `read`; a glob
+/// accepts only `deny`, which would also hide the file from reading, so a
+/// credential name pattern elsewhere in the project cannot be expressed here.
+pub(crate) const READ_ONLY_PROJECT_PATHS: &[&str] = &[
+    ".cortex",
+    ".cortex-dev",
+    ".cortex-dev-owner.json",
+    ".cortex-workspace-dev.json",
+    ".env",
+    ".env.local",
+    ".env.development",
+    ".env.production",
+    ".env.test",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".htpasswd",
+    ".git-credentials",
+    ".kube",
+    "credentials",
+    "credentials.json",
+];
+/// The non-persistent session layers that define the Cortex worker permission
+/// profile (`native_engine_policy::CODEX_WORKER_PROFILE`), which codex-acp offers as
+/// the mode `permission-profile:cortex-workspace`. A write there fails Codex's own
+/// writable-path check, so `apply_patch` sends an approval request the runtime
+/// answers (observed with Codex 0.166.0 and codex-acp 2.6.0). Codex requires
+/// `default_permissions` once `[permissions]` is defined; `:workspace` is the
+/// built-in profile `workspace-write` maps to. codex-acp gives a profile mode the
+/// effective `approval_policy` and `approvals_reviewer` of the config, which the
+/// owner's `config.toml` may set to `never`, a granular policy without sandbox
+/// approvals or the automatic reviewer: these layers pin `on-request` with the
+/// user reviewer, so every escalation reaches the runtime. The built-in modes
+/// carry their own policy and are unaffected.
+pub(crate) fn permission_layers() -> Vec<String> {
+    let paths: Vec<String> = READ_ONLY_PROJECT_PATHS
+        .iter()
+        .map(|p| format!("{}=\"read\"", toml_string(p)))
+        .collect();
+    [
+        "default_permissions=\":workspace\"".to_owned(),
+        format!(
+            "permissions.{}={{extends=\":workspace\",filesystem={{\":project_roots\"={{{}}}}}}}",
+            crate::native_engine_policy::CODEX_WORKER_PROFILE,
+            paths.join(",")
+        ),
+        "approval_policy=\"on-request\"".to_owned(),
+        "approvals_reviewer=\"user\"".to_owned(),
+    ]
+    .into_iter()
+    .flat_map(|layer| ["-c".to_owned(), layer])
+    .collect()
+}
+
 /// Linux passes the artifact path as one argument to this native interpreter.
 /// No shell or PATH lookup is used; child environments retain Python locale semantics.
 pub fn artifact(service: &Path, binary: &Path) -> io::Result<String> {
@@ -334,6 +391,7 @@ async fn verify(binary: &OsString) -> io::Result<Vec<String>> {
     {
         return Err(invalid());
     }
+    args.extend(permission_layers());
     args.extend(["-c".to_owned(), trust_override(&std::env::current_dir()?)?]);
     args.push("app-server".to_owned());
     Ok(args)
@@ -499,5 +557,60 @@ mod tests {
         );
         assert!(trust_override(Path::new("relative")).is_err());
         assert!(trust_override(Path::new(OsStr::from_bytes(b"/\xff"))).is_err());
+    }
+
+    /// The worker profile layers: one profile extending `:workspace` with the
+    /// read-only project paths, the required default and the pinned approval route.
+    #[test]
+    fn permission_layers_define_the_worker_profile() {
+        let layers = super::permission_layers();
+        let values: Vec<&str> = layers.iter().skip(1).step_by(2).map(String::as_str).collect();
+        assert!(layers.iter().step_by(2).all(|flag| flag == "-c"));
+        assert_eq!(values[0], r#"default_permissions=":workspace""#);
+        assert!(values[1].starts_with(
+            r#"permissions.cortex-workspace={extends=":workspace",filesystem={":project_roots"={".cortex"="read",".cortex-dev"="read","#
+        ));
+        assert!(values[1].ends_with(r#""credentials.json"="read"}}}"#));
+        assert_eq!(&values[2..], [r#"approval_policy="on-request""#, r#"approvals_reviewer="user""#]);
+        assert_eq!(
+            crate::native_engine_policy::CODEX_WORKER_PROFILE_MODE,
+            format!("permission-profile:{}", crate::native_engine_policy::CODEX_WORKER_PROFILE)
+        );
+    }
+
+    /// No model call: the real bundled Codex runs a command in its own sandbox under
+    /// the worker profile. A write into a read-only project path fails there and an
+    /// ordinary project write succeeds (`CORTEX_TEST_CODEX_CLI` names the binary).
+    #[test]
+    #[ignore = "requires the bundled Codex CLI 0.166.0 binary and unprivileged namespaces"]
+    fn real_codex_sandbox_keeps_profile_paths_read_only() {
+        let binary = std::env::var_os("CORTEX_TEST_CODEX_CLI").expect("set CORTEX_TEST_CODEX_CLI");
+        let base = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap()
+            .join(format!(".cache/cortex-profile-probe-{}", std::process::id()));
+        let (project, codex_home) = (base.join("project"), base.join("codex-home"));
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::create_dir_all(project.join(".cortex")).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(&codex_home).unwrap();
+        let run = |target: &str| {
+            let mut args = super::permission_layers();
+            args.extend(["sandbox", "-P", crate::native_engine_policy::CODEX_WORKER_PROFILE, "-C"].map(String::from));
+            args.push(project.to_str().unwrap().to_owned());
+            args.extend(["--", "sh", "-c", &format!("mkdir -p \"$(dirname {target})\" && echo x > {target}")].map(String::from));
+            std::process::Command::new(&binary)
+                .args(&args)
+                .env("CODEX_HOME", &codex_home)
+                .current_dir(&project)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        assert!(run("src/ordinary"));
+        for target in [".cortex/injected", ".cortex-dev/injected", ".env", ".cortex-dev-owner.json", ".git/qa-note"] {
+            assert!(!run(target), "{target}");
+            assert!(!project.join(target).exists(), "{target}");
+        }
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

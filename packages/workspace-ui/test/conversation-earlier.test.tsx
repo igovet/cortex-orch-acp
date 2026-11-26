@@ -9,6 +9,7 @@ import { createWorkspaceStore } from "../src/store";
 import { STEP_PREFIX } from "../src/tool-names";
 import { conversationOf } from "../src/port/history";
 import { firstWindowEntries } from "../src/first-view";
+import { edgeReach } from "../src/edge-pager";
 import { capabilitiesWire, flush, scriptedTransport, wireDecision, wireTask } from "./support";
 
 /**
@@ -371,7 +372,9 @@ it("reads a short conversation in one read and shows it exactly as a read from t
 });
 
 /** Model the flow and scroll bounds in JSDOM (which has no layout). Each row is 50 px unless overridden. */
-async function openPage(svc: ReturnType<typeof service>, rowHeight = (_row: Element) => 50, firstWindow: (() => number) | undefined = PAGE_SCREEN) {
+async function openPage(svc: ReturnType<typeof service>, rowOf = (_row: Element) => 50, firstWindow: (() => number) | undefined = PAGE_SCREEN) {
+  // The reserve above the rows (FollowEdge in follow.ts) is as tall as the follow controller sets it; every other row as given.
+  const rowHeight = (row: Element) => row.classList.contains("ws-reserve") ? parseFloat((row as HTMLElement).style.height) || 0 : rowOf(row);
   const observers: (() => void)[] = [];
   vi.stubGlobal("ResizeObserver", class { constructor(cb: () => void) { observers.push(cb); } observe() {} disconnect() {} });
   history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}/t/task-1`);
@@ -408,15 +411,17 @@ it("scrolling near the top reads the earlier part with a Loading line, and the r
   box.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
   scrollTo(120);
   const anchor = [...inner.children].find(row => !row.hasAttribute("data-follow-skip") && row.getBoundingClientRect().bottom > 0)!;
-  const y = anchor.getBoundingClientRect().top, rows = inner.children.length;
+  const reserve = () => parseFloat(inner.querySelector<HTMLElement>(".ws-reserve")?.style.height ?? "") || 0;
+  const y = anchor.getBoundingClientRect().top, rows = inner.children.length, room = reserve();
   try { await vi.waitFor(() => expect(root.textContent).toContain("Loading earlier…")); }
   finally { release(); }
   await vi.waitFor(() => expect(inner.children.length).toBeGreaterThan(rows), { timeout: 4000 });
   resize();
-  // The same node, at the same place on screen: the scroll position moved by exactly what was put above it.
+  // The same node, at the same place on screen. What was put above it took the reserve's room first: the scroll position
+  // moved only by what the reserve could not give (here it was grown in one step, by the difference).
   expect(anchor.isConnected).toBe(true);
   expect(anchor.getBoundingClientRect().top).toBe(y);
-  expect(top() - 120).toBe((inner.children.length - rows) * 50);
+  expect(top() - 120).toBe((inner.children.length - rows) * 50 + reserve() - room);
   expect(root.textContent).toContain("Earlier conversation is not shown.");
   expect(root.textContent).not.toContain("Loading earlier…");
   // Nothing new was counted as missed by the reader who scrolled up.
@@ -447,7 +452,7 @@ it("Show earlier reads the earlier part; a failed read says so with Retry, and t
   expect(root.querySelector(".brief")!.hasAttribute("data-follow-skip")).toBe(false);
 });
 
-it("automatically fills a short following feed, anchors its tail, and stops once the marker is a screen above", async () => {
+it("automatically fills a short following feed, anchors its tail, and stops once the marker is out of the edge reach above", async () => {
   const svc = service({ earlierDelay: 20 });
   for (let i = 0; i < 2200; i++) {
     if (i === 2000 || (i < 2000 && i % 80 === 0)) svc.add("user", `Sparse message ${i}`);
@@ -464,7 +469,7 @@ it("automatically fills a short following feed, anchors its tail, and stops once
   // No scroll input: the layout callback runs even while the feed is following.
   resize();
   const marker = inner.querySelector(".ws-earlier")!;
-  await vi.waitFor(() => expect(marker.getBoundingClientRect().bottom).toBeLessThanOrEqual(-box.clientHeight));
+  await vi.waitFor(() => expect(marker.getBoundingClientRect().bottom).toBeLessThanOrEqual(-edgeReach(box.clientHeight)));
   expect(svc.reads.length).toBeGreaterThan(4);
   expect(held.isConnected).toBe(true);
   expect(held.getBoundingClientRect().top).toBe(y);
@@ -637,4 +642,38 @@ it("counts plumbing folds only when the Conversation tool view displays them", a
   await vi.waitFor(() => expect(inner.textContent).toContain("Worked "));
   expect(svc.reads.map(r => r.cursor)).toEqual([null, "np1.100.201"]);
   expect(inner.textContent).not.toContain("Older message ");
+});
+
+it("scrolling in the middle of a long conversation reads nothing; approaching the top reads exactly once, and the viewed row keeps its place", async () => {
+  const svc = service();
+  long(svc, 1000);
+  const { box, inner, resize, scrollTo, top } = await openPage(svc, row => row.classList.contains("brief") ? 1600 : 50);
+  box.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+  const marker = inner.querySelector(".ws-earlier")!;
+  const settled = svc.reads.length;
+  // The middle of the feed: the boundary is far above the viewport, outside the reach.
+  scrollTo(3000);
+  expect(marker.getBoundingClientRect().bottom).toBeLessThan(-edgeReach(400));
+  for (let y = 3000; y > 2600; y -= 20) scrollTo(y);
+  for (let y = 2600; y < 3200; y += 20) scrollTo(y);
+  resize(); await flush();
+  expect(svc.reads).toHaveLength(settled);
+  // Approaching the boundary: one read for the whole approach, however many scroll events it takes.
+  const release = svc.holdNext();
+  const edge = top() + marker.getBoundingClientRect().bottom + edgeReach(400);
+  for (let y = 3200; y > edge + 100; y -= 100) scrollTo(y);
+  expect(svc.reads).toHaveLength(settled);
+  for (let y = edge - 10; y > edge - 200; y -= 10) scrollTo(y);
+  await vi.waitFor(() => expect(svc.reads.length).toBe(settled + 1));
+  await flush();
+  scrollTo(top() - 5); scrollTo(top() - 5); resize();
+  await flush();
+  expect(svc.reads).toHaveLength(settled + 1);
+  const anchor = [...inner.children].find(row => !row.hasAttribute("data-follow-skip") && row.getBoundingClientRect().bottom > 0)!;
+  const y = anchor.getBoundingClientRect().top, rows = inner.children.length;
+  release();
+  await vi.waitFor(() => expect(inner.children.length).toBeGreaterThan(rows), { timeout: 4000 });
+  resize();
+  expect(anchor.isConnected).toBe(true);
+  expect(anchor.getBoundingClientRect().top).toBe(y);
 });

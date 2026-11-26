@@ -63,9 +63,14 @@ fn strings(v: &Value) -> Fallible<Vec<String>> {
         })
         .collect()
 }
-fn configuration(server: &Value, config: &crate::Config) -> Fallible<Spec> {
+fn configuration(
+    server: &Value,
+    config: &crate::Config,
+    registry: Option<&std::path::Path>,
+) -> Fallible<Spec> {
     let folder = project_config::owner_folder(config).map_err(|_| "PortableError")?;
-    let saved = project_config::read_plain(&folder.join("mcp-servers.json"), true)
+    let file = registry.map_or_else(|| folder.join("mcp-servers.json"), std::path::Path::to_path_buf);
+    let saved = project_config::read_plain(&file, true)
         .map_err(|_| "PortableError")?
         .map(|b| serde_json::from_slice::<Value>(&b).map_err(|_| "PortableError"))
         .transpose()?
@@ -438,8 +443,29 @@ fn project(spec: &Spec, tools: Vec<Value>) -> Fallible<Value> {
 pub(super) async fn discover(server: &Value, config: &crate::Config) -> Value {
     discover_with_timeout(server, config, Duration::from_secs(15)).await
 }
+/// Discovery for a server drafted in one project's editor: a `keep` environment value comes
+/// from that project's own registry, never from the machine registry.
+pub(super) async fn discover_in_project(
+    server: &Value,
+    config: &crate::Config,
+    root: &std::path::Path,
+) -> Value {
+    let file = match super::project_config_save::user_mcp::project_path(root, config) {
+        Ok(file) => file,
+        Err(_) => return unsupported("configuration", "PortableError"),
+    };
+    discover_with_registry(server, config, Duration::from_secs(15), Some(&file)).await
+}
 async fn discover_with_timeout(server: &Value, config: &crate::Config, timeout: Duration) -> Value {
-    let spec = match configuration(server, config) {
+    discover_with_registry(server, config, timeout, None).await
+}
+async fn discover_with_registry(
+    server: &Value,
+    config: &crate::Config,
+    timeout: Duration,
+    registry: Option<&std::path::Path>,
+) -> Value {
+    let spec = match configuration(server, config, registry) {
         Ok(s) => s,
         Err(e) => return unsupported("configuration", e),
     };

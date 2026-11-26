@@ -312,3 +312,18 @@ it("names every dialog by its visible title, following it as it changes, and by 
   expect(dialog.hasAttribute("aria-labelledby")).toBe(false);
   expect(name()).toBe("Stop this worker?");
 });
+
+it("a stale-result refusal offers Rerun checks inside the finish dialog and sends rerun_check", async () => {
+  const h = mount(true, undefined, [{ name: "Unit", outcome: "passed", detail: "", kind: "automated", command: ["npm", "test"], rerunnable: true }]);
+  h.open({ kind: "merge", taskId: "t", how: "squash" });
+  button("Confirm merge into main").click();
+  await settle();
+  h.script.receipt(false, undefined, "workspace_drift", "Files changed after acceptance. Rerun checks and accept the new result.");
+  await settle();
+  expect(active()).not.toBeNull();
+  const rerun = button("Rerun checks");
+  expect(rerun).toBeTruthy();
+  rerun.click();
+  await settle();
+  expect(h.script.commands.at(-1)?.payload).toMatchObject({ type: "rerun_check", taskId: "t", digest: "digest", checkIndex: 0 });
+});

@@ -527,16 +527,17 @@ it("puts a background column change straight into normal layout", async () => {
 it.each([
   { view: "project Board", path: BOARD },
   { view: "machine Board", path: `/m/${LOCAL_MACHINE_ID}/board` },
-])("labels a displayed preview on the $view only until the matching live presentation arrives", async ({ path }) => {
+])("shows a saved preview on the $view without a line while live reads are slow, and says so only once they fail", async ({ path }) => {
   const s = everything();
   await mount(s.port, path);
   s.emit({ kind: "preview", slice: { project, tasks: [task("saved")], sessions: [] },
     facts: { projectId: project.id, openBranch: "main", defaultBranch: "main", repo: null, workers: [], reviews: [], overlays: {}, sprints: [] } });
   expect($('.card[data-task="saved"]')).not.toBeNull();
-  expect(document.body.textContent).toContain("Saved view; checking live state");
+  // A live read under way, however slow, is no issue: the confirmed saved view stands with no line and no error.
+  expect(document.body.textContent).not.toContain("Saved view;");
+  expect($('[role="alert"]')).toBeNull();
   s.emit({ kind: "connection", connection: { state: "disconnected", reason: "Connection lost", at: Date.now() } });
   expect(document.body.textContent).toContain("Saved view; live state unavailable");
-  expect(document.body.textContent).not.toContain("Saved view; checking live state");
   expect($('.card[data-task="saved"]')).not.toBeNull();
   s.emit({ kind: "connection", connection: { state: "connected", reason: null, at: Date.now() } });
   s.emit(projection("1", world([task("live")])));
@@ -782,5 +783,71 @@ describe("the Inspector", () => {
     s.emit(projection("2", world([task("w", { status: "working", process: "live", title: "Task w, later" })])));
     await settled();
     expect(before.isConnected).toBe(true);
+  });
+});
+
+describe("an owner action during a background read", () => {
+  it("reads only the action's project, once, with no full reread and no delayed refresh after it", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-23T12:00:00Z"), toFake: ["Date", "performance", "setTimeout", "clearTimeout", "requestAnimationFrame", "cancelAnimationFrame"] });
+    try {
+      let running = false, version = 1, delay = 0;
+      const wire = () => wireTask({ version: String(version), ...(running ? { executionId: "execution", phase: "execution", executionState: "running", runtimeState: "EXECUTING" } : {}) });
+      const s = scriptedTransport({
+        "service.capabilities": () => ({ methods: ["machine.call"], machine: true }),
+        "projects.list": () => [{ projectId: "p", displayName: "Fixture", canonicalRoot: "/fixture", activation: {} }],
+        "capabilities.get": () => capabilitiesWire(["capabilities.get", "project.snapshot", "tasks.start"]),
+        "project.snapshot": async () => {
+          const reply = snapshot(String(version + 2), [wire()]);
+          if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+          return reply;
+        },
+        "tasks.start": async raw => {
+          await new Promise(resolve => setTimeout(resolve, 50));
+          running = true; version++;
+          return { requestId: (raw as { requestId: string }).requestId, outcome: "recorded", target: "task-1", entityVersion: "2", recordedAt: "2026-11-23T12:00:00Z" };
+        },
+        "machine.call": raw => {
+          const { op } = raw as { op: string };
+          if (op === "overview") return { ok: true, result: { name: "Fixture" } };
+          if (op === "config.read") return { ok: true, result: { config: emptyWorkspace().machines[0].config, connections: [], tokens: {} } };
+          if (op === "project.config.read") return { ok: true, result: { value: {}, tokens: {} } };
+          if (op === "repo.snapshot") return { ok: true, result: null };
+          if (op === "workers") return { ok: true, result: [] };
+          return { ok: true, result: { tasks: {}, sprints: [], messages: [] } };
+        },
+      });
+      const port = createRealPort({ transport: s.transport, actorId: "owner", registry: true });
+      const query = vi.spyOn(port, "query");
+      history.replaceState(null, "", BOARD);
+      const root = document.createElement("div");
+      document.body.append(root);
+      dispose = render(() => <Workspace port={port} />, root);
+      await vi.advanceTimersByTimeAsync(64);
+      const column = () => $('.card[data-task="task-1"]')?.closest(".col")?.getAttribute("data-col");
+      expect(column()).toBe("todo");
+      // A project event starts a background read that is still running when the owner presses Start.
+      delay = 200;
+      s.send({ type: "invalidated", projectId: "p" });
+      await vi.advanceTimersByTimeAsync(10);
+      query.mockClear();
+      const reads = s.calls.filter(c => c.operation === "project.snapshot").length;
+      all("button").find(b => b.textContent === "Start" && b.closest('.card[data-task="task-1"]'))!.click();
+      delay = 0;
+      await vi.advanceTimersByTimeAsync(400);
+      expect(column()).toBe("work");
+      // Long past every gap: nothing more is read.
+      await vi.advanceTimersByTimeAsync(5000);
+      const scopes = query.mock.calls.filter(([operation]) => operation === "project.snapshot").map(([, parameters]) => parameters);
+      expect(scopes).toEqual([{ projectId: "p" }]);
+      expect(s.calls.filter(c => c.operation === "project.snapshot").length - reads).toBe(1);
+      expect(s.calls.filter(c => c.operation === "tasks.start")).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+describe("card footer spacing", () => {
+  it("reserves no height for the empty request status on a card", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../src/workspace.css"), "utf8");
+    expect(css).toMatch(/\.card > \.ws-request-status \{[^}]*min-block-size: 0/);
   });
 });

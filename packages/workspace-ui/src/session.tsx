@@ -1,11 +1,11 @@
-import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, useContext, type Accessor, type JSX } from "solid-js";
+import { createComputed, createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch, useContext, type Accessor, type JSX } from "solid-js";
 import { capabilityOf, FEATURES, isOpen, type Activity, type Decision, type OwnerHoldAction, type TimelineEntry, type Worker } from "@cortex/workspace-domain";
 import { CodeView } from "./code";
 import { archiveRow, daysLeft } from "./archive-model";
 import { AttachChips, Composer, TaskAttachments } from "./composer";
 import { useWs } from "./ctx";
 import { Confirmed, createBodyMark, createTicker, ScreenActive } from "./freshness";
-import { A, closePop, Count, createFollow, I, Keyed, Loading, MenuItem, Pop, useWantOverview } from "./kit";
+import { A, closePop, Count, createFollow, I, Keyed, MenuItem, Pop, useWantOverview } from "./kit";
 import { ConflictPanel, ReadyPanel } from "./merge";
 import { Answered, QuestionForm, type Ask, type AskAnswer } from "./questions";
 import { AcceptBlocker, ChangesPanel, ResultCard, type ChangesViewState } from "./review";
@@ -15,8 +15,9 @@ import { inConflict, mergeControls, repoOf, sentence, taskCheckout } from "./rev
 import type { Route, TaskTab } from "./router";
 import { age, attemptsSpentOn, clock, humanStatus, ownerHold, replanStopping, reviewDeadEnd, sprintRoute, stopReason, type OwnerHold } from "./selectors";
 import { inTask } from "./status-text";
-import { attemptsByNode, closeBlocked, contextOf, coordinatorLine, duration, elapsedOf, isFinished, messageDelivery, reviewLine, workersOutcome, phases, recordedCoordinatorRoute, resumeState, sessionModel, tokens, unconfirmedState, verificationFace, workerFace, workerState, workingNow, type SessionModel } from "./session-model";
+import { attemptsByNode, closeBlocked, contextOf, coordinatorLine, duration, elapsedOf, isFinished, messageDelivery, reviewLine, workersOutcome, phases, recordedCoordinatorRoute, resumeState, sessionModel, taskSettings, tokens, unconfirmedState, verificationFace, workerState, workingNow, type SessionModel } from "./session-model";
 import { CORTEX, Pill, StopCommand, VERIFICATION, WorkerPane, WaitingIndicator, WorkingIndicator } from "./worker";
+import { TaskOwnerActions } from "./owner-actions";
 import { SpendLine } from "./task-spend";
 import { createOpenState, Fold, TextSteps } from "./feed";
 
@@ -28,9 +29,12 @@ import { viewOfText } from "./tool-names";
 import { shownFold } from "./port/history";
 import { usePlanningSprint, useTaskRoutes } from "./task-place";
 import { createFirstView, decisionsReadOf, type FirstRead } from "./first-view";
-import { FirstViewNotice, Skeleton, unreachable } from "./skeleton";
+import { EdgeStrip, ReserveSkeleton, FirstViewNotice, LoadingStrip, Skeleton, unreachable } from "./skeleton";
 import { firstCard, revealIntent, revealKey, settleReveal } from "./reveal-intent";
 import { scrollIntoFeed } from "./follow";
+import { createEdgeApproach, createRevealer, nearEdge } from "./edge-pager";
+import { createRowSlots, sameItems } from "./row-slots";
+import { SideChat, SIDE_CHAT_KEYS, toggleSideChat } from "./side-chat";
 import type { Ws } from "./ctx";
 
 type TaskRoute = Extract<Route, { name: "task" }>;
@@ -95,10 +99,13 @@ function TaskBar(props: { m: SessionModel; tab: TaskTab | undefined; route: Task
         <Show when={t.id === "workers" && props.m.workers.length > 0}><span class="n">{workersNote(props.m)}</span></Show>
         <Show when={t.id === "changes" && changes()}>{c => <span class="tnum n"><span class="add">+{c().add}</span> <span class="del">−{c().del}</span></span>}</Show>
       </A>}</For></nav>
+      <Show when={ws.store.sideChat}><button type="button" class="btn td-link" aria-pressed={ws.panels.sideChat().open && !ws.panels.sideChat().collapsed ? "true" : "false"}
+        data-tooltip={ws.keys(SIDE_CHAT_KEYS) ? `${ws.t("sideChatNote")} · ${SIDE_CHAT_KEYS}` : ws.t("sideChatNote")} onClick={() => ws.panels.setSideChat(toggleSideChat(ws.panels.sideChat()))}><I n="message" />{ws.t("sideChat")}</button></Show>
       <button type="button" class="btn td-more" popovertarget={menu} aria-label="Task details"><I n="list" />Details<I n="chevron-down" s={12} /></button>
       <Pop id={menu} class="pop-anchor" align="right" label="Task details" style={{ width: "220px" }}>
         <Show when={props.tab}><MenuItem icon="message" label="Conversation" onSelect={() => ws.go(at())} /></Show>
         <For each={entries()}>{t => <MenuItem label={t.label} check={props.tab === t.id} onSelect={() => ws.go(at(t.id))} />}</For>
+        <Show when={ws.store.sideChat}><MenuItem icon="message" label={ws.t("sideChat")} keys={SIDE_CHAT_KEYS} onSelect={() => ws.panels.setSideChat(toggleSideChat(ws.panels.sideChat()))} /></Show>
       </Pop>
     </>} />;
 }
@@ -130,7 +137,7 @@ function Brief(props: { m: SessionModel }) {
   // Above a conversation read only in part, the description stays where it is while earlier rows are put below it: the
   // reading position holds on what the reader looks at, not on this.
   return <div class="brief" data-follow-skip={s().historyEarlier ? "" : undefined}>
-    <ResultText breaks text={t().description} />
+    <ResultText breaks bareNames text={t().description} />
     <TaskAttachments taskId={t().id} />
     <div class="meta">
       <Show when={s().createdAt !== null}><span>Created {clock(s().createdAt)}</span></Show>
@@ -148,8 +155,8 @@ function Plan(props: { m: SessionModel }) {
   const plan = () => props.m.session.plan!;
   const label = (w: Worker | undefined) => {
     if (!w) return { text: "Pending", tone: "st-idle", icon: "hourglass" };
-    const f = workerFace(w.status);
-    return { text: w.status === "completed" ? "Done" : w.status === "pending" || w.status === "not_started" ? "Pending" : w.status === "working" ? "Running" : f.label, tone: f.tone, icon: f.icon, spin: f.spin };
+    const f = workerState(w);
+    return { text: w.status === "completed" && f.tone === "st-ok" ? "Done" : w.status === "pending" || w.status === "not_started" ? "Pending" : w.status === "working" ? "Running" : f.label, tone: f.tone, icon: f.icon, spin: f.spin };
   };
   return <div class="surface">
     <div class="plan-h"><I n="list" s={14} class="faint" />Plan r{plan().revision}<span class="r">Executing {props.m.planDone} of {props.m.planTotal} done, {plan().note}</span></div>
@@ -547,7 +554,7 @@ function HistoryState(props: { m: SessionModel }) {
   const ws = useWs();
   const read = () => props.m.session.historyRead;
   return <Switch>
-    <Match when={read()?.state === "loading"}><Loading class="cap faint" text="Loading the conversation…" /></Match>
+    <Match when={read()?.state === "loading"}><LoadingStrip label="Loading the conversation…" /></Match>
     <Match when={read()?.state === "failed"}>
         <div class="answered" role="alert"><I n="alert" s={14} /><span>{props.m.session.timeline.length ? "The latest conversation could not be read" : "The conversation could not be read"}: {humanStatus((read() as { reason: string }).reason)}. Retrying automatically.</span>
         <button class="lnk" onClick={() => ws.store.retryHistory(props.m.view.id)}>Retry now</button></div>
@@ -555,22 +562,23 @@ function HistoryState(props: { m: SessionModel }) {
   </Switch>;
 }
 
-/** A conversation read only in part says so at its top: earlier conversation exists and is not shown. It is read on
- *  request here or automatically near the viewport; while it is read, and when the read failed, the line says so. */
-function Earlier(props: { m: SessionModel }) {
+/** A conversation read only in part ends at its top in the edge line: earlier conversation exists and is not shown. It is
+ *  read automatically as the reader nears it, or on Show earlier. Before and while it is read the line is the same quiet
+ *  skeleton (its words, and Show earlier, are for screen readers and the keyboard), so nothing changes size or reads as a
+ *  caption as the read starts; a failed read says why, with Retry. */
+function Earlier(props: { m: SessionModel; onShow?: () => void }) {
   const ws = useWs();
   const e = () => props.m.session.historyEarlier;
-  const load = () => ws.store.loadEarlierHistory(props.m.view.id, ws.panels.showAllTools);
+  const load = () => { props.onShow?.(); ws.store.loadEarlierHistory(props.m.view.id, ws.panels.showAllTools); };
   return <Show when={e()}>{earlier => <div class="ws-earlier" data-follow-skip="">
     <Switch>
-      <Match when={earlier().state === "loading"}><Loading class="cap faint" text="Loading earlier…" /></Match>
+      <Match when={earlier().state === "loading"}><LoadingStrip label="Loading earlier…" /></Match>
       <Match when={earlier().state === "failed"}>
         <div class="answered" role="alert"><I n="alert" s={14} /><span>Earlier conversation could not be read: {humanStatus((earlier() as { reason: string }).reason)}.</span>
           <button class="lnk" onClick={load}>Retry</button></div>
       </Match>
       <Match when={earlier().state === "available"}>
-        <div class="answered" role="note"><I n="clock" s={14} /><span>Earlier conversation is not shown.</span>
-          <button class="lnk" onClick={load}>Show earlier</button></div>
+        <EdgeStrip note="Earlier conversation is not shown." onShow={load} />
       </Match>
     </Switch>
   </div>}</Show>;
@@ -634,9 +642,20 @@ export function Conversation(props: {
   const opened = createOpenState();
   let scroller: HTMLDivElement | undefined;
   // The team is not a feed entry: it stands pinned above the composer (TeamBar), so the feed never ends in a workers block.
-  const ids = createMemo(() => (props.model()?.session.timeline ?? []).filter(e => e.kind !== "workers").map(e => e.id));
+  const allIds = createMemo(() => (props.model()?.session.timeline ?? []).filter(e => e.kind !== "workers").map(e => e.id), undefined, { equals: sameItems });
+  // The first row drawn. What the conversation held when it was shown is drawn at once; rows read above it later (an earlier
+  // page) are drawn a few a frame (createRevealer), into the room the feed keeps above them. New rows below always draw.
+  const [from, setFrom] = createSignal<string | null>(null);
+  const hidden = () => { const f = from(); return f === null ? 0 : Math.max(0, allIds().indexOf(f)); };
+  const ids = createMemo(() => { const all = allIds(), at = hidden(); return at > 0 ? all.slice(at) : all; }, undefined, { equals: sameItems });
   const entries = createMemo(() => new Map(props.model()?.session.timeline.map(e => [e.id, e])));
-  const entry = (id: string) => entries().get(id)!;
+  // Each row reads only its own entry: a page put above, or a streamed update, evaluates the new and changed rows alone.
+  const slot = createRowSlots(entries);
+  const entry = (id: string) => slot(id)()!;
+  // The records rows look their delivery up in: unchanged records are the same objects, so a read that changed none of them
+  // wakes no row (a new list around the same records is not a change).
+  const messages = createMemo(() => props.model()?.messages ?? [], [], { equals: sameItems });
+  const paused = createMemo(() => props.model()?.mode === "paused");
   // Earlier rows read above the ones on screen are neither new nor the owner's latest: only entries after them count.
   const older = createPrepended(ids);
   const historyKey = () => { const v = props.model()?.view; return v ? `${v.id}:${v.task.executionId ?? ""}` : undefined; };
@@ -644,28 +663,55 @@ export function Conversation(props: {
     const key = historyKey();
     return props.model()?.session.historyEarlier || previous === key ? key : undefined;
   });
-  let pendingCheck = false, disposed = false;
-  const checkEarlier = () => {
+  let pendingCheck = false, disposed = false, requestedAt = "", reserve: HTMLDivElement | undefined;
+  const approach = createEdgeApproach();
+  /** Reads the earlier part only when the viewport is within reach of the boundary: on a scroll toward it or into its reach,
+   *  and after a layout pass while still within reach (a page too small to fill the viewport). Never on a scroll in the middle,
+   *  and one read at a time: the same boundary with the same rows shown is not asked for twice. */
+  const checkEarlier = (scrolling = false) => {
+    if (scroller) approach.seen(scroller.scrollTop, scrolling);
     if (pendingCheck) return;
     pendingCheck = true;
     queueMicrotask(() => {
       pendingCheck = false;
-      if (disposed || props.hidden || !scroller?.clientHeight || props.model()?.session.historyEarlier?.state !== "available") return;
-      const marker = scroller.querySelector(".ws-earlier");
-      // The brief can be tall: measure the boundary, not the distance from scrollTop to zero.
-      const box = scroller.getBoundingClientRect(), at = marker?.getBoundingClientRect();
-      // Bounded on both sides: a boundary entirely below the viewport (a tall brief fills it) is not read until it comes near.
-      if (at && at.bottom > box.top - scroller.clientHeight && at.top < box.bottom) {
-        ws.store.loadEarlierHistory(m().view.id, ws.panels.showAllTools);
-      }
+      // Rows already read are drawn before more are read.
+      if (disposed || props.hidden || !scroller?.clientHeight || hidden() > 0 || props.model()?.session.historyEarlier?.state !== "available") return;
+      // The brief can be tall: measure the boundary (and the reserve above it), not the distance from scrollTop to zero.
+      if (!approach.decide(nearEdge(scroller, scroller.querySelector(".ws-earlier"), reserve))) return;
+      const asked = `${historyKey()}|${props.model()?.session.historyEarlier?.since}|${ids().length}`;
+      if (asked === requestedAt) return;
+      requestedAt = asked;
+      ws.store.loadEarlierHistory(m().view.id, ws.panels.showAllTools);
     });
   };
   onCleanup(() => { disposed = true; });
   // The first-read gate applies to the runtime feed, not to the sprint's already available content.
   const first = createTaskFirstView(ws, props.model, "conversation", model => conversationReads(ws, model));
   const runtimeVisible = () => !!props.model() && !first.loading();
+  // The first row drawn is taken once the conversation is first shown: what its first reveal holds is drawn whole.
+  createComputed(() => { const all = allIds(), f = from(); if (runtimeVisible() && all.length && (f === null || !all.includes(f))) setFrom(all[0]); });
   const saved = props.sprintFeed?.saved(runtimeVisible);
-  const follow = createFollow(() => scroller, () => (runtimeVisible() ? ids().length - older() : 0) + (saved?.count() ?? 0), undefined, checkEarlier);
+  // While earlier conversation exists, the room above the rows that an earlier page takes (FollowEdge in follow.ts).
+  const more = () => { const state = props.model()?.session.historyEarlier?.state; return runtimeVisible() && (hidden() > 0 || state === "available" || state === "loading"); };
+  const follow = createFollow(() => scroller, () => (runtimeVisible() ? ids().length - older() : 0) + (saved?.count() ?? 0), undefined, () => checkEarlier(),
+    { reserve: () => reserve, keep: more });
+  // Rows put above (an earlier page) or below, and the earlier line changing between its note and its skeleton, are in the DOM
+  // when this runs (render effects run first): the reading anchor is restored now, in the same task and before the engine
+  // paints. Left to the ResizeObserver, a page drawn from inside its callback was painted a frame before it was corrected.
+  createEffect(on([ids, () => props.model()?.session.historyEarlier?.state], () => { if (!disposed && !props.hidden) follow.sync(); }, { defer: true }));
+  const draw = createRevealer({ hidden, room: follow.room, reveal: count => {
+    const all = allIds(), at = hidden();
+    // The effect on `ids` above holds the reading anchor as soon as the step is in the DOM.
+    if (at > 0 && !props.hidden) setFrom(all[Math.max(0, at - count)]);
+  } });
+  // Show earlier (or Retry) pressed: the page it reads is drawn at once when it arrives, as the owner asked for it.
+  let showPressed = false;
+  createEffect(() => {
+    if (hidden() <= 0 || props.hidden) return;
+    if (!showPressed) { draw(); return; }
+    showPressed = false;
+    queueMicrotask(() => { if (!disposed) setFrom(allIds()[0] ?? null); });
+  });
   // ResizeObserver covers geometry changes. Also recheck after a history publish or reveal when the size stayed the same.
   const available = createMemo(() => props.model()?.session.historyEarlier?.state === "available" ? historyKey() : undefined);
   createEffect(() => {
@@ -708,7 +754,7 @@ export function Conversation(props: {
     });
   });
   const decision = (id: string) => m().session.decisions.find(d => d.id === id)!;
-  const message = (id: string) => m().messages.find(x => x.id === id)!;
+  const message = (id: string) => messages().find(x => x.id === id)!;
   const stranded = () => m().view.column === "needs" && !m().view.unknown && m().open.length === 0;
   // Questions asked together are one form until their answers are recorded.
   const asks = createMemo(() => {
@@ -721,14 +767,15 @@ export function Conversation(props: {
   const changesAt = (): Route => ({ name: "task", machine: m().view.machine.id, task: m().view.id, tab: "changes" });
   const team = () => <Show when={runtimeVisible()}><TeamBar m={m()} now={props.now} pick={props.pick} onPick={props.onPick} /></Show>;
   return <section class="task-panel" classList={{ "sp-conv": !!props.sprintFeed }} aria-label="Conversation" hidden={props.hidden}>
-    <div class="timeline" classList={{ "ws-history-end": partialTail() !== undefined }} ref={scroller} aria-busy={first.loading() ? "true" : undefined} onScroll={() => { follow.onScroll(); checkEarlier(); }}>
+    <div class="timeline" classList={{ "ws-history-end": partialTail() !== undefined }} ref={scroller} aria-busy={first.loading() ? "true" : undefined} onScroll={() => { follow.onScroll(); checkEarlier(true); }}>
       <div class="tl-in">
         {props.sprintFeed?.brief}
         <Show when={first.loading()}><Skeleton kind="conversation" label="Loading the conversation…" /></Show>
         <Show when={runtimeVisible()}>
         <Show when={!props.sprintFeed}><Brief m={m()} /></Show>
         <HistoryState m={m()} />
-        <Earlier m={m()} />
+        <Show when={follow.reserving()}><ReserveSkeleton ref={el => (reserve = el)} /></Show>
+        <Earlier m={m()} onShow={() => { showPressed = true; }} />
         <For each={ids()}>{id => <Switch>
           <Match when={entry(id).kind === "cortex"}>{(() => {
             const text = () => (entry(id) as Extract<TimelineEntry, { kind: "cortex" }>).text;
@@ -737,9 +784,9 @@ export function Conversation(props: {
           <Match when={entry(id).kind === "said"}>{(() => {
             const text = () => (entry(id) as Extract<TimelineEntry, { kind: "said" }>).text;
             // The runtime's record of this message (same text), when the facts carry it: its files and delivery state.
-            const sent = () => m().messages.find(x => x.workerId === null && x.delivery !== "queued" && x.text.trim() === text().trim());
+            const sent = () => messages().find(x => x.workerId === null && x.delivery !== "queued" && x.text.trim() === text().trim());
             return <><div class="mine"><ResultText breaks text={text()} /><AttachChips files={sent()?.attachments} open /></div>
-              <Show when={sent()}>{s => <div class="mine-meta"><I n="check" s={12} />{messageDelivery(s(), m().mode === "paused")}</div>}</Show><MessageTools text={text()} end /></>;
+              <Show when={sent()}>{s => <div class="mine-meta"><I n="check" s={12} />{messageDelivery(s(), paused())}</div>}</Show><MessageTools text={text()} end /></>;
           })()}</Match>
           <Match when={entry(id).kind === "fold"}>{(() => {
             const f = () => entry(id) as Extract<TimelineEntry, { kind: "fold" }>;
@@ -757,7 +804,7 @@ export function Conversation(props: {
             const x = () => message((entry(id) as Extract<TimelineEntry, { kind: "message" }>).messageId);
             return <>
               <div class="mine"><ResultText breaks text={x().text} /><AttachChips files={x().attachments} open /></div>
-              <div class="mine-meta"><I n="check" s={12} />{messageDelivery(x(), m().mode === "paused")}<Show when={x().at !== null}><span>{clock(x().at)}</span></Show><CopySource text={x().text} /></div>
+              <div class="mine-meta"><I n="check" s={12} />{messageDelivery(x(), paused())}<Show when={x().at !== null}><span>{clock(x().at)}</span></Show><CopySource text={x().text} /></div>
             </>;
           })()}</Match>
           <Match when={entry(id).kind === "decision"}>{(() => {
@@ -845,7 +892,8 @@ export function WorkersList(props: { m: SessionModel; now: number; pick: string 
     <Group title="Review" list={lane("review")} />
     <div class="wg">Verification</div>
     <A class="wcard lane" role="tab" to={at(VERIFICATION)} aria-selected={props.pick === VERIFICATION ? "true" : "false"}>
-      <span class="l1"><span class="ic"><I n={check().icon} s={14} class={check().spin ? `spin ${check().tone}` : check().tone === "st-idle" ? "faint" : check().tone} /></span>Runtime verification<span class={`st ${check().tone}`}>{check().label}</span></span>
+      <span class="l1"><span class="ic"><I n={check().icon} s={14} class={check().spin ? `spin ${check().tone}` : check().tone === "st-idle" ? "faint" : check().tone} /></span><span class="trunc">Runtime verification</span></span>
+      <span class={`l2 ws-vstatus st ${check().tone}`}>{check().label}</span>
       <span class="l2 trunc" style={{ display: "block" }}>Automatic, not a worker</span>
     </A>
     {/* Finished workers by plan step: the newest attempt of each step, its earlier attempts folded under it. */}
@@ -892,13 +940,25 @@ function WorktreeRecovery() {
 
 /** The same Changes tab carries the diff review, Ready to merge and the conflict, so a task's state decides what it opens on. */
 function ChangesTab(props: { m: SessionModel; route: TaskRoute; viewState: ChangesViewState }) {
-  const t = () => props.m.view.task;
-  const merging = () => !props.m.view.automaticFact && (inConflict(t()) || t().status === "ready_to_merge" || t().integration?.method === "squash" || t().integration?.method === "commit");
+  const ws = useWs();
+  const merges = (m: SessionModel) => { const t = m.view.task; return !m.view.automaticFact && (inConflict(t) || t.status === "ready_to_merge" || t.integration?.method === "squash" || t.integration?.method === "commit"); };
+  // A board read that lands before its facts shows the task without the overlay that lifts it to Ready to merge, and a read
+  // after a refused command can come back that way. That gap is no answer: the last confirmed model stays until the next
+  // facts read installs and says otherwise.
+  const held = { installs: 0 };
+  const shown = createMemo<SessionModel>(prev => {
+    const installs = ws.store.factsInstalls(), now = props.m;
+    if (ws.store.mode === "real" && prev && prev.view.id === now.view.id && !merges(now) && merges(prev) && installs === held.installs) return prev;
+    held.installs = installs;
+    return now;
+  }, props.m);
+  const m = () => shown();
+  const t = () => m().view.task;
   const unavailable = () => { const c = t().checkout; return c.kind === "worktree" && c.unavailable; };
-  return <Switch fallback={<ChangesPanel m={props.m} route={props.route} viewState={props.viewState} />}>
-    <Match when={unavailable()}><WorktreeRecovery /><ChangesPanel m={props.m} route={props.route} viewState={props.viewState} /></Match>
-    <Match when={props.route.sub === "conflict" && (!!t().merge?.conflictId || !props.m.view.automaticFact)}><ConflictPanel m={props.m} route={props.route} /></Match>
-    <Match when={props.route.sub === undefined && (inConflict(t()) || !!t().merge?.freshChecks || merging())}><ReadyPanel m={props.m} route={props.route} /></Match>
+  return <Switch fallback={<ChangesPanel m={m()} route={props.route} viewState={props.viewState} />}>
+    <Match when={unavailable()}><WorktreeRecovery /><ChangesPanel m={m()} route={props.route} viewState={props.viewState} /></Match>
+    <Match when={props.route.sub === "conflict" && (!!t().merge?.conflictId || !m().view.automaticFact)}><ConflictPanel m={m()} route={props.route} /></Match>
+    <Match when={props.route.sub === undefined && (inConflict(t()) || !!t().merge?.freshChecks || merges(m()))}><ReadyPanel m={m()} route={props.route} /></Match>
   </Switch>;
 }
 
@@ -957,7 +1017,7 @@ export function TaskPage(props: { id: string }) {
     get text() { return <>
       <strong>{m().mode === "unconfirmed" ? "Task state not confirmed." : "Machine disconnected."}</strong>{" "}
       {checking() ? "Re-checking the latest state. Sending and task controls stay off." :
-        rechecked() && ws.store.readIssue() ? "Re-check could not read the latest state. Try again, or open " :
+        rechecked() && (ws.store.lastReadFailed?.() || ws.store.readIssue()) ? "Re-check could not read the latest state. Try again, or open " :
         m().mode === "unconfirmed" ? `${rechecked() ? "Still not confirmed. " : ""}The machine is connected, but it cannot confirm whether this task is running or stopped. Re-check, or open ` :
         "This machine cannot be reached. Re-check the connection, or open "}
       <Show when={!checking()}>Machine settings → <A class="lnk" to={{ name: "settings", machine: m().view.machine.id, section: "diagnostics" }}>Diagnostics</A>.</Show>
@@ -1004,6 +1064,7 @@ export function TaskPage(props: { id: string }) {
     <div class="main-body">
       <Show when={live()} fallback={
         <div class="task-body">
+          <TaskOwnerActions task={props.id} />
           <Switch>
             <Match when={tab() === undefined}><Conversation model={model} now={now()} pick={pick()} onPick={onPick} route={route()} /></Match>
             <Match when={tab() === "changes"}><ChangesTab m={m()} route={route()} viewState={changesView} /></Match>
@@ -1015,6 +1076,7 @@ export function TaskPage(props: { id: string }) {
         <TaskWorkers model={model} now={now()} pick={pick()} onPick={onPick} />
       </Show>
     </div>
+    <SideChat taskId={props.id} defaults={() => taskSettings(m())} />
   </Page></ResultScope.Provider>;
 }
 

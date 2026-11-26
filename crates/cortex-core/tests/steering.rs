@@ -111,7 +111,7 @@ fn active_plan_args(s: &Store) -> Value {
 
 fn begin_plan(s: &Store, task: &str, proposed: &Value) {
     s.write(|db| {
-        plan::accept_tx(db, task, "coordinator", "plan", proposed)?;
+        plan::accept_tx(db, task, "coordinator", "plan", &support::with_goal(proposed))?;
         db.execute(
             "UPDATE runtime_tasks SET state='EXECUTING' WHERE task_id=?",
             [task],
@@ -242,7 +242,7 @@ fn active_consultation_plan_preserves_runtime_node_and_gates_new_work() {
     let before: Value = serde_json::from_str(&one(&s, "SELECT plan_json FROM runtime_tasks")).unwrap();
     assert_eq!(before["tasks"][0]["id"], "_consultation");
     let mut args = active_plan_args(&s);
-    assert_eq!(args["plan"], proposed);
+    assert_eq!(args["plan"], support::with_goal(&proposed));
     let unchanged = s.write(|db| plan::amend_active_tx(db, &task, &args)).unwrap();
     assert_eq!(unchanged["changed"], false);
     assert_eq!(count(&s, "PLAN_AMENDED"), 0);
@@ -574,7 +574,7 @@ fn allow_write_lifts_exactly_the_owners_own_denial() {
     // A later plan touching a lifted path is accepted again.
     let plan = json!({"tasks":[{"id":"n","role":"backend-dev","objective":"Work","dependencies":[],"scope":["secrets"],"model":"auto"}],
         "verification":[["cargo","test"]]});
-    s.write(|db| plan::accept_tx(db, &task, "coordinator", "after-lift", &plan))
+    s.write(|db| plan::accept_tx(db, &task, "coordinator", "after-lift", &support::with_goal(&plan)))
         .unwrap();
     // The capsule shows the current (empty) set.
     let capsule = s
@@ -742,7 +742,7 @@ fn a_deny_write_rule_is_recorded_and_enforced() {
             &task,
             "coordinator",
             "denied",
-            &plan(json!(["secrets"]))
+            &support::with_goal(&plan(json!(["secrets"])))
         ))
         .unwrap_err()
         .code(),
@@ -754,13 +754,13 @@ fn a_deny_write_rule_is_recorded_and_enforced() {
             &task,
             "coordinator",
             "docs-file",
-            &plan(json!(["docs/guide.md"]))
+            &support::with_goal(&plan(json!(["docs/guide.md"])))
         ))
         .unwrap_err()
         .code(),
         "write_denied"
     );
-    s.write(|db| plan::accept_tx(db, &task, "coordinator", "allowed", &plan(json!(["src"]))))
+    s.write(|db| plan::accept_tx(db, &task, "coordinator", "allowed", &support::with_goal(&plan(json!(["src"])))))
         .unwrap();
     // A worker's request for more scope on a denied path is refused too.
     s.write(|db| {

@@ -27,7 +27,8 @@ release path. Existing configuration is not copied or migrated across channels.
 | User defaults and policy ceiling | `$XDG_CONFIG_HOME/cortex/defaults.json` | User-wide base configuration. |
 | Routing rules | `<project>/.cortex/routing.json`, then `$CORTEX_ROUTING`, then `$XDG_CONFIG_HOME/cortex/routing.json` (or `~/.config/cortex/routing.json`) | First existing file wins; files are not merged. The bundled default preset is written only when the file is absent: by setup, at each agent start and by Settings' Apply action. Existing owner files are never overwritten. See [Default preset](#default-preset). |
 | User routing profiles | `$XDG_CONFIG_HOME/cortex/routing-profiles.json` | Saved owner settings: routing, defaults/ceiling, MCP usage policy and connection limits. Activation materializes these user files; project settings are not captured. |
-| Cortex-owned external MCP servers | `$XDG_CONFIG_HOME/cortex/mcp-servers.json` | User-wide only. Project-local MCP registries are intentionally ignored. |
+| Cortex-owned external MCP servers | `$XDG_CONFIG_HOME/cortex/mcp-servers.json` | User-wide base. A project can add to it and adjust it through its own owner-private registry, see below. A registry inside the project tree is never read. |
+| Per-project MCP registry | `$XDG_CONFIG_HOME/cortex/projects/<digest of the project root>/mcp-servers.json` | Written by Settings > MCP servers with a project chosen. Same schema as the machine file, plus `overrides`. Not in the project, not in profiles. |
 | Engine-native state and catalog snapshots | `$XDG_STATE_HOME/cortex/connections/<id>/...` or `~/.local/state/cortex/...` | User-wide mutable state, separate from configuration. |
 | Paseo launch record | `$XDG_CONFIG_HOME/cortex/paseo-plugin-launch.json` or `~/.config/cortex/paseo-plugin-launch.json` | Owner-private non-secret command, environment and shim metadata written by the setup helper in the environment it describes. A Paseo instance with its own `XDG_CONFIG_HOME` (such as the isolated dev daemon) has its own record and does not use another instance's `~/.config` record. |
 | ssh password dialog (optional, off) | `$XDG_CONFIG_HOME/cortex/ssh-askpass.json` | User-wide, written by hand. See [ssh from workers](#ssh-from-workers). |
@@ -934,11 +935,11 @@ writing configuration or dispatching work.
 - `auto_allow`: tokens of the same form that may enter automatic selection despite the built-in OpenCode exclusion (on an engine without a `models` selection list; a list replaces this exclusion). OpenCode model IDs name their provider, so an OpenCode entry is the exact route, for example `"opencode/anthropic/claude-sonnet-4-5"`. It does not override `deny`, `providers`, catalog availability, connection readiness or quota limits.
 - `tiers`: object mapping model names to `flagship`, `deep`, `standard`, or `light`, for every engine. Built-in known families/models are classified automatically; this key overrides that classification, and a per-engine `models` tier overrides this key. A Luna model moved out of `light` routes like any model of its new tier; only the Luna effort floor (`high`) and `max` still apply.
 - `providers`: array restricted to `codex-acp`, `claude-agent-acp` and/or `opencode`. When absent, every configured provider is considered. It restricts automatic routing, failover and pins; it does not hide models from the selector or disable manual selection. A disallowed pin is refused.
-- `engine_affinity`: object mapping a work kind or `*` to `codex-acp`, `claude-agent-acp`, `opencode`, or `null` (no lean). Work kinds are `implementation_backend`, `implementation_frontend`, `implementation_frontend_design`, `operations`, `debugging`, `testing`, `investigation`, `review`, `design`, `writing`, `planning`, and `analysis` (each worker role's kind is `ROLE_WORK_KINDS`; an unlisted role is `implementation_backend`). A kind named here wins, then `*`, then the built-in default: `implementation_backend`, `implementation_frontend` and `operations` lean to `codex-acp`; `implementation_frontend_design`, `investigation`, `review`, `design`, `writing`, `planning` and `analysis` lean to `claude-agent-acp`; `debugging` and `testing` are neutral. Affinity breaks ties only after the 95% quota band and retry diversification (rank version 15): a known route at or above 95% ranks behind any non-hot route, so affinity never overrides that band. Plan usage is only the last tie-breaker after affinity (see [usage switching](#explicit-user-model-priority-and-usage-switching)). Affinity never overrides a pin, `deny`, `providers`, availability or the 100% quota exclusion. An unknown kind or engine makes the file invalid.
+- `engine_affinity`: object mapping a work kind or `*` to `codex-acp`, `claude-agent-acp`, `opencode`, or `null` (no lean). Work kinds are `implementation_backend`, `implementation_frontend`, `implementation_frontend_design`, `operations`, `debugging`, `testing`, `investigation`, `review`, `design`, `writing`, `planning`, `analysis`, and `consultation` (used only by the senior consultant; each worker role's kind is `ROLE_WORK_KINDS`; an unlisted role is `implementation_backend`). A kind named here wins, then `*`, then the built-in default: `implementation_backend`, `implementation_frontend` and `operations` lean to `codex-acp`; `implementation_frontend_design`, `investigation`, `review`, `design`, `writing`, `planning` and `analysis` lean to `claude-agent-acp`; `debugging` and `testing` are neutral. Affinity breaks ties only after the 95% quota band and retry diversification (rank version 15): a known route at or above 95% ranks behind any non-hot route, so affinity never overrides that band. Plan usage is only the last tie-breaker after affinity (see [usage switching](#explicit-user-model-priority-and-usage-switching)). Affinity never overrides a pin, `deny`, `providers`, availability or the 100% quota exclusion. An unknown kind or engine makes the file invalid.
 - `models`: object mapping a supported engine id to an object with any of `auto`, `tiers` and `policy`, each keyed by the exact model id the engine reports (OpenCode ids are `<provider>/<model>`). Validation reports every problem with its field path.
   - `auto`: array of unique model ids. Present, it is the complete list of that engine's models automatic routing may use (`[]`: none), replacing the built-in OpenCode exclusion, `auto_allow` and newest-version-only routing for that engine; absent, the built-in rules apply. `deny` and `providers` still win; a `pin` or the model selector can still use any offered model.
   - `tiers`: model id to `flagship`, `deep`, `standard` or `light`, or to a non-empty list of them (for example `["standard", "deep"]`); it wins over the legacy top-level `tiers`, which wins over the built-in classification. A model given several tiers is an automatic-routing candidate of each (it is listed under each in `list_route_options`) and runs at the effort of the tier it was chosen for; a pin or explicit effort may use any effort one of its tiers permits, and it counts as flagship for a user's explicit flagship request when `flagship` is one of its tiers. Only this per-engine key takes a list; the legacy top-level `tiers` stays one tier per model. In Settings > Engines & models the tier control is a multi-select; clearing every tier removes the setting.
-  - `policy`: model id to an object of optional attributes, each overriding the model's built-in value (`null` removes it): `effort_floor` and `max_effort` (efforts `low`..`max`; without `max_effort` a flagship-tier model stops at `high`), `effort_ladder` (1-3 strictly ascending efforts a light model runs at for light work, standard work, and standard work that fell short once), `also_standard_for` (work kinds for which a light model is also a standard-tier candidate, only for explicitly configured work kinds), `preferred_for` (work kinds this model may do. Routing is strict: once any model lists a node's work kind, automatic selection (normal and escalated rung, quality retries, fix nodes) uses only models that list it, and untagged models are not generalists for that kind. If no listed model is usable the runtime refuses with the visible reason `no_model_listed_for_work_kind` (work kind and tier) and waits. Only when the listed models are unavailable from exhausted quota, a provider hold or a provider-side route failure may it switch to another enabled, not denied, provider-authorized automatic-list model of the same tier (an adjacent tier only if that tier has none), recorded as `availability_failover`, not escalation. When no model lists the kind, the ordinary eligible pool is used as before. Mandatory review uses only `review` models and blocks, never waives, when none is usable; the consultant uses only `design` models and does not run otherwise. A `*` pin does not bypass the list on either the normal or the escalated rung (an off-kind `*` pin is ignored while the kind has listed models); exact-role pins, explicit user model requests and applicable `AGENTS.md`/`CLAUDE.md` requirements stay explicit exceptions. Among the listed models it is also preferred: rank version 9 puts it ahead of new plan hints, plan usage and retry diversification within its tier; it yields for quota only when at least 95% used and more than 10 points worse than a known usable alternative; plan usage compares only the preferred models while they are honoured, and none once they are used up), `preferred_when` (optional owner-written condition, non-blank text of at most 500 characters, for example `"frontend changes without design work"`; see below) and `request_names` (1-16 lowercase extra spellings, Cyrillic stems taking Russian endings, that count as the user naming this model's family in an explicit flagship request; ordinary request, work or negation words are refused).
+  - `policy`: model id to an object of optional attributes, each overriding the model's built-in value (`null` removes it): `effort_floor` and `max_effort` (efforts `low`..`max`; without `max_effort` a flagship-tier model stops at `high`), `effort_ladder` (1-3 strictly ascending efforts a light model runs at for light work, standard work, and standard work that fell short once), `tier_efforts` (per tier this model is placed in, `{"min": effort, "max": effort}` from `low`..`max` with min not above max; on that tier it replaces `effort_floor`, `max_effort` and the light-only `max` rule, both bounds must be levels the route offers or the route is refused with `model_effort_policy_unsupported`, and the automatic effort is the tier target (light low, standard medium, deep and flagship high) moved into the range, the lower level on a tie; a range for a tier the model is not placed in is refused; it bounds the coordinator only in a profile without `coordinator_models`, see [coordinator models](features/routing-and-fallback/index.md#coordinator-models-and-per-tier-effort-ranges)), `also_standard_for` (work kinds for which a light model is also a standard-tier candidate, only for explicitly configured work kinds), `preferred_for` (work kinds this model may do. Routing is strict: once any model lists a node's work kind, automatic selection (normal and escalated rung, quality retries, fix nodes) uses only models that list it, and untagged models are not generalists for that kind. If no listed model is usable the runtime refuses with the visible reason `no_model_listed_for_work_kind` (work kind and tier) and waits. Only when the listed models are unavailable from exhausted quota, a provider hold or a provider-side route failure may it switch to another enabled, not denied, provider-authorized automatic-list model of the same tier (an adjacent tier only if that tier has none), recorded as `availability_failover`, not escalation. When no model lists the kind, the ordinary eligible pool is used as before. Mandatory review uses only `review` models and blocks, never waives, when none is usable; the consultant uses only `consultation` models and does not run otherwise; until some model lists `consultation` it uses the `design` list (existing files keep working). A `*` pin does not bypass the list on either the normal or the escalated rung (an off-kind `*` pin is ignored while the kind has listed models); exact-role pins, explicit user model requests and applicable `AGENTS.md`/`CLAUDE.md` requirements stay explicit exceptions. Among the listed models it is also preferred: rank version 9 puts it ahead of new plan hints, plan usage and retry diversification within its tier; it yields for quota only when at least 95% used and more than 10 points worse than a known usable alternative; plan usage compares only the preferred models while they are honoured, and none once they are used up), `preferred_when` (optional owner-written condition, non-blank text of at most 500 characters, for example `"frontend changes without design work"`; see below) and `request_names` (1-16 lowercase extra spellings, Cyrillic stems taking Russian endings, that count as the user naming this model's family in an explicit flagship request; ordinary request, work or negation words are refused).
 
   `preferred_when` makes the preference conditional. The runtime cannot judge
   free text, so `list_route_options.preferred_when` gives the coordinator each
@@ -968,13 +969,16 @@ writing configuration or dispatching work.
 
   The coordinator sees the effective selection, tiers and policy only through `list_route_options`; no prompt or tool schema names a model. See [routing](features/routing-and-fallback/index.md#owner-configured-models-selection-tiers-and-policy).
 
+- `coordinator_models`: the models the coordinator may use, apart from the worker tiers: a list of 1-64 unique `{"engine", "model", "tiers"}` entries, `engine` one of `codex-acp`, `claude-agent-acp` or `opencode`, `model` an exact model id, `tiers` mapping one or more of `flagship` (shown as Frontier), `deep`, `standard` and `light` to `{"min": effort, "max": effort}` from `low`..`max` with min not above max. Present, only enabled, non-denied listed models may coordinate (Settings default, task, sprint, composer and ACP pickers, the pinned and alternate coordinator), at the union of their ranges the route offers (a range with a bound the route does not offer adds nothing; an effort outside the union moves to the nearest allowed level, an unsupported effort is refused), and sprint planning assigns each task a listed model of the category its complexity names, ranked by provider usage. Absent, the coordinator follows the worker tiers as before. An empty list, a model without a category, an unknown category or an inverted or unknown range is refused with `invalid_routing_overrides`. Settings edits it under Orchestration › Coordinator models; profiles store it with the routing section; the Paseo settings panel preserves it without editing it. See [coordinator models](features/routing-and-fallback/index.md#coordinator-models-and-per-tier-effort-ranges).
+
 Precedence is first existing routing file: project `<project>/.cortex/routing.json`, then `CORTEX_ROUTING`, then user `routing.json`. The files do not merge, so a project file that should keep the defaults must list them itself. An existing malformed file fails closed. If no file exists, built-in automatic routing applies.
 
 ### User routing profiles
 
 The `routing_profiles` management surface stores owner-only JSON at
 `$XDG_CONFIG_HOME/cortex/routing-profiles.json`. Format 2 stores a profile's
-`sections` and settings snapshot: the eight supported user-routing keys;
+`sections` and settings snapshot: the supported user-routing keys, including
+the coordinator list `coordinator_models`;
 user defaults (route id, connection id and exact model id, named parameters,
 language, and owner policy ceiling); each registered MCP server's usage
 policy; and each registered connection's concurrent-session limit. The profile
@@ -1073,9 +1077,11 @@ saved as the default language, as in Python. See
 
 ## MCP servers for Cortex and workers
 
-Cortex may pass session MCP entries supplied by the ACP client, and it can load owner-managed stdio servers from `$XDG_CONFIG_HOME/cortex/mcp-servers.json`. A project-local MCP registry is deliberately unsupported: changing project contents must not install a persistent executable capability. The loader is `load_mcp_servers`; setup and engine sessions validate explicit tool grants and containment.
+Cortex may pass session MCP entries supplied by the ACP client, and it can load owner-managed stdio servers from `$XDG_CONFIG_HOME/cortex/mcp-servers.json`. A registry inside the project tree is deliberately unsupported: changing project contents must not install a persistent executable capability. Per-project servers live instead in the owner's own configuration (next paragraph). The loader is `load_mcp_servers`; setup and engine sessions validate explicit tool grants and containment.
 
 An owner entry whose `command`, or (for a contained entry) any `read_paths`/`write_paths` value, does not exist on the host is not forwarded to engine sessions: the checkout drops it and logs `external_mcp_server_path_missing`. A deployed package that predates this filter forwards it, and the client then sees the server close at once (`CONNECTION_CLOSED`). Correct the path or refresh the deployed package; see [browser and Playwright status](features/design-workflow/index.md#browser-and-playwright-status).
+
+**Per-project registry.** Settings > MCP servers with a project chosen edits `$XDG_CONFIG_HOME/cortex/projects/<digest of the project root>/mcp-servers.json` (the digest is of the logical root, so a linked checkout shares its project's file; the folder and file are owner-private). It has the machine file's schema, with `servers` (entries validated exactly like machine entries: explicit tool grants, containment, roles, paths, environment) and an optional `overrides` object mapping a machine server name to `false` (off for this project) or `true` (on for this project, using the machine entry unchanged, also when the machine entry is `enabled: false`). A name under `servers` replaces the machine entry of that name for this project, even if the project entry is disabled; a name cannot be in both `servers` and `overrides`. Effective servers of a session = machine servers, adjusted by `overrides`, plus the project's `servers`. A project file that is malformed, not private or invalid refuses the project's sessions instead of falling back to the machine registry. Like machine settings, it is read when the project's native host opens. Example, Kling only for one project: set `enabled: false` on the machine entry, then switch it on in that project's list.
 
 Example (replace executable, tool names and paths with values appropriate to your installed server):
 
@@ -1127,6 +1133,10 @@ session fallback, an unconfigured client entry is refused. Native containment us
 Landlock/seccomp with narrower local-socket and project-scope support, not Python's
 namespace launcher. See [native external MCP boundaries](project/native-incoming-acp.md#external-mcp-boundary)
 before selecting that optional entry point; this does not change installed clients.
+
+### MCP servers that need a sign-in
+
+An enabled server (machine or project) that never answers MCP `initialize` because it waits for an OAuth sign-in, for example `npx -y mcp-remote@0.16.7 https://kling.ai/mcp`, which prints an authorization address on stderr, gets one machine-wide owner card, "Sign in to <server>", in the same card stack as the GitHub, Codex and Claude sign-ins, and one desktop notification when it appears. The service finds it without a model call: it starts the entry as a session would (same containment, no channel, no tool grant), sends one `initialize` and reads stderr. The card shows **Open sign-in** (the system browser, desktop only) and **Check again**. It has no Dismiss: it stays until the server answers (the held process finishes its own OAuth callback, so the card closes by itself after you sign in in the browser, and later sessions attach the server) or until you switch the server off in Settings. While a card is open the service looks again every 10 seconds. A server is looked at when it first appears, when a session reports it exited or printed a sign-in request, and when the registry changes. Tokens stay where the server keeps them (for `mcp-remote`, its `MCP_REMOTE_CONFIG_DIR`); Cortex never reads them.
 
 ## ssh from workers
 
@@ -1227,42 +1237,59 @@ Reads never rewrite the source file or profile; the policy version remains 2. Th
 
 ### Fresh-install owner default snapshot
 
-The schema-version-1 install snapshot uses the portable policy of the saved
-`default` profile. It ships `claude-agent-acp/opus` at `thought_level: medium`
-and `language: ru`, without a mode override. The unrestricted user ceiling
-needs no explicit override. Route/connection bindings, account limits and
-machine-specific executable paths, environment values and grants are not copied.
-The disabled MCP examples do not opt out of containment. Existing registrations
-and saved profiles are not replaced by seeding.
+The schema-version-1 install snapshot copies the model, tier, effort and
+routing settings of the owner's production `default` profile and adds the
+owner's coordinator models (`coordinator_models`). It ships
+`codex-acp/gpt-6.2-sol` at `thought_level: high` as the coordinator default and
+`language: ru`, without a mode override. The unrestricted user ceiling needs
+no explicit override. Route/connection bindings, account limits and
+machine-specific executable paths, environment values and grants are not
+copied. The disabled MCP examples do not opt out of containment. Existing
+registrations and saved profiles are not replaced by seeding.
 
-| Engine / model ID | Automatic tiers | Effort floor → maximum | Preference |
-| --- | --- | --- | --- |
-| Claude `opus` | flagship, deep | medium → xhigh | Design, planning, frontend design implementation, debugging, analysis, backend and frontend implementation, writing, operations, testing and review; conditional |
-| Claude `fable` | flagship | low → high | Design |
-| Claude `haiku` | light | high → max | Investigation only |
-| Claude `sonnet` | standard, light | medium → xhigh | Backend and frontend implementation, operations, debugging, design, planning, analysis, review, testing and writing |
-| Codex `gpt-6.2-sol` | deep, standard | medium → xhigh | All work kinds except frontend design implementation |
-| Codex `gpt-6.2-astra` | flagship, deep | low → high | All work kinds except investigation; conditional |
-| Codex `gpt-6-luna` | light | high → max | Investigation only |
-| Codex `gpt-6.1-terra` | standard, light | medium → high | All work kinds except writing and frontend design implementation |
+| Engine / model ID | Automatic tiers | Worker effort range per tier (`tier_efforts`) | Effort floor → maximum (other tiers) | Preference |
+| --- | --- | --- | --- | --- |
+| Claude `opus` (Opus 5.5) | flagship | none | medium → xhigh | Design, planning, frontend design implementation, review, backend and frontend implementation, senior consultation |
+| Claude `fable` | flagship | none | low → high | Design (enabled list off) |
+| Claude `haiku` | light | none | high → max | Investigation only |
+| Claude `sonnet` (Sonnet 5.5) | deep, standard, light | Deep high → xhigh; Standard medium → xhigh; Light medium → high | medium → xhigh | Backend and frontend implementation, operations, debugging, planning, analysis, review, testing, writing and frontend design implementation |
+| Codex `gpt-6.2-sol` (Sol 6.2) | deep, standard | Deep high → xhigh; Standard medium → xhigh | medium → xhigh | All work kinds except design |
+| Codex `gpt-6.2-astra` (Astra 6.2) | flagship | none | low → high | Design, planning, review, frontend design implementation, backend and frontend implementation, senior consultation |
+| Codex `gpt-6-luna` | light | none | high → max | Investigation only |
+| Codex `gpt-6.1-terra` | standard, light | none | medium → high | All work kinds except writing and frontend design implementation |
 
-Claude and Codex are the configured providers. Each listed model is enabled
-and automatic; `opencode/*` is the only deny entry and OpenCode has no enabled
-models. Removing older exact denials does not add models to the allowlists.
-The four exact Claude quota windows remain; `seven_day_sonnet` applies to
-`sonnet`. Haiku and Luna retain their high/xhigh/max ladders and do not stretch
-into standard testing.
+The coordinator models, apart from those worker tiers:
+
+| Coordinator model | Categories and effort ranges |
+| --- | --- |
+| Claude `opus` (Opus 5.5) | Frontier (flagship) low → high |
+| Claude `sonnet` (Sonnet 5.5) | Deep xhigh; Standard high → xhigh; Light medium → xhigh |
+| Codex `gpt-6.2-astra` (Astra 6.2) | Frontier (flagship) low → high |
+| Codex `gpt-6.2-sol` (Sol 6.2) | Deep xhigh; Standard high → xhigh; Light medium → xhigh |
+
+Claude and Codex are the configured providers. Claude enables `opus`,
+`haiku` and `sonnet`; `fable` stays in its automatic list but is off, as in
+production. `opencode/*` is the only deny entry and OpenCode has no enabled
+models. The four exact Claude quota windows remain; `seven_day_sonnet`
+applies to `sonnet`. Haiku and Luna retain their high/xhigh/max ladders and do
+not stretch into standard testing. Opus and Astra carry no conditional
+`preferred_when` text, so flagship work reaches them by escalation, an
+explicit request, a `high`-complexity sprint task or a pin.
 
 Planner, general and technical-writer roles still request light, standard and
 deep tiers for low, normal and high complexity; explorer requests light,
 light and standard. These are requested tiers, not guaranteed selections.
-Opus and Astra both list frontend design implementation. Claude affinity
-still comes first, and Opus is its only listed preference for that kind.
-Codex is considered only when no eligible Claude route remains. Other kinds
-use the ordinary conditional-hint rules for Opus and Astra. See
+Opus, Sonnet, Sol and Astra list frontend design implementation; Claude
+affinity still comes first. See
 [affinity-bound frontend design](features/routing-and-fallback/index.md#affinity-bound-frontend-design).
-This snapshot does not qualify availability, effort support or model access on
-a live account.
+Only the listed coordinator models may coordinate, and the coordinator's
+effort stays inside the union of that model's listed ranges; sprint planning
+assigns each task one of them by complexity and provider usage; see
+[coordinator models](features/routing-and-fallback/index.md#coordinator-models-and-per-tier-effort-ranges).
+Existing installations keep their own files: **Reset to default preset**
+adopts this snapshot explicitly. This snapshot does not qualify
+availability, effort support or model access on a live account.
+
 
 ### Haiku 5.5 and Luna parity
 

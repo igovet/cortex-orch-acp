@@ -146,7 +146,7 @@ fn replace_sync(path: &Path, bytes: &[u8], finish: impl FnOnce(&Path) -> Result<
 pub(super) fn save(root: &Path, config: &crate::Config, params: &Value) -> Result<Value> {
     // Preserve legacy preflight order (routing/registry, then store/user/ceiling)
     // even for an unsupported surface. This reader cannot create a second store.
-    let current = reader::read(root, config)?;
+    let current = reader::read_now(root, config)?;
     // A malformed owner defaults root is never an unrestricted user ceiling.
     ceiling::user(config)?;
     if !params.is_object() {
@@ -155,6 +155,7 @@ pub(super) fn save(root: &Path, config: &crate::Config, params: &Value) -> Resul
     match params["surface"].as_str() {
         Some("routing") => routing::save(root, config, params, &current),
         Some("project_ceiling") => ceiling::save(root, config, params),
+        Some("mcp_servers") => user_mcp::save_project(root, config, params),
         _ => Err(refuse(
             "unsupported_action",
             "Only routing and ceilings can be overridden by a project.",

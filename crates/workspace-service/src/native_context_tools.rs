@@ -74,9 +74,10 @@ pub(super) fn task_context(store: &Store, i: &Identity, channel: &str) -> CoreRe
         unchanged
     };
     if !unchanged {
-        return crate::native_commands::defer_json(store, i, value);
+        return defer_keeping_outcomes(store, i, value);
     }
     let mut compact = json!({"unchanged_since_last_read":true,"state":value["state"],"revision":value["revision"]});
+    merge(&mut compact, plan_outcomes(&value));
     if nothing {
         compact["hint"] = json!(NOTHING_NEEDED);
     }
@@ -110,7 +111,7 @@ pub(super) fn capsule(store: &Store, i: &Identity, args: &Value) -> CoreResult<V
     value["recipient"] = json!({"role":i.role,"profile":i.profile,"stage":i.stage,
         "assignment":i.assignment,"attempt":i.attempt});
     value["role_and_tool_access"] = json!({"tools":served_tools(i)});
-    crate::native_commands::defer_json(store, i, value)
+    defer_keeping_outcomes(store, i, value)
 }
 
 const PROGRAM_MISSING: &str = "The check program is unavailable in its execution environment. Install the required tool in an isolated project-private tools directory (for example .venv), without sudo or system changes, or choose another executable check. Probe again before depending on it. If neither is possible, ask the owner now through ask_question (workers) or user_question_request (coordinator); do not defer the decision until the result.";
@@ -154,6 +155,11 @@ pub(super) fn sprint_read(
     }
     crate::native_documents::validate(identity, name, args)?;
     let state = state.ok_or(CoreError::Refused("sprint_membership_required"))?;
+    if name == "sprint_graph" && args["include"] == "pending_descriptions" {
+        let value = crate::machine::sprint_revision::pending_descriptions(store, state, &identity.task, args)?;
+        crate::native_documents::authenticate(store, credential, identity)?;
+        return crate::native_commands::defer_json(store, identity, value);
+    }
     let scope = store
         .read(|db| Scope::load(db, state, &identity.task))?
         .ok_or(CoreError::Refused("sprint_membership_required"))?;
@@ -171,4 +177,36 @@ pub(super) fn sprint_read(
     }
     crate::native_documents::authenticate(store, credential, identity)?;
     crate::native_commands::defer_json(store, identity, value)
+}
+
+/// The small dedicated form of what a coordinator must carry into a new plan: the
+/// state, the revision and the goal outcomes of the plan in force verbatim. It stays
+/// inline beside a deferred (large) context or capsule reply, so a reply that does
+/// not fit a batch item or the inline budget never hides the outcomes.
+pub(super) fn plan_outcomes(value: &Value) -> Value {
+    let mut compact = json!({"state":value["state"],"revision":value["revision"]});
+    if !value["plan_summary"]["outcomes"].is_null() {
+        compact["plan_outcomes"] = value["plan_summary"]["outcomes"].clone();
+        compact["plan_outcomes_note"] = value["plan_summary"]["outcomes_note"].clone();
+    }
+    if !value["plan_summary"]["required_verification"].is_null() {
+        compact["required_verification"] = value["plan_summary"]["required_verification"].clone();
+        compact["required_verification_note"] = value["plan_summary"]["required_verification_note"].clone();
+    }
+    compact
+}
+/// `defer_json` that keeps [`plan_outcomes`] inline when the reply is deferred.
+fn defer_keeping_outcomes(store: &Store, i: &Identity, value: Value) -> CoreResult<Value> {
+    let compact = plan_outcomes(&value);
+    let mut reply = crate::native_commands::defer_json(store, i, value)?;
+    if reply["deferred"] == true {
+        merge(&mut reply, compact);
+    }
+    Ok(reply)
+}
+/// Copy every field of `compact` into `reply`.
+pub(super) fn merge(reply: &mut Value, compact: Value) {
+    if let (Some(reply), Value::Object(compact)) = (reply.as_object_mut(), compact) {
+        reply.extend(compact);
+    }
 }

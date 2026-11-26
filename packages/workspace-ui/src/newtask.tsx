@@ -112,7 +112,7 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
     setSaving(true);
     try {
     if (kind() === "sprint") {
-      const receipt = await request.run({ type: "create_sprint", projectId: s.project.id, description: text(), attachments: files.files(), runMode: runMode(), checkout: { kind: checkout() }, settings: settings(), targetBranch: target() });
+      const receipt = await request.run({ type: "create_sprint", projectId: s.project.id, description: text(), attachments: files.files(), runMode: runMode(), checkout: { kind: checkout() }, settings: settings(), targetBranch: target(), taskRoute: routePicked ? "sprint" : "automatic" });
       if (!receipt.ok || !receipt.entityId) return;
       // Route and target are recorded before the planning start.
       ws.go({ name: "sprint", machine: s.machine.id, project: s.project.id, sprint: receipt.entityId, tab: "planning" });

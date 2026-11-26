@@ -28,7 +28,7 @@ it("never publishes the raw tasks before sprint/planning/archive facts, on start
   await store.reload();
   expect(seen.flat()).not.toContain("Purged run");
   // A same-wire-version facts change may legitimately unhide a former planning task.
-  s.port.query = (async (op:string)=>op==="capabilities.get"?{everything:true,operations:[]}:op==="project.snapshot"?[{kind:"projection",scope:"workspace",version,state:structuredClone(raw)}]:[]) as typeof s.port.query;
+  s.port.query = (async (op:string)=>op==="capabilities.get"?{everything:true,operations:[]}:op==="project.snapshot"?[{kind:"projection",scope:"workspace",version,state:structuredClone(raw)}]:op==="project.facts"?[{projectId:"p",openBranch:"main",defaultBranch:"main",repo:null,workers:[],reviews:[],sprints:[],overlays:{}}]:[]) as typeof s.port.query;
   await store.reload();
   expect(store.state().tasks.map(t=>t.title)).toEqual(["Purged run"]);
   expect(store.ready()).toBe(true);
@@ -40,7 +40,12 @@ it("keeps the last coherent view when a required facts read fails", async () => 
   await store.reload();
   expect(store.state().tasks[0].title).toBe("Known");
   expect(store.connection().state).toBe("connected");
+  // A passing failure over a confirmed view shows nothing; one that persists over three reads in a row is said.
+  expect(store.readIssue()).toBeNull();
+  await store.reload(); expect(store.readIssue()).toBeNull();
+  await store.reload();
   expect(store.readIssue()).toBe("Facts unavailable");
+  expect(store.state().tasks[0].title).toBe("Known");
 });
 it("shows only the startup screen rather than an empty project list or a wrong-page error",async()=>{
   const s=scriptedPort(), pending=deferred<any>();
@@ -52,4 +57,20 @@ it("shows only the startup screen rather than an empty project list or a wrong-p
   expect(root.querySelector(".l-startup")).toBeTruthy();
   expect(root.querySelector(".titlebar, .sidebar, .ws-tabstrip")).toBeNull();
   expect(root.textContent).not.toMatch(/No projects on this machine|This task is not on this machine|Offline|Connecting/);
+});
+it("keeps the last confirmed archived/purged classification when a board read arrives without its facts", async () => {
+  const s=scriptedPort();
+  const board=()=>{const w=withTask(emptyWorkspace(),"Old");w.tasks[0].status="review";return w;};
+  let version=1, late=false;
+  s.port.query=(async(op:string)=>op==="capabilities.get"?{everything:true,operations:[]}:op==="project.snapshot"?[{kind:"projection",scope:"workspace",version:String(version),state:board()}]:op==="project.facts"?(late?[]:[{projectId:"p",openBranch:"main",defaultBranch:"main",repo:null,workers:[],reviews:[],sprints:[],overlays:{t:{purged:true}}}]):[]) as typeof s.port.query;
+  const store=createRoot(d=>{dispose=d;return createWorkspaceStore(s.port);});
+  const seen:string[][]=[];
+  createRoot(d=>{const prior=dispose!;dispose=()=>{d();prior();};createEffect(()=>seen.push(store.state().tasks.map(t=>t.status)));});
+  await flush();
+  expect(store.state().tasks).toEqual([]);
+  // After a command the next read brings the board and no facts for the project (its facts read is still under way).
+  late=true; version=2;
+  await store.reload(); await flush();
+  expect(store.state().tasks).toEqual([]);
+  expect(seen.flat()).not.toContain("review");
 });

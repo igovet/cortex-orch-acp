@@ -1,7 +1,8 @@
-import { readableCheckReason, ACCESS_MODES, effortLabel, emptySession, engineLabel, isOpen, LANGUAGES, machineDefaults } from "@cortex/workspace-domain";
+import { automaticQueueOf, readableCheckReason, ACCESS_MODES, effortLabel, emptySession, engineLabel, isOpen, LANGUAGES, machineDefaults } from "@cortex/workspace-domain";
 import type { Check, Decision, EngineKey, Machine, Message, SessionOptions, TaskSession, TaskSettings, Worker, WorkerRoute, WorkerStatus } from "@cortex/workspace-domain";
-import { automaticAcceptanceHold, automaticStaleResultHold, staleResult, clock, interruptedTurn, ownerHold, plainChoice, readyLabel, readyStep, replanStopping, sameBranch, type TaskView, type WorkspaceIndex } from "./selectors";
-import { inTask, plainReason } from "./status-text";
+import { automaticAcceptanceHold, automaticStaleResultHold, staleResult, clock, interruptedTurn, ownerHold, currentModelId, plainChoice, readyLabel, readyStep, replanStopping, sameBranch, type TaskView, type WorkspaceIndex } from "./selectors";
+import { inTask, plainReason, STATUS_SETTINGS_PAGE } from "./status-text";
+import { workspaceCopy } from "./copy";
 
 /** Read models for the task session. Every count on the screen comes from these lists; nothing here changes state. */
 export type Face = { label: string; tone: string; icon: string; spin?: boolean };
@@ -124,7 +125,7 @@ export const coordinatorLine = (m: SessionModel) => m.running.length === 0 ? "Wo
 export function reviewLine(w: Worker): string | null {
   const r = w.review;
   if (!r) return null;
-  const verdict = r.verdict === "APPROVE" ? "Review approved"
+  const verdict = r.verdict === "APPROVE" ? (r.goalNotMet ? workspaceCopy("reviewGoalNotMet") : "Review approved")
     : r.verdict === "REQUEST_CHANGES" ? "Review requested changes"
     : r.verdict === "BLOCK" ? "Review blocked this result"
     : r.verdict === "INCOMPLETE" ? "Review incomplete"
@@ -215,7 +216,7 @@ export const routeLabel = (route: WorkerRoute | null, options: SessionOptions, m
   if (!route) return null;
   const engine = route.engine as EngineKey | undefined;
   const catalogued = engine ? machines.map(m => m.config?.catalogue?.[engine]?.models.find(x => x.id === route.model)?.label).find(Boolean) : undefined;
-  const model = route.modelLabel || catalogued || options.models.find(m => m.id === route.model)?.label || plainChoice(route.model), effort = options.efforts.find(e => e.id === route.effort)?.label ?? effortLabel(route.effort);
+  const model = route.modelLabel || catalogued || options.models.find(m => m.id === currentModelId(options.models, route.model))?.label || plainChoice(route.model), effort = options.efforts.find(e => e.id === route.effort)?.label ?? effortLabel(route.effort);
   return [engine ? `${engineLabel(engine)} · ${model}` : model, effort].filter(Boolean).join(", ") || null;
 };
 /** A worker's own model as its engine session was configured, or why none is shown yet. Never the coordinator's route. */
@@ -243,7 +244,16 @@ export function verificationFace(m: SessionModel): Face & { checks: Check[] } {
   if (failed) return { label: `${failed} failed`, tone: "st-bad", icon: "x-circle", checks };
   if (checks.length && checks.every(c => c.outcome === "passed")) return { label: `${checks.length} passed`, tone: "st-ok", icon: "check-circle", checks };
   if (checks.length) return { label: "Not all confirmed", tone: "st-warn", icon: "help", checks };
+  if (!verificationFollows(m)) return { label: workspaceCopy("verificationWillNotRun"), tone: "st-warn", icon: "alert", checks };
   return { label: "Not run", tone: "st-idle", icon: "circle", checks };
+}
+/** Whether a verification step still follows the latest review. A review that requested changes, blocked, was incomplete or
+ *  approved a stage that misses the goal sends the work back, so the runtime does not verify that state. */
+function verificationFollows(m: SessionModel) {
+  const reviews = (m.workers ?? []).filter(w => w.review?.verdict && !w.superseded);
+  const latest = reviews[reviews.length - 1]?.review;
+  if (!latest) return true;
+  return latest.verdict === "APPROVE" && !latest.goalNotMet;
 }
 /** Why a check is not a pass, in a person's words. A stated reason wins, and a bare evidence reference is never shown. */
 export function checkWhy(check: Check) {
@@ -381,6 +391,11 @@ export function resumeState(v: TaskView): ResumeState | null {
     why: mode === "review" ? "This run failed and cannot be resumed. Send a message to reopen it for a new plan."
       : ownerHold(v)?.actions.length ? "This run failed and cannot be resumed. What you can do is on the card above the message box."
       : "This run failed and cannot be resumed. Close task moves it to Done and keeps what was done." };
+  // The runtime's own hold (RECOVERING with automatic_continuation_paused) projects as paused, but it is not a pause the owner
+  // set: the core refuses Resume on it (task_not_paused). Automatic continues it by itself; a message steers it.
+  if (t.status === "paused" && t.automaticContinuation?.pause)
+    return { kind: "automatic", action: null, text: v.automaticFact?.text ?? "Paused by Automatic",
+      why: "Automatic paused this task and continues it by itself once the cause is resolved. Nothing is replayed. Write a message to steer it; what you can do is on the card above the message box." };
   if (t.status === "paused") return { kind: "paused", action: "continue_task", text: t.automaticContinuation?.pause ? v.automaticFact?.text ?? "Paused" : "Paused by you", why: "" };
   if (mode === "automatic") return { kind: "automatic", action: null, text: t.observedPhase === "recovery" && t.status === "working" ? "Recovering automatically" : v.automaticFact?.text ?? "Automatic",
     why: t.observedPhase === "recovery" && t.status === "working"
@@ -390,4 +405,15 @@ export function resumeState(v: TaskView): ResumeState | null {
     return t.conflict === "none" ? { kind: "held", action: "retry_task", text: interruptedTurn(t.issue) ? "Interrupted" : "Stopped", why: "" }
       : { kind: "held", action: null, text: "Conflict", why: "A merge is in progress. Resolve or abort it first" };
   return null;
+}
+
+/**
+ * The settings page that resolves the reason this task is paused or held for, when only the owner's settings can
+ * (see `STATUS_SETTINGS_PAGE`); null for every other reason, and for a task that is not stopped on one.
+ */
+export function pauseSettingsPage(view: TaskView): "engines" | null {
+  const hold = automaticQueueOf(view.sprint);
+  const code = hold?.taskId === view.id && hold.kind !== "owner_integration" ? hold.reason
+    : view.task.status === "paused" ? view.task.automaticContinuation?.pause?.reason : undefined;
+  return code !== undefined && Object.hasOwn(STATUS_SETTINGS_PAGE, code) ? STATUS_SETTINGS_PAGE[code] : null;
 }

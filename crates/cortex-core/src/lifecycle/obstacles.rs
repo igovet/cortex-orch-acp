@@ -707,6 +707,16 @@ pub fn classify(s: &Signals) -> Classification {
             summary("Access was reported missing, but nothing was tried and refused. Run the needed command or tool first (command_run, or outside_command for the host) and report missing access only with the exact refusal or error it returned"),
         );
     }
+    // An access claim that names no service, host or credential cannot be a concrete
+    // owner action (a card "Нужен доступ: unknown"). It stays in the task's own flow:
+    // the coordinator replans or asks a question.
+    if matches!(&access, Some((_, service)) if service == "unknown") {
+        return Classification::new(
+            TECHNICAL,
+            "blocker_missing_access_unnamed",
+            summary("The work reported missing data or access but named no service, host or credential, so there is nothing for the owner to grant. Replan, obtain the data another way, or ask the owner a question naming what is needed"),
+        );
+    }
     if let Some((rule, service)) = access {
         let mut c = Classification::new(ACCESS, rule, summary(&access_detail(&service, false)));
         c.service = Some(service);
@@ -1010,11 +1020,14 @@ pub fn open_obstacle_tx(
     }
     match found.class {
         ACCESS => {
-            let service = found
+            // Never an owner card without a concrete service.
+            let Some(service) = found
                 .service
                 .as_deref()
-                .filter(|s| access_service_ok(s))
-                .unwrap_or("unknown");
+                .filter(|s| access_service_ok(s) && *s != "unknown")
+            else {
+                return Ok(None);
+            };
             if let Some(existing) = open_actions(db, task)?
                 .into_iter()
                 .find(|a| a["service"] == service)

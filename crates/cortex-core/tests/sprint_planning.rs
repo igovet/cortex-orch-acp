@@ -88,12 +88,12 @@ fn a_planning_task_plans_only_read_only_specialists() {
                 &task,
                 "coordinator",
                 "writer",
-                &plan_with("backend-dev"),
+                &support::with_goal(&plan_with("backend-dev")),
             )
         })
         .unwrap_err();
     assert_eq!(refused.code(), "read_only_task_writer_refused");
-    s.write(|db| plan::accept_tx(db, &task, "coordinator", "study", &plan_with("explorer")))
+    s.write(|db| plan::accept_tx(db, &task, "coordinator", "study", &support::with_goal(&plan_with("explorer"))))
         .unwrap();
     // An ordinary task keeps its writing roles.
     let (_p, s, task, _) = start(None);
@@ -104,7 +104,7 @@ fn a_planning_task_plans_only_read_only_specialists() {
             &task,
             "coordinator",
             "writer",
-            &plan_with("backend-dev"),
+            &support::with_goal(&plan_with("backend-dev")),
         )
     })
     .unwrap();
@@ -158,7 +158,7 @@ fn the_plan_is_recorded_only_for_a_planning_task_and_replays_exactly() {
     );
     // Neither while a study worker runs.
     let (_p, s, task, _) = start(Some(NativeExecutionPolicy::SprintPlanning));
-    s.write(|db| plan::accept_tx(db, &task, "coordinator", "study", &plan_with("explorer")))
+    s.write(|db| plan::accept_tx(db, &task, "coordinator", "study", &support::with_goal(&plan_with("explorer"))))
         .unwrap();
     let args = json!({"tasks":revised,"request_key":"plan-3"});
     assert_eq!(
@@ -280,12 +280,12 @@ fn a_planning_study_names_no_verification_and_other_plans_still_must() {
         "dependencies":[],"scope":["src"]}],"verification":[]});
     let (_p, s, task, _) = start(Some(NativeExecutionPolicy::SprintPlanning));
     let accepted = s
-        .write(|db| plan::accept_tx(db, &task, "coordinator", "study", &study))
+        .write(|db| plan::accept_tx(db, &task, "coordinator", "study", &support::with_goal(&study)))
         .unwrap();
     assert!(accepted.is_object(), "{accepted}");
     let (_p, s, task, _) = start(None);
     assert_eq!(
-        s.write(|db| plan::accept_tx(db, &task, "coordinator", "study", &study))
+        s.write(|db| plan::accept_tx(db, &task, "coordinator", "study", &support::with_goal(&study)))
             .unwrap_err()
             .code(),
         "verification_required"

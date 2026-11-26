@@ -602,6 +602,18 @@ fn sprint_run_mode(value: &Value) -> Result<&str> {
     }
 }
 
+/// `automatic`: each task created from the plan gets its route by complexity;
+/// `sprint`: every task uses the sprint's own (owner-chosen) model.
+fn sprint_task_route(value: &Value) -> Result<&str> {
+    match value.as_str() {
+        Some(route @ ("automatic" | "sprint")) => Ok(route),
+        _ => Err(refuse(
+            "invalid_sprint",
+            "Choose Automatic by complexity or the sprint model for the sprint's tasks.",
+        )),
+    }
+}
+
 /// A queue hold keeps its identity (`holdId`) while the scheduler rewrites the same
 /// condition (same kind, code, task and reason); any other hold is a new one. An owner
 /// decision names the hold it answers, so a click on an older card never applies to
@@ -1141,6 +1153,12 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
             }
             sprint["checkout"] = checkout.clone();
         }
+        // Whether the tasks created from the plan use the sprint's model (the owner
+        // picked it) or each its automatic route by complexity (the default).
+        if let Some(route) = p.get("taskRoute").filter(|v| !v.is_null()) {
+            sprint_task_route(route)?;
+            sprint["taskRoute"] = route.clone();
+        }
         if !sprint["settings"].is_null() {
             workspace_protocol::validate(
                 "CreatePayload",
@@ -1219,6 +1237,7 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
                 "settings",
                 "planningTaskId",
                 "planningRun",
+                "taskRoute",
             ]
             .contains(&k.as_str())
         }) {
@@ -1234,6 +1253,9 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
             if sprint["runMode"] != *mode {
                 sprint.as_object_mut().unwrap().remove("automaticQueue");
             }
+        }
+        if let Some(route) = patch.get("taskRoute") {
+            sprint_task_route(route)?;
         }
         if let Some(settings) = patch.get("settings").filter(|v| !v.is_null()) {
             workspace_protocol::validate(
@@ -1272,6 +1294,10 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
         }
         for (key, value) in patch {
             sprint[key] = value.clone();
+        }
+        // A title the owner typed is never replaced by a generated one.
+        if patch.contains_key("title") {
+            sprint["titleState"] = json!("user");
         }
         target = patch.get("targetBranch").cloned();
     } else if matches!(

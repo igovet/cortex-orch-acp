@@ -31,14 +31,29 @@ The final text for a session is built in
    `CONSULTANT_EXCLUDED_NAMED`. Source: `crates/cortex-xtask/src/instructions.rs`
    (`composed_instructions`, `INLINED_COORDINATOR`, `INLINED_WORKER`,
    `SKILL_TRIGGERS`).
-2. **Claude specialist narration rule** (`compose` in `native_instructions.rs`):
-   the session prompt tells delegated execution workers and reviewers to work
-   through tools without interim assistant text. If a closing response is needed
-   after the final tool call, it is limited to one short sentence and cannot
-   replace the structured result. The coordinator, senior consultant, Codex
-   sessions and OpenCode sessions do not receive this rule. It is prompt guidance,
-   not enforcement or output filtering. If Claude generates interim assistant
-   text anyway, it is still recorded in worker activity.
+2. **Claude tool-calls-only rule** (`TOOL_CALLS_ONLY` and
+   `TOOL_CALLS_ONLY_AGAIN` in `native_instructions.rs`): for delegated Claude
+   execution workers and reviewers the rule is the first text of the prompt,
+   before the role body, and a short restatement is its last text, after every
+   later part (`native_instructions::append` keeps later parts in front of it).
+   While work remains, every response is tool calls only: no plan, next-step
+   announcement, progress update, status note, finding, summary or
+   acknowledgement as assistant text before, between or after tool calls.
+   Findings, decisions, assumptions and the report go into tool arguments
+   (`result_submit` or an owned report draft); a genuine owner question goes
+   through `ask_question`; the only text allowed right before a call is the
+   detail that tool's schema description asks for. Instructions elsewhere to explain, state or
+   report mean the content of those arguments. After the final tool call the
+   turn ends without text or with one short sentence. The shared worker
+   communication section no longer lists "progress" as worker text. The
+   coordinator, senior consultant, Codex sessions and OpenCode sessions do not
+   receive this rule. It is an instruction to the model, not enforcement or
+   output filtering: the installed Claude Agent SDK 0.3.323 (Claude Code
+   2.1.323) offers no option that stops assistant text, and any interim text
+   Claude still generates is recorded in worker activity and never hidden. The
+   Claude Code preset is not involved: the Cortex text is sent as a plain
+   `_meta.systemPrompt` string, which replaces the preset and its "short updates
+   between tool calls" guidance (see [Delivery per engine](#delivery-per-engine)).
 3. **Native capability boundary** (`compose` in `native_instructions.rs`): a fixed
    paragraph saying only the tools advertised on the channel are available, a
    paragraph that names the Cortex discovery tool and says how to treat external
@@ -55,7 +70,8 @@ The final text for a session is built in
 5. **Mode additions** (`native_sessions.rs`): a coordinator always gets
    `lifecycle::automatic::COORDINATOR_NOTE`, plus a sentence about project file
    tools when the task is Automatic; an Automatic execution worker gets the
-   "Automatic sprint" note about attributable write receipts.
+   "Automatic sprint" note about attributable write receipts. A closing
+   Claude tool-calls-only rule stays after these and the route text.
 6. **Route text** (`route.instructions`): the route's instruction string (in
    `native_routes.rs`) plus the owner-language paragraph added in
    `native_runtime.rs`. The coordinator is told to write what the owner reads in

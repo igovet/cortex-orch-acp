@@ -1,8 +1,10 @@
+import { LoadingBar } from "./skeleton";
 import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
-import type { ProjectSkill } from "@cortex/workspace-domain";
+import type { CortexSkill, ProjectSkill } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { I, keepInside, place } from "./kit";
 import { same } from "./stable";
+const SEARCHING = "Searching project files…";
 
 /**
  * Inline suggestions in a message field: `@` names a project file, `/` at the start of a line names a command of this
@@ -23,9 +25,9 @@ export type SuggestOptions = {
   skills?: boolean;
 };
 export type Trigger = { kind: "file" | "slash"; start: number; query: string };
-type Option = { id: string; kind: "file" | "command" | "skill"; label: string; sub?: string; why?: string; file?: string; command?: SlashCommand; skill?: ProjectSkill };
+type Option = { id: string; kind: "file" | "command" | "skill" | "cortex"; label: string; sub?: string; why?: string; file?: string; command?: SlashCommand; skill?: ProjectSkill; cortex?: CortexSkill };
 /** The same option as far as the list shows and accepts it. A command's `run` is looked up again when it is picked. */
-const sameOption = (a: Option, b: Option) => a.kind === b.kind && a.label === b.label && a.sub === b.sub && a.why === b.why && a.file === b.file && same(a.skill, b.skill);
+const sameOption = (a: Option, b: Option) => a.kind === b.kind && a.label === b.label && a.sub === b.sub && a.why === b.why && a.file === b.file && same(a.skill, b.skill) && same(a.cortex, b.cortex);
 
 /** The field's hint where `@` files and `/` commands and skills are all offered. */
 export const SUGGEST_HINT = "Message the agent, tag @files, or use /commands and /skills";
@@ -88,12 +90,15 @@ export function rankFiles(paths: readonly string[], query: string, max = MAX_SHO
 /** A file mention as text: `@path`, quoted when the path holds a space. */
 export const mention = (path: string) => /\s/.test(path) ? `@"${path}"` : `@${path}`;
 /** What the model receives for a skill picked from `/`: an ordinary sentence naming the project skill and where it is. */
+/** What the model receives for a built-in skill picked from `/`: a sentence naming the built-in skill, which `read_skill` serves by id. */
+export const cortexSkillText = (s: CortexSkill) => `Use the built-in skill ${s.id} (read it with read_skill before acting).`;
 export const skillText = (s: ProjectSkill) => s.pathOnly ? `Use the project skill at ${s.path}.` : `Use the project skill ${s.name} (${s.path}).`;
 
 /** Paths picked in this window, newest first: what `@` offers before anything is typed. */
 const recent = new Map<string, string[]>();
 const remember = (projectId: string, path: string) => recent.set(projectId, [path, ...(recent.get(projectId) ?? []).filter(p => p !== path)].slice(0, 6));
-type SkillRead = { at: number; pending: Promise<ProjectSkill[]>; value: ProjectSkill[] | null };
+type Skills = { skills: ProjectSkill[]; cortex: CortexSkill[] };
+type SkillRead = { at: number; pending: Promise<Skills>; value: Skills | null };
 const skillReads = new WeakMap<object, Map<string, SkillRead>>();
 
 /**
@@ -106,7 +111,7 @@ export function createSuggest(props: { options: () => SuggestOptions | undefined
   const [trigger, setTrigger] = createSignal<Trigger | null>(null);
   const [dismissed, setDismissed] = createSignal<number | null>(null);
   const [files, setFiles] = createSignal<{ query: string; paths: string[] } | null>(null);
-  const [skills, setSkills] = createSignal<ProjectSkill[] | null>(null);
+  const [skills, setSkills] = createSignal<Skills | null>(null);
   const [loading, setLoading] = createSignal(false);
   let timer: ReturnType<typeof setTimeout> | undefined, asked = 0, composing = false;
   let load: { id: string; done: Promise<void> } | null = null;
@@ -142,8 +147,8 @@ export function createSuggest(props: { options: () => SuggestOptions | undefined
     if (!cache) { cache = new Map(); skillReads.set(ws.store, cache); }
     let read = cache.get(projectId);
     if (!read || (read.value && Date.now() - read.at > SKILLS_FRESH_MS)) {
-      const entry: SkillRead = { at: Date.now(), value: read?.value ?? null, pending: ws.store.listProjectSkills(projectId).then(r => r?.skills ?? []) };
-      entry.pending = entry.pending.then(v => (entry.value = v), () => (entry.value = entry.value ?? []));
+      const entry: SkillRead = { at: Date.now(), value: read?.value ?? null, pending: ws.store.listProjectSkills(projectId).then(r => ({ skills: r?.skills ?? [], cortex: r?.cortex ?? [] })) };
+      entry.pending = entry.pending.then(v => (entry.value = v), () => (entry.value = entry.value ?? { skills: [], cortex: [] }));
       cache.set(projectId, read = entry);
     }
     if (read.value) setSkills(read.value);
@@ -180,10 +185,13 @@ export function createSuggest(props: { options: () => SuggestOptions | undefined
     const commands = (opts()?.commands?.() ?? []).filter(c => fits(c.name) || fits(c.label))
       .sort((a, b) => Number(!lower(a.name).startsWith(q)) - Number(!lower(b.name).startsWith(q)))
       .map(c => ({ id: `c:${c.name}`, kind: "command" as const, label: `/${c.name}`, sub: c.label, why: c.why, command: c }));
-    const named = (opts()?.skills ? skills() ?? [] : []).filter(s => fits(s.name) || fits(s.description ?? ""))
+    const named = (opts()?.skills ? skills()?.skills ?? [] : []).filter(s => fits(s.name) || fits(s.description ?? ""))
       .sort((a, b) => Number(!lower(a.name).startsWith(q)) - Number(!lower(b.name).startsWith(q)))
       .map(s => ({ id: `s:${s.path}`, kind: "skill" as const, label: `/${s.name}`, sub: s.description ?? s.path, skill: s }));
-    return [...commands, ...named].slice(0, MAX_SHOWN);
+    const builtIn = (opts()?.skills ? skills()?.cortex ?? [] : []).filter(s => fits(s.id) || fits(s.description))
+      .sort((a, b) => Number(!lower(a.id).startsWith(q)) - Number(!lower(b.id).startsWith(q)))
+      .map(s => ({ id: `x:${s.id}`, kind: "cortex" as const, label: `/${s.id}`, sub: s.description, cortex: s }));
+    return [...commands, ...named, ...builtIn].slice(0, MAX_SHOWN);
   };
   // A background update (a new fact, an event, another task's change) rebuilds the commands and this field's options; the
   // list keeps every option that still reads the same as the old object, so its rows, highlight and scroll stay put.
@@ -206,7 +214,7 @@ export function createSuggest(props: { options: () => SuggestOptions | undefined
     if (!t || dismissed() === t.start || options().length) return null;
     if (t.kind === "file") {
       if (!t.query) return "Type to search project files";
-      if (loading() || files()?.query !== t.query) return "Searching project files…";
+      if (loading() || files()?.query !== t.query) return SEARCHING;
       return "No matching files";
     }
     return null;
@@ -231,6 +239,7 @@ export function createSuggest(props: { options: () => SuggestOptions | undefined
     if (!option || !t || option.why) return;
     if (option.kind === "file") { const id = opts()?.projectId; if (id) remember(id, option.file!); replace(t, mention(option.file!)); }
     else if (option.kind === "skill") replace(t, skillText(option.skill!));
+    else if (option.kind === "cortex") replace(t, cortexSkillText(option.cortex!));
     else { const run = (opts()?.commands?.() ?? []).find(c => c.name === option.command!.name) ?? option.command!; replace(t, ""); run.run(); }
   };
   const key = (e: KeyboardEvent): boolean => {
@@ -280,11 +289,11 @@ export function SuggestList(props: { s: Suggest; field: () => HTMLTextAreaElemen
   const heading = (o: Option, i: number) => {
     const list = props.s.options();
     if (i > 0 && list[i - 1].kind === o.kind) return null;
-    return o.kind === "file" ? null : o.kind === "command" ? "Commands" : "Project skills";
+    return o.kind === "file" ? null : o.kind === "command" ? "Commands" : o.kind === "cortex" ? "Built-in skills" : "Project skills";
   };
   return <Show when={props.s.open()}>
     <div ref={show} popover="manual" class="ws-suggest" onMouseDown={e => e.preventDefault()}>
-      <Show when={props.s.notice()}>{n => <div class="ws-suggest-note cap muted" role="status">{n()}</div>}</Show>
+      <Show when={props.s.notice()}>{n => <div class="ws-suggest-note cap muted" role="status"><Show when={n() === SEARCHING} fallback={n()}><LoadingBar label={n()} /></Show></div>}</Show>
       <Show when={props.s.options().length}>
         <div id={props.s.listId} role="listbox" aria-label={props.s.trigger()?.kind === "file" ? "Project files" : "Commands and skills"}>
           <For each={props.s.options()}>{(o, i) => <>

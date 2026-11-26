@@ -73,6 +73,7 @@ const ACTIONS: Record<string, { kind: ToolPresentationKind; icon: ToolPresentati
   sprint_graph: { kind: "read", icon: "FileText", action: "Read sprint graph" },
   plan_submit: { kind: "edit", icon: "FilePenLine", action: "Submit plan" },
   sprint_plan_submit: { kind: "edit", icon: "FilePenLine", action: "Submit sprint plan" },
+  sprint_revision_submit: { kind: "edit", icon: "FilePenLine", action: "Submit sprint revision" },
   synthesis_submit: { kind: "edit", icon: "FilePenLine", action: "Submit synthesis" },
   user_question_request: { kind: "governance", icon: "Scale", action: "Ask user" },
   result_submit: { kind: "edit", icon: "FilePenLine", action: "Submit result" },

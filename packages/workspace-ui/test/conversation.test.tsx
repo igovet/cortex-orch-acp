@@ -96,6 +96,22 @@ it("formats an ordinary question’s answer labels and details inline without se
   expect($(".dc-answer .mc-effect strong")?.textContent).toBe("Pick");
 });
 
+it("links a bare root-level file name in question text and option labels only when the checkout has it", async () => {
+  const state = world(live, [question({ text: "Should I change `README.md` or `NOTES.md`? See crates/foo/src/lib.rs:12.", options: [
+    { label: "Edit `README.md`", sub: "Also `ws.store` and src/choice.ts:3", optionId: "a" },
+    { label: "Skip", optionId: "b" },
+  ] })]);
+  state.projects[0].repository = "/fixture";
+  state.repos = [{ projectId: "p", remote: "", tree: ["README.md", "crates/foo/src/lib.rs"], sources: {}, commits: [], branches: [], fetchedAt: null,
+    checkouts: [{ id: "p:main", projectId: "p", kind: "main", path: "/fixture", branch: "main", files: [], sources: {}, taskId: null, label: null, base: "main", ahead: 0, behind: 0, behindOf: {}, draft: "", updateConflict: null }] }];
+  await mount(state);
+  expect(all(".dc-q a, .dc .opt a").map(a => a.textContent)).toEqual(["README.md", "crates/foo/src/lib.rs:12", "README.md", "src/choice.ts:3"]);
+  expect(all(".dc-q code, .dc .opt code").map(c => c.textContent)).toEqual(["README.md", "NOTES.md", "README.md", "ws.store"]);
+  $(".dc-q a")!.click(); await settle();
+  expect(location.pathname).toBe(`/m/${LOCAL_MACHINE_ID}/t/t/code`);
+  expect(new URLSearchParams(location.search).get("file")).toBe("README.md");
+});
+
 it("delivers by the visible choice only: Ctrl+Enter does not queue, and Enter follows Queue once it is chosen", async () => {
   const p = await mount(world(live));
   typeMessage("Lock the row").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));

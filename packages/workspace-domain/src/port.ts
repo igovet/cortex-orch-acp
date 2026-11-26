@@ -12,10 +12,12 @@ export type PortCapabilities = { everything: boolean; operations: string[] };
 
 /** One project's confirmed facts, as they replace what was shown for that project. */
 export type ProjectSlice = { project: Project; tasks: Task[]; sessions: TaskSession[] };
-/** A confirmed snapshot. `version` is a decimal string, and a store installs only a newer one. */
-export type ProjectionUpdate = { kind: "projection"; version: string } & ({ scope: "workspace"; state: WorkspaceState } | { scope: "project"; slice: ProjectSlice });
+/** A confirmed snapshot. `version` is a decimal string, and a store installs only a newer one.
+ * `standIn`: a project's empty placeholder (not activated, or its Cortex away), not a read of what it holds. A real read of a project with
+ * no task yet is at version "0" too, so the version alone never tells the two apart. */
+export type ProjectionUpdate = { kind: "projection"; version: string; standIn?: true } & ({ scope: "workspace"; state: WorkspaceState } | { scope: "project"; slice: ProjectSlice });
 /** What the owner decided about a task. The runtime knows nothing of these, so they come from the machine and sit over its facts. */
-export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptance" | "reviewActions" | "integrationFacts" | "closedAs" | "doneAt" | "archive" | "archiveHold" | "targetBranch" | "sprintId" | "dependencies" | "integration" | "notVerifiedByCortex" | "purgeBlocker" | "work" | "checkout" | "settings" | "result" | "conflict" | "merge" | "resolvedBy" | "writeDenials" | "spend" | "reworkAvailable" | "reworkUnavailableReason" | "reworkWarnings" | "reworkVersion" | "reworkOwnerEpoch" | "reworkExecutionId">> & {
+export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptance" | "reviewActions" | "integrationFacts" | "closedAs" | "doneAt" | "archive" | "archiveHold" | "targetBranch" | "sprintId" | "dependencies" | "integration" | "notVerifiedByCortex" | "purgeBlocker" | "work" | "checkout" | "settings" | "result" | "conflict" | "merge" | "resolvedBy" | "writeDenials" | "spend" | "reworkAvailable" | "reworkUnavailableReason" | "reworkWarnings" | "reworkVersion" | "reworkOwnerEpoch" | "reworkExecutionId" | "sprintRoute">> & {
   status?: "ready_to_merge" | "done"; automaticReady?: boolean; planning?: boolean; purged?: boolean; retiredPlanner?: boolean;
   /** Latest coordinator attempt clock and reported usage, read with task facts. */
   coordinatorMetrics?: Pick<TaskSession["coordinator"], "elapsedMs" | "runningSince" | "usage">;
@@ -45,8 +47,9 @@ export type CatalogueState = { running: boolean; failed: { connectionId: string;
  */
 export type MachineFacts = { machineId: string; patch: Partial<Machine>; engineUsage?: EngineWeeklyUsage[]; options?: SessionOptions; catalogue?: CatalogueState };
 export type PortUpdate = { kind: "preview"; slice: ProjectSlice; facts: ProjectFacts } | { kind: "enrichment"; update: ProjectionUpdate } | { kind: "project_state"; project: Project; issue: string | null; cause?: string | null } | { kind: "delta"; update: ProjectionUpdate } | { kind: "registry"; projectIds: string[] } | ProjectionUpdate | { kind: "connection"; connection: PortConnection } | { kind: "facts"; facts: ProjectFacts } | { kind: "machine"; facts: MachineFacts }
-  /** What the machine can do changed, for example a project's Cortex started. Read everything again. */
-  | { kind: "refresh" };
+  /** With `projectId`: that project's events arrived, so its tasks and facts are read again. Without: what the machine can
+   *  do changed (a resubscribe, a registry change), so everything is read again. */
+  | { kind: "refresh"; projectId?: string };
 
 export type CommandEnvelope = {
   requestId: string; operation: WorkspaceCommand["type"];
@@ -86,7 +89,8 @@ export interface WorkspacePort {
   /** Desktop owner only. Omit offset for a preview, otherwise read retained bytes from that offset. */
   readCommandOutput?(request: CommandOutputRead): Promise<CommandOutput>;
   /** One file of a checkout, read when it is opened. A port with no files has none. */
-  discoverMcp?(server: McpServer): Promise<ConnectResult>;
+  /** With a project, a stored environment value is kept from that project's registry instead of the machine's. */
+  discoverMcp?(server: McpServer, projectId?: string | null): Promise<ConnectResult>;
   takeDroppedFiles?(): Promise<import("./types").Attachment[]>;
   /** A saved task's files, fetched on demand rather than duplicated in every board snapshot. */
   readTaskAttachments?(taskId: string): Promise<import("./types").AttachmentInput[]>;
@@ -149,6 +153,8 @@ export interface WorkspacePort {
     list(): Promise<import("./owner-actions").OwnerActions | null>;
     act(projectId: string, actionId: string, action: import("./owner-actions").OwnerActionVerb): Promise<import("./owner-actions").OwnerActionReply>;
     token(projectId: string, actionId: string, token: string): Promise<import("./owner-actions").OwnerActionReply>;
+    /** Opens a machine MCP sign-in in the computer's browser (desktop only; absent elsewhere). */
+    openSignIn?(actionId: string): Promise<void>;
   };
   readFile?(checkoutId: string, file: string): Promise<FileRead>;
   /** A commit message or pull request text the machine wrote from the task's real changes. Null when none could be had; the caller keeps its own text. */
@@ -182,20 +188,43 @@ export interface WorkspacePort {
     read(sprintId: string): Promise<SprintGraphRead>;
     edit(edit: SprintGraphEdit): Promise<SprintGraphWrite>;
   };
+  /**
+   * The task side chat (`product.task` `side_question`, `side_chat_poll`, `side_chat_history`, `side_chat_clear`): the owner's
+   * questions about one task, answered by a read-only session on the task's coordinator route or a picked model. Nothing it
+   * does reaches the task, its conversation or its store; the machine keeps the history in its own private state.
+   * `ask` answers the entry it started or the refusal; `poll` reads one entry again, null when it could not be read.
+   */
+  sideChat?: SideChatPort;
 }
+
+export type SideChatEntry = {
+  id: string; question: string; at: number; state: "running" | "done" | "failed" | "interrupted"; answer?: string; reason?: string;
+  route?: { engine?: string; model?: string; effort?: string | null; fileAccess?: "read_tools" | "context_only" };
+};
+export type SideChatAsk = { taskId: string; question: string; model?: string; effort?: string };
+export type SideChatPort = {
+  history(taskId: string): Promise<SideChatEntry[]>;
+  ask(request: SideChatAsk): Promise<{ ok: true; entry: SideChatEntry } | { ok: false; code: string; message: string }>;
+  poll(taskId: string, entryId: string): Promise<SideChatEntry | null>;
+  clear(taskId: string): Promise<boolean>;
+};
 
 export type SprintGraphRead = { kind: "graph"; graph: LiveSprintGraph } | { kind: "unsupported" } | { kind: "refused"; code: string; message: string };
 /** One live edge to add or remove, or one move of a ready draft's priority. Both carry the revision the owner saw. */
 export type SprintGraphEdit =
   | { action: "set_dependency"; sprintId: string; dependentTaskId: string; predecessorTaskId: string; present: boolean; expectedGraphRevision: string }
-  | { action: "move_priority"; sprintId: string; taskId: string; direction: "up" | "down"; expectedGraphRevision: string };
+  | { action: "move_priority"; sprintId: string; taskId: string; direction: "up" | "down"; expectedGraphRevision: string }
+  | { action: "apply_revision"; sprintId: string; revisionId: string; expectedGraphRevision: string }
+  | { action: "reject_revision"; sprintId: string; revisionId: string };
 /** `unchanged`: the graph already was as asked. `unknown`: no answer, or the service could not confirm its save. */
 export type SprintGraphWrite = { outcome: "changed" } | { outcome: "unchanged" } | { outcome: "refused"; code: string; message: string } | { outcome: "unknown"; message?: string };
 
 /** One read of a checkout file. `revision` is the hash of its bytes; `readOnly` and `writer` say why saving it is not possible now. */
 /** `pathOnly`: a bundled skill has the same name, so only the path names this file. `omitted` counts skills past the bound. */
 export type ProjectSkill = { name: string; path: string; description: string | null; pathOnly: boolean };
-export type ProjectSkills = { skills: ProjectSkill[]; omitted: number };
+/** One of Cortex's own topic skills the coordinator reads with `read_skill`. */
+export type CortexSkill = { id: string; description: string };
+export type ProjectSkills = { skills: ProjectSkill[]; omitted: number; cortex?: CortexSkill[] };
 export type FileRead = { text: string | null; reason?: string; revision?: string | null; size?: number; readOnly?: string | null; writer?: string | null; media?: FileMedia };
 export type FolderListRequest = { dirs: string[]; overview?: boolean };
 /** `ignored` is Git's verdict (in a folder without Git: one of the folders its tree does not walk); null when Git could not say. */

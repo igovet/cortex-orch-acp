@@ -1462,3 +1462,68 @@ async fn withdrawn_failed_check_no_longer_blocks_acceptance_but_unassessed_ones_
         f.service.stop().await.unwrap();
     }
 }
+/// A standalone task in the project folder (no sprint) stays acceptable while other
+/// tasks or the owner change unrelated files, and goes stale only when a file it wrote
+/// changes. Its verified folder digest is deliberately not the current folder digest.
+#[tokio::test]
+async fn standalone_project_folder_result_is_scoped_to_its_own_written_files() {
+    use sha2::{Digest, Sha256};
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/task-work-facts.json")).unwrap();
+    let case = fixture["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "work-current-waiver")
+        .unwrap();
+    let f = Fixture::new().await;
+    f.git(&["init", "-b", "main"]);
+    f.git(&["config", "user.name", "Fixture"]);
+    f.git(&["config", "user.email", "fixture@example.invalid"]);
+    f.git(&["config", "commit.gpgsign", "false"]);
+    f.git(&["config", "core.hooksPath", "/dev/null"]);
+    fs::write(f.root.join("other.txt"), "base\n").unwrap();
+    f.git(&["add", "other.txt"]);
+    f.git(&["commit", "-m", "base"]);
+    let own = "own text\n";
+    fs::write(f.root.join("own.md"), own).unwrap();
+    let store = f.store();
+    store.write(|db| {
+        for row in case["rows"].as_array().unwrap() {
+            let row = replace(row, &f.root, &f.id);
+            let params = row[1].as_array().unwrap().iter().map(sql).collect::<Vec<_>>();
+            db.execute(row[0].as_str().unwrap(), rusqlite::params_from_iter(params))?;
+        }
+        let events = [
+            ("TASK_CREATED", json!({"execution_host":"rust"})),
+            ("NATIVE_PROJECT_WRITTEN", json!({"channel_id":"ch","path":"own.md","sha256":format!("{:x}",Sha256::digest(own.as_bytes())),"add":1,"del":0})),
+            ("VERIFICATION_PASSED", json!({"revision":0,"checks":[],"revision_digest":"1".repeat(64),"checkout_digest":"2".repeat(64)})),
+        ];
+        for (kind, payload) in events {
+            db.execute("INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')", (kind, payload.to_string()))?;
+        }
+        Ok(())
+    }).unwrap();
+    let path = store.key().directory().join("r1/result.md");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(&path, case["files"][0]["content"].as_str().unwrap()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    f.save(&json!({"tasks":{"t1":{"status":"ready_to_merge","checkout":{"kind":"main"},"targetBranch":"main"}}}));
+    let stale = "Result evidence is unavailable or the files changed. Request changes and run fresh checks.";
+    // Another task or the owner changes unrelated files in the same folder.
+    fs::write(f.root.join("other.txt"), "someone else\n").unwrap();
+    fs::write(f.root.join("untracked.txt"), "new\n").unwrap();
+    let reply = f.call("product.read", json!({})).await.unwrap();
+    let actions = &reply["result"]["tasks"]["t1"]["reviewActions"];
+    assert_ne!(actions["reason"], stale, "{actions}");
+    assert_eq!(actions["accept"], true, "{actions}");
+    // A file the task wrote changed after its result: acceptance is refused.
+    fs::write(f.root.join("own.md"), "changed later\n").unwrap();
+    let reply = f.call("product.read", json!({})).await.unwrap();
+    let actions = &reply["result"]["tasks"]["t1"]["reviewActions"];
+    assert_eq!(actions["accept"], false, "{actions}");
+    assert_eq!(actions["reason"], stale, "{actions}");
+    f.service.stop().await.unwrap();
+}

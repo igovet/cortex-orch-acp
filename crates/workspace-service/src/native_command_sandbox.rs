@@ -27,6 +27,16 @@ pub(crate) enum Profile {
     ReadOnly,
     Guarded,
     Development,
+    /// Development plus a writable `.cortex`/`.cortex-dev` (Auto access only):
+    /// the live store files stay read-only.
+    Auto,
+}
+
+impl Profile {
+    /// Development and Auto share the whole-host writing view.
+    pub(crate) fn wide(self) -> bool {
+        matches!(self, Self::Development | Self::Auto)
+    }
 }
 
 pub(crate) struct Sandbox {

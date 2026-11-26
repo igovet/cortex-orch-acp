@@ -4,7 +4,7 @@ import { useWs, WsContext } from "./ctx";
 import { ScreenActive } from "./freshness";
 import { hrefOf, type Route } from "./router";
 import type { Fact } from "./selectors";
-import { Skeleton } from "./skeleton";
+import { LoadingBar, Skeleton } from "./skeleton";
 
 export const I = (props: { n: string; s?: 12 | 14; class?: string }) =>
   <i class={`i ${props.s ? `s${props.s} ` : ""}i-${props.n}${props.class ? ` ${props.class}` : ""}`} aria-hidden="true" />;
@@ -22,7 +22,7 @@ export function OverviewShown(props: { children: JSX.Element; inline?: boolean }
   const wait = useOverviewWait();
   // A whole panel still waiting for its first read shows the panel skeleton; one whose read failed says why, in words.
   const panel = () => ws.store.overviewIssue() ? <Loading text={wait()!} /> : <div aria-busy="true"><Skeleton kind="panel" label={wait()!} /></div>;
-  return <Show when={!wait()} fallback={props.inline ? <span class="cap muted" role="status">{wait()}</span> : panel()}>{props.children}</Show>;
+  return <Show when={!wait()} fallback={props.inline ? (ws.store.overviewIssue() ? <span class="cap muted" role="status">{wait()}</span> : <LoadingBar label={wait()!} />) : panel()}>{props.children}</Show>;
 }
 /**
  * Asks for the machine's overview (`wantOverview`) while the screen that shows its fields is on view and `visible` holds:
@@ -138,6 +138,9 @@ export function Pop(props: { id: string; class?: string; align?: Align; label?: 
   onMount(() => { name(); el.addEventListener("beforetoggle", onBefore); el.addEventListener("toggle", onToggle); });
   return <div ref={r => { el = r; props.ref?.(r); }} popover="auto" id={props.id} class={props.class} style={props.style} role={props.role} aria-label={props.label} on:keydown={props.onKeyDown}>{props.children}</div>;
 }
+/** A disabled item names its reason in one short line; the whole sentence stays in `data-why` for the tooltip, so a long reason never widens the menu. */
+export const REASON_HINT_MAX = 72;
+export const briefReason = (why: string, max = REASON_HINT_MAX) => { const one = why.replace(/\s+/g, " ").trim(); return one.length > max ? `${one.slice(0, max - 1).trimEnd()}…` : one; };
 export function MenuItem(props: { actionId?: string; icon?: string; label: JSX.Element; sub?: string; keys?: string; count?: string; check?: boolean; danger?: boolean; disabled?: string; needs?: WorkspaceCommand["type"]; onSelect?: () => void }) {
   const ws = useWs();
   // Read through a memo: a conditional prop read in a click handler would otherwise build a computation with no owner.
@@ -145,7 +148,7 @@ export function MenuItem(props: { actionId?: string; icon?: string; label: JSX.E
   return <button class={`mi${props.danger ? " mi-danger" : ""}`} role="menuitem" data-task-action={props.actionId} aria-disabled={disabled() ? "true" : undefined} data-why={disabled()}
     onClick={e => { const at = e.currentTarget; if (disabled()) return; closePop(at); props.onSelect?.(); }}>
     <Show when={props.icon}><I n={props.icon!} /></Show>
-    <span class="grow">{props.label}<Show when={props.sub}><span class="sub">{props.sub}</span></Show><Show when={disabled()}>{why => <span class="sub">{why()}</span>}</Show></span>
+    <span class="grow">{props.label}<Show when={props.sub}><span class="sub">{props.sub}</span></Show><Show when={disabled()}>{why => <span class="sub mi-why">{briefReason(why())}</span>}</Show></span>
     <Show when={props.keys && ws.keys(props.keys)}>{keys => <span class="kbd">{keys()}</span>}</Show>
     <Show when={props.count}><span class="kbd">{props.count}</span></Show>
     <Show when={props.check}><I n="check" s={14} /></Show>

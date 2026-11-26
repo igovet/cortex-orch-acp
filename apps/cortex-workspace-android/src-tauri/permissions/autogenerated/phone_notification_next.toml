@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-phone-notification-next"
+description = "Enables the phone_notification_next command without any pre-configured scope."
+commands.allow = ["phone_notification_next"]
+
+[[permission]]
+identifier = "deny-phone-notification-next"
+description = "Denies the phone_notification_next command without any pre-configured scope."
+commands.deny = ["phone_notification_next"]

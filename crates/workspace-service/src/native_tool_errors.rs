@@ -79,7 +79,9 @@ fn field(code: &str) -> Option<&'static str> {
         | "outside_path_inside_project"
         | "outside_parent_unavailable"
         | "write_outside_assignment_scope"
-        | "rule_file_protected" => "path",
+        | "rule_file_protected"
+        | "cortex_live_store"
+        | "protected_path_not_confirmed" => "path",
         "invalid_cwd" | "outside_cwd_unavailable" | "scoped_command_cwd_refused"
         | "worktree_command_cwd_refused" => "cwd",
         "skill_link_name_invalid" | "skill_source_missing" => "name",
@@ -90,6 +92,21 @@ fn field(code: &str) -> Option<&'static str> {
         | "verification_executable_unavailable" => "argv",
         "verification_failed_check_missing" | "automatic_required_check_missing" => "verification",
         "synthesis_text_required" => "text",
+        "plan_outcomes_required"
+        | "invalid_plan_outcome"
+        | "plan_outcome_uncovered"
+        | "plan_outcome_deferral_conflict"
+        | "plan_outcome_deferral_reason_required"
+        | "plan_outcome_dropped"
+        | "plan_outcome_statement_required" => "plan.outcomes",
+        "plan_outcome_unknown" => "plan.tasks.delivers",
+        "verification_goal_commands_missing" => "plan.verification",
+        "final_outcomes_required"
+        | "final_outcome_unknown"
+        | "invalid_final_outcomes"
+        | "final_outcome_evidence_required"
+        | "completion_goal_not_met" => "outcomes",
+        "not_verified_not_a_check" => "not_verified",
         "synthesis_gaps_undisclosed" | "invalid_not_verified" | "synthesis_blocker_required" => {
             "not_verified"
         }
@@ -131,7 +148,7 @@ fn hint(code: &str) -> &'static str {
         "sprint_membership_required" => "Sprint reads need a current Workspace sprint member. Continue from the current task context.",
         "sprint_membership_changed" => "The sprint membership changed during this read. Read the current graph again.",
         "tool_not_available" => "That tool is not offered to this channel; tools_discover without a name lists the offered tools.",
-        "invalid_scope" => "Each scope entry must be a project-relative path without wildcards, '..' or private runtime storage.",
+        "invalid_scope" => "Each scope entry must be a project-relative path without wildcards or '..'.",
         "scope_conflicts_with_user_policy" => "A requested path is protected by the owner. Remove it from the request.",
         "replan_limit_requires_user_input" => "The automatic replan limit for this task is reached. Ask the owner through the question route, or report the blocker.",
         "invalid_replan_operation" => "Use replan_request, scope_request or escalation_request with their advertised fields.",
@@ -142,6 +159,19 @@ fn hint(code: &str) -> &'static str {
         "synthesis_disclosure_in_text" => "Put verification-gap disclosures only in not_verified, not in text.",
         "invalid_not_verified" | "synthesis_blocker_required" => "Each not_verified entry needs the exact check name and a concrete blocker.",
         "plan_not_expected" => "A plan is accepted only while planning; end the turn and wait for the runtime.",
+        "plan_outcomes_required" | "invalid_plan_outcome" => "List every required result of the original goal and the owner's messages in plan.outcomes, each with a unique id and a statement in the owner's terms.",
+        "plan_outcome_uncovered" => "Every outcome needs a task that lists its id in delivers, or deferred with the reason a later plan delivers it.",
+        "plan_outcome_deferral_conflict" => "An outcome a task delivers is not deferred; remove deferred, or remove the id from delivers.",
+        "plan_outcome_deferral_reason_required" => "A deferred outcome needs a concrete reason.",
+        "plan_outcome_unknown" => "A task's delivers names an id that plan.outcomes does not define; use only ids from plan.outcomes.",
+        "plan_outcome_dropped" => "Keep every outcome of the plan in force with its exact id and statement (plan_summary.outcomes in task_get_context lists them verbatim), or send only its id and the runtime fills the recorded statement; add new outcomes instead of dropping or rewording one.",
+        "batch_result_limit" => "This output is larger than one read_batch item. Call read_large_output directly, outside read_batch (it pages with offset and limit), to read it. A deferred task_get_context or read_capsule keeps state, revision, required_verification and plan_outcomes inline, so the goal outcomes to carry into a new plan never need this read.",
+        "plan_outcome_statement_required" => "An outcome without a statement must name an outcome of the plan in force by its id (plan_summary.outcomes in task_get_context); give a new outcome its statement.",
+        "verification_goal_commands_missing" => "The previous plan's approved stage did not meet the goal before its verification ran; keep its verification commands with their exact argv in this plan.",
+        "final_outcomes_required" | "final_outcome_unknown" | "invalid_final_outcomes" => "Report every goal outcome of the accepted plan (plan_summary.outcomes in task_get_context) exactly once in outcomes with done or not_done; for a plan without outcomes, list the original goal's required results yourself.",
+        "final_outcome_evidence_required" => "A done outcome names its evidence: a report id, a verified check or the delivered result.",
+        "completion_goal_not_met" => "Nothing was recorded: an outcome of the goal is not done. Do not synthesize unfinished work. Continue with replan_request for a plan that delivers the remaining outcomes, or ask the owner with user_question_request when only the owner can decide.",
+        "not_verified_not_a_check" => "not_verified lists only recorded checks and runtime limits that did not pass. Unfinished work is not a check gap: report it as a not_done outcome, and continue the work instead of synthesizing.",
         "owner_question_required" => "A decision only the owner can make blocks this work (capsule obstacles.owner_decisions). Ask it first with user_question_request: one question with concrete options. Plan the blocked work after the answer.",
         "verification_failed_check_missing" | "automatic_required_check_missing" => "Keep the unresolved verification commands in the repair plan with their exact argv. Assign the underlying code fix to a writing worker so the runtime can verify it again.",
         "verification_repair_not_expected" => "No verification repair is expected now; end the turn and wait for the runtime.",
@@ -171,6 +201,8 @@ fn hint(code: &str) -> &'static str {
         "native_command_sandbox_unavailable" => "The command did not start: its supervisor could not prepare or confirm the sandbox before release. Nothing ran. This refusal does not authorize running on the host. Report the preparation blocker; a fresh contained attempt is appropriate only if the problem has cleared and the original receipt confirms it never launched.",
         "project_mount_alias_refused" => "Use a path directly in the bound checkout; this path crosses a mount boundary.",
         "write_outside_assignment_scope" => "Use a target inside the current assignment scope or request access to an additional project path before retrying. Outside paths cannot be added to the assignment.",
+        "cortex_live_store" => "This is a live file of the Cortex store (its database, WAL, SHM or lock files); no tool writes it in any mode, because a write from outside the runtime can corrupt the running store. Leave it unchanged and report what you needed.",
+        "protected_path_not_confirmed" => "This path is Cortex private state, a Git control file or a credential file: the owner did not allow this access, or no one could answer the card. Nothing changed. Do not repeat it; report it as not done with this blocker.",
         "rule_file_protected" => "The owner denied writes to this path (`deny-write:`). Leave it unchanged; the owner lifts the denial with `allow-write: <path>`.",
         "outside_action_not_confirmed" => "The user did not allow this to run outside the sandbox, or no one could answer the permission card. Nothing ran. Do not repeat it; report the check as not run with this blocker.",
         "native_verification_sandbox_unavailable" =>"The verification sandbox could not run the probe; this does not show that the program is missing.",
@@ -183,6 +215,7 @@ fn hint(code: &str) -> &'static str {
         "skill_link_not_managed" => "Only the exact managed link to ../../.agents/skills/<name> is removed. Leave this entry or ask the owner.",
         "capsule_unavailable" => "This worker's own assignment is not recorded yet; retry shortly.",
         "at_revision_out_of_range" => "at_revision must not exceed the task's current source revision.",
+"turn_tool_loop_limit" => "The runtime ended this turn: the same call kept repeating without any change in the task, or the turn made too many calls. Make no further calls and end the turn. The next turn starts from the retained state; correct the call before repeating it.",
         "busy" | "storage_unavailable" | "session_host_closed" | "native_host_closed" => "The runtime store was briefly unavailable; nothing new is known about the outcome. Retry the identical call once, then report it.",
         _ => "No change was made by this refusal unless the code says the outcome is unknown. Correct the call according to the code and the tool's live description.",
     }
@@ -258,6 +291,17 @@ pub(crate) fn enrich(value: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn batch_result_limit_and_outcome_refusals_say_how_to_continue() {
+        let limit = reply("batch_result_limit");
+        let hint = limit["structuredContent"]["hint"].as_str().unwrap();
+        assert!(hint.contains("read_large_output directly") && hint.contains("plan_outcomes inline"), "{hint}");
+        for code in ["plan_outcome_dropped", "plan_outcome_statement_required"] {
+            let r = reply(code);
+            assert_eq!(r["structuredContent"]["field"], "plan.outcomes");
+            assert!(r["structuredContent"]["hint"].as_str().unwrap().contains("plan_summary.outcomes"));
+        }
+    }
     #[test]
     fn content_failures_are_tool_errors_and_authority_stays_a_named_refusal() {
         let error = finish(Err(cortex_engine::Error::Refused("request_key_conflict"))).unwrap();

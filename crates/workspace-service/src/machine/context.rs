@@ -14,7 +14,38 @@ pub(super) fn core(error: CoreError) -> Refused {
 pub fn key(root: &Path) -> Result<cortex_core::ProjectKey> {
     crate::native_runtime::key(root).map_err(core)
 }
+thread_local! {
+    /// Set on the thread that serves one of the owner's screen reads (see `machine::owner_read`).
+    static OWNER_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Marks this thread as serving an owner read until the guard drops: its live
+/// read-only opens wait for an exclusive migration instead of refusing `busy`.
+pub(crate) struct OwnerRead(bool);
+pub(crate) fn owner_read() -> OwnerRead {
+    OwnerRead(OWNER_READ.with(|r| r.replace(true)))
+}
+impl Drop for OwnerRead {
+    fn drop(&mut self) {
+        OWNER_READ.with(|r| r.set(self.0));
+    }
+}
 pub(super) fn open(root: &Path, mode: OpenMode) -> Result<Option<Store>> {
+    let key = key(root)?;
+    // An owner's screen read waits for an exclusive migration or initialization;
+    // actions (even their read-only prechecks) never queue: they refuse `busy` at once.
+    let opened = if mode == OpenMode::LiveReadOnly && OWNER_READ.with(|r| r.get()) {
+        Store::open_waiting(key.clone(), mode)
+    } else {
+        Store::open(key.clone(), mode)
+    };
+    match opened {
+        Ok(store) => Ok(Some(store)),
+        Err(e) if crate::local::store_missing(&key, &e) => Ok(None),
+        Err(e) => Err(core(e)),
+    }
+}
+/// Open without waiting for an exclusive lock: for mutations, which refuse `busy` at once.
+pub(super) fn open_now(root: &Path, mode: OpenMode) -> Result<Option<Store>> {
     let key = key(root)?;
     match Store::open(key.clone(), mode) {
         Ok(store) => Ok(Some(store)),

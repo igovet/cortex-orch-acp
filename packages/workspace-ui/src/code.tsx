@@ -1,3 +1,4 @@
+import { LoadingBar, LoadingStrip } from "./skeleton";
 import { createEffect, createMemo, createSignal, createUniqueId, For, lazy, on, onCleanup, Show, Suspense, untrack, useContext } from "solid-js";
 import type { FolderListing, FolderOverview, ProjectRepo, RepoCheckout } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
@@ -11,7 +12,7 @@ import { ScreenActive } from "./freshness";
 import { languageOf } from "./highlight";
 import { A, I, Keyed, MenuItem, Modal, Pop } from "./kit";
 import { ActionBar, revealCutIn, Toolbar } from "./layout";
-import { addedLines, allDirs, checkoutFiles, codeTree, dirName, fileName, searchFiles, sourceOf, splitMatch, treeRows, type FolderView } from "./review-model";
+import { addedLines, allDirs, checkoutFiles, codeTree, dirName, fileName, READING_NOTE, searchFiles, sourceOf, splitMatch, treeRows, type FolderView } from "./review-model";
 import { same } from "./stable";
 import type { Route } from "./router";
 
@@ -321,7 +322,7 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
             {/* Kept by kind and path: the rows are rebuilt whenever a folder opens or the checkout's files move, and a row that
                 is still there must keep its node, so focus, hover and the tree's scroll stay where they were. */}
             <Keyed each={rows()} by={r => `${r.kind}:${r.path}`}>{row => row().kind === "more"
-              ? <div class="tn ws-tree-note" role="treeitem" style={{ "--d": row().depth }}><span class="trunc">{row().name}</span></div>
+              ? <div class="tn ws-tree-note" role="treeitem" style={{ "--d": row().depth }}><Show when={row().name === READING_NOTE} fallback={<span class="trunc">{row().name}</span>}><LoadingBar label={row().name} /></Show></div>
               : row().kind === "dir"
               ? <button class="tn" classList={{ "ws-ignored": !!row().ignored }} role="treeitem" style={{ "--d": row().depth }} aria-label={row().ignored ? `${row().name}, ignored` : undefined} aria-expanded={!shut().has(row().path)} onClick={() => toggleDir(row().path, row().lazy)}><I n={shut().has(row().path) ? "chevron-right" : "chevron-down"} s={14} /><span data-tooltip-cut="" class="trunc">{row().name}</span></button>
               : <button class="tn" classList={{ "ws-ignored": !!row().ignored }} role="treeitem" style={{ "--d": row().depth }} aria-label={row().ignored ? `${row().name}, ignored` : undefined} aria-current={open() === row().path ? "true" : undefined} onClick={() => show(row().path)}><I n={row().link ? "link" : "file"} s={14} /><span data-tooltip-cut="" class="trunc">{row().name}</span><Show when={diffOf(row().path)}>{d => <GitLetter status={d().status} />}</Show></button>}</Keyed>
@@ -376,13 +377,13 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
           <Show when={working(path())?.filter}>{driver => <div class="strip info"><span>{driver() === "lfs" ? "Git LFS" : `Git filter: ${driver()}`} · Content comparison is unavailable; no filter is run.</span></div>}</Show>
           <Show when={mode() === "file"} fallback={<div class="ebody ws-flush"><Show when={diff()} fallback={<div class="note-panel"><span class="w500">No changes in this file</span><span>It matches {props.checkout.base}.</span></div>}>{d => <Diff file={d()} layout={mode() === "split" ? "split" : "unified"} actions={actions(path())} />}</Show></div>}>
             <Show when={view() === "source"} fallback={<FilePreview path={path()} plan={plan()} text={previewText()} reason={previewReason()} readMedia={() => ws.store.readMedia(props.checkout.id, path())} onSource={() => setView("source")} />}>
-            <Show when={buffer()?.loaded && !buffer()?.missing && buffer()} fallback={<Show when={!editable() || buffer()?.missing} fallback={<div class="ebody"><div class="note-panel"><span>Opening…</span></div></div>}>
+            <Show when={buffer()?.loaded && !buffer()?.missing && buffer()} fallback={<Show when={!editable() || buffer()?.missing} fallback={<div class="ebody"><LoadingStrip label="Opening…" /></div>}>
               <div class="ebody"><Show when={source()} fallback={<div class="note-panel"><span class="w500">{buffer()?.missing ?? ws.t("noFileCopy")}</span></div>}>{s => <>
                 <Show when={s().partial}><div class="cap faint ws-pad">{ws.t("partialFile")}</div></Show>
                 <Show when={buffer()?.missing}>{reason => <div class="cap faint ws-pad">{reason()}</div>}</Show>
                 <div class="code"><For each={s().lines}>{(line, i) => <div id={`code-line-${i() + 1}`} class={`cl${added().has(i() + 1) ? " chg" : ""}${props.line === i() + 1 ? " hit" : ""}`}><span class="n">{i() + 1}</span><span class="m"></span><span class="c"><Code path={path()} text={line} /></span></div>}</For></div>
               </>}</Show></div>
-            </Show>}>{b => <div class="ebody ws-flush ws-editor"><Suspense fallback={<div class="note-panel"><span>Opening…</span></div>}><CodeEditor buffer={b()} locked={locked(b())} line={props.line} changed={added()} onSave={saveNow} diagnostics={language()?.diagnostics ?? undefined} jump={jump()?.path === path() && jump()?.line === props.line ? jump() : undefined} onDefinition={languageKey() && languageIo() ? definition : undefined} /></Suspense></div>}</Show>
+            </Show>}>{b => <div class="ebody ws-flush ws-editor"><Suspense fallback={<LoadingStrip label="Opening…" />}><CodeEditor buffer={b()} locked={locked(b())} line={props.line} changed={added()} onSave={saveNow} diagnostics={language()?.diagnostics ?? undefined} jump={jump()?.path === path() && jump()?.line === props.line ? jump() : undefined} onDefinition={languageKey() && languageIo() ? definition : undefined} /></Suspense></div>}</Show>
             </Show>
           </Show>
         </>}</Show>

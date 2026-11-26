@@ -28,6 +28,11 @@ const PAUSED: &str = "automatic_continuation_paused";
 /// Escalated routing applies to the revision after an escalating rung and to the work
 /// that fell short (`node_escalated`).
 pub const STRATEGIES: [&str; 4] = ["repair", "escalate_route", "consult", "reassign"];
+/// The stop of a coordinator that ended turns without a plan, a result or a question
+/// (`coordinator_no_progress_limit`). Each rung already cost the coordinator's
+/// no-progress turns, so this stop takes at most this many rungs (`repair`, then
+/// `reassign`, which moves the coordinator to another model) before the owner is asked.
+pub const COORDINATOR_NO_PROGRESS_RUNGS: usize = 2;
 /// Model-facing note for every coordinator session.
 pub const COORDINATOR_NOTE: &str = "Runtime no-stop policy: the runtime owns recovery, cooldowns and any owner question about a repeated runtime failure. Do not ask the owner how to handle runtime failures, repairs, retries, limits or approvals. Ask only for decisions about the work itself, and keep working on everything the answer does not block. When the runtime reports effects with an unknown outcome, re-verify them from the files, Git state and receipts before redoing them. Keep using the normal permission and access routes. Never waive required review or verification.";
 
@@ -311,7 +316,7 @@ pub fn projection(db: &Connection, task: &str) -> CoreResult<Option<Value>> {
     let pause = if paused {
         latest(db, task, "AUTOMATIC_PAUSED")?.map(|(id, v)| {
             json!({
-                "eventId":id.to_string(),"kind":v["pause_kind"],"reason":v["reason"]
+                "eventId":id.to_string(),"kind":v["pause_kind"],"reason":owner_reason(&v)
             })
         })
     } else {
@@ -368,32 +373,57 @@ pub(super) fn require_failed_checks(
     task: &str,
     proposed: &Value,
 ) -> CoreResult<()> {
-    if !enabled(db, task)? {
-        return Ok(());
-    }
-    let dropped: bool = db.query_row(
-        "SELECT EXISTS(
-            SELECT 1 FROM runtime_events e, json_each(e.payload_json,'$.commands') c
-            WHERE e.task_id=?1 AND e.type='VERIFICATION_FAILED' AND e.id>?4
-              AND NOT EXISTS (SELECT 1 FROM json_each(?2) p WHERE p.value=c.value)
-              AND NOT EXISTS (SELECT 1 FROM json_each(?3) a WHERE a.value=c.value)
-        )",
-        (
-            task,
-            proposed.to_string(),
-            json!(owner_accepted_commands(db, task)?).to_string(),
-            // Failures from before an explicit owner rework belong to the closed cycle.
-            crate::workspace::control::owner_rework_event(db, task)?.unwrap_or(0),
-        ),
-        |r| r.get(0),
-    )?;
-    if dropped {
+    let proposed = proposed.as_array().cloned().unwrap_or_default();
+    if owed_failed_checks(db, task)?.iter().any(|argv| !proposed.contains(argv)) {
         return crate::error::refuse("automatic_required_check_missing");
     }
     Ok(())
 }
 
+/// The commands of recorded verification failures the owner has not accepted as
+/// disclosed unverified limits (empty when the automatic policy is not bound). A plan
+/// that replaces the failed work keeps them (see `plan::required_verification`).
+pub(super) fn owed_failed_checks(db: &Connection, task: &str) -> CoreResult<Vec<Value>> {
+    if !enabled(db, task)? {
+        return Ok(Vec::new());
+    }
+    let accepted = owner_accepted_commands(db, task)?;
+    // Failures from before an explicit owner rework belong to the closed cycle.
+    let since = crate::workspace::control::owner_rework_event(db, task)?.unwrap_or(0);
+    let mut stmt = db.prepare(
+        "SELECT c.value FROM runtime_events e, json_each(e.payload_json,'$.commands') c
+         WHERE e.task_id=?1 AND e.type='VERIFICATION_FAILED' AND e.id>?2 ORDER BY e.id, c.key",
+    )?;
+    let rows = stmt
+        .query_map((task, since), |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut out: Vec<Value> = Vec::new();
+    for raw in rows {
+        let argv: Value = serde_json::from_str(&raw)?;
+        if !accepted.contains(&argv) && !out.contains(&argv) {
+            out.push(argv);
+        }
+    }
+    Ok(out)
+}
+
 pub const NO_MODEL_LISTED_FOR_WORK_KIND: &str = "no_model_listed_for_work_kind";
+/// How an owner reads [`NO_MODEL_LISTED_FOR_WORK_KIND`] when the blocked work is
+/// the mandatory review: no usable model has Review in its preferred work, which
+/// only the owner's model settings change. A projection code only; the pause,
+/// its strategy and its resume keep the runtime code.
+pub const NO_MODEL_LISTED_FOR_REVIEW: &str = "no_model_listed_for_review";
+
+/// The pause reason the owner sees: the recorded code, made specific where the
+/// recorded route block names the work kind.
+fn owner_reason(paused: &Value) -> Value {
+    if paused["reason"] == NO_MODEL_LISTED_FOR_WORK_KIND
+        && paused["worker_route"]["work_kind_block"]["work_kind"] == "review"
+    {
+        return json!(NO_MODEL_LISTED_FOR_REVIEW);
+    }
+    paused["reason"].clone()
+}
 
 pub fn route_blocked(reason: &str) -> bool {
     matches!(
@@ -1012,6 +1042,8 @@ fn disclose_review_tx(
         None => result["checks"] = json!(limits),
     }
     result["review_limit_disclosed"] = json!(true);
+    // Reached only on the owner's own answer about these items.
+    result["review_limit_owner_authorized"] = json!(true);
     db.execute(
         "UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND revision=? AND node_id=?",
         (result.to_string(), task, revision, &node),
@@ -1144,18 +1176,17 @@ pub(super) fn stop_tx(db: &Transaction<'_>, task: &str, reason: &str) -> CoreRes
         } else {
             None
         };
-        // A review whose dead ends are only items the owner already decided about and
-        // items its tools cannot reach is disclosed at once: the owner is never asked
-        // the same question twice, and no strategy reaches those items.
+        // A review whose dead ends are only items the owner already decided about is
+        // disclosed at once on that decision: the owner is never asked the same
+        // question twice. Items its tools cannot reach are not the owner's decision
+        // yet: once every strategy met them, the owner is asked (close as is or not).
         let answered = found
             .as_ref()
             .is_some_and(|f| f.rule == "owner_decision_answered")
             && review.is_some()
             && blocked_items(&dead_end_event(db, task, revision)?.unwrap_or(Value::Null))
                 .iter()
-                .all(|b| {
-                    b["blocker"] == obstacles::OWNER_DECISION || b["blocker"] == "tool_unavailable"
-                });
+                .all(|b| b["blocker"] == obstacles::OWNER_DECISION);
         // A dead end that repeats goes to another role first.
         let prefer = dead_end.is_some().then_some("reassign");
         let (history, verdict, _) = guard::observe_tx(
@@ -1166,13 +1197,25 @@ pub(super) fn stop_tx(db: &Transaction<'_>, task: &str, reason: &str) -> CoreRes
             &subject,
             json!({"stop":reason,"failed_node":failed,"items":items}),
             false,
-            |h| match guard::next_rung(&STRATEGIES, h, &skip, prefer) {
+            |h| {
+                let silent_coordinator = reason == "coordinator_no_progress_limit";
+                // A coordinator that went nowhere moves to another model on its second
+                // rung, and the owner is asked after that (no further rungs).
+                let prefer = if silent_coordinator && !h.rungs_used.is_empty() {
+                    Some("reassign")
+                } else {
+                    prefer
+                };
+                match guard::next_rung(&STRATEGIES, h, &skip, prefer) {
                 _ if answered => Verdict::Break { action: "disclose" },
+                Some(_) if silent_coordinator && h.rungs_used.len() >= COORDINATOR_NO_PROGRESS_RUNGS => {
+                    Verdict::Break { action: "ask_owner" }
+                }
                 Some(rung) => Verdict::Continue { rung },
-                None if review.is_some() => Verdict::Break { action: "disclose" },
                 None => Verdict::Break {
                     action: "ask_owner",
                 },
+                }
             },
         )?;
         if verdict == (Verdict::Break { action: "disclose" }) {
@@ -1444,6 +1487,24 @@ fn question_options(
     }
 }
 
+/// The options as stored for the owner, in the same shape as model questions: the safe
+/// default carries `recommended` (retry now after an interruption, retry later after a
+/// broken loop).
+fn recommended_question_options(interruption: bool, options: &[&str]) -> Vec<Value> {
+    let recommended = if interruption { 0 } else { 3 };
+    options
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            if i == recommended {
+                json!({"label":label,"recommended":true})
+            } else {
+                json!({"label":label})
+            }
+        })
+        .collect()
+}
+
 fn interruption_question(details: &Value) -> bool {
     details["reason"] == COORDINATOR_TURN_INTERRUPTED && details["loop"]["kind"] == "infrastructure"
 }
@@ -1554,6 +1615,7 @@ pub(crate) fn runtime_question_tx(
 ) -> CoreResult<TaskState> {
     let interruption = interruption_question(&details);
     let (option_ids, options) = question_options(interruption, ru);
+    let stored = recommended_question_options(interruption, options);
     let question = format!("pq_{}", uuid::Uuid::new_v4().simple());
     db.execute(
         "INSERT INTO pending_questions(id,task_id,dedup_key,text,options_json,status,created_at)
@@ -1563,7 +1625,7 @@ pub(crate) fn runtime_question_tx(
             task,
             format!("runtime:loop:{}:{attempt}", history.key),
             &text,
-            json!(options).to_string(),
+            json!(stored).to_string(),
             crate::now(),
         ),
     )?;
@@ -1587,7 +1649,7 @@ pub(crate) fn runtime_question_tx(
         db,
         task,
         "USER_QUESTION_REQUESTED",
-        json!({"question_id":question,"question":text,"options":options,"option_ids":option_ids,
+        json!({"question_id":question,"question":text,"options":options,"recommended":stored.iter().position(|o| o["recommended"]==true).map(|i| i+1),"option_ids":option_ids,
             "resume_state":"RECOVERING","revision":revision,"blocker":reason,
             "runtime_loop":{"key":history.key,"attempt":attempt,"continuation_event":id,"stop":reason}}),
     )?;
@@ -2093,4 +2155,22 @@ pub fn idle_continuations(db: &Connection, task: &str) -> CoreResult<i64> {
         [task],
         |r| r.get(0),
     )?)
+}
+
+#[cfg(test)]
+mod owner_reason_tests {
+    use super::*;
+
+    /// 2026-11-25: a review blocked because no model had Review in its preferred
+    /// work showed as a reason the app "cannot describe".
+    #[test]
+    fn a_review_route_block_reads_as_its_own_owner_reason() {
+        let review = json!({"reason":NO_MODEL_LISTED_FOR_WORK_KIND,
+            "worker_route":{"work_kind_block":{"work_kind":"review","target_tier":"light"}}});
+        assert_eq!(owner_reason(&review), NO_MODEL_LISTED_FOR_REVIEW);
+        let other = json!({"reason":NO_MODEL_LISTED_FOR_WORK_KIND,
+            "worker_route":{"work_kind_block":{"work_kind":"operations"}}});
+        assert_eq!(owner_reason(&other), NO_MODEL_LISTED_FOR_WORK_KIND);
+        assert_eq!(owner_reason(&json!({"reason":"engine_unavailable"})), "engine_unavailable");
+    }
 }

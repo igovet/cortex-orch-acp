@@ -25,7 +25,7 @@ pub(super) const KEYS: [&str; 10] = [
 pub(super) const ENGINES: [&str; 3] = ["codex-acp", "claude-agent-acp", "opencode"];
 pub(super) const TIERS: [&str; 4] = ["flagship", "deep", "standard", "light"];
 pub(super) const EFFORTS: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
-pub(super) const KINDS: [&str; 13] = [
+pub(super) const KINDS: [&str; 14] = [
     "implementation_backend",
     "implementation_frontend",
     "implementation_frontend_design",
@@ -38,6 +38,7 @@ pub(super) const KINDS: [&str; 13] = [
     "writing",
     "planning",
     "analysis",
+    "consultation",
     "implementation",
 ];
 // The helper builds this order, then management filters it into KEYS order.
@@ -142,6 +143,7 @@ pub(super) fn document(v: &Value, previous: &Value) -> Result<Value> {
                         ("effort_floor", "effortFloor"),
                         ("max_effort", "maxEffort"),
                         ("effort_ladder", "effortLadder"),
+                        ("tier_efforts", "tierEfforts"),
                         ("also_standard_for", "alsoStandardFor"),
                         ("preferred_for", "preferredFor"),
                         ("preferred_when", "preferredWhen"),
@@ -173,6 +175,11 @@ pub(super) fn document(v: &Value, previous: &Value) -> Result<Value> {
     }
     if truth(&quota) {
         d["quota_windows"] = quota;
+    }
+    // The coordinator list: written as sent, removed by an explicit null, kept
+    // from the file when the form does not name it.
+    if let Some(list) = v.get("coordinatorModels") {
+        d[crate::native_routes::COORDINATOR_MODELS] = list.clone();
     }
     Ok(d)
 }
@@ -281,6 +288,7 @@ pub(super) fn pretty(path: &Path, d: &Value, previous: Option<&[u8]>) -> Result<
                                                 "effort_floor",
                                                 "max_effort",
                                                 "effort_ladder",
+                                                "tier_efforts",
                                                 "also_standard_for",
                                                 "preferred_for",
                                                 "preferred_when",
@@ -310,9 +318,13 @@ pub(super) fn pretty(path: &Path, d: &Value, previous: Option<&[u8]>) -> Result<
             fields.push((k.into(), ordered));
         }
     }
+    let coordinator = crate::native_routes::COORDINATOR_MODELS;
+    if let Some(v) = d.get(coordinator).filter(|v| !v.is_null()) {
+        fields.push((coordinator.into(), coordinator_ordered(v)));
+    }
     if let Some(view::Ordered::Object(old)) = old {
         for (k, v) in old {
-            if !KEYS.contains(&k.as_str()) {
+            if !KEYS.contains(&k.as_str()) && !(k == coordinator && d.get(coordinator).is_some()) {
                 fields.push((k, v));
             }
         }
@@ -376,4 +388,82 @@ pub(super) fn save(
     }
     replace(&path, &body)?;
     Ok(reply)
+}
+/// The coordinator list in its written order: engine, model, then the tiers
+/// from flagship to light, each `{min, max}`. Anything else keeps its shape.
+fn coordinator_ordered(v: &Value) -> view::Ordered {
+    let Some(entries) = v.as_array() else {
+        return view::Ordered::from_value(v);
+    };
+    view::Ordered::Array(
+        entries
+            .iter()
+            .map(|e| {
+                let Some(m) = e.as_object() else {
+                    return view::Ordered::from_value(e);
+                };
+                let mut fields: Vec<(String, view::Ordered)> = ["engine", "model"]
+                    .iter()
+                    .filter_map(|k| {
+                        m.get(*k)
+                            .map(|v| (k.to_string(), view::Ordered::from_value(v)))
+                    })
+                    .collect();
+                if let Some(t) = m.get("tiers") {
+                    let ordered = match t.as_object() {
+                        Some(tiers) => view::Ordered::Object(
+                            TIERS
+                                .iter()
+                                .filter_map(|tier| tiers.get(*tier).map(|r| (tier.to_string(), r)))
+                                .chain(
+                                    tiers
+                                        .iter()
+                                        .filter(|(k, _)| !TIERS.contains(&k.as_str()))
+                                        .map(|(k, r)| (k.clone(), r)),
+                                )
+                                .map(|(tier, r)| {
+                                    let range = match r.as_object() {
+                                        Some(range) => view::Ordered::Object(
+                                            ["min", "max"]
+                                                .iter()
+                                                .filter_map(|k| {
+                                                    range.get(*k).map(|v| {
+                                                        (
+                                                            k.to_string(),
+                                                            view::Ordered::from_value(v),
+                                                        )
+                                                    })
+                                                })
+                                                .chain(
+                                                    range
+                                                        .iter()
+                                                        .filter(|(k, _)| *k != "min" && *k != "max")
+                                                        .map(|(k, v)| {
+                                                            (
+                                                                k.clone(),
+                                                                view::Ordered::from_value(v),
+                                                            )
+                                                        }),
+                                                )
+                                                .collect(),
+                                        ),
+                                        None => view::Ordered::from_value(r),
+                                    };
+                                    (tier, range)
+                                })
+                                .collect(),
+                        ),
+                        None => view::Ordered::from_value(t),
+                    };
+                    fields.push(("tiers".into(), ordered));
+                }
+                fields.extend(
+                    m.iter()
+                        .filter(|(k, _)| !["engine", "model", "tiers"].contains(&k.as_str()))
+                        .map(|(k, v)| (k.clone(), view::Ordered::from_value(v))),
+                );
+                view::Ordered::Object(fields)
+            })
+            .collect(),
+    )
 }

@@ -55,7 +55,7 @@ export function recommendation(value: unknown, count: number): { recommended?: n
 }
 
 export function questionOption(label: string, index: number, recommended?: number, language?: unknown) {
-  return { label, ...(index + 1 === recommended ? { description: language === "ru" ? "Рекомендуется" : "Recommended" } : {}) };
+  return { label, ...(index + 1 === recommended ? { description: language === "ru" ? "Рекомендую" : "Recommended" } : {}) };
 }
 
 export function batchForm(batch: Pick<QuestionBatch, "questions" | "language">) {

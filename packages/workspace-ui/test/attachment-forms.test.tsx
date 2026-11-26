@@ -392,6 +392,17 @@ describe("every message form sends its files", () => {
     expect(sent.payload.answers[0]).toMatchObject({ text: "Use the nightly\nand keep the logs", attachments: [refOf({ name: "log.txt", mimeType: "text/plain", data: btoa("bytes") })] });
   });
 
+  it("a typed answer with semicolons reaches the machine whole, not cut at the first one", async () => {
+    const s = machine({ decisions: [wireDecision({ prompt: "How to continue?" })] });
+    await open(s, TASK);
+    const typed = "Retry in this task: replan with the same four changes (outcomes as in my original description) and run a new worker; then verify; keep going";
+    fill("Your answer", typed);
+    button("Send answer").click();
+    await settled();
+    const sent = calls(s, "decisions.answer")[0].message as { payload: { answers: { text: string }[] } };
+    expect(sent.payload.answers[0].text).toBe(typed);
+  });
+
   it("a chosen option, the owner's own words and the files go together as one answer", async () => {
     const s = machine({ decisions: [wireDecision({ prompt: "Which build?", options: [{ optionId: "o", label: "Nightly" }, { optionId: "o2", label: "Stable" }] })] });
     await open(s, TASK);

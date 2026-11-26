@@ -23,7 +23,7 @@ cleanup separately: an unsafe or unconfirmed removal does not undo their outcome
 
 The native bridge reloads the fixed channel unit, requests a nonblocking start
 and waits up to 30 seconds for its authenticated local socket. That readiness
-budget is separate from the request deadline: no action bytes are sent until
+budget is separate from an action's request deadline (reads have none): no action bytes are sent until
 connection succeeds. The first subscription reports connecting during its startup
 grace period rather than a spurious offline state. Failure beyond that budget
 remains visible and retries automatically; a real loss after connection is still
@@ -205,17 +205,18 @@ appears in one change, at its end, following. A question that arrives before
 the transcript, or the reverse, is never shown on its own, and an empty list
 before its read is not taken for "none". The questions of the task on view are
 read on their own as soon as its identity is confirmed; the board's read of
-every task's questions waits for that read (at most the same budget) and takes
-the task on view first. After 5 s (`FIRST_VIEW_MS`), or at once when the machine
-is offline, the skeleton stops: what was confirmed is shown with one notice
-naming what is not ("Couldn’t finish loading the conversation.") and
-**Retry**, and a later arrival clears it. New events do not restart the budget.
+every task's questions waits for that read (at most 5 s, `FIRST_VIEW_MS`) and
+takes the task on view first. A slow first read is waited for, however long it
+takes: the skeleton stays and nothing says it failed. Only a genuine failure (a
+refused or unreadable read) or the machine going offline stops it: what was
+confirmed is shown with one notice naming what is not ("Couldn’t finish loading
+the conversation.") and **Retry**, and a later arrival clears it.
 A view already shown in this window (a parked tab, a reconnect, a reread of the
 same execution, a task the owner just started from its page) keeps what it
 shows, its draft, focus and position, with no skeleton. Git settlement, older
 history, report bodies and other tasks are never waited for. Until the first
-transcript read finishes, the conversation says it is loading. A read that fails, or a page with no answer within a minute,
-shows its reason on that task with **Retry now**. Earlier confirmed rows stay
+transcript read finishes, the conversation says it is loading. A conversation page has no deadline: a slow page is
+waited for. A read that genuinely fails (refused, unreadable, disconnected) shows its reason on that task with **Retry now**. Earlier confirmed rows stay
 shown, and the read is retried automatically after 3 s, doubling up to 30 s. A
 conversation failure is not a project read issue. The Working line comes from
 the task's runtime state and running workers, never from missing history.
@@ -229,6 +230,27 @@ instead of publishing those IDs alone. Starting/recovering status without a fail
 reason is not a project issue. The native reader retries a concurrent
 `snapshot_expired` race at most three times within the same read; policy/storage
 failures are not swallowed. These are reads only, never action retries.
+
+## Slow reads are waited for
+
+A read never fails for being slow, whatever it reads (the store, product records,
+Git, files). The service runs every owner read (`machine::owner_read`, the same set
+as `workspace_protocol::read::owner_read_op`: `product.read`, `product.facts`,
+`product.board`, `workers` including coordinator history pages, `repo.snapshot`,
+`repo.context`, `repo.file`, `repo.list`, `repo.locate`, `repo.skills`,
+`repo.file.lease.status`, `command.output`, `overview`, `config.read`,
+`project.config.read` and the sprint `live_graph`) until it completes: it has no
+30-second helper deadline, never answers `machine_busy` while it waits for a lane
+slot, and its Git commands have no 25-second `git_timeout`. Concurrency stays
+bounded: saved-facts reads queue for their project's two `PROJECT_READS` slots,
+and the other reads for their fixed lanes (reads, settings, repository
+inspections), so a slow disk holds a bounded number of threads and never an
+action's slot. Actions (writes, Git and engine actions) keep their deadlines.
+The clients (`workspace_protocol::read::read_request`: board and history
+projections, workspace queries, the project and owner-prompt lists and every owner
+`machine.call` read) wait for such an answer without a request deadline; only a
+lost connection (`service_disconnected`) fails it. The interface treats a timeout
+or busy answer from an older service as still loading, never as an error.
 
 ## Native desktop reads
 
@@ -279,7 +301,11 @@ Questions and results read by a details read are kept even when a newer
 snapshot supersedes that read: they are at least as new as the snapshot they
 were read for. A running task moves the snapshot all the time, so discarding
 them left an answered question showing **Needs you** on the board, in the
-sidebar and in the Inbox for as long as the task kept working. A recorded
+sidebar and in the Inbox for as long as the task kept working. When only the
+snapshot's watermark moved (the same generation), they are also shown at once,
+with the board as it is now and at its current version, and another details
+read follows; they no longer wait for a details read that no newer event
+overtakes. A recorded
 answer also marks its questions answered at once in the window, so the reread
 that follows the answer shows the task working.
 

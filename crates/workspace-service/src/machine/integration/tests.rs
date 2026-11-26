@@ -115,7 +115,14 @@ impl Env {
         digest
     }
     async fn accept_native(&self) -> String {
+        self.accept_native_writing(&[]).await
+    }
+    /// As `accept_native`, with the task's own project writes recorded before its verification.
+    async fn accept_native_writing(&self, writes: &[(&str, &[u8])]) -> String {
         self.evidence(&[]).await;
+        for (path, content) in writes {
+            record_own_write(self, path, content);
+        }
         let digest = crate::native_effects::observe_digest(self.root.clone())
             .await
             .unwrap();
@@ -1775,4 +1782,63 @@ async fn a_repository_without_commits_finishes_automatic_in_place_and_refuses_a_
         .success());
     task["status"] = json!("done");
     assert_eq!(saved["acceptance"], task["acceptance"]);
+}
+
+/// Records that task `r1` wrote `path` with `content` (the native project-write receipt).
+fn record_own_write(env: &Env, path: &str, content: &[u8]) {
+    let store = context::open(&env.root, OpenMode::RuntimeValidate).unwrap().unwrap();
+    let sha = format!("{:x}", Sha256::digest(content));
+    store
+        .write(|db| {
+            db.execute("INSERT OR IGNORE INTO trusted_channels(channel_id,secret_hash,task_id,principal_thread_id,role,owner_epoch,issued_at) VALUES ('c1','h','r1','p','worker',1,'now')", [])?;
+            db.execute(
+                "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1','NATIVE_PROJECT_WRITTEN',?,'channel','now')",
+                [json!({"channel_id":"c1","path":path,"sha256":sha,"add":1,"del":0}).to_string()],
+            )?;
+            db.execute(
+                "INSERT INTO runtime_requests VALUES ('r1',?,'c1','project_write','bound',?)",
+                (
+                    format!("write-{path}-{sha}"),
+                    json!({"complete":1,"reply":{"structuredContent":{"path":path,"sha256":sha}}}).to_string(),
+                ),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn foreign_changes_after_acceptance_do_not_block_the_commit_of_the_tasks_own_files() {
+    let env = Env::new("foreign-after-accept");
+    git(&env.root, &["checkout", "-q", "main"]);
+    git(&env.root, &["branch", "-D", "task"]);
+    fs::write(env.root.join("a.txt"), "task change\n").unwrap();
+    let digest = env.accept_native_writing(&[("a.txt", b"task change\n")]).await;
+    // Another task writes a different file after acceptance.
+    fs::write(env.root.join("foreign.txt"), "someone else\n").unwrap();
+    let mut params = squash(&digest);
+    params["method"] = json!("commit");
+    params["message"] = json!("Own files only");
+    assert_eq!(env.run(params).await.unwrap(), json!({"done":true}));
+    assert_eq!(git(&env.root, &["show", "--name-only", "--format=", "HEAD"]), "a.txt");
+    assert_eq!(git(&env.root, &["status", "--porcelain"]), "?? foreign.txt");
+}
+
+#[tokio::test]
+async fn a_foreign_change_to_the_tasks_own_file_after_acceptance_still_blocks_the_commit() {
+    let env = Env::new("own-file-drift");
+    git(&env.root, &["checkout", "-q", "main"]);
+    git(&env.root, &["branch", "-D", "task"]);
+    fs::write(env.root.join("a.txt"), "task change\n").unwrap();
+    let digest = env.accept_native_writing(&[("a.txt", b"task change\n")]).await;
+    fs::write(env.root.join("a.txt"), "edited by someone else\n").unwrap();
+    let mut params = squash(&digest);
+    params["method"] = json!("commit");
+    params["message"] = json!("Must not land");
+    let error = env.run(params).await.unwrap_err();
+    assert!(
+        ["workspace_drift", "stale_result", "task_content_unknown"].contains(&error.code),
+        "{error:?}"
+    );
+    assert_eq!(git(&env.root, &["log", "-1", "--format=%s"]), "Base");
 }

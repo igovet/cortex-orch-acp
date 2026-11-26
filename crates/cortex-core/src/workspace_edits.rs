@@ -65,3 +65,67 @@ pub fn change(
         Ok(Some((version + 1).to_string()))
     })
 }
+
+/// A sprint revision's change of one saved draft, inside the caller's
+/// transaction: only a draft with no execution identity at `expected` changes.
+/// The title is stored like an owner edit's (`draftTitle`). Returns the new version.
+pub fn revise_draft_tx(
+    db: &rusqlite::Transaction<'_>,
+    project: &str,
+    task: &str,
+    expected: &str,
+    description: Option<&str>,
+    title: Option<&str>,
+) -> CoreResult<i64> {
+    let row: Option<(Option<String>, i64)> = db
+        .query_row(
+            "SELECT execution_id,version FROM workspace_tasks WHERE task_id=? AND project_id=?",
+            (task, project),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let (execution, version) = row.ok_or(CoreError::Refused("unknown_task"))?;
+    let started: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workspace_starts WHERE task_id=?)",
+        [task],
+        |r| r.get(0),
+    )?;
+    if execution.is_some() || started {
+        return refuse("task_started");
+    }
+    if version.to_string() != expected {
+        return refuse("stale_version");
+    }
+    if let Some(description) = description {
+        if description.trim().is_empty() {
+            return refuse("description_required");
+        }
+        db.execute(
+            "UPDATE workspace_tasks SET description=? WHERE task_id=?",
+            (description, task),
+        )?;
+    }
+    if let Some(title) = title {
+        let raw: Option<String> = db
+            .query_row(
+                "SELECT options_json FROM workspace_task_options WHERE task_id=?",
+                [task],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let mut options: Value = match raw {
+            Some(raw) => serde_json::from_str(&raw)?,
+            None => json!({}),
+        };
+        options
+            .as_object_mut()
+            .ok_or(CoreError::Refused("state_unreadable"))?
+            .insert("draftTitle".into(), json!(title.trim()));
+        db.execute("INSERT INTO workspace_task_options VALUES (?,?) ON CONFLICT(task_id) DO UPDATE SET options_json=excluded.options_json",
+            (task, options.to_string()))?;
+    }
+    db.execute("UPDATE workspace_tasks SET version=version+1 WHERE task_id=?", [task])?;
+    db.execute("UPDATE workspace_projects SET version=version+1 WHERE project_id=?", [project])?;
+    append_public_tx(db, project, task, "task", version + 1)?;
+    Ok(version + 1)
+}

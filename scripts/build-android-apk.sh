@@ -146,6 +146,22 @@ grep -q "^package $identifier$" "$activity" || fail 'Could not install the app a
 speech=src-tauri/gen/android/app/src/main/java/dev/cortex/workspace/speech
 mkdir -p "$speech"
 cp src-tauri/android/SpeechPlugin.kt "$speech/SpeechPlugin.kt"
+# The phone's own notifications: a foreground service (Android 14's special-use type, with the
+# reason Android asks for), the notification permission, the plugin and its status bar icon.
+notify=src-tauri/gen/android/app/src/main/java/dev/cortex/workspace/notify
+mkdir -p "$notify" src-tauri/gen/android/app/src/main/res/drawable
+cp src-tauri/android/NotifyService.kt "$notify/NotifyService.kt"
+cp src-tauri/android/ic_stat_cortex.xml src-tauri/gen/android/app/src/main/res/drawable/ic_stat_cortex.xml
+sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#&\
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />\
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />#' "$manifest"
+sed -i 's#</application>#    <service android:name="dev.cortex.workspace.notify.NotifyService" android:exported="false" android:foregroundServiceType="specialUse">\
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Keeps the end-to-end encrypted connection to the owner'"'"'s own paired computers open while the owner has turned phone notifications on, so the app itself can tell the owner when a task asks a question, finishes or fails. No push service is used." />\
+        </service>\
+    </application>#' "$manifest"
+grep -q 'android.permission.POST_NOTIFICATIONS' "$manifest" && grep -q 'android:foregroundServiceType="specialUse"' "$manifest" \
+    || fail 'Could not add the notification service to the generated manifest.'
 # The launcher icon is the product's own, drawn from src-tauri/android/icon.json (the foreground
 # has the margin Android's icon masks need).
 icons="$out/icons-$channel"

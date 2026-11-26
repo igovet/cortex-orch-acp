@@ -515,7 +515,32 @@ async fn turn(d: &SessionDriver, home: &Path, calls: &[Value]) -> Turn {
         meta: record["meta"].clone(),
     }
 }
-fn call(name: &str, arguments: Value) -> Value {
+/// A fixture call with the goal-outcome fields the advertised contract requires
+/// filled in when the fixture leaves them out (one outcome `goal`, delivered and done).
+fn call(name: &str, mut arguments: Value) -> Value {
+    match name {
+        "plan_submit" if arguments["plan"]["outcomes"].is_null() => {
+            arguments["plan"]["outcomes"] = json!([{"id":"goal","statement":"The requested work is done"}]);
+            for task in arguments["plan"]["tasks"].as_array_mut().into_iter().flatten() {
+                if task["delivers"].is_null() {
+                    task["delivers"] = json!(["goal"]);
+                }
+            }
+        }
+        "synthesis_submit" | "answer_submit" if arguments["outcomes"].is_null() => {
+            arguments["outcomes"] = json!([{"id":"goal","status":"done","evidence":"fixture"}]);
+        }
+        "result_submit" if arguments["verdict"].is_null() && arguments["objective_status"].is_null() => {
+            arguments["objective_status"] = json!("complete");
+        }
+        "result_submit"
+            if arguments["verdict"].as_str().is_some_and(|v| v.eq_ignore_ascii_case("APPROVE"))
+                && arguments["goal_coverage"].is_null() =>
+        {
+            arguments["goal_coverage"] = json!([{"id":"goal","delivered":true}]);
+        }
+        _ => {}
+    }
     json!({"name":name,"arguments":arguments})
 }
 
@@ -1406,7 +1431,7 @@ async fn battery(
     if verdict.as_ref().is_some_and(|(v, _)| *v == "INCOMPLETE") {
         let part = "live deployment behaviour";
         args["not_covered"] = json!([{"item":part,"blocker":"missing_access",
-            "reason":"the deployment host is not reachable from this review"}]);
+            "reason":"gh auth status shows GitHub is not logged in, so this review cannot reach the deployment"}]);
         // Submitting with the same gap twice for the same version is refused both
         // times on the same channel; no other reviewer is dispatched meanwhile.
         for attempt in 1..=2 {
@@ -2118,29 +2143,42 @@ async fn single_review(ledger: &mut Ledger, verdict: &str, engine: EngineKind) {
                 || state == "PLANNING"
                 || state == "RECOVERING"
         }
-        // A named dead end (here missing access) is a continuation on the strategy
-        // ladder (no-stop policy, RECOVERING), never an owner question and never a
-        // second review of the same revision.
+        // A review blocked only by missing access parks its review node with an
+        // owner action (`park_review_access_tx`, see failures-and-cancellation
+        // "Access on a review node"): the task stays in REVIEWING, the review node
+        // fails attributable to its assignment, and no second reviewer of the same
+        // revision is dispatched; resolving the action retries that review.
         "INCOMPLETE" => {
             let s = p.store();
-            let (reviews, reruns, routed): (i64, i64, i64) = s
+            let (reviews, reruns, routed, actions, parked, failed): (i64, i64, i64, i64, i64, i64) = s
                 .read(|db| {
                     Ok(db.query_row(
                         "SELECT (SELECT count(*) FROM runtime_nodes WHERE task_id=?1 AND stage='review'),
                             (SELECT count(*) FROM runtime_events WHERE task_id=?1 AND type='REVIEW_RERUN'),
-                            (SELECT count(*) FROM runtime_events WHERE task_id=?1 AND type='REVIEW_DEAD_END_ROUTED')",
+                            (SELECT count(*) FROM runtime_events WHERE task_id=?1 AND type='REVIEW_DEAD_END_ROUTED'),
+                            (SELECT count(*) FROM runtime_events WHERE task_id=?1 AND type='OWNER_ACTION_REQUIRED'
+                                AND json_extract(payload_json,'$.kind')='access'),
+                            (SELECT count(*) FROM runtime_events WHERE task_id=?1 AND type='FAILURE_CLASSIFIED'
+                                AND json_extract(payload_json,'$.class')='access'),
+                            (SELECT count(*) FROM runtime_nodes WHERE task_id=?1 AND stage='review' AND status='failed')",
                         [task],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
                     )?)
                 })
-                .unwrap_or((-1, -1, -1));
+                .unwrap_or((-1, -1, -1, -1, -1, -1));
             ledger.check(
                 &role,
                 "no second reviewer for the same revision",
                 (reviews, reruns, routed) == (1, 0, 1),
                 format!("reviews {reviews}, reruns {reruns}, routed {routed}"),
             );
-            state == "RECOVERING"
+            ledger.check(
+                &role,
+                "missing access parks the review with an owner action",
+                (actions, parked, failed) == (1, 1, 1),
+                format!("owner actions {actions}, classified {parked}, failed reviews {failed}"),
+            );
+            state == "REVIEWING"
         }
         _ => state != "REVIEWING",
     };

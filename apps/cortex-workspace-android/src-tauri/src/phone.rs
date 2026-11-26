@@ -5,6 +5,7 @@
 //! The interface never supplies an address, a key or a relay: it names a machine by the id the
 //! pairing produced, and everything else is read from the phone's private state.
 
+use crate::moments::{self, Delivery};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -13,7 +14,10 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::oneshot, task::JoinHandle};
-use workspace_client::{policy, Bridge, RemoteConnector};
+use workspace_client::{
+    frames::{read_frame, write_frame},
+    policy, Bridge, Connector, RemoteConnector,
+};
 use workspace_remote::{
     link::LinkError, Client, ClientConfig, ConnectionState, PairError, PairingAttempt, PathKind,
     RemoteConnection, INCOMPATIBLE_VERSION_CODE,
@@ -21,6 +25,8 @@ use workspace_remote::{
 
 /// Receives the two event streams of the shell: `phone-state` and `workspace-transport`.
 pub type Emit = Arc<dyn Fn(&str, Value) + Send + Sync>;
+/// Raises and withdraws this phone's own notifications (see [`moments`]).
+pub type Deliver = Arc<dyn Fn(Delivery) + Send + Sync>;
 
 /// A remote machine answers slower than a local socket, and a lost one must not hold the
 /// interface for the desktop's start-up allowance.
@@ -28,6 +34,12 @@ const STARTUP_GRACE: Duration = Duration::from_secs(5);
 /// How long the subscription waits before it tries a lost machine again.
 const RESUBSCRIBE: Duration = Duration::from_secs(2);
 const SETTINGS: &str = "phone.json";
+/// The fingerprints of the owner moments already announced, per machine.
+const NOTIFIED: &str = "notified.json";
+/// The longest wait before a lost machine's moments are asked for again.
+const MOMENTS_BACKOFF: Duration = Duration::from_secs(60);
+/// A machine that refuses the subscription (built before it) is asked again this rarely.
+const MOMENTS_REFUSED: Duration = Duration::from_secs(300);
 
 struct Link {
     connection: RemoteConnection,
@@ -47,12 +59,19 @@ struct Inner {
     subscription: Option<JoinHandle<()>>,
     attempt: Option<PairingAttempt>,
     waiting: Option<oneshot::Sender<()>>,
+    /// Set while this phone raises notifications: one moments subscription per paired machine.
+    deliver: Option<Deliver>,
+    watchers: HashMap<String, JoinHandle<()>>,
+    /// Per machine, how its moments subscription stands (`connecting`, `subscribed`, `refused`).
+    watching: HashMap<String, &'static str>,
 }
 
 pub struct Phone {
     client: Client,
     device_name: String,
     settings: PathBuf,
+    notified: PathBuf,
+    book: Mutex<moments::Book>,
     emit: Emit,
     inner: Mutex<Inner>,
     this: Weak<Phone>,
@@ -111,10 +130,18 @@ impl Phone {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .and_then(|value| value["active"].as_str().map(str::to_owned));
+        let notified = state_dir.join(NOTIFIED);
+        let book = std::fs::read(&notified)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .map(|saved| moments::Book::from_saved(&saved))
+            .unwrap_or_default();
         let phone = Arc::new_cyclic(|this| Self {
             client,
             device_name,
             settings,
+            notified,
+            book: Mutex::new(book),
             emit,
             inner: Mutex::new(Inner::default()),
             this: this.clone(),
@@ -227,6 +254,122 @@ impl Phone {
         Ok(())
     }
 
+    /// Turns this phone's notifications on (every paired machine's owner moments reach
+    /// `deliver`, titled in the interface's language by `titles`, see [`moments::words`]) or off.
+    pub fn set_notifications(&self, deliver: Option<Deliver>, titles: HashMap<String, String>) {
+        self.book
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_titles(titles);
+        let on = deliver.is_some();
+        let machines: Vec<String> = {
+            let mut inner = self.lock();
+            inner.deliver = deliver;
+            if !on {
+                for (_, watcher) in inner.watchers.drain() {
+                    watcher.abort();
+                }
+                inner.watching.clear();
+            }
+            inner.links.keys().cloned().collect()
+        };
+        if on {
+            for machine in machines {
+                self.watch(&machine);
+            }
+        }
+    }
+
+    /// Whether this phone raises notifications, and how each machine's moments stand.
+    pub fn notifications(&self) -> Value {
+        let inner = self.lock();
+        json!({"enabled": inner.deliver.is_some(), "machines": inner.watching})
+    }
+
+    /// A tap on one of this phone's notifications, as the notification handed it back. It
+    /// leads somewhere only for a paired machine and a target of the closed shapes.
+    pub fn notification_tap(&self, machine_id: &str, target: &Value) -> Option<Value> {
+        let paired = self
+            .client
+            .machines()
+            .iter()
+            .any(|m| m.machine_id == machine_id);
+        (paired && policy::notification_target(target))
+            .then(|| json!({"machineId": machine_id, "target": target}))
+    }
+
+    /// One machine's moments subscription, held while notifications are on.
+    fn watch(&self, machine_id: &str) {
+        // Checked and recorded under one lock, so a machine is never watched twice.
+        let mut inner = self.lock();
+        if inner.deliver.is_none() || inner.watchers.contains_key(machine_id) {
+            return;
+        }
+        let connection = match inner.links.get(machine_id) {
+            Some(link) => link.connection.clone(),
+            None => return,
+        };
+        let this = self.this.clone();
+        let id = machine_id.to_owned();
+        let watcher = tokio::spawn(async move {
+            let connector = RemoteConnector::new(connection);
+            let mut wait = RESUBSCRIBE;
+            loop {
+                let outcome = moments_subscription(&connector, &this, &id).await;
+                let Some(phone) = this.upgrade() else { break };
+                let state = if outcome.is_err() {
+                    "refused"
+                } else {
+                    "connecting"
+                };
+                phone.lock().watching.insert(id.clone(), state);
+                drop(phone);
+                // A subscription that held is taken up again at once; a machine that cannot be
+                // reached is asked less and less often, one that refuses it rarely.
+                wait = match outcome {
+                    Err(()) => MOMENTS_REFUSED,
+                    Ok(true) => RESUBSCRIBE,
+                    Ok(false) => (wait * 2).min(MOMENTS_BACKOFF),
+                };
+                tokio::time::sleep(wait).await;
+            }
+        });
+        inner.watching.insert(machine_id.to_owned(), "connecting");
+        inner.watchers.insert(machine_id.to_owned(), watcher);
+    }
+
+    /// One complete set of a machine's moments: what is new is raised, what is gone withdrawn.
+    fn moments(&self, machine_id: &str, found: Vec<moments::Moment>) {
+        let deliver = match self.lock().deliver.clone() {
+            Some(deliver) => deliver,
+            None => return,
+        };
+        let name = self
+            .client
+            .machines()
+            .into_iter()
+            .find(|m| m.machine_id == machine_id)
+            .map(|m| m.name)
+            .unwrap_or_default();
+        let (out, saved) = {
+            let mut book = self.book.lock().unwrap_or_else(|p| p.into_inner());
+            let out = book.apply(machine_id, &name, found);
+            (out, book.saved())
+        };
+        self.save_notified(&saved);
+        for delivery in out {
+            deliver(delivery);
+        }
+    }
+
+    fn save_notified(&self, saved: &Value) {
+        let body = serde_json::to_vec(saved).unwrap_or_default();
+        let staged = self.notified.with_extension("json.new");
+        if std::fs::write(&staged, body).is_ok() {
+            let _ = std::fs::rename(&staged, &self.notified);
+        }
+    }
+
     fn save(&self) {
         let active = self.lock().active.clone();
         let body = serde_json::to_vec(&json!({"active": active})).unwrap_or_default();
@@ -314,6 +457,7 @@ impl Phone {
             }
         }
         self.link(&machine.machine_id)?;
+        self.watch(&machine.machine_id);
         if self.lock().active.is_none() {
             self.open_machine(&machine.machine_id)?;
         } else {
@@ -365,6 +509,10 @@ impl Phone {
         let was_open = {
             let mut inner = self.lock();
             inner.links.remove(machine_id);
+            if let Some(watcher) = inner.watchers.remove(machine_id) {
+                watcher.abort();
+            }
+            inner.watching.remove(machine_id);
             let was_open = inner.active.as_deref() == Some(machine_id);
             if was_open {
                 if let Some(subscription) = inner.subscription.take() {
@@ -378,6 +526,15 @@ impl Phone {
             .forget(machine_id)
             .await
             .map_err(|_| "unknown_machine".to_string())?;
+        // Its notifications could no longer be opened.
+        let (withdrawn, saved) = {
+            let mut book = self.book.lock().unwrap_or_else(|p| p.into_inner());
+            (book.forget(machine_id), book.saved())
+        };
+        self.save_notified(&saved);
+        if let Some(deliver) = self.lock().deliver.clone() {
+            withdrawn.into_iter().for_each(|d| deliver(d));
+        }
         if was_open {
             match self.client.machines().first() {
                 Some(next) => self.open_machine(&next.machine_id.clone())?,
@@ -398,10 +555,63 @@ impl Phone {
     }
 }
 
+/// One moments subscription on a fresh tunnelled stream: `Ok(true)` once it held and then
+/// ended, `Ok(false)` when it could not be made, `Err(())` when the machine refused it (a
+/// machine built before phone notifications).
+async fn moments_subscription(
+    connector: &RemoteConnector,
+    phone: &Weak<Phone>,
+    machine_id: &str,
+) -> Result<bool, ()> {
+    let Ok(mut stream) = connector.connect().await else {
+        return Ok(false);
+    };
+    let request =
+        json!({"jsonrpc":"2.0","id":"moments","method":"notifications.subscribe","params":{}});
+    let ack = tokio::time::timeout(STARTUP_GRACE * 2, async {
+        write_frame(&mut stream, &request).await.ok()?;
+        read_frame(&mut stream).await.ok()
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(ack) = ack.filter(|ack| ack["jsonrpc"] == "2.0" && ack["id"] == "moments") else {
+        return Ok(false);
+    };
+    if ack["error"]["message"] == workspace_remote::REFUSED_MESSAGE {
+        return Err(());
+    }
+    if ack["result"]["subscribed"] != true {
+        return Ok(false);
+    }
+    match phone.upgrade() {
+        Some(phone) => phone
+            .lock()
+            .watching
+            .insert(machine_id.to_owned(), "subscribed"),
+        None => return Ok(true),
+    };
+    // Every frame is a complete set; one that is not ends this subscription.
+    while let Ok(frame) = read_frame(&mut stream).await {
+        let found = (frame["jsonrpc"] == "2.0" && frame["method"] == "service.event")
+            .then(|| moments::parse(&frame["params"]))
+            .flatten();
+        let (Some(found), Some(phone)) = (found, phone.upgrade()) else {
+            break;
+        };
+        phone.moments(machine_id, found);
+    }
+    Ok(true)
+}
+
 impl Drop for Phone {
     fn drop(&mut self) {
-        if let Some(subscription) = self.lock().subscription.take() {
+        let mut inner = self.lock();
+        if let Some(subscription) = inner.subscription.take() {
             subscription.abort();
+        }
+        for (_, watcher) in inner.watchers.drain() {
+            watcher.abort();
         }
     }
 }

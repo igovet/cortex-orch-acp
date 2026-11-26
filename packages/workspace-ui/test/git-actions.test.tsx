@@ -344,7 +344,7 @@ describe("View PR in the merge card", () => {
     const { root, p } = await open(state(), "/m/local/t/t/changes");
     expect(row(root).textContent).toContain(PR_UNKNOWN);
     expect(viewPr(row(root))).toBeUndefined();
-    expect(root.querySelector("#m-git")?.textContent).toContain(PR_UNKNOWN);
+    expect([...root.querySelectorAll("#m-git [data-why]")].map(e => e.getAttribute("data-why"))).toContain(PR_UNKNOWN);
     expect(p.commands).toEqual([]);
   });
 
@@ -408,7 +408,7 @@ describe("the band on screen", () => {
     const primary = gitPrimaryButton(root);
     expect(primary.getAttribute("aria-label")).toBe("Pull…");
     expect(band(root).querySelector(".hg-sync")?.textContent).toBe("↑1↓2");
-    const menu = root.querySelector("#m-git")!.textContent!;
+    const menu = [...root.querySelectorAll("#m-git [data-why]")].map(e => e.getAttribute("data-why")).join("\n");
     expect(menu).toContain(DIVERGED);
     expect(menu).toContain("The remote has commits you do not have. Pull first.");
     primary.click(); await settle();

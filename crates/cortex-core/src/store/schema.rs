@@ -4,6 +4,12 @@ use std::collections::BTreeSet;
 pub const APPLICATION_ID: i64 = 1129467218;
 pub const FORMAT: i64 = 12;
 pub const SQL: &str = include_str!("schema.sql");
+/// Read-path indexes of format 12, created by `install` after every column they cover exists (a
+/// format-11 `host_transcript` gains `message_id` only there). They are additive: each initializing
+/// open creates a missing one inside its install transaction, so an existing store gains it on its next
+/// open without a format change, and an older build reading a store that has it sees one more index.
+/// - `host_transcript_by_message`: one worker's narration (`{attempt}:` message identities) of a session.
+pub const READ_INDEXES: &str = "CREATE INDEX IF NOT EXISTS host_transcript_by_message ON host_transcript(session_id, kind, message_id);";
 pub fn tables(db: &Connection) -> CoreResult<BTreeSet<String>> {
     Ok(db
         .prepare("SELECT name FROM sqlite_master WHERE type='table'")?
@@ -203,6 +209,7 @@ pub fn install(db: &Connection) -> CoreResult<()> {
         (phase LIKE 'worker_publish:%' OR (phase LIKE 'worker_start:%' AND attempt_id IN
         (SELECT attempt_id FROM attempt_process_registry WHERE terminated_at IS NOT NULL AND termination_reason IS NOT 'timeout_alive')))",[])?;
     legacy_requirements(db)?;
+    db.execute_batch(READ_INDEXES)?;
     db.pragma_update(None, "application_id", APPLICATION_ID)?;
     db.pragma_update(None, "user_version", FORMAT)?;
     Ok(())

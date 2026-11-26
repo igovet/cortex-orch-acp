@@ -46,7 +46,7 @@ export function isPlumbingStep(text: string): boolean {
  * Edit a.ts"). The row is the call's, so its name and kind come from the title after it. */
 const ROLE = /^(?:orchestrator|worker-[a-z0-9]+(?:-[a-z0-9]+)*):\s+(?=\S)/;
 export const bareTitle = (title: string) => title.replace(ROLE, "");
-export type DisplayStep = { title?: string; callId?: string; kind?: string; status?: string; path?: string; command?: string; query?: string; ref?: string; oldText?: string; newText?: string; output?: string; notice?: string; failure?: string; commandOutputRef?: CommandOutputRef };
+export type DisplayStep = { title?: string; callId?: string; kind?: string; status?: string; path?: string; command?: string; query?: string; ref?: string; input?: string; oldText?: string; newText?: string; output?: string; notice?: string; failure?: string; commandOutputRef?: CommandOutputRef };
 export const STEP_PREFIX = "Workspace step: ";
 /** Only the helper's selected presentation fields, never raw protocol JSON. */
 export function displayStep(text?: string): DisplayStep | null {
@@ -59,7 +59,7 @@ export function displayStep(text?: string): DisplayStep | null {
     const value = JSON.parse(body);
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const out: DisplayStep = {};
-    for (const key of ["title","callId","kind","status","path","command","query","ref","oldText","newText","output","notice","failure"] as const)
+    for (const key of ["title","callId","kind","status","path","command","query","ref","input","oldText","newText","output","notice","failure"] as const)
       if (typeof value[key] === "string") out[key] = key === "title" ? bareTitle(value[key]) : value[key];
     const ref = value.commandOutputRef;
     if (ref && typeof ref.attemptId === "string" && typeof ref.toolCallRef === "string" && ref.toolCallRef.startsWith("native-command:") &&
@@ -167,20 +167,19 @@ function activityView(a: Step, detail: DisplayStep | null, text: string): StepVi
   const step = named(text);
   return { ...step, target: a.code && !IDENTIFIER.test(a.code.trim()) ? a.code : step.target };
 }
-const PRIVATE_DETAIL = new Set(["create_draft", "draft_write", "read_draft", "write_report", "read_report", "result_submit", "task_result", "sprint_task_result"]);
 const FILE_TOOLS = new Set(["project_read", "project_edit", "project_write", "project_delete", "project_mkdir", "outside_write", "project_skill_link"]);
 const detailOperation = (title: string) => operation(title)?.name ?? title.trim().toLowerCase().replaceAll(" ", "_");
 
-export const privateStep = (step: StepView) =>
-  [step.source, step.detail?.title].some(title => title && PRIVATE_DETAIL.has(detailOperation(title)));
 
-/** File actions keep their existing link/diff behavior. Plumbing visibility is decided before a row is built. */
+/** File reads and edits keep their path link and diff. Every other call, the runtime's own steps included, opens on its recorded input and
+ *  output. Plumbing visibility is decided before a row is built. */
 export function hasRecordedDetail(step: StepView): boolean {
   const title = step.source ?? step.detail?.title ?? step.label;
-  const name = detailOperation(title);
-  if (PRIVATE_DETAIL.has(name) || isPlumbingStep(title)) return true;
-  if (FILE_TOOLS.has(name) || /^(read|edit)$/.test(step.detail?.kind ?? "")) return false;
-  return step.kind !== "read" && step.kind !== "edit";
+  if (FILE_TOOLS.has(detailOperation(title))) return false;
+  const file = step.kind === "read" || step.kind === "edit" || /^(read|edit)$/.test(step.detail?.kind ?? "");
+  // A file call names its path; a plain sentence ("Read failed") has no call to record. A read without a path (read_batch,
+  // read_report) is a tool call like any other.
+  return !(file && (!!step.detail?.path || (!step.detail && !isToolName(title))));
 }
 // Recorded activity is never changed in place, so what was decided about a record holds for as long as the record lives.
 const hidden = new WeakMap<object, "status" | "plumbing" | "shown">();

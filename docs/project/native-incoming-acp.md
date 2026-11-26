@@ -1391,7 +1391,11 @@ ever handed are accepted and ignored: an entry without a stdio `command` (an
 stored nor forwarded. An unconfigured stdio entry still refuses before session
 admission with `external_mcp_server_unconfigured`. An empty client list still
 attaches eligible configured servers.
-No project-local registry is read. Configuration is snapshotted when a native
+No registry inside the project tree is read. The owner's private per-project registry
+(`cortex/projects/<digest of the logical root>/mcp-servers.json` in the owner's Cortex
+configuration) is merged over the owner-global one: its `servers` replace or add by
+name and its `overrides` switch machine servers on or off for that project; a
+malformed file refuses. Configuration is snapshotted when a native
 project host opens; a new host is needed to apply changed grants.
 
 The native host uses mandatory Linux Landlock ABI 3+ and seccomp, not
@@ -1399,8 +1403,14 @@ the bubblewrap launcher. Project reads exclude private control directories; writ
 workers additionally receive existing, non-root scoped paths. A scope path that
 does not exist yet (a file the worker is about to create, or a pattern) is not
 granted to the server: it is neither created nor widened to its parent.
-Administrator grants must exist, contain no protected paths/symlink ancestry or
-protected descendants, and cannot overlap the project. Missing administrator grant
+Administrator grants must exist, contain no protected paths/symlink ancestry,
+must not be, contain or sit inside Cortex private state (the owner's Cortex
+configuration and data directories, or a directory directly holding `.cortex`,
+`.cortex-dev`, `.git`, `.ssh` and similar), and cannot overlap the project. The
+check is bounded (the grant, its direct children and well-known locations), not a
+recursive walk: a grant tree may contain symlinks and ordinary files (a Node
+install under NVM, a server's own `auth` directory); the Landlock policy
+enforces what a symlink may reach. Missing administrator grant
 paths are withheld. Invalid grants or scopes, unavailable containment, a failed
 launch or relay, or a server process that exits before `session/new` fail closed
 for that server only: the session starts without it and the runtime records

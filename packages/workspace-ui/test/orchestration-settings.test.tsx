@@ -5,7 +5,7 @@ import { Workspace } from "../src";
 import { flush, projection, scriptedPort } from "./support";
 
 /**
- * The orchestration settings are organised as the Cortex settings panel: eight sections in its order, one frame on each
+ * The orchestration settings are organised as the Cortex settings panel: nine sections in its order, one frame on each
  * (context bar, profile bar, strips, save bar), one draft per file. These tests walk the sections on a port that offers
  * everything, with the machine's configuration sent as the service sends it.
  */
@@ -52,10 +52,10 @@ const go = async (text: string) => { (all('nav[aria-label="Settings"] a.snav').f
 const frames = () => new Promise(resolve => setTimeout(resolve, 60));
 const current = () => all('nav[aria-label="Settings"] .snav.sub[aria-current="page"]').map(a => a.textContent);
 
-const SECTIONS = ["Defaults", "Models", "Engines and models", "Project ceiling", "Routing", "Profiles", "MCP servers", "Connections"];
+const SECTIONS = ["Defaults", "Coordinator models", "Models", "Engines and models", "Project ceiling", "Routing", "Profiles", "MCP servers", "Connections"];
 
 describe("orchestration settings, organised as the Cortex settings panel", () => {
-  it("lists the eight sections in the panel's order and opens Defaults on the bare route", async () => {
+  it("lists the nine sections in the panel's order and opens Defaults on the bare route", async () => {
     await open(`${M}/orchestration`);
     expect(all('nav[aria-label="Settings"] .snav.sub').map(a => a.textContent?.trim())).toEqual(SECTIONS);
     expect(title()).toBe("Defaults");
@@ -68,7 +68,7 @@ describe("orchestration settings, organised as the Cortex settings panel", () =>
 
   it("lands each existing link on the section or page it names", async () => {
     const cases: [string, string, string][] = [
-      ["orchestration/defaults", "Defaults", "Defaults"], ["orchestration/models", "Models", "Models"], ["orchestration/engines", "Engines and models", "Engines and models"],
+      ["orchestration/defaults", "Defaults", "Defaults"], ["orchestration/coordinator", "Coordinator models", "Coordinator models"], ["orchestration/models", "Models", "Models"], ["orchestration/engines", "Engines and models", "Engines and models"],
       ["orchestration/ceiling", "Project ceiling", "Project ceiling"], ["orchestration/routing?tab=quota", "Routing", "Routing"], ["orchestration/effective", "Route preview", "Routing"],
       ["orchestration/policy", "Defaults", "Defaults"], ["orchestration/tools", "MCP servers", "MCP servers"], ["orchestration/profiles", "Profiles", "Profiles"],
       ["orchestration/files", "Files and sources", "Routing"], ["connections", "Connections", "Connections"],
@@ -89,8 +89,8 @@ describe("orchestration settings, organised as the Cortex settings panel", () =>
     }
   });
 
-  it("puts the profile bar on every section and the project picker only on sections 2 to 5", async () => {
-    const pages: [string, boolean][] = [["orchestration/defaults", false], ["orchestration/models", true], ["orchestration/engines", true], ["orchestration/ceiling", true], ["orchestration/routing", true], ["orchestration/profiles", false], ["orchestration/tools", false], ["connections", false]];
+  it("puts the profile bar on every section and the project picker only on the sections that can act on a project", async () => {
+    const pages: [string, boolean][] = [["orchestration/defaults", false], ["orchestration/coordinator", true], ["orchestration/models", true], ["orchestration/engines", true], ["orchestration/ceiling", true], ["orchestration/routing", true], ["orchestration/profiles", false], ["orchestration/tools", true], ["connections", false]];
     for (const [path, scoped] of pages) {
       await open(`${M}/${path}`);
       expect($(".set-prof"), path).toBeTruthy();
@@ -285,6 +285,16 @@ describe("orchestration settings, for assistive technology", () => {
     expect(row.querySelector('[role="cell"]')?.textContent).toBe("Attempts per task");
   });
 
+  it("Engines and models: the senior consultation kind is its own chip and says it uses the Design list until set", async () => {
+    await open(`${M}/orchestration/engines`);
+    button("Details of Opus")!.click();
+    await settled(); await frames();
+    const chip = $<HTMLInputElement>('input[aria-label="Opus preferred for Senior consultation"]')!;
+    expect(chip).toBeTruthy();
+    expect(chip.closest("label")!.textContent).toContain("Senior Consultant");
+    expect(chip.closest("label")!.textContent).toContain("uses Design list until set");
+  });
+
   it("Engines and models: the model table stays a table with a model's details open", async () => {
     await open(`${M}/orchestration/engines`);
     button("Details of Opus")!.click();
@@ -297,6 +307,112 @@ describe("orchestration settings, for assistive technology", () => {
     expect(detail.getAttribute("role")).toBe("cell");
     expect(detail.parentElement?.parentElement).toBe(table);
     expect($<HTMLInputElement>('input[aria-label="Pick Opus automatically"]')!.closest('[role="cell"]')?.getAttribute("data-label")).toBe("Automatic");
+  });
+
+  it("Engines and models: edits a tier's effort range and saves it as tier efforts", async () => {
+    const s = await open(`${M}/orchestration/engines`, world(c => {
+      c.surfaces.routing.engines["claude-agent-acp"].auto = ["opus"];
+      c.surfaces.routing.engines["claude-agent-acp"].tiers = { opus: ["deep"] };
+    }));
+    button("Details of Opus")!.click();
+    await settled();
+    const item = (pop: string, text: string) => all<HTMLButtonElement>(`[id^="${pop}"] [role="menuitem"]`).find(b => b.textContent?.startsWith(text))!;
+    expect(all(`[id^="m-range-min-deep-"] [role="menuitem"]`).map(b => b.textContent)).toEqual(["No range", "Medium", "High"]);
+    item("m-range-min-deep-", "Medium").click();
+    await settled();
+    item("m-range-max-deep-", "High").click();
+    await settled();
+    button("Save routing rules on This machine")!.click();
+    await settled();
+    expect((last(s).value as RoutingRules).engines["claude-agent-acp"].policy.opus.tierEfforts).toEqual({ deep: { min: "medium", max: "high" } });
+  });
+
+  it("Defaults: the coordinator is offered only models with a tier, at the efforts their tiers allow", async () => {
+    await open(`${M}/orchestration/defaults`, world(c => {
+      c.catalogue["claude-agent-acp"].models.push({ id: "haiku", label: "Haiku", efforts: ["low", "medium", "high"], observed: true }, { id: "sonnet", label: "Sonnet", efforts: ["low", "medium", "high", "xhigh"], observed: true });
+      const r = c.surfaces.routing.engines["claude-agent-acp"];
+      r.enabled = ["opus", "haiku", "sonnet"];
+      r.tiers = { opus: ["flagship"], sonnet: ["deep"] };
+      r.policy = { sonnet: { effortFloor: null, maxEffort: null, effortLadder: null, alsoStandardFor: null, preferredFor: null, preferredWhen: null, requestNames: null, tierEfforts: { deep: { min: "xhigh", max: "xhigh" } } } };
+      c.surfaces.user_defaults.coordinator = { engine: "claude-agent-acp", model: "haiku", effort: "medium", parameters: {} };
+    }));
+    const options = () => all('#m-def-model [role="menuitem"]').map(b => [b.querySelector(".grow")?.firstChild?.textContent, b.getAttribute("aria-disabled")]);
+    // The saved coordinator outside the profile stays shown, but cannot be picked again.
+    expect(options()).toEqual([["Haiku", "true"], ["Opus", null], ["Sonnet", null]]);
+    expect($('[aria-labelledby="set-coord-h"] .st')?.textContent).toContain("This model has no tier in Models, so it cannot coordinate.");
+    all<HTMLButtonElement>('#m-def-model [role="menuitem"]').find(b => b.textContent?.startsWith("Sonnet"))!.click();
+    await settled();
+    expect(all('[aria-labelledby="set-coord-h"] .seg button').map(b => b.textContent)).toEqual(["Extra high"]);
+    expect(options().map(o => o[0])).toEqual(["Opus", "Sonnet"]);
+  });
+
+  it("Coordinator models: adds a model, ticks its categories, sets each range and saves it as coordinator models", async () => {
+    const s = await open(`${M}/orchestration/coordinator`, world(c => {
+      c.catalogue["claude-agent-acp"].models.push({ id: "sonnet", label: "Sonnet", efforts: ["low", "medium", "high", "xhigh"], observed: true });
+      c.surfaces.routing.engines["claude-agent-acp"].enabled = ["opus", "sonnet"];
+      c.surfaces.routing.coordinatorModels = [{ engine: "claude-agent-acp", model: "opus", tiers: { flagship: { min: "medium", max: "high" } } }];
+    }));
+    expect(title()).toBe("Coordinator models");
+    expect($("#set-cm-h")?.textContent).toBe("Models the coordinator may use");
+    const item = (pop: string, text: string) => all<HTMLButtonElement>(`[id^="${pop}"] [role="menuitem"]`).find(b => b.textContent?.startsWith(text))!;
+    // Only switched-on models that are not listed yet can be added.
+    expect(all('#m-cm-add [role="menuitem"]').map(b => b.querySelector(".grow")?.firstChild?.textContent)).toEqual(["Sonnet"]);
+    item("m-cm-add", "Sonnet").click();
+    await settled();
+    const tick = (label: string) => all<HTMLInputElement>("input.chk").find(i => i.getAttribute("aria-label") === label)!;
+    expect(tick("Sonnet coordinates Standard").checked).toBe(true);
+    tick("Sonnet coordinates Deep").click();
+    await settled();
+    expect(all(`[id^="m-cm-min-deep-claude-agent-acp-sonnet"] [role="menuitem"]`).map(b => b.textContent)).toEqual(["Low", "Medium", "High", "Extra high"]);
+    item("m-cm-min-deep-claude-agent-acp-sonnet", "Extra high").click();
+    await settled();
+    item("m-cm-min-standard-claude-agent-acp-sonnet", "High").click();
+    await settled();
+    item("m-cm-max-standard-claude-agent-acp-sonnet", "Extra high").click();
+    await settled();
+    tick("Opus coordinates Frontier").click();
+    await settled();
+    // Opus has no category left: the save waits for one.
+    expect(all(".ws-err").map(e => e.textContent)).toContain("Choose at least one category.");
+    tick("Opus coordinates Frontier").click();
+    await settled();
+    button("Save routing rules on This machine")!.click();
+    await settled();
+    expect(last(s)).toMatchObject({ type: "save_surface", surface: "routing" });
+    expect((last(s).value as RoutingRules).coordinatorModels).toEqual([
+      { engine: "claude-agent-acp", model: "opus", tiers: { flagship: { min: "high", max: "high" } } },
+      { engine: "claude-agent-acp", model: "sonnet", tiers: { deep: { min: "xhigh", max: "xhigh" }, standard: { min: "high", max: "xhigh" } } },
+    ]);
+  });
+
+  it("Coordinator models: a profile without the list says so and starts it from the worker tiers", async () => {
+    const s = await open(`${M}/orchestration/coordinator`, world(c => { c.surfaces.routing.engines["claude-agent-acp"].tiers = { opus: ["flagship"] }; }));
+    expect($("#set-cm-legacy-h")?.textContent).toBe("No coordinator list yet");
+    expect(document.body.textContent).toContain("the coordinator may use any model with a tier under Engines and models");
+    button("Start the list")!.click();
+    await settled();
+    button("Remove Opus from coordinator models")!.click();
+    await settled();
+    expect(all(".ws-err").map(e => e.textContent)).toContain("Keep at least one model, so a task can start.");
+    expect(s.commands.filter(c => c.payload.type === "save_surface")).toEqual([]);
+  });
+
+  it("Defaults: the coordinator is offered only listed coordinator models, at their ranges", async () => {
+    await open(`${M}/orchestration/defaults`, world(c => {
+      c.catalogue["claude-agent-acp"].models.push({ id: "sonnet", label: "Sonnet", efforts: ["low", "medium", "high", "xhigh"], observed: true });
+      const r = c.surfaces.routing.engines["claude-agent-acp"];
+      r.enabled = ["opus", "sonnet"];
+      // Worker tiers name Opus; the coordinator list names only Sonnet.
+      r.tiers = { opus: ["flagship"] };
+      c.surfaces.routing.coordinatorModels = [{ engine: "claude-agent-acp", model: "sonnet", tiers: { standard: { min: "high", max: "xhigh" } } }];
+    }));
+    const options = () => all('#m-def-model [role="menuitem"]').map(b => [b.querySelector(".grow")?.firstChild?.textContent, b.getAttribute("aria-disabled")]);
+    expect(options()).toEqual([["Opus", "true"], ["Sonnet", null]]);
+    expect($('[aria-labelledby="set-coord-h"] .st')?.textContent).toContain("This model is not in Coordinator models, so it cannot coordinate.");
+    expect(document.body.textContent).toContain("Sonnet (Standard)");
+    all<HTMLButtonElement>('#m-def-model [role="menuitem"]').find(b => b.textContent?.startsWith("Sonnet"))!.click();
+    await settled();
+    expect(all('[aria-labelledby="set-coord-h"] .seg button').map(b => b.textContent)).toEqual(["High", "Extra high"]);
   });
 
   it("puts each group heading right under the page title, at level 2", async () => {

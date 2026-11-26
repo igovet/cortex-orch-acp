@@ -85,14 +85,16 @@ it("says it is loading only after two seconds, with a loader but no progress fig
   mount({ notice });
   await vi.advanceTimersByTimeAsync(1900);
   expect(slot()).toBe("");
-  expect(document.querySelector(".l-startup .spin")).toBeNull();
+  expect(document.querySelector(".l-startup .ws-skel-strip")).toBeNull();
   await vi.advanceTimersByTimeAsync(200);
   expect(slot()).toBe("Loading workspace…");
-  expect(document.querySelector(".l-startup .spin")).not.toBeNull();
+  expect(document.querySelector(".l-startup .ws-skel-strip[aria-busy=true]")).not.toBeNull();
+  expect(document.querySelector(".l-startup .spin")).toBeNull();
   await vi.advanceTimersByTimeAsync(13000);
   expect(slot()).toContain("Still waiting for the service. The first start can take longer.");
   expect(slot()).toContain("Installing the qualified adapter");
-  expect(document.querySelector(".l-startup .spin")).not.toBeNull();
+  expect(document.querySelector(".l-startup .ws-skel-strip[aria-busy=true]")).not.toBeNull();
+  expect(document.querySelector(".l-startup .spin")).toBeNull();
   expect(document.querySelector(".l-startup [role=progressbar]")).toBeNull();
 });
 

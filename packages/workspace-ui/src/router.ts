@@ -1,3 +1,4 @@
+import { workspaceCopy } from "./copy";
 export const PROJECT_VIEWS = ["board", "list", "code", "git", "worktrees", "knowledge", "settings"] as const;
 export type ProjectView = typeof PROJECT_VIEWS[number];
 export const APP_SECTIONS = ["appearance", "voice", "updates", "shortcuts", "machines"] as const;
@@ -7,19 +8,19 @@ export type SettingsSection = typeof APP_SECTIONS[number] | typeof MACHINE_SECTI
  * Every page an orchestration link can name. `effective` (Route preview) and `files` (Files and sources) are secondary pages
  * reached from a section; `policy` is the old Limits and fallback link, which now lands on Defaults or Project ceiling.
  */
-export const ORCHESTRATION_PAGES = ["defaults", "models", "engines", "ceiling", "routing", "profiles", "tools", "effective", "files", "policy"] as const;
+export const ORCHESTRATION_PAGES = ["defaults", "coordinator", "models", "engines", "ceiling", "routing", "profiles", "tools", "effective", "files", "policy"] as const;
 export type OrchestrationPage = typeof ORCHESTRATION_PAGES[number];
 /**
- * The eight orchestration sections, in the order of the Cortex settings panel. Connections is the machine's `connections`
+ * The nine orchestration sections, in the order of the Cortex settings panel, with Coordinator models right after Defaults. Connections is the machine's `connections`
  * section shown inside the orchestration frame, so its old links keep working.
  */
-export const ORCHESTRATION_SECTIONS = ["defaults", "models", "engines", "ceiling", "routing", "profiles", "tools", "connections"] as const;
+export const ORCHESTRATION_SECTIONS = ["defaults", "coordinator", "models", "engines", "ceiling", "routing", "profiles", "tools", "connections"] as const;
 export type OrchestrationSection = typeof ORCHESTRATION_SECTIONS[number];
 export const ORCHESTRATION_LABELS: Record<OrchestrationSection, string> = {
-  defaults: "Defaults", models: "Models", engines: "Engines and models", ceiling: "Project ceiling", routing: "Routing", profiles: "Profiles", tools: "MCP servers", connections: "Connections",
+  defaults: "Defaults", coordinator: workspaceCopy("coordinatorModels"), models: "Models", engines: "Engines and models", ceiling: "Project ceiling", routing: "Routing", profiles: "Profiles", tools: "MCP servers", connections: "Connections",
 };
-/** Sections 2 to 5 act on a project file when a project is chosen; the others are machine-wide. */
-export const SCOPED_SECTIONS: readonly OrchestrationSection[] = ["models", "engines", "ceiling", "routing"];
+/** Sections 2 to 6 and MCP servers act on a project file when a project is chosen; the others are machine-wide. */
+export const SCOPED_SECTIONS: readonly OrchestrationSection[] = ["coordinator", "models", "engines", "ceiling", "routing", "tools"];
 /** Which section a route belongs to: a secondary page counts as the section it opens from. */
 export function orchestrationSection(route: Route, projectScope: string | null): OrchestrationSection | null {
   if (route.name !== "settings") return null;

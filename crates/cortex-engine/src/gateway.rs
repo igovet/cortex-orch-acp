@@ -59,6 +59,10 @@ pub trait GatewayCore: Send + Sync + 'static {
         true
     }
     fn authenticate<'a>(&'a self, credentials: &'a Credentials) -> FutureResult<'a, Channel>;
+    /// A call the gateway refused before `execute` (arguments outside the advertised
+    /// schema, a tool not offered). A host may count these: a model that repeats such a
+    /// refusal never reaches `execute`.
+    fn call_rejected(&self, _name: &str, _arguments: &Value, _code: &str) {}
     fn execute<'a>(
         &'a self,
         credentials: &'a Credentials,
@@ -186,12 +190,15 @@ impl Gateway {
             return Err(Error::Invalid);
         }
         let name = p["name"].as_str().ok_or(Error::Invalid)?;
-        let tool = tools
-            .iter()
-            .find(|t| t["name"] == name)
-            .ok_or(Error::Refused("tool_not_offered"))?;
         let args = p.get("arguments").cloned().unwrap_or(json!({}));
-        schema::validate(&tool["inputSchema"], &args)?;
+        let Some(tool) = tools.iter().find(|t| t["name"] == name) else {
+            self.core.call_rejected(name, &args, "tool_not_offered");
+            return Err(Error::Refused("tool_not_offered"));
+        };
+        if let Err(error) = schema::validate(&tool["inputSchema"], &args) {
+            self.core.call_rejected(name, &args, "invalid_arguments");
+            return Err(error);
+        }
         self.core
             .execute(&self.credentials, &channel, name, args, id)
             .await

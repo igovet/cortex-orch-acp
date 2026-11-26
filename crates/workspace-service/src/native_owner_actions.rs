@@ -337,6 +337,8 @@ pub(crate) enum Act {
     Terminal,
     Dismiss,
     Token(Secret),
+    /// Machine MCP sign-in card only: the desktop asks for the sign-in address.
+    Open,
 }
 /// `owner_actions.act`: `{projectId, actionId, action}` with `action` one of `recheck`,
 /// `terminal`, `dismiss`, or `token` with exactly one more field, `token`. The token string
@@ -359,6 +361,7 @@ pub(crate) fn parse_act(mut params: Value) -> io::Result<(String, String, Act)> 
         ("recheck", 3) => Act::Recheck,
         ("terminal", 3) => Act::Terminal,
         ("dismiss", 3) => Act::Dismiss,
+        ("open", 3) => Act::Open,
         ("token", 4) => {
             let Some(Value::String(token)) = map.get_mut("token").map(Value::take) else {
                 return Err(invalid());
@@ -573,6 +576,11 @@ pub(crate) async fn list(places: &[Place]) -> Value {
             actions.extend(opens.iter().map(|open| (open.opened_ms, view(place, open))));
         }
     }
+    // Machine-wide sign-in cards live in process memory; unit tests of project actions run
+    // beside the sign-in tests in one process, so they list project actions only.
+    if cfg!(not(test)) {
+        actions.extend(crate::native_mcp_signin::list());
+    }
     actions.sort_by_key(|(at, _)| *at);
     json!({
         "actions": actions.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
@@ -591,6 +599,7 @@ pub(crate) async fn act(place: &Place, id: &str, act: Act) -> io::Result<Value> 
     let key = (place.project.clone(), open.id.clone());
     let checked = match act {
         Act::Dismiss => Checked::Resolved("dismissed"),
+        Act::Open => return Err(crate::failure("owner_open_unsupported")),
         Act::Terminal => {
             let argv = access
                 .terminal
@@ -653,6 +662,9 @@ impl crate::Service {
             }
             "owner_actions.act" => {
                 let (project, id, request) = parse_act(params)?;
+                if project == crate::native_mcp_signin::MACHINE {
+                    return mcp_act(&id, request).await;
+                }
                 let place = self
                     .owner_places()
                     .await
@@ -1184,5 +1196,31 @@ mod tests {
             ]
         );
         TEST_PROGRAMS.lock().unwrap().clear();
+    }
+}
+
+/// `owner_actions.act` on a machine MCP sign-in card. The card closes only when the server
+/// is ready or the owner turns the server off in Settings; it cannot be dismissed.
+async fn mcp_act(id: &str, act: Act) -> io::Result<Value> {
+    use crate::native_mcp_signin as signin;
+    if !signin::is_open(id) {
+        return Err(crate::failure("unknown_owner_action"));
+    }
+    match act {
+        Act::Open => signin::url_of(id)
+            .map(|url| json!({"outcome":"open","url":url}))
+            .ok_or_else(|| crate::failure("mcp_signin_link_unavailable")),
+        Act::Recheck => {
+            signin::wake();
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            Ok(if signin::is_open(id) {
+                json!({"outcome":"still_needed","status":"waiting_for_sign_in"})
+            } else {
+                json!({"outcome":"resolved","how":"recheck"})
+            })
+        }
+        Act::Dismiss => Err(crate::failure("mcp_signin_turn_off_in_settings")),
+        Act::Terminal => Err(crate::failure("owner_terminal_unsupported")),
+        Act::Token(_) => Err(crate::failure("owner_token_unsupported")),
     }
 }

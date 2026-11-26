@@ -92,6 +92,8 @@ export const STATUS_TEXT: Record<string, string> = {
   active_writer_conflict: "Another task is changing the same files",
   no_ready_nodes: "No step is ready to run",
   no_available_route: "No engine is available for this step",
+  no_model_listed_for_review: "No model may review this work. Add Review to a model's Preferred work in Settings › Engines and models",
+  no_model_listed_for_work_kind: "No model may do this kind of work. Add it to a model's Preferred work in Settings › Engines and models",
   pinned_route_unavailable: "The engine chosen for this step is not available",
   user_requested_route_unavailable: "The engine you chose is not available",
   portable_coordinator_unavailable: "No engine is available to coordinate this task",
@@ -150,6 +152,13 @@ export const STATUS_TEXT: Record<string, string> = {
   worktree_cleanup_unconfirmed: "Refresh and inspect the worktree before attempting cleanup again.",
   unsafe_worktree_root: "Choose a safe worktree location outside registered project folders in machine settings.",
   contradictory_evidence: "The recorded evidence contradicts itself",
+};
+
+/** Reasons only the owner's settings resolve, with the orchestration page that resolves them: a screen that shows the reason
+ *  offers a link to `{ name: "settings", section: "orchestration", page }`. */
+export const STATUS_SETTINGS_PAGE: Record<string, "engines"> = {
+  no_model_listed_for_review: "engines",
+  no_model_listed_for_work_kind: "engines",
 };
 
 /** The phrase used when a code stands inside a sentence. */

@@ -776,3 +776,63 @@ fn a_window_report_names_the_no_progress_threshold_only_from_the_offered_hours()
         );
     }
 }
+
+/// What a paired phone reads of an owner moment: its kind, an opaque fingerprint that
+/// changes with the moment's state, a bounded title and the closed target, and nothing of
+/// a question's text, a stop's headline or a pause reason.
+#[test]
+fn a_phone_moment_carries_kind_fingerprint_title_and_target_only() {
+    let tasks = [task("q", "waiting"), task("stop", "waiting"), task("r", "result")];
+    let product = json!({"tasks":{"q":{"title":format!("Ask\u{7}{}", "x".repeat(300))},"r":{"title":"Review me"}}});
+    let decisions = HashMap::from([
+        ("q".to_owned(), vec![question("wd_1", false)]),
+        ("stop".to_owned(), vec![question("wd_2", true)]),
+    ]);
+    let found = items("p", &tasks, &product, &decisions, &[]);
+    let of = |id: &str| moment(found.iter().find(|i| i.place.id == id).unwrap());
+    let q = of("q");
+    assert_eq!(q["kind"], "question");
+    assert_eq!(
+        q["target"],
+        json!({"kind":"question","project":"p","task":"q","decision":"wd_1"})
+    );
+    let title = q["title"].as_str().unwrap();
+    assert_eq!(title.chars().count(), MOMENT_TITLE);
+    assert!(title.starts_with("Askx") && !title.contains('\u{7}'));
+    let fingerprint = q["fingerprint"].as_str().unwrap();
+    assert_eq!(fingerprint.len(), 32);
+    assert!(fingerprint.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(
+        q.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["fingerprint", "kind", "target", "title"]
+    );
+    let stop = of("stop");
+    assert_eq!(stop["kind"], "stop");
+    assert!(!stop.to_string().contains("independent review"), "{stop}");
+    assert!(!q.to_string().contains("Never shown"), "{q}");
+    assert_eq!(of("r")["target"], json!({"kind":"result","project":"p","task":"r"}));
+    // A newer state of the same place is a new fingerprint; the same state is the same one.
+    let mut later = found.iter().find(|i| i.place.id == "r").unwrap().clone();
+    assert_eq!(moment(&later)["fingerprint"], of("r")["fingerprint"]);
+    later.state = "r:e-r:t2".into();
+    assert_ne!(moment(&later)["fingerprint"], of("r")["fingerprint"]);
+}
+
+/// The phones' snapshot holds every project's moments, changes only when they do, and a
+/// project with none leaves it.
+#[test]
+fn the_phone_snapshot_changes_only_with_the_moments() {
+    let notifier = Notifier::default();
+    let mut watch = notifier.moments();
+    let mut inner = Inner::default();
+    let a = json!({"kind":"result","fingerprint":"a","title":"A","target":{"kind":"result","project":"p","task":"a"}});
+    notifier.publish_moments(&mut inner, "p", vec![a.clone()]);
+    assert!(watch.has_changed().unwrap());
+    assert_eq!(*watch.borrow_and_update(), json!({"moments":[a.clone()]}));
+    notifier.publish_moments(&mut inner, "p", vec![a.clone()]);
+    assert!(!watch.has_changed().unwrap());
+    notifier.publish_moments(&mut inner, "q", vec![]);
+    assert!(!watch.has_changed().unwrap());
+    notifier.publish_moments(&mut inner, "p", vec![]);
+    assert_eq!(*watch.borrow_and_update(), json!({"moments":[]}));
+}

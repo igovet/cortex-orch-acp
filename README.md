@@ -23,6 +23,8 @@ In Workspace, open [Board](docs/cortex-workspace/SCREENS.md#conversation-adoptio
 
 In Workspace, use **⋯** on a task to open its [task actions](docs/cortex-workspace/SCREENS.md#task-actions). On desktop, right-click a sidebar row, list row, board card or dashboard task row to open the same menu.
 
+In a Workspace task, **Side chat** (or Ctrl+Shift+J) opens a floating window for your own questions about the task. It knows the task (description, state, reports, recent messages, its diff and its files through read-only tools) but never enters the task's conversation, never reaches its coordinator and never changes the task. Drag it by its header, resize it from its corner, collapse it with Esc to a pill or close it; on a phone it is a bottom sheet. It starts on the task's model and effort, and you can pick another for the chat only. Its history is kept per task in the machine's private state. See [task side chat](docs/features/side-chat/index.md).
+
 Workspace reserves room for saving task drafts and active-task model or effort changes while a sprint is running. If a new draft is saved but joining the sprint is not confirmed, refresh the project and check for the existing draft before retrying. See [Workspace project actions](docs/features/workspaces-and-integration/index.md).
 
 In Workspace Code, the [File actions menu](docs/cortex-workspace/ide-and-git.md#code-file-actions) opens the file palette, opens the current file in an external editor, or shows it in the file manager.
@@ -49,7 +51,7 @@ In Workspace, you can add a comment to a route choice without changing the selec
 
 Choose English, Russian, or Automatic for coordinator responses. Internal work stays in English; the coordinator is guided to keep replies, questions and final results in your language even when tool output is English.
 
-Coordinator and worker questions mark one suggested answer without selecting it for you. Workspace shows “Recommended” (or “Рекомендуется” in a Russian UI); you can still choose another option or write your own answer for normal questions. See [questions and answers](docs/features/steering-and-questions/index.md).
+Coordinator and worker questions mark one suggested answer without selecting it for you. Workspace shows “Recommended” (or “Рекомендую” in a Russian UI); questions the runtime itself asks with fixed answers mark the safe default the same way, and plain ACP clients see “ (Recommended)” or “ (рекомендую)” after that option’s label; you can still choose another option or write your own answer for normal questions. See [questions and answers](docs/features/steering-and-questions/index.md).
 
 Workspace result checks list recorded skips with their reasons, including checks that required authorization and did not run.
 
@@ -71,6 +73,16 @@ The approved plan stays read-only. Board and List show Working before Not
 started in the order the queue will use. See [live sprint graph and execution
 order](docs/cortex-workspace/local-task-execution.md#live-sprint-graph-and-execution-order).
 
+When the owner changes a running sprint task (a message to its coordinator, a
+rework request or an answer) while other sprint tasks have not started, that
+task cannot finish until its coordinator re-checks them: it reads them with
+`sprint_graph` `include: "pending_descriptions"` and records `unchanged` or a
+revision with `sprint_revision_submit`. A revision changes only unstarted drafts,
+is independently reviewed, and is applied by the runtime in an Automatic sprint
+or by the owner's **Apply** / **Reject** in a Hybrid or Manual sprint; proposed
+cancellations are only shown. See [re-checking the sprint after an owner
+change](docs/cortex-workspace/local-task-execution.md#re-checking-the-sprint-after-an-owner-change).
+
 Workspace engine limits retain connected engines with an explicit Unavailable state when no provider usage is observed. Coordinator choices exclude switched-off engines. See [desktop engine controls](docs/cortex-workspace/maintenance-and-controls.md).
 
 The incoming Rust ACP-v1 binary in `crates/cortex-acp` is the only entry for
@@ -89,6 +101,7 @@ engine permission requests keep their response correlation until an answer or
 cancellation, rather than expiring after 30 seconds; disconnect clears pending waits.
 Sessions accept client MCP entries no engine is handed, such as the HTTP
 server Paseo injects into every session; an unconfigured stdio server still refuses.
+External MCP servers can be machine-wide or per project: Settings > MCP servers with a project chosen switches machine servers on or off for it and adds servers only it has, kept in an owner-private file outside the project ([configuration](docs/configuration.md#mcp-servers-for-cortex-and-workers)).
 Cortex tool discovery lists only Cortex tools. For external MCP, use the exact
 tool name and description advertised by the engine for the current session;
 if a code index is not offered, use the available project reads instead.
@@ -196,7 +209,10 @@ reconciliation supports synthesis, owner questions, certified answers,
 verification repair and budgeted replan/scope/escalation proposals. Rejected
 synthesis disclosures now identify the current unresolved check names and explain
 how to correct the proposal; old revision names cannot silently close new gaps.
-Permission approval is not synthesis acceptance. Native source,
+Permission approval is not synthesis acceptance. A task completes only when its
+final result reports every goal outcome of the plan done; an approved stage that
+misses the goal returns to planning without verification, and an INCOMPLETE review
+reaches verification only on the owner's close-as-is decision. Native source,
 project-file and Git tools now retain channel-local read coverage and full command
 output. Brokered worker commands and runtime verification now launch bubblewrap
 from Rust: private read-only process views, private literal /var/tmp scratch and
@@ -417,6 +433,16 @@ real engine accounts or a released application. In Workspace, choose **Separate 
 The Workspace reasoning-effort picker offers only concrete levels for the
 selected model. With no choice, it uses the effort in Settings or Medium,
 whichever is applicable, adjusted to the closest level the model supports.
+The routing profile lists the coordinator's models apart from the worker
+tiers (`coordinator_models`, Settings › Orchestration › **Coordinator
+models**): each listed model coordinates in the categories you tick (Frontier,
+Deep, Standard, Light), each with its own effort range. Only those models can
+coordinate, the coordinator's effort stays inside the union of its model's
+ranges, and tasks created from a sprint plan without an owner-chosen model get
+a runtime-picked listed model from the plan item's complexity, that
+category's range and provider usage. A profile without the list keeps the
+older rule (any model with a worker tier, at its tier ranges). See [coordinator models](docs/features/routing-and-fallback/index.md#coordinator-models-and-per-tier-effort-ranges)
+and [sprint task routes](docs/features/routing-and-fallback/index.md#sprint-task-routes).
 
 The runtime normally continues work on its own. Work failures use a strategy
 ladder (repair, escalated routes, the senior consultant, another role and
@@ -496,7 +522,10 @@ machine, shows Code read-only and has no terminal. `./scripts/build-local.sh [de
 desktop package and the APK (`scripts/build-android-apk.sh`, which needs the Android SDK, an NDK and JDK
 17); a self-hosted relay stack is in `deploy/relay/`. This is built and checked by no-paid automated tests
 only: nothing is verified on a physical Android device, through a relay or with a real phone paired to a
-real desktop, and no push notifications, Android Keystore key wrapping or app lock exist. See
+real desktop, and no Android Keystore key wrapping or app lock exist. The phone raises its own notifications
+for questions, results and failures of every paired machine (no push service: while **Phone notifications** is
+on in the phone's Settings, a foreground service with one quiet notification keeps the connections open, and a
+tap opens the task); background, Doze and tap behaviour on a real phone are not verified. See
 [remote access](docs/cortex-workspace/remote-access.md) and its
 [security](docs/cortex-workspace/security.md#remote-access-built-not-qualified).
 
@@ -507,7 +536,9 @@ Workspace's Rust service starts without an interpreter or Python helper assets, 
 Workspace waits for its local service socket on cold start, separately from request deadlines. Reconnect
 invalidates presentation caches without waiting for each project controller. Registered projects remain
 listed while their stores load or fail; those issues stay on the affected project. Slow reads finish in
-the background and failed reads retry without replaying actions; a failed repository read retries on its
+the background with no read deadline on the service or the client (a slow read keeps its skeleton or the
+confirmed saved view, never an error; only a disconnect, refusal or unreadable store fails it), and failed
+reads retry without replaying actions; a failed repository read retries on its
 own within seconds and names an owner-fixable cause such as an unsafe private settings folder. A normal
 pending read is silent; only repeated failures produce a project issue. The desktop renders its last
 confirmed, display-only board snapshot before service readiness, then reconciles it. Native batched task
@@ -695,8 +726,10 @@ is possible. Review separates human-only items as **Check manually**, outside ou
 acceptance blockers. Rerun is available only for recorded commands, with fresh output and a bounded
 deadline. Accept and Finish list each skipped check as **Not run** with its reason, including a policy
 refusal. Legacy technical check blockers remain honest evidence and allow explicit acknowledged
-acceptance; an informational answer needs no invented tests. Once the runtime's own verification of a
-native result's current version passed on the unchanged folder, the workers' and reviewer's unconfirmed or
+acceptance; an informational answer needs no invented tests. Before recording a follow-up answer
+that relies on an existing review, the runtime compares the current checkout or reviewed files with
+the saved review. A change keeps the task in planning for fresh verification. Once the runtime's
+own verification of a native result's current version passed on the unchanged folder, the workers' and reviewer's unconfirmed or
 not-run self-reported checks are listed as notes on the result and do not block Accept; a self-reported
 failure, a policy-blocked check or failed runtime verification
 still does. Sprint creation offers Project folder or Separate worktree, just like a single task. All tasks
@@ -910,7 +943,14 @@ flowchart LR
   and deletions ask you first. Eligible Development/Auto writer commands can
   see the host and write the live checkout. Ordinary command reads are not
   limited to the project, and native engine processes do not run in a general
-  filesystem jail. See [permissions and containment](docs/features/permissions-and-containment/index.md).
+  filesystem jail. That engines read what you can read and use the host network is
+  your decision, not a gap. Cortex's own `.cortex`/`.cortex-dev` state, Git
+  control files and credential files are changed on request: Auto allows it,
+  Guarded and Development ask you; only the live store database and lock files
+  are never written. A writing Codex worker runs in a Cortex permission profile
+  that keeps those Cortex paths and common root credential files read-only in its
+  sandbox, so its patch there asks instead of writing silently (a credential file
+  under another name is still written without asking). See [permissions and containment](docs/features/permissions-and-containment/index.md).
 
 Documentation never references internal task/assignment/report identifiers —
 these pages describe product behavior, not how a particular run was tracked.

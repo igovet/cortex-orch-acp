@@ -211,3 +211,47 @@ fn explicit_root_reader_is_nonmutating_and_refuses_unsafe_inputs() {
     project.config = f.directory("repo/.cortex");
     assert!(ConfigurationReader::new(project).is_err());
 }
+
+#[test]
+fn routing_reads_carry_the_coordinator_list_and_refuse_a_malformed_one() {
+    let f = Fixture::new();
+    let environment = RouteEnvironment {
+        home: f.directory("home"),
+        config: f.directory("config"),
+        state: f.directory("state"),
+        routing_override: None,
+    };
+    let c = f.directory("config/cortex");
+    write(
+        &c.join("connections.json"),
+        &json!({"schema_version":1,"connections":{}}),
+    );
+    let list = json!([{"engine":"codex-acp","model":"gpt-6.2-sol",
+        "tiers":{"standard":{"min":"high","max":"xhigh"}}}]);
+    let rules = json!({"model_policy_version":2,"enabled":{"codex-acp":["gpt-6.2-sol"]},
+        "models":{"codex-acp":{"auto":["gpt-6.2-sol"],"tiers":{"gpt-6.2-sol":"deep"}}},
+        "coordinator_models":list});
+    write(&c.join("routing.json"), &rules);
+    let reader = ConfigurationReader::new(environment.clone()).unwrap();
+    let before = snapshot(&f.0);
+    let routing = reader.routing_management(None).unwrap();
+    assert_eq!(snapshot(&f.0), before);
+    assert_eq!(routing["effective_valid"], true);
+    assert_eq!(routing["effective_rules"]["coordinator_models"], list);
+    // Other management clients see it as a key they keep but do not edit.
+    let user = routing["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["source"] == "user")
+        .unwrap();
+    assert_eq!(user["ignored_keys"], json!(["coordinator_models"]));
+    // A malformed list makes the whole file invalid, never silently ignored.
+    let mut bad = rules.clone();
+    bad["coordinator_models"] = json!([{"engine":"codex-acp","model":"gpt-6.2-sol","tiers":{}}]);
+    write(&c.join("routing.json"), &bad);
+    assert_eq!(
+        reader.routing_management(None).unwrap()["effective_valid"],
+        false
+    );
+}

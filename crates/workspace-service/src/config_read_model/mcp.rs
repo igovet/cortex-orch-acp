@@ -286,3 +286,9 @@ pub(crate) fn observation(path: &Path, bytes: Option<&[u8]>) -> CoreResult<Value
     }
     Ok(view)
 }
+
+/// A registry observation as the editor's server rows (env as presence only),
+/// shared by the machine and the project-scoped editors.
+pub(crate) fn editor_rows(result: &Value) -> Value {
+    super::settings::mcp(result)
+}

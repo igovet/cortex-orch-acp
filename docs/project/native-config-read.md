@@ -631,8 +631,9 @@ machine poll, so a list that arrives later reaches the composer without a relaun
 
 The existing result fields are preserved, with additive `result.diagnostics` for
 usage/context/setup/keyring unknowns. Refusals contain only a coarse code and safe
-message, without partial settings. Native reads use the existing 30-second bounded
-inspection lane; a timeout/disconnect does not trigger Python fallback. The service
+message, without partial settings. Native reads use the bounded settings lane and
+have no deadline: a slow read is waited for ([slow reads](../cortex-workspace/consistency-and-recovery.md#slow-reads-are-waited-for));
+a disconnect does not trigger Python fallback. The service
 may still append its ordinary sanitized helper audit event outside settings storage.
 
 Display never calls refresh or initializes state. Refresh first completes the

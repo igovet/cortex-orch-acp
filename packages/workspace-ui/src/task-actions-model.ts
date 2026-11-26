@@ -6,7 +6,7 @@ import { revealCard, revealKey } from "./reveal-intent";
 import { repoOf, taskCheckout } from "./review-model";
 import type { Route } from "./router";
 import { closeBlocked, EXTERNAL_DONE_LABEL, externalDoneBlocked, offersExternalDone, REWORK_LABEL, resumeState, reworkBinding, sessionModel, unconfirmedState } from "./session-model";
-import { automaticAcceptanceHold, decisionRoute, ownerHold, reviewDeadEnd, type TaskView } from "./selectors";
+import { automaticAcceptanceHold, decisionRoute, ownerHold, REVISION_WAIT, reviewDeadEnd, type TaskView } from "./selectors";
 
 export type TaskAction = {
   id: string;
@@ -68,7 +68,8 @@ export function taskActionsFor(v: TaskView, ws: ActionScope): TaskAction[] {
   }
   if (taskEditable(task)) add("edit", "Edit task…", "pencil", () => ws.open({ kind: "edit-task", taskId: id }), gate("edit_task", unknown));
   if (task.status === "draft") add("start", "Start", "play", () => send("start_task"),
-    gate("start_task", unknown ?? (v.fact.icon === "hourglass" ? "Start is controlled by its dependencies or the sprint queue" : undefined)));
+    gate("start_task", unknown ?? (v.fact.text === REVISION_WAIT ? "A sprint revision holds this task back. Apply or reject it on the sprint page first"
+      : v.fact.icon === "hourglass" ? "Start is controlled by its dependencies or the sprint queue" : undefined)));
   add("stop", "Stop", "stop", () => ws.stopTask(id),
     gate("stop_task", ["working", "needs_you"].includes(task.status) ? unknown : "This task is not running"), { keys: "Ctrl+." });
   if (resume?.action === "retry_task") add("continue", "Continue", "play", () => send("retry_task"), gate("retry_task", unknown));

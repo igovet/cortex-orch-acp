@@ -224,6 +224,7 @@ pub(super) fn latest_snapshot(
         {
             continue;
         }
+        let mut stable_ids = Vec::new();
         for e in entries {
             let r = &e["route"];
             let pairs: Vec<(String, String)> =
@@ -235,15 +236,24 @@ pub(super) fn latest_snapshot(
                 || e["connection_id"] != id
                 || r["connection_id"] != id
                 || !e["catalog_snapshot_id"].is_string()
-                || crate::native_routes::catalog_route_id(
-                    &r["engine"],
-                    &r["connection_id"],
-                    &r["model"],
-                    pairs,
-                ) != r["id"]
             {
                 return Err(CoreError::Refused("invalid_catalog_snapshot"));
             }
+            let Some(stable) = crate::native_routes::accepted_route_id(
+                &r["id"],
+                &r["engine"],
+                &r["connection_id"],
+                &r["model"],
+                pairs,
+            ) else {
+                return Err(CoreError::Refused("invalid_catalog_snapshot"));
+            };
+            stable_ids.push(stable);
+        }
+        // An id derived over launch details is shown as the stable id.
+        let mut doc = doc;
+        for (e, stable) in doc["entries"].as_array_mut().into_iter().flatten().zip(stable_ids) {
+            e["route"]["id"] = json!(stable);
         }
         return Ok(Some(doc));
     }

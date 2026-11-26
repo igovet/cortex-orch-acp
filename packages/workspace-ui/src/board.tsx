@@ -1,4 +1,4 @@
-import { capabilityOf, FEATURES } from "@cortex/workspace-domain";
+import { capabilityOf, FEATURES, sprintRouteLabel } from "@cortex/workspace-domain";
 import { createMemo, createSignal, createUniqueId, For, mapArray, Show } from "solid-js";
 import { CodeView } from "./code";
 import { useWs } from "./ctx";
@@ -17,10 +17,6 @@ import { KnowledgePage, ProjectSettingsPage } from "./project-pages";
 import { createQueueStrip, QueueButton, QueueHelp, RunMode, SprintTarget, TargetChoices } from "./sprint";
 import { EmptyUntilRead, projectsPending } from "./skeleton";
 import { watchLiveGraphs } from "./live-graph";
-
-/** On a sprint's own board and list, what runs comes before what waits: Working, then Not started. Mixed work keeps the global order. */
-const SPRINT_COLUMNS = COLUMNS.map(c => COLUMNS.find(x => x.id === (c.id === "todo" ? "work" : c.id === "work" ? "todo" : c.id))!);
-const columnOrder = (sprint: boolean) => sprint ? SPRINT_COLUMNS : COLUMNS;
 
 const CARD_GAP = 8;
 const SECONDARY: { id: ProjectView; label: string }[] = [
@@ -75,6 +71,7 @@ function Card(props: { view: TaskView; named: boolean; showProject?: boolean }) 
         <div class="card-t"><span data-tooltip-cut="">{v().task.title}</span></div>
         <Show when={props.showProject}><div class="card-project">{v().project.name}</div></Show>
         <Show when={v().task.checkout.branch}><div class="card-b"><I n={v().task.checkout.kind === "worktree" ? "branch" : "folder"} s={12} /><span data-tooltip-cut="" class="mono trunc">{v().task.checkout.branch}</span><span class="type">{v().task.checkout.kind === "worktree" ? "Worktree" : "Project folder"}</span></div></Show>
+        <Show when={v().task.sprintRoute}>{r => <div class="card-b"><I n="cpu" s={12} /><span data-tooltip-cut="" class="trunc">{sprintRouteLabel(v().machine.config.catalogue, r())}</span></div>}</Show>
         <div class="card-s"><FactLine fact={cardFact(v())} cutHint /></div>
       </div>
     </A>
@@ -123,7 +120,7 @@ function Board(props: { summary?: ProjectSummary; views: TaskView[]; onQuick?: (
   const quick = () => props.summary && !props.summary.offline && props.onQuick;
   const rows = (id: ColumnId): GroupedRow[] => props.grouped ? bySprint(columns()[id]) : columns()[id].map(view => ({ kind: "task", view }));
   return <div class="board-wrap" classList={{ "machine-board": !props.summary }} onKeyDown={moveOnBoard}>
-    <For each={columnOrder(!!props.sprint).filter(col => col.id !== "closed_unverified" || columns()[col.id].length > 0)}>{col => {
+    <For each={COLUMNS.filter(col => col.id !== "closed_unverified" || columns()[col.id].length > 0)}>{col => {
       const open = () => columns()[col.id].length > 0 || (col.id === "todo" && !!quick());
       return <section class={`col${open() ? "" : " strip"}`} data-col={col.id} aria-label={columnLabel(col.id, col.label)}>
         <Show when={open()} fallback={<><I n={col.icon} s={14} class="faint" /><span class="v">{columnLabel(col.id, col.label)}</span></>}>
@@ -158,7 +155,7 @@ function List(props: { views: TaskView[]; grouped: boolean; machine: string; spr
   const ws = useWs();
   const rows = createMemo(() => {
     const columns = columnsOf(props.views, ws.store.index());
-    return columnOrder(!!props.sprint).flatMap((col): ListRow[] => columns[col.id].length ? [{ kind: "head", id: col.id, count: columns[col.id].length }, ...(props.grouped ? bySprint(columns[col.id]).map(r => r.kind === "sprint" ? { ...r, column: col.id } : r) : columns[col.id].map((view): GroupedRow => ({ kind: "task", view })))] : []);
+    return COLUMNS.flatMap((col): ListRow[] => columns[col.id].length ? [{ kind: "head", id: col.id, count: columns[col.id].length }, ...(props.grouped ? bySprint(columns[col.id]).map(r => r.kind === "sprint" ? { ...r, column: col.id } : r) : columns[col.id].map((view): GroupedRow => ({ kind: "task", view })))] : []);
   });
   const onKey = (e: KeyboardEvent) => {
     const row = (e.target as Element).closest?.(".lrow");

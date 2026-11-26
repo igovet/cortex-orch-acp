@@ -58,12 +58,16 @@ impl Registry {
         project: String,
         request: RequestEnvelope<workspace_protocol::core::CoreQuery>,
     ) -> io::Result<Value> {
+        // Conversation pages and task facts answer the owner's screen: read at the session's
+        // disk priority, not the level the service unit gives task processes (`io_priority`).
+        let _disk = cortex_core::io_priority::raised();
         project_guard::check(&root)?;
         let key = key(&root)?;
         let slot = self.slot(&key)?;
         let mut entry = slot.lock().map_err(|_| failure("storage_unavailable"))?;
         if entry.is_none() {
-            let store = Store::open(key, OpenMode::LiveReadOnly).map_err(err)?;
+            // The owner waits for this read: queue behind an exclusive migration, never `busy`.
+            let store = Store::open_waiting(key, OpenMode::LiveReadOnly).map_err(err)?;
             let reader = ProjectionReader::new(store, project.clone(), actor()).map_err(err)?;
             let reply = consistent_read(|| reader.query(request.body.clone())).map_err(err)?;
             let subscription = reader
@@ -84,6 +88,8 @@ impl Registry {
         serde_json::to_value(reply).map_err(|_| failure("invalid_reply"))
     }
     fn poll(&self, root: PathBuf, project: String) -> io::Result<Vec<Value>> {
+        // A stalled poll holds this project's reader, which the next page read waits for.
+        let _disk = cortex_core::io_priority::raised();
         project_guard::check(&root)?;
         let key = key(&root)?;
         let slot = self.slot(&key)?;

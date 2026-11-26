@@ -269,7 +269,10 @@ mod cancellation_tests {
         let card = crate::question_card(&decision, &labels, true);
         assert_eq!(card["toolCall"]["rawInput"]["recommended"], 2);
         assert_eq!(card["toolCall"]["rawInput"]["language"], "ru");
-        assert_eq!(card["options"][1]["name"], "Spacious");
+        assert_eq!(card["options"][1]["name"], "Spacious (рекомендую)");
+        assert_eq!(card["options"][0]["name"], "Compact");
+        let en = crate::question_card(&decision, &labels, false);
+        assert_eq!(en["options"][1]["name"], "Spacious (Recommended)");
         let response = json!({"outcome":{"outcome":"selected","optionId":"cortex-question-2"}});
         assert_eq!(crate::card_choice(&response, &labels), Some("Spacious"));
     }
@@ -583,7 +586,11 @@ impl Agent {
                         return Err(invalid("invalid_mcp_servers"));
                     }
                     if p.get("mcpServers").and_then(Value::as_array).is_some_and(|a|!a.is_empty()) {
-                        let registry=self.routes.mcp_registry().map_err(|e|invalid(e.code()))?;
+                        let cwd=p.get("cwd").and_then(Value::as_str).map(PathBuf::from).filter(|c|c.is_absolute());
+                        let registry=match cwd {
+                            Some(cwd)=>self.routes.mcp_registry_for(&cwd),
+                            None=>self.routes.mcp_registry(),
+                        }.map_err(|e|invalid(e.code()))?;
                         registry.validate_client(&p["mcpServers"]).map_err(|e|invalid(e.code()))?;
                     }
                     if method=="session/load" {
@@ -1463,7 +1470,7 @@ async fn follow(
                         .filter(|m| m["batchId"] == batch)
                         .flat_map(|m| {
                             m["options"].as_array().unwrap().iter().enumerate().map(move |(i,o)|
-                            json!({"optionId":format!("cortex-batch:{}:{}",m["questionId"].as_str().unwrap_or_default(),i+1),"name":o["label"],"kind":"allow_once"}))
+                            json!({"optionId":format!("cortex-batch:{}:{}",m["questionId"].as_str().unwrap_or_default(),i+1),"name":recommended_label(o["label"].as_str().unwrap_or_default(), o["recommended"]==true, ru),"kind":"allow_once"}))
                         })
                         .collect();
                     let body = json!({"toolCall":{"toolCallId":format!("cortex-question-batch:{batch}"),"kind":"other",
@@ -1512,7 +1519,10 @@ fn question_card(d: &Value, labels: &[&str], ru: bool) -> Value {
     let options: Vec<_> = shown
         .iter()
         .enumerate()
-        .map(|(i, label)| json!({"optionId":format!("cortex-question-{}",i+1),"name":label,"kind":"allow_once"}))
+        .map(|(i, label)| {
+            let mark = !labels.is_empty() && d["options"][i]["recommended"] == true;
+            json!({"optionId":format!("cortex-question-{}",i+1),"name":recommended_label(label, mark, ru),"kind":"allow_once"})
+        })
         .collect();
     let question = d["prompt"].as_str().unwrap_or_default();
     let question: String = question.chars().take(4000).collect();
@@ -1524,6 +1534,16 @@ fn question_card(d: &Value, labels: &[&str], ru: bool) -> Value {
     json!({"toolCall":{"toolCallId":format!("cortex-question:{}",d["questionId"].as_str().unwrap_or_default()),
         "kind":"other","title":question,"rawInput":input},
         "options":options,"_meta":{"cortexQuestion":true}})
+}
+
+/// The visible mark appended to the recommended option's card label, so a plain ACP
+/// client shows the recommendation without reading `_meta`-style raw input.
+fn recommended_label(label: &str, recommended: bool, ru: bool) -> String {
+    match (recommended, ru) {
+        (false, _) => label.to_owned(),
+        (true, true) => format!("{label} (рекомендую)"),
+        (true, false) => format!("{label} (Recommended)"),
+    }
 }
 
 fn recommended_position(decision: &Value) -> Option<usize> {

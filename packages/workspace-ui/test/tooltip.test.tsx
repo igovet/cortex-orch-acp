@@ -2,7 +2,7 @@
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ReasonTip, Whole } from "../src/layout";
-import { Tooltip, tooltipPlacement } from "../src/tooltip";
+import { Tooltip, TOOLTIP_DELAY } from "../src/tooltip";
 
 let dispose: (() => void) | undefined;
 beforeEach(() => vi.useFakeTimers());
@@ -14,8 +14,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 const tooltip = () => document.querySelector<HTMLElement>('[role="tooltip"]:not([hidden])');
-const hover = (el: Element, type = "pointerover", pointerType = "mouse") =>
-  el.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerType }));
+const hover = (el: Element, type = "pointerover", pointerType = "mouse", clientX = 0, clientY = 0) =>
+  el.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerType, clientX, clientY }));
 function fixture() {
   dispose = render(() => <>
     <button data-tooltip="Sidebar · Ctrl+B" aria-label="Sidebar" aria-describedby="existing" />
@@ -135,13 +135,56 @@ it("ignores labelled buttons, touch, phone controls and text that fits; cut text
   expect(document.querySelector(".l-why-tip")?.textContent).toBe("An actually truncated name");
 });
 
-it("flips and shifts at viewport edges, avoids an adjacent control, and skips an impossible fit", () => {
-  const anchor = { left: 270, right: 294, top: 164, bottom: 192 };
-  const adjacent = { left: 190, right: 224, top: 125, bottom: 153 };
-  const point = tooltipPlacement(anchor, 100, 28, 300, 200, [adjacent]);
-  expect(tooltipPlacement(anchor, 100, 28, 300, 200, [])).toEqual({ left: 192, top: 130 });
-  expect(point).toEqual({ left: 164, top: 164 });
-  expect(point!.left + 100).toBeLessThan(anchor.left);
-  expect(point!.top).toBeGreaterThan(adjacent.bottom);
-  expect(tooltipPlacement(anchor, 100, 28, 300, 200, [{ left: 0, top: 0, right: 300, bottom: 200 }])).toBeNull();
+const place = () => {
+  const tip = tooltip()!;
+  return { left: parseFloat(tip.style.left), top: parseFloat(tip.style.top) };
+};
+function wide() {
+  dispose = render(() => <><button data-whole="Озвучить EP001 и подготовить промпты для всех эпизодов" /><Tooltip /></>, document.body);
+  const title = document.querySelector<HTMLElement>("[data-whole]")!;
+  Object.defineProperties(title, { scrollWidth: { value: 900 }, clientWidth: { value: 600 } });
+  title.getBoundingClientRect = () => new DOMRect(100, 200, 600, 28);
+  document.querySelector("[role='tooltip']")!.getBoundingClientRect = () => new DOMRect(0, 0, 120, 24);
+  return title;
+}
+
+it("anchors a pointer tooltip next to the cursor even for a wide trigger, using the latest pointer position", () => {
+  const title = wide();
+  hover(title, "pointerover", "mouse", 400, 214);
+  hover(title, "pointermove", "mouse", 420, 216);
+  vi.advanceTimersByTime(TOOLTIP_DELAY);
+  const { left, top } = place();
+  expect({ left, top }).toEqual({ left: 432, top: 232 });
+  expect(left).toBeGreaterThan(420);
+  expect(top).toBeGreaterThan(216);
+  expect(Math.hypot(left - 420, top - 216)).toBeLessThanOrEqual(32);
+  window.dispatchEvent(new Event("scroll"));
+  expect(tooltip()).toBeNull();
+});
+
+it("keeps a keyboard-focus tooltip at the element's start edge", () => {
+  const title = wide();
+  document.documentElement.setAttribute("data-keyboard", "");
+  title.focus();
+  vi.advanceTimersByTime(TOOLTIP_DELAY);
+  const { left, top } = place();
+  expect(left).toBeGreaterThanOrEqual(100);
+  expect(left).toBeLessThanOrEqual(124);
+  expect(top).toBeGreaterThanOrEqual(228);
+  expect(top).toBeLessThanOrEqual(228 + 24);
+});
+
+it("flips and clamps a pointer tooltip at the right and bottom viewport edges without covering the cursor", () => {
+  const title = wide();
+  title.getBoundingClientRect = () => new DOMRect(0, 0, innerWidth, innerHeight);
+  const x = innerWidth - 10, y = innerHeight - 6;
+  hover(title, "pointerover", "mouse", x, y);
+  vi.advanceTimersByTime(TOOLTIP_DELAY);
+  const { left, top } = place();
+  expect(left + 120).toBeLessThanOrEqual(x);
+  expect(top + 24).toBeLessThanOrEqual(y);
+  expect(left).toBeGreaterThanOrEqual(0);
+  expect(top).toBeGreaterThanOrEqual(0);
+  expect(x - (left + 120)).toBeLessThanOrEqual(32);
+  expect(y - (top + 24)).toBeLessThanOrEqual(32);
 });

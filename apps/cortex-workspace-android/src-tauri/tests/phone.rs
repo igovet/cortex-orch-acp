@@ -202,6 +202,41 @@ async fn scenario() {
         .unwrap();
     assert_eq!(projects, json!([]));
 
+    // Phone notifications: the machine's owner moments arrive through the tunnel on their own
+    // subscription (nothing is open on this machine, so nothing is raised), and a tap leads
+    // only to a paired machine and a target of the closed shapes.
+    let delivered: Arc<Mutex<Vec<cortex_workspace_android::moments::Delivery>>> = Arc::default();
+    let sink = delivered.clone();
+    phone.set_notifications(
+        Some(Arc::new(move |d| sink.lock().unwrap().push(d))),
+        Default::default(),
+    );
+    eventually("the moments subscription holds", || {
+        (phone.notifications()["machines"][&machine_id] == "subscribed").then_some(())
+    })
+    .await;
+    assert_eq!(phone.notifications()["enabled"], true);
+    assert!(delivered.lock().unwrap().is_empty());
+    assert!(f.0.join("phone/notified.json").exists());
+    let target = json!({"kind":"task","project":"p","task":"t"});
+    assert_eq!(
+        phone.notification_tap(&machine_id, &target),
+        Some(json!({"machineId":machine_id,"target":target}))
+    );
+    assert_eq!(phone.notification_tap("someone-else", &target), None);
+    assert_eq!(
+        phone.notification_tap(
+            &machine_id,
+            &json!({"kind":"task","project":"p","task":"t","url":"x"})
+        ),
+        None
+    );
+    phone.set_notifications(None, Default::default());
+    assert_eq!(
+        phone.notifications(),
+        json!({"enabled":false,"machines":{}})
+    );
+
     // The open machine survives a restart of the app.
     drop(phone);
     let phone = Phone::open(&f.0.join("phone"), "Test Phone", Arc::new(|_, _| ())).unwrap();

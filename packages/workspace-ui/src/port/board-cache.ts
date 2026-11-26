@@ -60,7 +60,7 @@ function board(raw: unknown, legacy = false): CachedBoard {
     // A member the service already deleted is never on the board again.
     if (s.taskIds.some(id => tasks[id]?.purged !== true && !items.some(t => t.taskId === id))) throw Error("incomplete cache");
     const deletion = object(s.deletion) && typeof s.deletion.total === "number" && Number.isSafeInteger(s.deletion.total) && s.deletion.total >= 0 && ids(s.deletion.left)
-      ? {deletion:{total:s.deletion.total,left:s.deletion.left}} : {};
+      ? {deletion:{total:s.deletion.total,left:s.deletion.left,...(text(s.deletion.reason)?{reason:s.deletion.reason}:{})}} : {};
     return {id:s.id,projectId:project.projectId,description:s.description,title:text(s.title)?s.title:null,
       runMode:legacy && s.runMode === "automatic" ? "hybrid" : s.runMode,planning:s.planning as Sprint["planning"],taskIds:s.taskIds.filter(id => tasks[id]?.purged !== true),
       queueState:s.queueState as Sprint["queueState"],pauseReason:s.pauseReason as string|null,

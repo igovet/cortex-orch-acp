@@ -21,6 +21,7 @@ pub mod repair_checks;
 pub mod review;
 pub mod runtime;
 pub mod skill_proposals;
+pub mod sprint_impact;
 pub mod sprint_planning;
 pub mod steering;
 pub mod stop_notice;
@@ -86,12 +87,15 @@ pub fn event_tx(db: &Connection, task: &str, kind: &str, payload: Value) -> Core
         db.execute("INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES (?,'TASK_PROGRESS','runtime',?,?)",
             (task,serde_json::to_string(&marker)?,crate::now()))?;
     }
+    // An owner change of a sprint member may require re-checking its sprint.
+    sprint_impact::note_tx(db, task, kind, id, &payload)?;
     Ok(id)
 }
 fn waiver(db: &Connection, task: &str) -> CoreResult<bool> {
     Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events e JOIN runtime_tasks t USING(task_id)
         WHERE e.task_id=? AND e.type='REVIEW_NOT_REQUIRED' AND json_extract(e.payload_json,'$.revision')=t.revision
-        AND NOT EXISTS(SELECT 1 FROM runtime_nodes n WHERE n.task_id=t.task_id AND n.revision=t.revision AND n.stage='review'))",
+        AND NOT EXISTS(SELECT 1 FROM runtime_nodes n WHERE n.task_id=t.task_id AND n.revision=t.revision AND n.stage='review'
+            AND substr(n.node_id,1,24)!='_sprint_revision_review_'))",
         [task],|r|r.get(0))?)
 }
 /// Trusted runtime supplies filesystem observations BEFORE the transaction.

@@ -252,3 +252,49 @@ describe("owner action wire readers", () => {
     expect(() => readOwnerActionReply({ outcome: "terminal", command: "rm\n", argv: [] })).toThrow();
   });
 });
+
+describe("MCP sign-in cards", () => {
+  const MCP = { actionId: "mcp_0123456789abcdef01234567", projectId: "machine", projectName: null, taskId: null, task: null, kind: "mcp_signin", service: "kling",
+    title: "Sign in to kling", detail: "This MCP server needs you to sign in before sessions can use it.", terminal: null, token: null, recheck: true,
+    signIn: { available: true }, openedAt: Date.now(), checkedAt: null, lastStatus: null };
+  function mcpMachine(actions: unknown[]) {
+    let open = [...actions];
+    const s = scriptedTransport({
+      "service.capabilities": () => ({ methods: ["projects.list", "owner_actions.list", "owner_actions.act", "native.open_mcp_signin"] }),
+      "projects.list": () => [],
+      "capabilities.get": () => capabilitiesWire([]),
+      "owner_actions.list": () => ({ actions: open, phoneTokens: true }),
+      "native.open_mcp_signin": () => ({ outcome: "opened" }),
+      "owner_actions.act": () => ({ outcome: "resolved", how: "recheck" }),
+    });
+    return { ...s, resolve() { open = []; } };
+  }
+  it("renders in the existing card with Open sign-in and no Dismiss; the button calls the opener with the card id only", async () => {
+    const s = mcpMachine([MCP]);
+    await desktop(s as any);
+    const c = card("Sign in to kling")!;
+    expect(c).toBeTruthy();
+    expect(c.className).toContain("owner-card");
+    expect(button("Sign in to kling", "Dismiss")).toBeUndefined();
+    expect(button("Sign in to kling", "Check again")).toBeTruthy();
+    button("Sign in to kling", "Open sign-in")!.click();
+    await settle();
+    expect(s.calls.filter(x => x.operation === "native.open_mcp_signin").map(x => x.message)).toEqual([{ actionId: MCP.actionId }]);
+    expect(card("Sign in to kling")!.textContent).toContain("this card closes by itself");
+  });
+  it("disappears once the machine no longer lists it", async () => {
+    const s = mcpMachine([MCP]);
+    await desktop(s as any);
+    expect(card("Sign in to kling")).toBeTruthy();
+    s.resolve();
+    button("Sign in to kling", "Check again")!.click();
+    await settle();
+    expect(card("Sign in to kling")).toBeNull();
+  });
+  it("reads a machine card and refuses an unknown kind", () => {
+    const ok = readOwnerActions({ actions: [MCP], phoneTokens: true });
+    expect(ok.actions[0]!.kind).toBe("mcp_signin");
+    expect(ok.actions[0]!.signIn).toEqual({ available: true });
+    expect(() => readOwnerActions({ actions: [{ ...MCP, kind: "other" }], phoneTokens: true })).toThrow();
+  });
+});

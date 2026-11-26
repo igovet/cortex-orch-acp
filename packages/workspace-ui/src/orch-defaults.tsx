@@ -1,5 +1,7 @@
 import { createMemo, createSignal, For, onMount, Show } from "solid-js";
-import { ACCESS_MODES, CONNECTION_ENGINE, configIssues, coordinatorEfforts, coordinatorResolution, denyTokens, effortLabel, engineLabel, ENGINE_KEYS, LANGUAGES, modelLabel, resolveEffort, routeIdOf, type CommandReceipt, type EngineKey } from "@cortex/workspace-domain";
+import { ACCESS_MODES, CONNECTION_ENGINE, configIssues, coordinatorAllowed, coordinatorEfforts, coordinatorResolution, denyTokens, effortLabel, engineLabel, ENGINE_KEYS, LANGUAGES, modelLabel, resolveEffort, routeIdOf, TIERS, type CommandReceipt, type EngineKey } from "@cortex/workspace-domain";
+import { workspaceCopy } from "./copy";
+import { CATEGORY_LABELS } from "./orch-coordinator";
 import { useWs } from "./ctx";
 import { A, I } from "./kit";
 import { HELP } from "./orch-help";
@@ -43,12 +45,22 @@ export function Defaults(props: { focus?: "ceiling" }) {
   // Every machine read rebuilds these lines: equal ones stay the old objects, so their rows (and focus on them) stay.
   const issues = createMemo<ReturnType<typeof configIssues>>(prev => share(prev, configIssues(m())), []);
   const available = (e: EngineKey, id: string) => c().setup[e].status === "connected" && !c().catalogue[e].failed && c().catalogue[e].models.some(m => m.id === id) && c().surfaces.routing.engines[e].enabled.includes(id) && denyTokens(c().surfaces.routing, e, id).length === 0;
-  const models = createMemo(() => ENGINE_KEYS.flatMap(e => c().surfaces.routing.engines[e].enabled.filter(id => available(e, id)).map(id => ({ id: `${e}|${id}`, label: modelLabel(c().catalogue, e, id), sub: engineLabel(e) }))));
+  // Only models of Coordinator models may coordinate (a profile without that list: models with a tier). A saved one outside stays shown, marked.
+  const inProfile = (e: EngineKey, id: string) => coordinatorAllowed(c().surfaces.routing, e, id, c().catalogue[e].models.find(x => x.id === id)?.efforts ?? [])?.length !== 0;
   const coord = () => v().coordinator;
-  const efforts = () => coord() ? coordinatorEfforts(c().catalogue, coord()!.engine, coord()!.model) : { levels: [], observed: true };
+  const listed = () => !!c().surfaces.routing.coordinatorModels;
+  /** The coordinator list in words: each model with its categories. */
+  const listWords = () => (c().surfaces.routing.coordinatorModels ?? []).map(x => `${modelLabel(c().catalogue, x.engine, x.model)} (${TIERS.filter(t => x.tiers[t]).map(t => CATEGORY_LABELS[t]).join(", ")})`).join("; ");
+  const models = createMemo(() => {
+    const list = ENGINE_KEYS.flatMap(e => c().surfaces.routing.engines[e].enabled.filter(id => available(e, id) && inProfile(e, id)).map(id => ({ id: `${e}|${id}`, label: modelLabel(c().catalogue, e, id), sub: engineLabel(e) })));
+    const now = coord(), key = now ? `${now.engine}|${now.model}` : "";
+    const outside = listed() ? "Not in Coordinator models" : "No tier in Models";
+    return !now || list.some(x => x.id === key) || !available(now.engine, now.model) ? list : [{ id: key, label: modelLabel(c().catalogue, now.engine, now.model), sub: outside, off: listed() ? "Unavailable: this model is not in Coordinator models" : "Unavailable: this model has no tier in Models" }, ...list];
+  });
+  const efforts = () => coord() ? coordinatorEfforts(c().catalogue, coord()!.engine, coord()!.model, c().surfaces.routing) : { levels: [], observed: true };
   const pick = (value: string) => {
     const [engine, model] = value.split("|") as [EngineKey, string];
-    const levels = coordinatorEfforts(c().catalogue, engine, model).levels;
+    const levels = coordinatorEfforts(c().catalogue, engine, model, c().surfaces.routing).levels;
     const { thought_level, ...parameters } = coord()?.parameters ?? {};
     set({ coordinator: { engine, model, effort: resolveEffort(coord()?.effort, thought_level, levels), parameters } });
   };
@@ -89,8 +101,9 @@ export function Defaults(props: { focus?: "ceiling" }) {
       <SetH title={<span id="set-coord-h">Coordinator</span>}><Hint text={HELP.coordinator} label="coordinator" /></SetH>
       <div class="surface">
         <Srow t="Model" d="The agent you talk to. Enabled, available models, grouped by engine." r="A strong general model; it plans and checks the work."><Pick id="m-def-model" label="Main model" width="240px" value={coord() ? `${coord()!.engine}|${coord()!.model}` : ""} empty="Choose a model" options={models()} disabled={off()} onPick={pick} /></Srow>
-        <Show when={coord()}><Srow t="Effort" d={efforts().observed ? "The levels this model reports." : FALLBACK_EFFORTS}><Seg label="Effort" value={resolveEffort(coord()!.effort, coord()!.parameters.thought_level, efforts().levels)} disabled={off()} options={efforts().levels.map(e => ({ id: e, label: effortLabel(e) }))} onChange={effort => set({ coordinator: { ...coord()!, effort } })} /></Srow></Show>
-        <Srow t="Status" d="What this resolves to now."><Show when={bound().ok} fallback={<><span class="st st-bad"><I n="x-circle" s={12} />{(bound() as { text: string }).text}</span><A class="lnk" to={orchTo(m().id, "models")}>Fix in Models</A></>}><span class="st st-ok"><I n="check-circle" s={12} />Bound to {(bound() as { route: string }).route}</span></Show></Srow>
+        <Show when={coord()}><Srow t="Effort" d={efforts().outside ? (listed() ? "This model is not in Coordinator models: choose another model." : "This model has no tier in Models: choose another model.") : !efforts().observed ? FALLBACK_EFFORTS : coordinatorAllowed(c().surfaces.routing, coord()!.engine, coord()!.model, []) === null ? "The levels this model reports." : listed() ? "The levels of its ranges in Coordinator models." : "The levels its tiers allow in Models."}><Seg label="Effort" value={resolveEffort(coord()!.effort, coord()!.parameters.thought_level, efforts().levels)} disabled={off()} options={efforts().levels.map(e => ({ id: e, label: effortLabel(e) }))} onChange={effort => set({ coordinator: { ...coord()!, effort } })} /></Srow></Show>
+        <Srow t={workspaceCopy("coordinatorModels")} d={listed() ? (listWords() || "No model is listed, so no task can start.") : "No list yet: the coordinator may use any model with a tier under Engines and models."}><A class="btn btn-line btn-sm" to={orchTo(m().id, "coordinator")}>{listed() ? "Edit" : "Set up"}</A></Srow>
+        <Srow t="Status" d="What this resolves to now."><Show when={bound().ok} fallback={<><span class="st st-bad"><I n="x-circle" s={12} />{(bound() as { text: string }).text}</span><Show when={listed()} fallback={<A class="lnk" to={orchTo(m().id, "models")}>Fix in Models</A>}><A class="lnk" to={orchTo(m().id, "coordinator")}>Fix in Coordinator models</A></Show></>}><span class="st st-ok"><I n="check-circle" s={12} />Bound to {(bound() as { route: string }).route}</span></Show></Srow>
       </div>
       <Show when={coord()}><Adv id="coordinator" label="More coordinator parameters" force={Object.keys(coord()?.parameters ?? {}).length > 0}>
         <div class="surface ws-pad"><div class="ws-fld"><span class="lab">Name and value of each parameter<Hint text={HELP.parameters} label="parameters" /></span><KeyValues label="Parameter" values={coord()!.parameters} disabled={off()} onChange={parameters => set({ coordinator: { ...coord()!, parameters } })} /></div></div>

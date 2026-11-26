@@ -4,7 +4,7 @@ import { FEATURES, type Activity, type Check, type Message, type Worker } from "
 import { AttachChips, createAttachments, createDictation, MessageComposer } from "./composer";
 import { useWs } from "./ctx";
 import { createTicker, createUnsent } from "./freshness";
-import { A, Count, createFollow, I, Loading, MenuItem, Modal, Pop } from "./kit";
+import { A, Count, createFollow, I, MenuItem, Modal, Pop } from "./kit";
 import { ActionBar } from "./layout";
 import type { Route } from "./router";
 import { clock, refusalLine, refusalReason } from "./selectors";
@@ -16,8 +16,9 @@ import { CopySource, MessageTools } from "./message-copy";
 import { SentMessages } from "./sent";
 import { useTaskRoutes } from "./task-place";
 import type { FollowPosition } from "./follow";
-import { createFirstView, firstWindowEntries } from "./first-view";
-import { FirstViewNotice, Skeleton, unreachable } from "./skeleton";
+import { createFirstView, firstWindowEntries, slowRead } from "./first-view";
+import { EdgeStrip, ReserveSkeleton, FirstViewNotice, LoadingStrip, Skeleton, unreachable } from "./skeleton";
+import { createEdgeApproach, createRevealer, nearEdge } from "./edge-pager";
 
 /** A worker feed's place, kept by its pane while another worker is on view: where the reader was, the older activity already
  *  read and how much of it was shown. Coming back shows the same rows at the same place, with nothing read again. */
@@ -359,7 +360,12 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
   const position = props.position;
   // The rows read before are back from the pane's memory, so the saved offset lands on them at once.
   const follow = createFollow(() => scroller, () => observed() + ws.store.sends.shown(sentHere()).length,
-    position && { position, ready: () => !loadingOlder() }, () => nearStart());
+    position && { position, ready: () => !loadingOlder() }, () => nearStart(),
+    // While earlier rows are held or can be read, the room above the drawn rows that they take (FollowEdge in follow.ts).
+    { reserve: () => reserve, keep: () => (held() > 0 || !!nextCursor()) && !historyError() });
+  // The line at the top changing between its note, its skeleton and its failure is in the DOM when this runs: the rows under
+  // it keep their place in the same task, before the engine paints.
+  createEffect(on([loadingOlder, historyError], () => follow.sync(), { defer: true }));
   // What the owner just sent here comes into view above the composer and following turns on, even for a reader who had
   // scrolled up. A row the reader opens stays in view: the follow controller watches the feed's own toggles.
   let pressedSeen = ws.store.sends.pressed(sentHere());
@@ -379,7 +385,7 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
       setCursor(page.activityCursor ?? null);
       // The shared follow controller preserves the visible row as older activity is prepended; what was read shows its newest part.
       queueMicrotask(() => { if (own === generation) showEarlier(); });
-    } catch (e) { if (own === generation) setHistoryError(e instanceof Error ? e.message : "Activity could not be loaded. Retry."); }
+    } catch (e) { if (own === generation && !slowRead(e)) setHistoryError(e instanceof Error ? e.message : "Activity could not be loaded. Retry."); }
     finally { if (own === generation) setLoadingOlder(false); }
   };
   let runIdsOf = "", lastShown = new Map<string, FeedItem<Activity>>();
@@ -400,21 +406,40 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
     return at >= 0 ? k.slice(at) : k.slice(Math.max(0, k.length - screen));
   }, undefined, { equals: sameKeys });
   const held = () => allKeys().length - keys().length;
-  /** The next screen of earlier rows: those already held first, then the machine's next older page. */
-  const showEarlier = () => {
+  // Held rows still to draw for the screens asked for so far: drawn a few a frame (createRevealer) into the room the feed
+  // keeps above them. Each step goes in outside any reactive update, so it is in the DOM when the step returns and the
+  // reading anchor holds at once, before the engine paints; left to the ResizeObserver, rows drawn from inside its callback
+  // were painted a frame before they were corrected (the reader saw the feed jump by the whole page and back).
+  let owed = 0;
+  const draw = createRevealer({ hidden: () => Math.min(owed, held()), room: follow.room, reveal: count => {
     const k = allKeys(), hidden = held();
-    if (hidden > 0) { setFrom(k[Math.max(0, hidden - screen)]); return; }
+    owed = Math.max(0, owed - count);
+    if (hidden > 0) { setFrom(k[Math.max(0, hidden - count)]); follow.sync(); }
+  } });
+  /** The next screen of earlier rows: those already held first, then the machine's next older page. Show earlier pressed
+   *  (`now`) draws that screen at once; as the reader nears the top it is drawn in steps. */
+  const showEarlier = (now = false) => {
+    const hidden = held();
+    if (hidden > 0 && now) { owed = 0; setFrom(allKeys()[Math.max(0, hidden - screen)]); follow.sync(); return; }
+    if (hidden > 0) { owed = Math.min(hidden, Math.max(owed, 0) + screen); draw(); return; }
     if (nextCursor() && !loadingOlder() && !historyError()) void loadOlder();
   };
-  /** Earlier rows show by themselves while the feed does not fill its box yet, and when the reader is within half a screen of
-   *  its top; never while following the end of a full feed. One step per layout pass. */
-  let stepping = false;
-  const nearStart = () => {
+  /** Earlier rows show by themselves when the reader's viewport is within reach of the feed's top edge (`nearEdge`: the edge
+   *  line and the reserve above it), which a feed that does not fill its box always is; never on a scroll in the middle, and
+   *  never while following the end of a full feed, whose edge is far above. A scroll reads when it comes into reach or moves
+   *  toward the top inside it; a layout pass continues only while still within reach. One step per layout pass, and the same
+   *  rows and cursor are not asked for twice. */
+  let stepping = false, steppedAt = "", reserve: HTMLDivElement | undefined;
+  const approach = createEdgeApproach();
+  const nearStart = (scrolling = false) => {
     const box = scroller;
+    if (box) approach.seen(box.scrollTop, scrolling);
     if (stepping || !box?.clientHeight || (!held() && !nextCursor()) || loadingOlder() || historyError()) return;
-    const short = box.scrollHeight <= box.clientHeight + 1, near = !follow.following() && box.scrollTop < box.clientHeight / 2;
-    if (!short && !near) return;
-    stepping = true;
+    const go = approach.decide(nearEdge(box, box.querySelector(".ws-earlier"), reserve));
+    if (!go) return;
+    const at = `${held()}|${nextCursor()}|${keys().length}`;
+    if (at === steppedAt) return;
+    steppedAt = at; stepping = true;
     queueMicrotask(() => { stepping = false; showEarlier(); });
   };
   // Each row reads its own entry, which is told only when that entry changed: an update to one row of a long feed wakes
@@ -430,11 +455,11 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
   const running = () => props.w.status === "working";
   const typing = () => <Show when={running()}><WorkingIndicator activity={all()} showAllTools={ws.panels.showAllTools()} /></Show>;
   const rows = () => <>
-    <Show when={loadingOlder()}><Loading class="cap faint ws-earlier" text="Loading recorded activity…" /></Show>
+    <Show when={follow.reserving()}><ReserveSkeleton ref={el => (reserve = el)} /></Show>
+    <Show when={loadingOlder()}><LoadingStrip class="ws-earlier" label="Loading recorded activity…" /></Show>
     <Show when={historyError()}><div class="cap st-warn ws-earlier" role="alert" data-follow-skip="">{historyError()} <button class="lnk" onClick={() => void loadOlder()}>Retry</button></div></Show>
     <Show when={!loadingOlder() && !historyError() && (held() > 0 || !!nextCursor())}>
-      <div class="answered ws-earlier" role="note" data-follow-skip=""><I n="clock" s={14} /><span>Earlier activity is not shown.</span>
-        <button type="button" class="lnk" onClick={showEarlier}>Show earlier</button></div>
+      <EdgeStrip class="ws-earlier" note="Earlier activity is not shown." onShow={() => showEarlier(true)} />
     </Show>
     <Show when={ws.t("activityNote")}><div class="cap faint">{ws.t("activityNote")}</div></Show>
     <For each={keys()}>{key => {
@@ -449,7 +474,7 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
     {typing()}
   </>;
   return <>
-    <div class="stream" ref={scroller} onScroll={() => { follow.onScroll(); nearStart(); }}><div class="stream-in">
+    <div class="stream" ref={scroller} onScroll={() => { follow.onScroll(); nearStart(true); }}><div class="stream-in">
       {rows()}
       <Show when={isFinished(props.w) && !props.readOnly}><Finished w={props.w} onAsk={props.onAsk} /></Show>
     </div></div>
@@ -536,7 +561,7 @@ function Finished(props: { w: Worker; onAsk?: () => void }) {
     <Modal open={reportOpen()} onClose={closeReport} label="Worker report">
       <div class="dlg-h"><h2>{page()?.title ?? "Worker report"}</h2><button data-tooltip="Close report · Esc" class="ib" aria-label="Close report" onClick={closeReport}><I n="x" /></button></div>
       <div class="dlg-b">
-        <Show when={loading()}><Loading text="Loading report…" /></Show>
+        <Show when={loading()}><LoadingStrip label="Loading report…" /></Show>
         <Show when={error()}><div role="alert">{error()} <button class="lnk" onClick={() => read()}>Retry</button></div></Show>
         <Show when={page()}>{p => <>
           <div class="cap muted">{p().totalCharacters} characters</div>
@@ -593,13 +618,14 @@ function CoordinatorFeed(props: { model: Accessor<SessionModel> }) {
       setFeed({ key: at, worker: { id: `coordinator:${taskId}`, taskId, executionId: "", role: "Coordinator", status: running() ? "working" : "completed", lane: "execution", goal: "", now: null, waitsFor: null, scope: [], route: null, attempt: null, elapsedMs: null, runningSince: null, context: null, usage: null, result: null, activity: page.activity, activityCursor: page.activityCursor ?? null, messages: page.messages } });
       setFailure(null);
     } catch (e) {
-      if (at !== key() || n < applied) return;
+      // A read that was only slow is no failure: the skeleton (or the feed shown) stays, and the next read follows.
+      if (at !== key() || n < applied || slowRead(e)) return;
       applied = n;
       setFailure({ key: at, text: e instanceof Error ? e.message : "Activity could not be loaded. Retry." });
     } finally { if (n === asked) inFlight = null; }
   };
-  // Its first reveal waits for its own first read, for at most the first-view budget (at once offline): then one notice
-  // names it with Retry. A feed already shown stays through a refresh that fails, with that failure above it.
+  // Its first reveal waits for its own first read however long it takes; a read that failed (or offline) brings one notice
+  // naming it with Retry. A feed already shown stays through a refresh that fails, with that failure above it.
   const first = createFirstView({ scope: ws.store, identity: () => `coordinator-activity|${key()}`, offline: () => unreachable(ws),
     reads: () => [{ section: "activity", state: shown() ? "settled" : error() ? "failed" : "pending" }], retry: () => void load(true) });
   // Every change the machine reports may be new coordinator activity, and the timer covers the time between reports.

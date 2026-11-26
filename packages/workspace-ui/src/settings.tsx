@@ -49,7 +49,7 @@ function Appearance() {
   </Page>;
 }
 
-const SHORTCUTS: [string, string][] = [["New task", "Ctrl+N"], ["New sprint", "Ctrl+Shift+N"], ["Search and actions", "Ctrl+K"], ["Inbox", "Ctrl+I"], ["Sidebar", "Ctrl+B"], ["Inspector", "Ctrl+Alt+B"], ["Terminal", "Ctrl+J"], ["Stop task", "Ctrl+."], ["Send a message, as Send now or Queue shows", "Enter"], ["New line in a message", "Shift+Enter"], ["New tab", "Ctrl+T"], ["Close tab", "Ctrl+W"], ["Next tab", "Ctrl+Tab"], ["Previous tab", "Ctrl+Shift+Tab"], ["Go to tab", "Ctrl+1 to Ctrl+9"],
+const SHORTCUTS: [string, string][] = [["New task", "Ctrl+N"], ["New sprint", "Ctrl+Shift+N"], ["Search and actions", "Ctrl+K"], ["Inbox", "Ctrl+I"], ["Sidebar", "Ctrl+B"], ["Inspector", "Ctrl+Alt+B"], ["Terminal", "Ctrl+J"], ["Stop task", "Ctrl+."], ["Side chat, in a task", "Ctrl+Shift+J"], ["Send a message, as Send now or Queue shows", "Enter"], ["New line in a message", "Shift+Enter"], ["New tab", "Ctrl+T"], ["Close tab", "Ctrl+W"], ["Next tab", "Ctrl+Tab"], ["Previous tab", "Ctrl+Shift+Tab"], ["Go to tab", "Ctrl+1 to Ctrl+9"],
   ["Chat or plan, in a sprint", "Ctrl+\\"], ["Search the graph", "/ or Ctrl+F"], ["Full view of the graph", "E"], ["Fit the graph, fit the matches", "F, Shift+F"],
   ["Zoom the graph", "+, -, 0"], ["Pan the graph", "Ctrl+Arrow keys"], ["Collapse a layer", "C"], ["Minimap", "M"], ["Direct links or the whole chain", "T"]];
 const Shortcuts = () => <Page title="Shortcuts" lead="Close task, Cancel, Delete and Merge have no shortcut on purpose. While you type in a terminal, Ctrl+T and Ctrl+W stay with the shell.">

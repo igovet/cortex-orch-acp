@@ -16,6 +16,8 @@ const SEPARATOR: &str = " · ";
 pub(super) struct Entry {
     candidate: Candidate,
     name: String,
+    /// The coordinator efforts the profile allows on this route (`None`: unconstrained).
+    allowed: Option<Vec<String>>,
 }
 impl Entry {
     fn route(&self) -> &str {
@@ -533,7 +535,11 @@ fn thought_option(
     state: Option<&str>,
     revision: Option<i64>,
 ) -> Option<Value> {
-    let values = efforts(&entry?.candidate);
+    let entry = entry?;
+    let values: Vec<String> = efforts(&entry.candidate)
+        .into_iter()
+        .filter(|e| entry.allowed.as_ref().is_none_or(|a| a.contains(e)))
+        .collect();
     let saved = parameters.get("thought_level").and_then(Value::as_str);
     let (current, description) = if unavailable_state(state) {
         (nearest_effort(&values, None)?, Some(UNAVAILABLE_THOUGHT))
@@ -654,6 +660,7 @@ impl RouteResolver {
             .iter()
             .filter(|c| {
                 self.allowed(c, false)
+                    && self.coordinator_eligible(c)
                     && self
                         .selected(c, json!({}), "incoming_picker")
                         .is_ok_and(|s| s.launch(root).is_ok())
@@ -684,6 +691,7 @@ impl RouteResolver {
             presented.push(Entry {
                 candidate: (*c).clone(),
                 name,
+                allowed: self.coordinator_efforts(c),
             });
         }
         presented
@@ -915,6 +923,7 @@ mod tests {
                     "supported_parameters":pairs}}),
             },
             name: model.into(),
+            allowed: None,
         }
     }
     #[test]

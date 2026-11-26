@@ -65,8 +65,15 @@ pub enum PathClass {
     Control,
     /// Credential and key material.
     Credential,
-    /// Cortex private state: refused in every mode.
+    /// Cortex private state (`.cortex`, `.cortex-dev`, the dev owner files):
+    /// allowed on request, like credentials and Git controls (Auto allows,
+    /// Guarded and Development ask the owner).
     Private,
+    /// The live files of a project store (`cortex.sqlite3` and its WAL, SHM and
+    /// journal, the store's `.*.lock` files): a write from outside the runtime
+    /// can corrupt the running store or drop its POSIX locks, so no native write
+    /// reaches them in any mode. Reads follow [`PathClass::Private`].
+    LiveStore,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -161,9 +168,10 @@ pub fn classify(request: &Value, facts: &Facts<'_>) -> Verdict {
     };
     let read = matches!(kind, Some("read" | "search"));
     let targets = targets(request, facts);
-    // Cortex private state is refused to every native request in every mode.
-    if targets.paths.iter().any(|(_, c)| *c == PathClass::Private) {
-        return verdict(refuse, "cortex_private");
+    // The live store files are never written natively, in any mode: a write from
+    // outside the runtime can corrupt the running store or drop its locks.
+    if !read && targets.paths.iter().any(|(_, c)| *c == PathClass::LiveStore) {
+        return verdict(refuse, "cortex_live_store");
     }
     // Read-only channels never write, delete or execute natively, in any mode. A web
     // fetch only reads (the session keeps WebFetch for exactly that), so it is not
@@ -181,10 +189,17 @@ pub fn classify(request: &Value, facts: &Facts<'_>) -> Verdict {
         .iter()
         .any(|(_, c)| *c == PathClass::Credential);
     let control = !read && targets.paths.iter().any(|(_, c)| *c == PathClass::Control);
+    // Cortex private state (read or written) is allowed on request.
+    let private = targets
+        .paths
+        .iter()
+        .any(|(_, c)| matches!(c, PathClass::Private | PathClass::LiveStore));
     let outside = targets.unclassified || targets.paths.iter().any(|(inside, _)| !inside);
     // Auto allows everything else; the rule names what was allowed.
     if auto {
-        let rule = if credential {
+        let rule = if private {
+            "auto_private"
+        } else if credential {
             "auto_credential"
         } else if control {
             "auto_control"
@@ -200,7 +215,10 @@ pub fn classify(request: &Value, facts: &Facts<'_>) -> Verdict {
         return verdict(Action::Allow, rule);
     }
     // Credential and key material, Git controls and engine/Cortex configuration
-    // (written) and a path that cannot be resolved ask the owner.
+    // (written), Cortex private state and a path that cannot be resolved ask the owner.
+    if private {
+        return verdict(ask, "cortex_private");
+    }
     if credential {
         return verdict(ask, "credential");
     }
@@ -355,6 +373,7 @@ fn targets(request: &Value, facts: &Facts<'_>) -> Targets {
 pub fn ask_reason(rule: &str, ru: bool) -> &'static str {
     if ru {
         return match rule {
+            "cortex_private" => "запрос затрагивает служебные данные Cortex (.cortex)",
             "credential" => "запрос затрагивает учётные данные или ключи",
             "control_target" => "запрос изменяет служебные файлы Git или настройки движка или Cortex",
             "unclassified_path" => "не удалось определить точный путь",
@@ -367,6 +386,7 @@ pub fn ask_reason(rule: &str, ru: bool) -> &'static str {
         };
     }
     match rule {
+        "cortex_private" => "it reaches Cortex private state (.cortex)",
         "credential" => "it reaches credential or key material",
         "control_target" => "it changes Git control files or engine/Cortex configuration",
         "unclassified_path" => "its path cannot be resolved",
@@ -381,6 +401,7 @@ pub fn ask_reason(rule: &str, ru: bool) -> &'static str {
 /// The stable reason code of an asked rule.
 pub fn reason_code(rule: &str) -> &'static str {
     match rule {
+        "cortex_private" => "private_state",
         "credential" => "credential",
         "control_target" => "control",
         "unclassified_path" => "unresolvable_path",
@@ -781,7 +802,9 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::create_dir_all(home.join(".ssh")).unwrap();
         let class = |p: &Path| {
-            if p.starts_with(root.join(".cortex")) || p.starts_with(root.join(".cortex-dev")) {
+            if p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("cortex.sqlite3")) {
+                PathClass::LiveStore
+            } else if p.starts_with(root.join(".cortex")) || p.starts_with(root.join(".cortex-dev")) {
                 PathClass::Private
             } else if p.starts_with(home.join(".ssh")) || p.to_string_lossy().ends_with(".pem") {
                 PathClass::Credential
@@ -911,17 +934,33 @@ mod tests {
             (
                 read(&root.join(".cortex/cortex.sqlite3")),
                 [
-                    (refuse, "cortex_private"),
-                    (refuse, "cortex_private"),
-                    (refuse, "cortex_private"),
+                    (ask, "cortex_private"),
+                    (ask, "cortex_private"),
+                    (allow, "auto_private"),
+                ],
+            ),
+            (
+                edit(&root.join(".cortex/cortex.sqlite3-wal")),
+                [
+                    (refuse, "cortex_live_store"),
+                    (refuse, "cortex_live_store"),
+                    (refuse, "cortex_live_store"),
+                ],
+            ),
+            (
+                edit(&root.join(".cortex/t_1/pipeline.md")),
+                [
+                    (ask, "cortex_private"),
+                    (ask, "cortex_private"),
+                    (allow, "auto_private"),
                 ],
             ),
             (
                 edit(&root.join(".cortex-dev/x")),
                 [
-                    (refuse, "cortex_private"),
-                    (refuse, "cortex_private"),
-                    (refuse, "cortex_private"),
+                    (ask, "cortex_private"),
+                    (ask, "cortex_private"),
+                    (allow, "auto_private"),
                 ],
             ),
             (
@@ -984,7 +1023,8 @@ mod tests {
                 "unclassified_path"
             )
         );
-        // A read-only channel's reads follow the same table; its private reads are refused.
+        // A read-only channel's reads follow the same table (private reads included);
+        // its writes, private or not, stay refused, and no mode writes the live store.
         let mut f = facts("auto", true, &root);
         f.home = Some(&home);
         f.class = &class;
@@ -994,7 +1034,15 @@ mod tests {
         );
         assert_eq!(
             classify(&read(&root.join(".cortex/x")), &f).rule,
-            "cortex_private"
+            "auto_private"
+        );
+        assert_eq!(
+            classify(&edit(&root.join(".cortex/x")), &f).rule,
+            "read_only"
+        );
+        assert_eq!(
+            classify(&edit(&root.join(".cortex/cortex.sqlite3")), &f).rule,
+            "cortex_live_store"
         );
         // The owner card names role, operation, path and reason with one-shot options.
         let request = json!({"toolCall":{"kind":"read","locations":[{"path":"/etc/hosts"}]},
@@ -1002,6 +1050,9 @@ mod tests {
         let card = owner_card(&request, "worker-explorer", "outside_read", false);
         assert_eq!(card["toolCall"]["title"],
             "Owner decision: worker-explorer wants to read /etc/hosts because it reads outside the project");
+        let private = owner_card(&edit(&root.join(".cortex/x")), "worker-backend-dev", "cortex_private", false);
+        assert!(private["toolCall"]["title"].as_str().unwrap().ends_with("because it reaches Cortex private state (.cortex)"));
+        assert_eq!(reason_code("cortex_private"), "private_state");
         assert_eq!(card["options"].as_array().unwrap().len(), 2);
         std::fs::remove_dir_all(&base).unwrap();
     }

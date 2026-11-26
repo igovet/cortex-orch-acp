@@ -160,6 +160,154 @@ fn a_120_task_plan_becomes_its_tasks_and_the_sprint_created_in_one_transition() 
     );
 }
 
+/// Rewrite the saved sprint's settings and plan items in place.
+fn reshape(env: &Env, settings: Value, complexities: &[Option<&str>]) {
+    let mut product = env.saved();
+    let sprint = &mut product["sprints"][0];
+    sprint["settings"] = settings;
+    for (item, complexity) in sprint["plan"]["items"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(complexities)
+    {
+        if let Some(c) = complexity {
+            item["complexity"] = json!(c);
+        }
+    }
+    settings::write_json(&product_path(&env.state, "p").unwrap(), &product).unwrap();
+}
+fn routed(env: &Env) -> Result<Value> {
+    materialize_routed(
+        &env.root,
+        "p",
+        &env.state,
+        &json!({"action":"materialize","sprintId":"sp","planVersion":1}),
+        &|complexity| {
+            let (route, tier, effort) = match complexity {
+                "high" => ("xr_opus", "flagship", "high"),
+                "low" => ("xr_light", "light", "medium"),
+                _ => ("xr_sonnet", "standard", "high"),
+            };
+            Some(json!({"routeId":route,"engine":"claude-agent-acp","model":route,
+                "tier":tier,"effort":effort,"complexity":complexity,"usedPercent":null}))
+        },
+    )
+}
+
+#[test]
+fn without_a_sprint_model_each_task_gets_the_route_of_its_complexity() {
+    let env = env("routed", 3);
+    reshape(
+        &env,
+        json!({"model":"","effort":"","mode":"auto","language":"en"}),
+        &[Some("high"), None, Some("low")],
+    );
+    routed(&env).unwrap();
+    let saved = env.saved();
+    let drafts = env.drafts();
+    let id = |key: &str| task_id("p", "sp", 1, key);
+    for (key, route, tier, effort, complexity) in [
+        ("t1", "xr_opus", "flagship", "high", "high"),
+        ("t2", "xr_sonnet", "standard", "high", "normal"),
+        ("t3", "xr_light", "light", "medium", "low"),
+    ] {
+        let (_, _, options) = drafts.iter().find(|d| d.0 == id(key)).unwrap();
+        assert_eq!(
+            options["settings"],
+            json!({"model":route,"effort":effort,"mode":"auto","language":"en"}),
+            "{key}"
+        );
+        let record = &saved["tasks"][id(key)]["sprintRoute"];
+        assert_eq!(
+            (record["routeId"].as_str(), record["tier"].as_str(), record["effort"].as_str()),
+            (Some(route), Some(tier), Some(effort))
+        );
+        assert_eq!(record["complexity"], complexity);
+    }
+}
+
+#[test]
+fn an_owner_chosen_sprint_model_wins_over_the_automatic_route() {
+    let env = env("explicit", 2);
+    reshape(
+        &env,
+        json!({"model":"connection:model","effort":"high","mode":"auto","language":"en"}),
+        &[Some("high"), Some("low")],
+    );
+    routed(&env).unwrap();
+    let saved = env.saved();
+    for (task, _, options) in env.drafts() {
+        assert_eq!(options["settings"]["model"], "connection:model");
+        assert_eq!(options["settings"]["effort"], "high");
+        assert!(saved["tasks"][&task].get("sprintRoute").is_none());
+    }
+}
+
+/// The new-sprint form always saves the planning model; only `taskRoute: "sprint"`
+/// (the owner picked it) makes it every task's route.
+#[test]
+fn the_planning_model_is_not_a_sprint_model_unless_the_owner_picked_it() {
+    for (name, task_route, sprint_model) in [
+        ("auto", "automatic", false),
+        ("picked", "sprint", true),
+    ] {
+        let env = env(name, 2);
+        reshape(
+            &env,
+            json!({"model":"connection:model","effort":"high","mode":"auto","language":"en"}),
+            &[Some("low"), Some("high")],
+        );
+        let mut product = env.saved();
+        product["sprints"][0]["taskRoute"] = json!(task_route);
+        settings::write_json(&product_path(&env.state, "p").unwrap(), &product).unwrap();
+        routed(&env).unwrap();
+        let saved = env.saved();
+        let id = |key: &str| task_id("p", "sp", 1, key);
+        for (key, route, effort) in [("t1", "xr_light", "medium"), ("t2", "xr_opus", "high")] {
+            let (_, _, options) = env.drafts().into_iter().find(|d| d.0 == id(key)).unwrap();
+            let record = &saved["tasks"][id(key)];
+            if sprint_model {
+                assert_eq!(options["settings"]["model"], "connection:model", "{key}");
+                assert!(record.get("sprintRoute").is_none(), "{key}");
+            } else {
+                assert_eq!(
+                    options["settings"],
+                    json!({"model":route,"effort":effort,"mode":"auto","language":"en"}),
+                    "{key}"
+                );
+                assert_eq!(record["sprintRoute"]["routeId"], route, "{key}");
+            }
+        }
+    }
+}
+
+#[test]
+fn no_profile_route_leaves_the_task_on_the_default_coordinator() {
+    let env = env("unrouted", 2);
+    reshape(&env, json!({"model":"","effort":"","mode":"auto","language":"en"}), &[]);
+    materialize_routed(
+        &env.root,
+        "p",
+        &env.state,
+        &json!({"action":"materialize","sprintId":"sp","planVersion":1}),
+        &|_| None,
+    )
+    .unwrap();
+    for (_, _, options) in env.drafts() {
+        assert!(options.get("settings").is_none());
+    }
+}
+
+#[test]
+fn an_unknown_complexity_refuses_the_plan() {
+    let env = env("badcomplexity", 2);
+    reshape(&env, json!({"model":"","mode":"auto","language":"en"}), &[Some("huge")]);
+    let before = env.bytes();
+    assert_eq!(routed(&env).unwrap_err().code, "invalid_plan");
+    untouched(&env, &before);
+}
+
 #[test]
 fn a_failure_part_way_leaves_no_task_and_the_plan_ready_and_a_retry_completes_it() {
     let env = env("fail", 120);
@@ -339,7 +487,7 @@ async fn the_product_sprint_materialize_action_is_this_one_operation() {
 }
 
 fn live(env: &Env, request: Value) -> Result<Value> {
-    super::super::sprint_live::owner_action(&env.root, &env.state, "p", &request)
+    super::super::sprint_live::owner_action(&env.root, &env.state, "p", &request, &|_| None)
 }
 
 fn graph(env: &Env) -> Value {

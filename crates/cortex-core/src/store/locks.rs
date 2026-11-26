@@ -89,6 +89,7 @@ impl AccessLock {
     pub fn acquire(path: &Path, create: bool, exclusive: bool, wait: Duration) -> CoreResult<Self> {
         let f = open_private(path, create, !create)?;
         let started = Instant::now();
+        let mut pause = Duration::from_millis(10);
         loop {
             // SAFETY: f owns a valid FD; flock does not retain Rust references.
             if unsafe {
@@ -108,7 +109,9 @@ impl AccessLock {
             if err.raw_os_error() != Some(libc::EWOULDBLOCK) || started.elapsed() >= wait {
                 return refuse("busy");
             }
-            std::thread::sleep(Duration::from_millis(20));
+            // Short waits stay responsive; a long migration is polled gently.
+            pause = (pause * 2).min(Duration::from_millis(250));
+            std::thread::sleep(pause);
         }
     }
 }

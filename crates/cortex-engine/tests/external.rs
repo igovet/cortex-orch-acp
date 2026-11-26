@@ -213,3 +213,42 @@ async fn revoked_external_channel_cannot_dispatch() {
         .unwrap()
         .unwrap();
 }
+
+/// A server that exits on its own leaves a short, credential-filtered last stderr line
+/// so a withheld server can be explained.
+#[tokio::test]
+async fn an_exited_server_exposes_a_safe_last_stderr_line() {
+    let launch = |script: &str| ExternalLaunch {
+        executable: PathBuf::from("/bin/sh"),
+        args: vec!["-c".into(), script.into()],
+        cwd: std::env::current_dir().unwrap(),
+        environment: BTreeMap::new(),
+    };
+    for (script, expected) in [
+        ("echo first >&2; echo 'node: Permission denied: /etc/ssl/openssl.cnf' >&2; exit 3", "node: Permission denied: /etc/ssl/openssl.cnf"),
+        ("echo 'Authorization Bearer abc123' >&2; exit 3", "<redacted> <redacted> <redacted>"),
+    ] {
+        let p = ExternalProxy::launch(
+            launch(script),
+            Credentials::new("ch_123456abcdef".into(), std::env::current_dir().unwrap(), "fixture-secret-12345".into()).unwrap(),
+            core(),
+            Grants {
+                name: "fixture".into(),
+                allowed_tools: BTreeSet::from(["lookup".into()]),
+                always_load: BTreeSet::new(),
+                read_only_tools: BTreeSet::new(),
+                coordinator_tools: None,
+            },
+        )
+        .await
+        .unwrap();
+        for _ in 0..100 {
+            if p.exited() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(p.exited());
+        assert_eq!(p.stderr_line().as_deref(), Some(expected));
+    }
+}

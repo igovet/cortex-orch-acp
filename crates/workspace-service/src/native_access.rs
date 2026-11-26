@@ -94,8 +94,8 @@ fn target(root: &Path, args: &Value, write: bool) -> CoreResult<PathBuf> {
         .unwrap_or_else(|| root.to_str().unwrap()),
     );
     absolute(&p)?;
-    if crate::native_engine_policy::project_private(&p) {
-        return Err(CoreError::Refused("cortex_private"));
+    if write && crate::native_engine_policy::live_store_file(&p) {
+        return Err(CoreError::Refused("cortex_live_store"));
     }
     let mut at = PathBuf::from("/");
     for part in p.components().skip(1) {
@@ -252,7 +252,8 @@ async fn execute_as(
             .map(|p| path.starts_with(p))
             .unwrap_or(true)
     });
-    // Auto decides eligible outside effects; all modes refuse private paths.
+    // Auto decides eligible outside effects, Cortex private state included; all
+    // modes refuse writes to a live store file.
     use cortex_engine::permission::PathClass;
     let class = match crate::native_engine_policy::path_class(&root, &path) {
         PathClass::Ordinary
@@ -265,6 +266,7 @@ async fn execute_as(
         class => class,
     };
     let rule = match class {
+        PathClass::LiveStore => "cortex_live_store",
         PathClass::Private => "cortex_private",
         PathClass::Credential => "credential",
         PathClass::Control => "control_target",
@@ -272,7 +274,7 @@ async fn execute_as(
         PathClass::Ordinary => "outside_command",
     };
     use crate::native_owner_decisions::Owner;
-    let (approved, decider) = if class == PathClass::Private {
+    let (approved, decider) = if class == PathClass::LiveStore && write {
         (false, "runtime".to_owned())
     } else if mode == "auto" {
         (true, format!("mode:{mode}"))
@@ -304,8 +306,8 @@ async fn execute_as(
         }
     };
     let result = async {
-        if class == PathClass::Private {
-            return Err(CoreError::Refused("cortex_private"));
+        if class == PathClass::LiveStore && write {
+            return Err(CoreError::Refused("cortex_live_store"));
         }
         if !approved {
             return Err(CoreError::Refused("outside_action_not_confirmed"));
@@ -376,9 +378,9 @@ fn atomic_write(root: &Path, args: &Value, data: &[u8]) -> CoreResult<Value> {
     };
     let p = target(root, args, true)?;
     if crate::native_engine_policy::path_class(root, &p)
-        == cortex_engine::permission::PathClass::Private
+        == cortex_engine::permission::PathClass::LiveStore
     {
-        return Err(CoreError::Refused("cortex_private"));
+        return Err(CoreError::Refused("cortex_live_store"));
     }
     let mut folder = File::open("/")?;
     let parent = p
@@ -440,4 +442,98 @@ fn atomic_write(root: &Path, args: &Value, data: &[u8]) -> CoreResult<Value> {
     }
     effect?;
     Ok(json!({"path":p,"byte_count":data.len(),"sha256":digest(data)}))
+}
+
+/// A gateway file call (`project_read`, `project_write`, `project_edit`) on a
+/// protected project path, decided by the runtime before the call runs: a read of
+/// Git control files is an ordinary read; a write of a live store file is refused
+/// in every mode (`cortex_live_store`); any other access to Cortex private state
+/// and a write of Git control files or of a credential file are allowed on request: Auto allows, Guarded
+/// and Development ask the owner (Allow once / Deny). Each decision is one
+/// `NATIVE_PROTECTED_PATH_DECIDED` event. `Ok(())` admits exactly this call.
+pub(super) async fn admit_protected(
+    executor: Arc<StoreExecutor>,
+    credential: Credential,
+    root: PathBuf,
+    permissions: Option<Arc<dyn ClientPermissions>>,
+    name: &str,
+    args: &Value,
+    protection: crate::native_project::Protected,
+) -> CoreResult<()> {
+    use crate::native_project::Protected;
+    let read = name == "project_read";
+    let path = args["path"]
+        .as_str()
+        .ok_or(CoreError::Refused("invalid_arguments"))?
+        .to_owned();
+    let rule = match (protection, read) {
+        // Reading Git control files or a credential file is an ordinary gateway read.
+        (Protected::Git | Protected::Credential, true) => return Ok(()),
+        (Protected::Credential, false) => "credential",
+        (Protected::LiveStore, false) => "cortex_live_store",
+        (Protected::Git, false) => "control_target",
+        (Protected::Private | Protected::LiveStore, _) => "cortex_private",
+    };
+    let key = match args["request_key"].as_str() {
+        Some(key) => format!("protected:{key}"),
+        None => format!("protected:{}", digest(&serde_json::to_vec(&json!([name, args]))?)),
+    };
+    let c = credential.clone();
+    let (mode, incoming, who, ru) = recv(executor.write(move |db| {
+        let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
+        let sessions = db.prepare("SELECT session_id FROM acp_host_sessions WHERE task_id=? AND json_extract(client_info,'$.name')='cortex-rust-acp'")?
+            .query_map([&i.task], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        if sessions.len() > 1 {
+            return Err(CoreError::Refused("incoming_session_binding_conflict"));
+        }
+        let ru = lifecycle::domain::task_language_tx(db, &i.task)? == "ru";
+        Ok((access::current(db, &i.task)?, sessions.into_iter().next(),
+            i.profile.clone().unwrap_or_else(|| i.role.clone()), ru))
+    })?).await?;
+    let absolute = root.join(&path);
+    let request = json!({"toolCall":{"toolCallId":key,"title":name,
+        "kind":if read {"read"} else {"edit"},"locations":[{"path":absolute}],
+        "rawInput":{"path":absolute}},
+        "options":cortex_engine::permission::one_shot_options(ru)});
+    use crate::native_owner_decisions::Owner;
+    let (allowed, decider) = if rule == "cortex_live_store" {
+        (false, "runtime".to_owned())
+    } else if mode == "auto" {
+        (true, format!("mode:{mode}"))
+    } else {
+        let card = cortex_engine::permission::owner_card(&request, &who, rule, ru);
+        let details = crate::native_owner_decisions::details(&request, &who, rule, &mode, ru);
+        match crate::native_owner_decisions::ask(
+            &executor, &credential, permissions, incoming, &key, &card, details,
+        )
+        .await
+        {
+            Ok(Owner::Allowed) => (true, "owner".to_owned()),
+            Ok(Owner::Denied) => (false, "owner".to_owned()),
+            Ok(Owner::Withdrawn(reason)) => (false, format!("withdrawn:{reason}")),
+            Ok(Owner::Unavailable) => (false, "no_owner_client".to_owned()),
+            Err(e) => (false, format!("error:{}", e.code())),
+        }
+    };
+    let c = credential;
+    let operation = name.to_owned();
+    let expected = mode.clone();
+    recv(executor.write(move |db| {
+        let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
+        // An allowance holds only under the access mode it was decided in.
+        if allowed && access::current(db, &i.task)? != expected {
+            return Err(CoreError::Refused("access_mode_changed"));
+        }
+        lifecycle::event_tx(db, &i.task, "NATIVE_PROTECTED_PATH_DECIDED", json!({
+            "channel_id": c.channel_id, "operation": operation, "path": path,
+            "mode": expected, "allowed": allowed, "rule": rule, "decider": decider}))?;
+        Ok(())
+    })?).await?;
+    if allowed {
+        Ok(())
+    } else if rule == "cortex_live_store" {
+        Err(CoreError::Refused("cortex_live_store"))
+    } else {
+        Err(CoreError::Refused("protected_path_not_confirmed"))
+    }
 }

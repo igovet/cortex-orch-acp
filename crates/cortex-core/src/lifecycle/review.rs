@@ -284,9 +284,10 @@ pub fn block_without_findings(result: &Value) -> bool {
         .is_some_and(|v| v.eq_ignore_ascii_case("BLOCK"))
         && result["findings"].as_array().is_none_or(Vec::is_empty)
 }
-/// A concrete finding with an owning execution node and an in-scope file can be
-/// repaired immediately, even in an INCOMPLETE review; the fresh review after the
-/// fix covers the new bytes.
+/// Any concrete finding of an INCOMPLETE review is repaired first, a cross-cutting
+/// one included (it takes the conservative fix of every plan task); the fresh
+/// review after the fix covers the new bytes. An INCOMPLETE review with findings
+/// never reaches verification.
 fn actionable_findings(result: &Value) -> bool {
     let Some(findings) = result["findings"].as_array() else {
         return false;
@@ -294,10 +295,6 @@ fn actionable_findings(result: &Value) -> bool {
     !findings.is_empty()
         && findings.iter().all(|finding| {
             finding.is_object()
-                && finding["cross_cutting"] == false
-                && finding["node"]
-                    .as_str()
-                    .is_some_and(|node| !node.trim().is_empty())
                 && finding["fix"]
                     .as_str()
                     .is_some_and(|fix| !fix.trim().is_empty())
@@ -779,7 +776,7 @@ fn disclose_review_limits_tx(
         .map(|b| {
             let item = b["item"].as_str().unwrap_or("an item").chars().take(200).collect::<String>();
             let reason = b["reason"].as_str().unwrap_or("").chars().take(400).collect::<String>();
-            if b["blocker"] == "owner_decision" {
+            if b["blocker"] == "owner_decision" || b["owner_accepted"] == true {
                 return json!({"name":format!("Review did not read {item}"),"outcome":"unverified",
                     "blocker":format!("The owner decided that {item} is not reviewed{}; it is not covered by the review.",
                         if reason.is_empty() { String::new() } else { format!(" ({reason})") }),
@@ -800,6 +797,7 @@ fn disclose_review_limits_tx(
         None => result["checks"] = json!(limits),
     }
     result["review_limit_disclosed"] = json!(true);
+    result["review_limit_owner_authorized"] = json!(true);
     db.execute(
         "UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND revision=? AND node_id=?",
         (result.to_string(), task, revision, review),
@@ -808,9 +806,126 @@ fn disclose_review_limits_tx(
         db,
         task,
         "REVIEW_LIMIT_DISCLOSED",
-        json!({"review":review,"revision":revision,"report_ref":result["report_ref"],"limits":limits}),
+        json!({"review":review,"revision":revision,"report_ref":result["report_ref"],"limits":limits,
+            "owner_authorized":true}),
     )?;
     domain::state_tx(db, task, TaskState::Verifying, None)
+}
+/// The verification commands of the plan whose approved stage missed the goal
+/// (`REVIEW_GOAL_NOT_MET` after the latest accepted plan): they never ran, so they
+/// are still owed by the next plan.
+pub fn owed_goal_commands(db: &rusqlite::Connection, task: &str) -> CoreResult<Vec<Value>> {
+    let owed: Option<String> = db
+        .query_row(
+            "SELECT json_extract(payload_json,'$.verification') FROM runtime_events WHERE task_id=?1
+             AND type='REVIEW_GOAL_NOT_MET'
+             AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='PLAN_ACCEPTED'),0)
+             ORDER BY id DESC LIMIT 1",
+            [task],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(owed
+        .and_then(|o| serde_json::from_str::<Value>(&o).ok())
+        .and_then(|o| o.as_array().cloned())
+        .unwrap_or_default())
+}
+/// Whether the owner accepted a review dead end of this task as not verified
+/// (`LOOP_BROKEN` `accept_unverified` for a `review_incomplete` stop) since the
+/// newest reopen or owner message: the owner's close-as-is for the unreachable parts.
+fn owner_accepted_review_tx(db: &Transaction<'_>, task: &str) -> CoreResult<bool> {
+    let since = repeat_window_tx(db, task)?;
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='LOOP_BROKEN' AND id>?
+         AND json_extract(payload_json,'$.action')='accept_unverified'
+         AND json_extract(payload_json,'$.evidence.stop')='review_incomplete')",
+        (task, since),
+        |r| r.get(0),
+    )?)
+}
+/// The review that a follow-up review of the same revision replaced, when
+/// `review` is such a follow-up (`REVIEW_RERUN`).
+fn rerun_of_tx(db: &Transaction<'_>, task: &str, revision: i64, review: &str) -> CoreResult<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='REVIEW_RERUN'
+         AND json_extract(payload_json,'$.revision')=? AND json_extract(payload_json,'$.rerun')=?)",
+        (task, revision, review),
+        |r| r.get(0),
+    )?)
+}
+/// One follow-up review of the same revision, narrowed to the parts the previous
+/// review's tools could not reach, on another route and with another approach
+/// (`REVIEW_RERUN`). Files the earlier review read in their current bytes stay
+/// read (`reviewed_before`). False when the review budget of the revision is used.
+fn narrow_review_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    revision: i64,
+    review: &str,
+    result: &Value,
+    blocked: &[Value],
+) -> CoreResult<bool> {
+    let mut cycle: i64 = db.query_row(
+        "SELECT review_cycle+1 FROM runtime_tasks WHERE task_id=?",
+        [task],
+        |r| r.get(0),
+    )?;
+    if cycle > MAX_REVIEW_CYCLES as i64 {
+        return Ok(false);
+    }
+    while db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=? AND revision=? AND node_id=?)",
+        (task, revision, format!("_review_{cycle}")),
+        |r| r.get::<_, bool>(0),
+    )? {
+        cycle += 1;
+    }
+    let deps: String = db.query_row(
+        "SELECT dependencies_json FROM runtime_nodes WHERE task_id=? AND revision=? AND node_id=?",
+        (task, revision, review),
+        |r| r.get(0),
+    )?;
+    let mut deps: Vec<String> = serde_json::from_str(&deps)?;
+    deps.push(review.to_owned());
+    let mut objective = format!(
+        "Follow-up review. The previous review ({review}, report {}) could not reach these parts of the change with its tools:\n",
+        result["report_ref"].as_str().unwrap_or("")
+    );
+    for b in blocked {
+        objective.push_str(&format!(
+            "- {} ({})\n",
+            b["item"].as_str().unwrap_or("unnamed part").chars().take(300).collect::<String>(),
+            b["reason"].as_str().unwrap_or("tool unavailable").chars().take(400).collect::<String>()
+        ));
+    }
+    objective.push_str("Cover exactly these parts first, with a different approach than the previous review (other read tools, line ranges, paging, a read-only command); files it read in their current bytes are marked reviewed_before. Then judge the whole work against the original goal in the review packet.");
+    let objective: String = objective.chars().take(8000).collect();
+    let node = format!("_review_{cycle}");
+    db.execute("INSERT INTO runtime_nodes(task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status)
+        VALUES (?,?,?,'worker-code-reviewer',?,?,'[\"**\"]','review','pending')",
+        (task, revision, &node, &objective, json!(deps).to_string()))?;
+    let plan: Option<String> = db.query_row(
+        "SELECT plan_json FROM runtime_tasks WHERE task_id=?",
+        [task],
+        |r| r.get(0),
+    )?;
+    let plan: Value = serde_json::from_str(plan.as_deref().unwrap_or("{}"))?;
+    let routing = super::plan::routing_fields(&super::plan::node_routing(&plan, review));
+    super::plan::record_node_routing_tx(db, task, &node, &routing)?;
+    db.execute(
+        "UPDATE runtime_tasks SET review_cycle=? WHERE task_id=?",
+        (cycle, task),
+    )?;
+    event_tx(
+        db,
+        task,
+        "REVIEW_RERUN",
+        json!({"review":review,"rerun":node,"revision":revision,
+            "reason":"The previous review's tools could not reach some parts of the change; a follow-up review covers them with another approach.",
+            "items":blocked.iter().map(|b| b["item"].clone()).collect::<Vec<_>>()}),
+    )?;
+    Ok(true)
 }
 /// Select the latest review's outcome. Approval enables final verification;
 /// request-changes schedules bounded scoped fixes; BLOCK with findings asks about the
@@ -835,11 +950,48 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
     }
     let result: Value =
         serde_json::from_str(&result.ok_or(CoreError::Refused("review_incomplete"))?)?;
+    // The review of a proposed sprint revision settles only that revision.
+    if super::sprint_impact::is_revision_review(&review) {
+        return super::sprint_impact::review_done_tx(db, task, &review, &result);
+    }
     // The review of a submitted sprint plan (see `sprint_planning`): findings return the
     // plan to its coordinator for a revision within the same bounded rules.
     let plan_review = super::sprint_planning::is_plan_review(&review);
     match result["verdict"].as_str() {
         Some("APPROVE") => {
+            // The stage is approved, but an outcome of the goal is not delivered: no
+            // verification. The coordinator plans the rest; the plan's verification
+            // commands, which never ran, stay owed (`plan::required_verification`).
+            let undelivered = if plan_review {
+                Vec::new()
+            } else {
+                super::completion::undelivered_outcomes(db, task, &result)?
+            };
+            if !undelivered.is_empty() {
+                let plan: Option<String> = db.query_row(
+                    "SELECT plan_json FROM runtime_tasks WHERE task_id=?",
+                    [task],
+                    |r| r.get(0),
+                )?;
+                let plan: Value = serde_json::from_str(plan.as_deref().unwrap_or("{}"))?;
+                event_tx(
+                    db,
+                    task,
+                    "REVIEW_GOAL_NOT_MET",
+                    json!({"review":review,"revision":revision,"report_ref":result["report_ref"],
+                        "undelivered":undelivered,"verification":plan["verification"]}),
+                )?;
+                event_tx(
+                    db,
+                    task,
+                    "TASK_PROGRESS",
+                    json!({"kind":"review_goal_not_met","node":review,"revision":revision}),
+                )?;
+                if !domain::return_to_coordinator_tx(db, task, "goal_not_met")? {
+                    domain::stop_tx(db, task, "goal_not_met")?;
+                }
+                return Ok(());
+            }
             event_tx(
                 db,
                 task,
@@ -868,9 +1020,21 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
         // that changes approach (no-stop policy), never a stop for the owner. A legacy
         // result without blockers, or a BLOCK naming no problem, takes the same route.
         Some("INCOMPLETE" | "BLOCK") => {
+            // A follow-up review that again could not reach the same kind of part:
+            // no further review can, so the owner decides (close it as is, or how
+            // to make it reviewable). The item is routed as an owner decision.
+            let narrowed = rerun_of_tx(db, task, revision, &review)?;
             let blocked: Vec<Value> = uncovered(&result)
                 .into_iter()
-                .map(|gap| json!({"item":gap["item"],"blocker":gap["blocker"],"reason":gap["reason"]}))
+                .map(|gap| {
+                    if narrowed && gap["blocker"] == "tool_unavailable" {
+                        json!({"item":gap["item"],"blocker":"owner_decision","reason":format!(
+                            "{}. A follow-up review with another approach could not reach it either; the owner decides whether to close it as is, without review, or how to make it reviewable",
+                            gap["reason"].as_str().unwrap_or("The reviewer's tools could not reach it").trim_end_matches('.'))})
+                    } else {
+                        json!({"item":gap["item"],"blocker":gap["blocker"],"reason":gap["reason"]})
+                    }
+                })
                 .collect();
             event_tx(
                 db,
@@ -904,10 +1068,16 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
             // with an owner answer since, or a reason citing an answered question;
             // owner store 2026-11-21: the owner answered "close as is" ten times
             // while each closing review re-raised the same declined reads).
+            // Only the owner closes an unreachable part as is: an owner decision the
+            // owner already answered, or a review dead end the owner accepted as not
+            // verified. Nothing else reaches verification from an INCOMPLETE review.
+            let accepted = owner_accepted_review_tx(db, task)?;
             let mut reachable = !blocked.is_empty();
             let mut decided = Vec::new();
-            for b in &blocked {
-                if b["blocker"] == "tool_unavailable" {
+            let mut blocked = blocked;
+            for b in &mut blocked {
+                if accepted {
+                    b["owner_accepted"] = json!(true);
                     continue;
                 }
                 let answer = if b["blocker"] == "owner_decision" {
@@ -922,10 +1092,7 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
                 };
                 match answer {
                     Some(answer) => decided.push((b.clone(), answer)),
-                    None => {
-                        reachable = false;
-                        break;
-                    }
+                    None => reachable = false,
                 }
             }
             if !plan_review && result["verdict"] == "INCOMPLETE" && reachable {
@@ -942,6 +1109,23 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
                     )?;
                 }
                 return disclose_review_limits_tx(db, task, revision, &review, &result, &blocked);
+            }
+            // Parts only the reviewer's tools could not reach get one follow-up review
+            // narrowed to them, on another route and with another approach. Parts the
+            // owner already decided about are not reviewed again.
+            let unreachable: Vec<Value> = blocked
+                .iter()
+                .filter(|b| !decided.iter().any(|(d, _)| d == *b))
+                .cloned()
+                .collect();
+            if !plan_review
+                && result["verdict"] == "INCOMPLETE"
+                && !narrowed
+                && !unreachable.is_empty()
+                && unreachable.iter().all(|b| b["blocker"] == "tool_unavailable")
+                && narrow_review_tx(db, task, revision, &review, &result, &unreachable)?
+            {
+                return Ok(());
             }
             domain::stop_tx(db, task, "review_incomplete")?;
             return Ok(());

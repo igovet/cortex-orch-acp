@@ -59,7 +59,8 @@ Before recording a planned-work answer, the runtime applies the same unresolved
 check assessment and disclosure guard as synthesis. An omitted gap or blank
 blocker refuses the proposal without changing state. Accepted disclosures are
 stored and shown in the answer's "Not verified" section; exact retries preserve
-that content.
+that content. A changed review binding also refuses the proposal while planning
+and lets the coordinator propose a scoped plan with fresh verification.
 
 The additive Rust host now serves coordinator reconciliation, synthesis and
 certified released answers, verification-command repair, and budgeted
@@ -94,6 +95,108 @@ runner for identified owner reruns; see [local task execution](../../cortex-work
 Workspace result facts list current skipped worker and runtime checks individually
 as `not_run`, with the recorded blocker when available. These rows are not
 rerun targets. Displaying them does not change review or acceptance requirements.
+
+## The original goal decides completion
+
+An owner store showed the gap: the coordinator narrowed its plan to
+"preparation only, no push", the reviewer approved that stage while writing that it
+was not approved for publication, verification ran, and the synthesis that began
+"the push to GitHub was not done" completed the task with eleven not-verified items.
+Every structural gate passed; none compared the result with the goal.
+
+- **Plan outcomes.** `plan_submit` carries `plan.outcomes`: every required result of
+  the original goal and of the owner's later messages, as an id and a statement.
+  Each outcome is delivered by a task (`delivers`) or explicitly `deferred` with its
+  reason (`plan_outcome_uncovered`, `plan_outcome_unknown`,
+  `plan_outcome_deferral_reason_required`, `plan_outcome_deferral_conflict`). A
+  deferred outcome stays owed. A replan, a steering amendment (`steer_plan`) or a
+  continuation keeps every outcome of the plan in force with the same id and
+  statement and may add new ones (`plan_outcome_dropped`), so an owner message can
+  add an outcome but a plan can never drop one. A changed statement is refused like a
+  dropped outcome, never recorded as a refinement. The coordinator always sees what it
+  must carry: the recovery capsule and `task_get_context` list the outcomes of the
+  plan in force verbatim (`plan_summary.outcomes`: id, statement and deferral
+  reason), and the recovery, goal-not-met and reconciliation prompts point at them.
+  An entry of only the id (plus `deferred` when no task delivers it) keeps that
+  outcome and the runtime fills its recorded statement; an id-only entry that names
+  no outcome of the plan in force is refused (`plan_outcome_statement_required`).
+  The `plan_outcome_dropped` reply lists each missing outcome verbatim
+  (`missing_outcomes`), so the coordinator corrects the plan in the same turn
+  instead of stalling after a recovery or a new owner message. The outcomes never
+  depend on a large read: a deferred `task_get_context` or `read_capsule` reply (and
+  its `read_batch` item) keeps `state`, `revision` and `plan_outcomes` inline, an
+  unchanged repeat read carries them too, and a coordinator prompt that only refers
+  to an already delivered capsule repeats them compactly. After three identical
+  `plan_outcome_dropped` refusals since the plan in force was accepted or the owner
+  last spoke (`PLAN_OUTCOME_REFUSED`), the runtime accepts the plan with those
+  outcomes kept itself: a reworded one gets its recorded statement back, a dropped
+  one is added as deferred and marked `deferred_by: "runtime"` (shown in
+  `plan_summary.outcomes`, kept while later plans still defer it, never taken from a
+  plan), and `LOOP_BROKEN` (`kind` `plan_outcome_refusal`, `action`
+  `outcomes_kept`) records it, so the task never spins on carrying outcomes. A
+  runtime-deferred outcome is owed like any other: a final result that leaves it out
+  or not done is refused (`final_outcomes_required`, `completion_goal_not_met`), so
+  the task completes only when it is reported done, after the owner's answer to a
+  question, or by the owner's close as is.
+- **Plan refusals name the item.** `plan_outcome_uncovered`, `plan_outcome_unknown`,
+  `plan_outcome_deferral_conflict` and `plan_outcome_deferral_reason_required` reply
+  with the items to fix: `uncovered` (outcomes no task delivers and the plan does not
+  defer), `unknown_delivers` (task and id), `delivered_and_deferred`,
+  `deferral_reason_missing` and `defined_outcome_ids`.
+- **Required verification commands.** Unresolved failed checks and the commands of
+  an approved stage that missed the goal (which never ran) are runtime-owned
+  obligations of the next plan. The coordinator sees them verbatim beforehand in
+  `plan_summary.required_verification` (`argv` and `reason` `failed_check` or
+  `goal_not_met`), in the capsule, `task_get_context` (also in the deferred and
+  unchanged-read forms and the `read_batch` item) and the recovery, goal-not-met and
+  reconciliation prompts. A plan that leaves one out is never refused: the runtime
+  appends each missing argv to the stored plan's `verification` (even beyond the
+  16 a coordinator may send), records `PLAN_VERIFICATION_KEPT` and answers with
+  `verification_kept_by_runtime`, so no refusal, loop or stall can arise from them.
+  `verification_submit` keeps its own check (`automatic_required_check_missing`).
+- **Review against the goal.** The review packet's `goal` holds the original goal
+  verbatim (up to 12,000 characters, longer goals marked truncated with the
+  capsule as source), the owner's messages and answers (newest 12) and the plan
+  outcomes. An APPROVE answers every outcome in `goal_coverage`
+  (`review_goal_coverage_required` otherwise). An approval that reports an outcome
+  undelivered (`REVIEW_GOAL_NOT_MET`) runs no verification: the task returns to its
+  coordinator (`RETURNED_TO_COORDINATOR` reason `goal_not_met`; once the return
+  budget is used, a `goal_not_met` stop on the strategy ladder), and the next plan
+  owes that plan's verification commands, which never ran (see "Required
+  verification commands" below). The Workspace shows such a review as
+  "Stage approved, goal not met" ("Этап одобрен, цель не достигнута"), and the
+  verification lane reads "Will not run: changes needed" whenever the latest review
+  sends the work back.
+- **Workers.** An execution worker reports `objective_status` `complete` or
+  `partial` with `remaining`; `partial` is accepted only at a dead end, as a failed
+  assignment with its blocker (`objective_partial_blocker_required` otherwise, and
+  the same session continues). A recorded partial node is not a success: the
+  coordinator plans what remains.
+- **Final result.** `synthesis_submit` and `answer_submit` report `outcomes`
+  (`id`, `status` `done` or `not_done`, `evidence`). A synthesis with any outcome not
+  done, missing or unknown is refused before anything is recorded
+  (`completion_goal_not_met`, `final_outcomes_required`, `final_outcome_unknown`);
+  the refusal lists the plan outcomes (`plan_outcomes`) and tells the coordinator
+  to continue with `replan_request` or ask the owner. The ids to report are always
+  visible beforehand in `task_get_context` and the capsule (`plan_summary.outcomes`).
+  From RECONCILING the only ways on are a replan, an owner question, or the
+  owner's close as is. A direct answer may leave an outcome not done only after the
+  owner answered a question asked after verification or a runtime stop question;
+  the runtime then appends its own "Goal not fully met (owner's decision)" section.
+  `not_verified` lists only recorded checks and runtime limits that did not pass;
+  anything else is refused `not_verified_not_a_check`. `complete_tx` itself refuses
+  `completion_goal_not_met` when the recorded final result leaves an outcome
+  undone or out. The runtime-composed synthesis reports the outcomes done only on
+  the approving reviewer's full goal coverage; otherwise the coordinator reconciles.
+- **Older plans.** A plan accepted before plans named outcomes still opens and
+  progresses: its review needs no goal coverage, but the coordinator names the
+  goal's outcomes itself in its next plan or final result; a final result recorded
+  before this change on such a plan completes as before.
+
+This is a runtime gate over model-reported outcomes: it makes an unmet goal
+visible and blocks completing past it, but it cannot prove that a model judged an
+outcome truthfully. The independent reviewer's `goal_coverage` is the second,
+independent judgment.
 
 ## Runtime-composed synthesis
 
@@ -306,7 +409,7 @@ A degenerate model turn always takes at least `escalate_route` and moves the coo
 
 The **loop guard** (`crates/cortex-core/src/lifecycle/loop_guard.rs`) records every sighting as `LOOP_OBSERVED {key, kind, node, count, rungs_used}`. Its count window starts at the owner's newest input that can change the situation (`TASK_REOPENED`, `USER_STEERING`, an owner Resume of an earlier version's cap, or an answer given while that key was the current loop) and never at `AUTOMATIC_RESUMED`, `PLAN_ACCEPTED` or a new plan revision, which every cycle passes through. A resumed continuation does not reset the host's relaunch spacing (counted per fingerprint) or the replan count after which a replan becomes a senior consultation (counted since the owner's last input) either. Once every rung was used for one fingerprint the loop is broken (`LOOP_BROKEN {key, kind, action, limits}`) instead of cycling again:
 
-- a review whose remaining dead ends no strategy reached (`disclose`) records them as disclosed `unverified` limits on the review result (`REVIEW_LIMIT_DISCLOSED`) and the task continues to verification; a review whose dead ends are only items the owner already decided about and items its tools cannot reach is disclosed at once, without asking again;
+- a review whose remaining dead ends no strategy reached is put to the owner like any other broken loop (`ask_owner`, below); only the owner's `accept_unverified` answer (close those parts as is) lets a later INCOMPLETE review of the same dead end record them as disclosed `unverified` limits (`REVIEW_LIMIT_DISCLOSED`, `owner_authorized: true`) and continue to verification. A review whose dead ends are only items the owner already decided about is disclosed at once on that decision (`disclose`), without asking again. Before this, every runtime-exhausted review dead end was disclosed and verified without the owner;
 - anything that cannot be disclosed, such as a check that keeps failing the same way or the same findings again (`ask_owner`), is put to the owner as one question the runtime asks itself, without a model call: in the task's language, naming the task, the repeated failure and how many full rounds of the ladder were tried. While it is open the task waits in WAITING_USER without model calls. The runtime applies the answer itself; its options have fixed ids: `retry_now` (a new round of the ladder at once), `other_approach` (the owner's own words, or a free-text answer, reach the next plan as the owner's direction, and a new round starts), `accept_unverified` (the failure becomes a disclosed `unverified` limit, `LOOP_BROKEN` action `accept_unverified`, that the final result lists under Not verified and is never a pass; an Automatic repair plan may then leave the accepted failed command out) and `retry_later` (the runtime continues by itself after 30 minutes, without model calls in between). The same failure asks again only after the chosen answer was tried and every rung was used again; that question names its attempt number, so the owner never gets the identical question twice. The question is not a coordinator question, so the coordinator's repeated-question refusal does not apply to it.
 
 
@@ -335,7 +438,7 @@ What remains: a route, connection, quota or authentication problem waits as `ext
 
 An effect whose outcome is unknown is never replayed blindly. When the continuation resumes and every owned session is confirmed gone, each write, edit, call or other synchronous effect without a complete receipt is settled with outcome `unknown` (`settled_by: runtime_reverify`) and listed in `RUNTIME_UNCERTAINTY_RECORDED` and in the coordinator's prompt, which re-verifies it from the files, Git state and receipts before redoing it. A command receipt that may still run is waited for until the host settles it (`native_command_outcome_pending`).
 
-A review whose only gaps are items its tools cannot reach (`tool_unavailable`), with nothing to repair, records them as disclosed unverified limits (`REVIEW_LIMIT_DISCLOSED`, `unverified` runtime checks on the review result that the final result must disclose) and the task continues to verification; the review is not waived. A failed final check returns to planning for three direct repairs per rung of the ladder, then continues on the next rung; a failed required check is never dropped from a repair plan. A verification outcome caused by the verifier's environment is not a failed check: the runtime reruns it and otherwise waits (see **Verifier environment** below). A limit the runtime disclosed when it broke a loop (`LOOP_BROKEN.limits`, since the last reopen) is a gap of the final result, which must list it under Not verified even after a replan. From the fourth replan since the owner's last input, a replan or scope request is accepted as a senior consultation (`decision: senior_consultation`, `strategy: consult`) instead of being refused. Continuations never waive review or verification and grant no permission.
+An INCOMPLETE review never leads to verification by itself. Its findings, cross-cutting ones included, are fixed first. Parts only its tools could not reach (`tool_unavailable`), with nothing to repair, get one follow-up review narrowed to them (`REVIEW_RERUN`, routed to another model than the earlier reviewers, its objective listing the parts and asking for another approach); when that follow-up meets the same dead end the parts are routed as owner decisions and the coordinator asks the owner whether to close them as is. Only the owner's decision (an answered owner decision about the same parts, or `accept_unverified` on the runtime's loop question) turns them into disclosed unverified limits (`REVIEW_LIMIT_DISCLOSED`, `owner_authorized: true`) that the final result must disclose; only such a review binds verification and completion like an approval. A failed final check returns to planning for three direct repairs per rung of the ladder, then continues on the next rung; a failed required check is never dropped from a repair plan. A verification outcome caused by the verifier's environment is not a failed check: the runtime reruns it and otherwise waits (see **Verifier environment** below). A limit the runtime disclosed when it broke a loop (`LOOP_BROKEN.limits`, since the last reopen) is a gap of the final result, which must list it under Not verified even after a replan. From the fourth replan since the owner's last input, a replan or scope request is accepted as a senior consultation (`decision: senior_consultation`, `strategy: consult`) instead of being refused. Continuations never waive review or verification and grant no permission.
 
 A task that an Automatic sprint started is bound at start to `AUTOMATIC_POLICY_BOUND`, a trusted host option that commands, plans and model tools cannot set. It adds the Automatic finish rules (attributable file-tool writes, failed checks kept in repair plans); the continuation itself follows the no-stop policy above for every task. See [sprint run modes](../../cortex-workspace/local-task-execution.md#sprint-run-modes).
 
@@ -343,8 +446,10 @@ The service records `planningSprintId` with the planning draft, so native task r
 
 A sprint's planning task is bound at Start to the runtime's sprint planning policy (`SPRINT_PLANNING_BOUND`), a trusted host option that commands, plans and model tools cannot set. The runtime refuses a plan with a writing role (`read_only_task_writer_refused`) and every project write of the task; its study plan may name no verification commands. Its coordinator submits the sprint plan with `sprint_plan_submit` at a coordinator turn (PLANNING or RECONCILING, no worker running). A large plan arrives in ordered parts (`SPRINT_PLAN_PART`; a first part discards an unfinished draft; the planning request directs the coordinator to submit large plans this way and refers to the tool's advertised limits); the final part validates the whole assembled plan (`SPRINT_PLAN_SUBMITTED`). The runtime refuses an unchanged plan, and schedules a mandatory independent plan review (`SPRINT_PLAN_REVIEW_SCHEDULED`) within the usual review-cycle budget, moving the task to REVIEWING. Findings record `SPRINT_PLAN_CHANGES_REQUESTED` and return the task to its coordinator under the bounded coordinator returns; repeated findings, the round limit or exhausted returns continue it on the strategy ladder. The continuation after a round-limit stop (`AUTOMATIC_CONTINUATION` with reason `review_cycle_limit`, once resumed), or an owner answer to an earlier version's round-limit stop, gives the next submitted plan a fresh review budget. After approval the runtime verification passes only for the newest, approved plan (`VERIFICATION_PASSED` with `runtime: sprint_plan`); otherwise it records `SPRINT_PLAN_PENDING` and completion stays refused. The task then completes through the ordinary gate. A planning task that ends terminally is classified from recorded runtime evidence as owner stop, an evidenced limit or an unknown cause. The first Retry after a limit starts a replacement task that plans in small parts from the outset; if the replacement meets the same limit, the service recommends Change request and refuses another plain Retry. Unfinished parts are not carried into a replacement task. See [sprint planning limits](../../cortex-workspace/local-task-execution.md#sprint-planning-limits).
 
+A sprint member's completion also waits for its sprint impact verdict. At each coordinator turn the service records the sprint's unstarted drafts (`SPRINT_MEMBER_BOUND`); an owner message delivered to the coordinator (`STEERING_DELIVERED`), an owner rework (`TASK_REOPENED` with origin `owner_rework`) or an owner answer (`USER_ANSWER_RECEIVED`, `WORKER_USER_ANSWER_RECEIVED`) while one of them is left records `SPRINT_IMPACT_CHECK_REQUIRED`. Completion is refused with `sprint_impact_pending` (named once as `SPRINT_IMPACT_PENDING`) and the coordinator's next turn records the verdict with `sprint_revision_submit` (`SPRINT_IMPACT_VERDICT`). Verdict `unchanged` resolves the check (`SPRINT_IMPACT_RESOLVED`); a revision is recorded (`SPRINT_REVISION_SUBMITTED`), reviewed by a fresh independent reviewer (`SPRINT_REVISION_REVIEW_SCHEDULED`, REVIEWING, then back to the PLANNING or RECONCILING state it came from with `SPRINT_REVISION_APPROVED` or `SPRINT_REVISION_CHANGES_REQUESTED`), and resolves the check once applied (`SPRINT_REVISION_APPLIED`) or handed to the owner (`SPRINT_REVISION_AWAITING_OWNER`). A refused apply (`SPRINT_REVISION_APPLY_REFUSED`) leaves the check open. The revision review is excluded from the task's own review binding, its review-not-required waiver and its change-review history. See [re-checking the sprint after an owner change](../../cortex-workspace/local-task-execution.md#re-checking-the-sprint-after-an-owner-change).
+
 Only an immutable, attempt-owned report and its structured result close a node.
-A reviewer, required whenever the project changed, submits APPROVE, REQUEST_CHANGES, BLOCK or INCOMPLETE. Every worker, a reviewer included, finishes its own assignment: `result_submit` refuses, correctably and before anything is published, a result that leaves something the worker can still do (an uncovered part without a dead-end blocker, an unread changed file the review packet marks required, that is a change of this task ([review of the task's own changes](../orchestration/index.md#review-of-the-tasks-own-changes)), or a required predecessor report of the review's round, a BLOCK without findings, a failure without its blocker), names each outstanding item in `missing`, and the same session continues on the same channel. A turn that ends without a result is asked once more in the same session to finish. A reviewer submits INCOMPLETE only for parts blocked by a named dead end (`missing_access`, `owner_decision`, `other_role_work` or `tool_unavailable`); no second reviewer is scheduled for the same revision. Items only its tools cannot reach become disclosed unverified limits and the task continues to verification; any other dead end is a continuation on the strategy ladder ([no-stop policy](#no-stop-policy-and-the-strategy-ladder), [review outcomes](../orchestration/index.md)). A fix and review round continues only on progress: unchanged task files or the same findings again end the round once (`review_no_progress`) as a continuation that changes approach. The runtime asks no stop question of its own; an earlier version's stored stop question still answers and relaunches the coordinator. Changes produce
+A reviewer, required whenever the project changed, submits APPROVE, REQUEST_CHANGES, BLOCK or INCOMPLETE. Every worker, a reviewer included, finishes its own assignment: `result_submit` refuses, correctably and before anything is published, a result that leaves something the worker can still do (an uncovered part without a dead-end blocker, an unread changed file the review packet marks required, that is a change of this task ([review of the task's own changes](../orchestration/index.md#review-of-the-tasks-own-changes)), or a required predecessor report of the review's round, a BLOCK without findings, a failure without its blocker), names each outstanding item in `missing`, and the same session continues on the same channel. A turn that ends without a result is asked once more in the same session to finish. A reviewer submits INCOMPLETE only for parts blocked by a named dead end (`missing_access`, `owner_decision`, `other_role_work` or `tool_unavailable`). Items only its tools cannot reach get one narrowed follow-up review; INCOMPLETE never continues to verification without the owner's close-as-is decision; any other dead end is a continuation on the strategy ladder ([no-stop policy](#no-stop-policy-and-the-strategy-ladder), [review outcomes](../orchestration/index.md)). A fix and review round continues only on progress: unchanged task files or the same findings again end the round once (`review_no_progress`) as a continuation that changes approach. The runtime asks no stop question of its own; an earlier version's stored stop question still answers and relaunches the coordinator. Changes produce
 fix nodes and another review, with a three-cycle ceiling. A fix node never keeps a read-only role: the runtime gives it a writing role chosen from its scope. Structured review findings confine fixes to the
 named plan tasks when the runtime can verify them. With no findings and multiple
 implementers, the runtime first returns to the coordinator to plan the remedy
@@ -491,10 +596,12 @@ earlier failed check, an owner-accepted gap) is never read as a policy restricti
 from the words of its explanation; it is a manual note that an Automatic sprint
 accepts with the result, never as passed (owner store 2026-11-22: "after repeated
 coverage refusals" matched a policy word and held the sprint for the owner). An
-INCOMPLETE review whose unreachable parts the runtime disclosed as limits
+INCOMPLETE review whose unreachable parts were disclosed as limits
 (`review_limit_disclosed`) counts as the approving review for acceptance, as it did
 for the runtime's own verification; its limits stay notes. Without that disclosure an
-INCOMPLETE review is not approved.
+INCOMPLETE review is not approved. The runtime discloses such parts only on the
+owner's decision (`review_limit_owner_authorized`); completion refuses an INCOMPLETE
+review disclosed without it.
 
 For coordinator-submitted synthesis and direct answers, structured `not_verified`
 is the sole source of the runtime's disclosure section. Items with the same blocker

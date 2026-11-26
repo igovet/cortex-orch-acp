@@ -152,8 +152,10 @@ fn task_effort_inherits_settings_and_ignores_legacy_sentinels() {
     let route = &mut snapshot["entries"][0]["route"];
     route.as_object_mut().unwrap().remove("id");
     route["supported_parameters"] = json!([
-        ["thought_level", "default"], ["thought_level", "high"],
-        ["thought_level", "low"], ["thought_level", "medium"]
+        ["thought_level", "default"],
+        ["thought_level", "high"],
+        ["thought_level", "low"],
+        ["thought_level", "medium"]
     ]);
     route["id"] = json!(format!(
         "xr_{}",
@@ -217,14 +219,18 @@ fn per_task_model_and_effort_require_existing_exact_eligible_catalog_values() {
     std::fs::rename(
         f.base.join("state/cortex/catalog/cn_fixture"),
         f.base.join(format!("state/cortex/catalog/{id}")),
-    ).unwrap();
+    )
+    .unwrap();
     let mut record = f.record();
     record["id"] = json!(id);
     record["name"] = json!("Fixture");
     record["key_kind"] = Value::Null;
     record["created_at"] = json!("2026-11-12T00:00:00Z");
     record["updated_at"] = record["created_at"].clone();
-    f.write("config/cortex/connections.json", &json!({"schema_version":1, "connections":{id:record}}));
+    f.write(
+        "config/cortex/connections.json",
+        &json!({"schema_version":1, "connections":{id:record}}),
+    );
     let first = &mut snapshot["entries"][0];
     first["connection_id"] = json!(id);
     first["route"]["connection_id"] = json!(id);
@@ -241,7 +247,10 @@ fn per_task_model_and_effort_require_existing_exact_eligible_catalog_values() {
         &digest(&serde_json::to_vec(&other["route"]).unwrap())[..24]
     ));
     snapshot["entries"].as_array_mut().unwrap().push(other);
-    f.write(&format!("state/cortex/catalog/{id}/cs_fixture.json"), &snapshot);
+    f.write(
+        &format!("state/cortex/catalog/{id}/cs_fixture.json"),
+        &snapshot,
+    );
     let provider = ConfiguredRoutes {
         environment: f.environment(),
         relay: PathBuf::from("/bin/true"),
@@ -900,14 +909,13 @@ fn preset_routes_only_the_current_sonnet_and_associates_its_quota() {
     let models = routing["models"].as_object().unwrap();
     assert_eq!(
         routing["enabled"][claude],
+        json!(["opus", "haiku", "sonnet"])
+    );
+    assert_eq!(
+        models[claude]["auto"],
         json!(["opus", "fable", "haiku", "sonnet"])
     );
-    assert_eq!(models[claude]["auto"], routing["enabled"][claude]);
     assert!(!routing.to_string().contains("claude-sonnet-5"));
-    assert_eq!(
-        models[claude]["tiers"]["sonnet"],
-        json!(["standard", "light"])
-    );
     assert_eq!(
         routing["quota_windows"][claude][1],
         json!({"window":"seven_day_sonnet","models":["sonnet"]})
@@ -919,15 +927,48 @@ fn preset_routes_only_the_current_sonnet_and_associates_its_quota() {
         );
         assert!(models[engine]["policy"][model]["also_standard_for"].is_null());
     }
-    for (engine, model) in [(claude, "opus"), ("codex-acp", "gpt-6.2-astra")] {
-        let policy = &models[engine]["policy"][model];
-        assert!(policy["preferred_for"]
+    // The owner's worker tiers and per-tier worker effort ranges.
+    for (engine, model, tiers, efforts) in [
+        (claude, "opus", json!(["flagship", "deep"]), Value::Null),
+        (
+            claude,
+            "sonnet",
+            json!(["deep", "standard", "light"]),
+            json!({"deep":{"min":"high","max":"xhigh"},"standard":{"min":"medium","max":"xhigh"},
+                "light":{"min":"medium","max":"high"}}),
+        ),
+        ("codex-acp", "gpt-6.2-astra", json!(["flagship", "deep"]), Value::Null),
+        (
+            "codex-acp",
+            "gpt-6.2-sol",
+            json!(["deep", "standard"]),
+            json!({"deep":{"min":"high","max":"xhigh"},"standard":{"min":"medium","max":"xhigh"}}),
+        ),
+    ] {
+        assert_eq!(models[engine]["tiers"][model], tiers, "{model}");
+        assert_eq!(
+            models[engine]["policy"][model]["tier_efforts"], efforts,
+            "{model}"
+        );
+        assert!(models[engine]["policy"][model]["preferred_for"]
             .as_array()
             .unwrap()
             .contains(&json!("review")));
-        assert!(policy["preferred_when"].is_string());
     }
-
+    // The owner's coordinator models, apart from the worker tiers.
+    let tiers = json!({"flagship":{"min":"high","max":"xhigh"},"deep":{"min":"medium","max":"high"},
+        "standard":{"min":"medium","max":"medium"},"light":{"min":"low","max":"low"}});
+    assert_eq!(
+        routing["coordinator_models"],
+        json!([
+            {"engine":claude,"model":"opus","tiers":tiers},
+            {"engine":"codex-acp","model":"gpt-6.2-astra","tiers":tiers},
+        ])
+    );
+    assert_eq!(
+        preset["coordinator"],
+        json!({"engine":claude,"model":"opus","parameters":{"thought_level":"medium"}})
+    );
     let mut frontend_design = Vec::new();
     for (engine, rules) in models {
         for (model, policy) in rules["policy"].as_object().unwrap() {
@@ -942,7 +983,12 @@ fn preset_routes_only_the_current_sonnet_and_associates_its_quota() {
     }
     assert_eq!(
         frontend_design,
-        [(claude, "opus"), ("codex-acp", "gpt-6.2-astra")]
+        [
+            (claude, "opus"),
+            (claude, "sonnet"),
+            ("codex-acp", "gpt-6.2-astra"),
+            ("codex-acp", "gpt-6.2-sol")
+        ]
     );
 }
 
@@ -1032,18 +1078,19 @@ fn preset_routing_preferences_and_role_tiers_follow_complexity() {
             assert_eq!(decision["role_tier"], tier);
             assert_eq!(decision["tier"], tier);
             assert_eq!(decision["purpose"]["status"], "honoured");
+            // Sonnet serves every tier below flagship, Sol deep and standard;
+            // Terra (no writing) only standard and light testing.
             let expected = match (tier, role) {
                 ("light", "worker-technical-writer") => vec!["claude-agent-acp/sonnet"],
                 ("light", _) => vec!["claude-agent-acp/sonnet", "codex-acp/gpt-6.1-terra"],
-                ("standard", "worker-technical-writer") => {
+                ("deep", _) | (_, "worker-technical-writer") => {
                     vec!["claude-agent-acp/sonnet", "codex-acp/gpt-6.2-sol"]
                 }
-                ("standard", _) => vec![
+                _ => vec![
                     "claude-agent-acp/sonnet",
                     "codex-acp/gpt-6.1-terra",
                     "codex-acp/gpt-6.2-sol",
                 ],
-                _ => vec!["codex-acp/gpt-6.2-sol"],
             };
             let preferred = decision["purpose"]["preferred"].as_array().unwrap();
             assert_eq!(
@@ -1062,8 +1109,18 @@ fn preset_routing_preferences_and_role_tiers_follow_complexity() {
             assert!(candidates
                 .iter()
                 .all(|c| c["route"] != "claude-agent-acp/claude-sonnet-5"));
-            let effort = if tier == "deep" { "high" } else { "medium" };
-            assert_eq!(selected.parameters["thought_level"], effort);
+            // The owner worker ranges move the tier target into each tier's range
+            // (deep high..xhigh, standard medium..xhigh, Sonnet light medium..high);
+            // Terra keeps its legacy floor medium.
+            let effort = match (selected.model(), tier) {
+                ("gpt-6.1-terra", _) => "medium",
+                (_, "deep") => "high",
+                _ => "medium",
+            };
+            assert_eq!(
+                selected.parameters["thought_level"], effort,
+                "{role}/{tier}"
+            );
         }
     }
 }
@@ -2466,4 +2523,521 @@ fn no_work_kind_list_keeps_automatic_tier_selection_and_is_audited() {
         selected.decision["work_kind_policy"]["owner_list_exists"],
         false
     );
+}
+
+/// The owner's coordinator profile: Sonnet-like and Sol-like models with deep,
+/// standard and light ranges, two flagship models with a low..high range, a
+/// deep-only model, a legacy floor/max model and a model outside every tier.
+fn profile_fixture() -> (Fixture, Value) {
+    let f = Fixture::new();
+    let mut registry = json!({"schema_version":1,"connections":{}});
+    let mut rules = json!({"enabled":{},"models":{}});
+    let three = json!(["deep", "standard", "light"]);
+    f.routing_catalog(
+        &mut registry,
+        &mut rules,
+        [
+            (
+                "claude-agent-acp",
+                "cn_claude",
+                vec![
+                    ("opus", json!("flagship")),
+                    ("sonnet", three.clone()),
+                    ("deepish", json!("deep")),
+                    ("untiered", Value::Null),
+                ],
+            ),
+            (
+                "codex-acp",
+                "cn_fixture",
+                vec![
+                    ("astra", json!("flagship")),
+                    ("sol", three),
+                    ("legacy", json!("standard")),
+                ],
+            ),
+        ],
+    );
+    rules["model_policy_version"] = json!(2);
+    let claude = &mut rules["models"]["claude-agent-acp"];
+    claude["tiers"].as_object_mut().unwrap().remove("untiered");
+    claude["auto"] = json!(["opus", "sonnet", "deepish"]);
+    let ranges = json!({"deep":{"min":"xhigh","max":"xhigh"},
+        "standard":{"min":"high","max":"xhigh"},"light":{"min":"medium","max":"xhigh"}});
+    let frontier = json!({"flagship":{"min":"low","max":"high"}});
+    claude["policy"]["opus"]["tier_efforts"] = frontier.clone();
+    claude["policy"]["sonnet"]["tier_efforts"] = ranges.clone();
+    claude["policy"]["deepish"]["tier_efforts"] = json!({"deep":{"min":"xhigh","max":"xhigh"}});
+    let codex = &mut rules["models"]["codex-acp"];
+    codex["policy"]["astra"]["tier_efforts"] = frontier;
+    codex["policy"]["sol"]["tier_efforts"] = ranges;
+    codex["policy"]["legacy"]["effort_floor"] = json!("medium");
+    codex["policy"]["legacy"]["max_effort"] = json!("high");
+    f.write("config/cortex/routing.json", &rules);
+    (f, rules)
+}
+fn route_of(f: &Fixture, connection: &str, model: &str) -> String {
+    let snapshot: Value = serde_json::from_slice(
+        &std::fs::read(
+            f.base
+                .join(format!("state/cortex/catalog/{connection}/cs_fixture.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    snapshot["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["route"]["model"] == model)
+        .unwrap()["route"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+fn tier_efforts(menu: &Value, tier: &str, route: &str) -> Value {
+    menu["tiers"][tier]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["route"] == route)
+        .unwrap_or_else(|| panic!("{route} is not in {tier}"))["efforts"]
+        .clone()
+}
+
+#[test]
+fn tier_effort_ranges_bound_each_tier_and_legacy_floor_and_max_are_unchanged() {
+    let (f, _) = profile_fixture();
+    let menu = f.load().unwrap().menu(&Default::default()).unwrap();
+    let sonnet = "claude-agent-acp/sonnet";
+    assert_eq!(tier_efforts(&menu, "deep", sonnet), json!(["xhigh"]));
+    assert_eq!(
+        tier_efforts(&menu, "standard", sonnet),
+        json!(["high", "xhigh"])
+    );
+    assert_eq!(
+        tier_efforts(&menu, "light", sonnet),
+        json!(["medium", "high", "xhigh"])
+    );
+    assert_eq!(
+        tier_efforts(&menu, "flagship", "claude-agent-acp/opus"),
+        json!(["low", "medium", "high"])
+    );
+    // Without a range the floor and maximum still decide, as before.
+    assert_eq!(
+        tier_efforts(&menu, "standard", "codex-acp/legacy"),
+        json!(["medium", "high"])
+    );
+    // A worker on the standard tier gets the tier target clamped into the range.
+    let selected = f
+        .load()
+        .unwrap()
+        .choose(
+            "worker-general",
+            &json!({"model":sonnet}),
+            &Default::default(),
+            false,
+            None,
+        )
+        .unwrap();
+    assert_eq!(selected.model(), "sonnet");
+    assert_eq!(selected.parameters["thought_level"], "high");
+}
+
+#[test]
+fn tier_effort_ranges_refuse_unsupported_inverted_or_unplaced_ranges() {
+    let f = Fixture::new();
+    // The default fixture route offers only `high`.
+    let mut rules = f.rules();
+    rules["models"]["codex-acp"]["policy"] =
+        json!({"fixture-model":{"tier_efforts":{"light":{"min":"low","max":"high"}}}});
+    f.write("config/cortex/routing.json", &rules);
+    assert_eq!(
+        code(f.load().unwrap().menu(&Default::default())),
+        "model_effort_policy_unsupported"
+    );
+    for bad in [
+        json!({"light":{"min":"high","max":"low"}}),
+        json!({"deep":{"min":"low","max":"high"}}),
+        json!({"light":{"min":"low"}}),
+        json!({"light":{"min":"low","max":"ultra"}}),
+        json!({}),
+    ] {
+        rules["models"]["codex-acp"]["policy"]["fixture-model"]["tier_efforts"] = bad.clone();
+        f.write("config/cortex/routing.json", &rules);
+        assert_eq!(code(f.load()), "invalid_routing_overrides", "{bad}");
+    }
+}
+
+#[test]
+fn coordinator_is_limited_to_profile_models_and_their_range_union() {
+    use workspace_service::{native_routes::ConfiguredRoutes, native_runtime::NativeRoutes};
+    let (f, _) = profile_fixture();
+    let provider = ConfiguredRoutes {
+        environment: f.environment(),
+        relay: PathBuf::from("/bin/true"),
+    };
+    let root = f.base.join("project");
+    let defaults = |model: &str, effort: &str| {
+        f.write(
+            "config/cortex/defaults.json",
+            &json!({"defaults":{"coordinator":{"engine":"claude-agent-acp","model":model,
+                "parameters":{"thought_level":effort}}}}),
+        )
+    };
+    // A model outside every tier cannot coordinate, as default or as a task choice.
+    defaults("untiered", "medium");
+    assert_eq!(
+        code(f.load().unwrap().coordinator()),
+        "portable_coordinator_unavailable"
+    );
+    defaults("sonnet", "medium");
+    let untiered = route_of(&f, "cn_claude", "untiered");
+    assert_eq!(
+        code(provider.task_route(&root, &json!({"model":untiered}))),
+        "native_task_route_unavailable"
+    );
+    // Sonnet's ranges cover medium (light), so the Settings default stays.
+    let selected = f.load().unwrap().coordinator().unwrap();
+    assert_eq!(selected.parameters["thought_level"], "medium");
+    // An effort outside the union moves to the nearest allowed level.
+    let sonnet = route_of(&f, "cn_claude", "sonnet");
+    let chosen = provider
+        .task_route(&root, &json!({"model":sonnet,"effort":"low"}))
+        .unwrap();
+    assert_eq!(chosen.parameters["thought_level"], "medium");
+    // A deep-only model with an xhigh range clamps the medium default to xhigh.
+    defaults("deepish", "medium");
+    let selected = f.load().unwrap().coordinator().unwrap();
+    assert_eq!(selected.parameters["thought_level"], "xhigh");
+    let pin = provider
+        .coordinator_pin(&root, &json!({}))
+        .unwrap()
+        .unwrap();
+    let pinned = provider.pinned_route(&root, &pin, Some("low")).unwrap();
+    assert_eq!(pinned.parameters["thought_level"], "xhigh");
+    let options = provider.options(&root, &json!({}));
+    let thought = options
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "thought_level")
+        .unwrap();
+    assert_eq!(
+        thought["options"],
+        json!([{"value":"xhigh","name":"xhigh"}])
+    );
+    let models: Vec<_> = options
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "model")
+        .unwrap()["options"]
+        .to_string()
+        .matches("untiered")
+        .map(str::to_owned)
+        .collect();
+    assert!(models.is_empty(), "an untiered model is never offered");
+    // The alternate coordinator stays inside the profile too.
+    let alternate = provider
+        .alternate_coordinator_pin(&root, &provider.task_route(&root, &json!({})).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_ne!(alternate["route_id"], json!(untiered));
+}
+
+#[test]
+fn sprint_routes_follow_complexity_tiers_ranges_and_provider_limits() {
+    let (f, _) = profile_fixture();
+    let route = |complexity: &str| f.load().unwrap().sprint_route(complexity).unwrap().unwrap();
+    let high = route("high");
+    assert_eq!(
+        (
+            high["engine"].as_str(),
+            high["model"].as_str(),
+            high["tier"].as_str()
+        ),
+        (Some("claude-agent-acp"), Some("opus"), Some("flagship"))
+    );
+    assert_eq!(high["effort"], "high");
+    assert_eq!(high["routeId"], json!(route_of(&f, "cn_claude", "opus")));
+    let normal = route("normal");
+    assert_eq!(
+        (normal["model"].as_str(), normal["tier"].as_str()),
+        (Some("sonnet"), Some("standard"))
+    );
+    assert_eq!(normal["effort"], "high");
+    let low = route("low");
+    assert_eq!(
+        (low["model"].as_str(), low["tier"].as_str()),
+        (Some("sonnet"), Some("light"))
+    );
+    assert_eq!(low["effort"], "medium");
+    // An exhausted provider is skipped: the other engine's model of the tier wins.
+    f.used("cn_claude", 100.0);
+    let high = route("high");
+    assert_eq!(high["model"], "astra");
+    assert_eq!(high["effort"], "high");
+    assert_eq!(route("normal")["model"], "sol");
+    // A hot provider goes after a cool one.
+    f.used("cn_claude", 96.0);
+    f.used("cn_fixture", 20.0);
+    assert_eq!(route("high")["model"], "astra");
+    assert_eq!(route("high")["usedPercent"], 20.0);
+    // With no usable flagship model, high work falls back to deep.
+    f.used("cn_claude", 100.0);
+    f.used("cn_fixture", 100.0);
+    assert!(f.load().unwrap().sprint_route("high").unwrap().is_none());
+    f.used("cn_fixture", 10.0);
+    let mut rules: Value =
+        serde_json::from_slice(&std::fs::read(f.base.join("config/cortex/routing.json")).unwrap())
+            .unwrap();
+    rules["deny"] = json!(["codex-acp/astra"]);
+    f.write("config/cortex/routing.json", &rules);
+    let high = route("high");
+    assert_eq!(
+        (high["model"].as_str(), high["tier"].as_str()),
+        (Some("sol"), Some("deep"))
+    );
+    assert_eq!(high["effort"], "xhigh");
+}
+
+/// The owner's explicit coordinator list, apart from the worker tiers: Sonnet
+/// keeps its worker tiers but is not listed; the untiered model and the
+/// legacy one coordinate only at their listed categories and ranges.
+fn coordinator_list_fixture() -> Fixture {
+    let (f, mut rules) = profile_fixture();
+    rules["coordinator_models"] = json!([
+        {"engine":"claude-agent-acp","model":"untiered","tiers":{"standard":{"min":"low","max":"medium"}}},
+        {"engine":"codex-acp","model":"legacy","tiers":{"flagship":{"min":"high","max":"xhigh"},
+            "standard":{"min":"high","max":"high"}}},
+        {"engine":"claude-agent-acp","model":"opus","tiers":{"light":{"min":"medium","max":"high"}}},
+    ]);
+    f.write("config/cortex/routing.json", &rules);
+    f
+}
+
+#[test]
+fn coordinator_models_list_replaces_worker_tiers_for_every_coordinator_choice() {
+    use workspace_service::{native_routes::ConfiguredRoutes, native_runtime::NativeRoutes};
+    let f = coordinator_list_fixture();
+    let provider = ConfiguredRoutes {
+        environment: f.environment(),
+        relay: PathBuf::from("/bin/true"),
+    };
+    let root = f.base.join("project");
+    let defaults = |model: &str, effort: &str| {
+        f.write(
+            "config/cortex/defaults.json",
+            &json!({"defaults":{"coordinator":{"engine":"claude-agent-acp","model":model,
+                "parameters":{"thought_level":effort}}}}),
+        )
+    };
+    // Sonnet has worker tiers but is not listed: it cannot coordinate.
+    defaults("sonnet", "high");
+    assert_eq!(
+        code(f.load().unwrap().coordinator()),
+        "portable_coordinator_unavailable"
+    );
+    // A listed model without any worker tier coordinates, its effort moved
+    // into the union of its listed ranges.
+    defaults("untiered", "high");
+    let selected = f.load().unwrap().coordinator().unwrap();
+    assert_eq!(selected.model(), "untiered");
+    assert_eq!(selected.parameters["thought_level"], "medium");
+    let sonnet = route_of(&f, "cn_claude", "sonnet");
+    assert_eq!(
+        code(provider.task_route(&root, &json!({"model":sonnet}))),
+        "native_task_route_unavailable"
+    );
+    let legacy = route_of(&f, "cn_fixture", "legacy");
+    let chosen = provider
+        .task_route(&root, &json!({"model":legacy,"effort":"low"}))
+        .unwrap();
+    assert_eq!(chosen.parameters["thought_level"], "high");
+    let chosen = provider
+        .task_route(&root, &json!({"model":legacy,"effort":"max"}))
+        .unwrap();
+    assert_eq!(chosen.parameters["thought_level"], "xhigh");
+    // The ACP picker lists only the listed models, with the listed efforts.
+    let options = provider.options(&root, &json!({}));
+    let option = |id: &str| {
+        options
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == id)
+            .unwrap()["options"]
+            .clone()
+    };
+    // (The picker lists the models of the current coordinator's connection.)
+    let names: Vec<_> = option("model")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["value"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(names, ["opus", "untiered"]);
+    assert_eq!(
+        option("thought_level"),
+        json!([{"value":"low","name":"low"},{"value":"medium","name":"medium"}])
+    );
+    // Worker routing keeps its own tiers and ranges.
+    let menu = f.load().unwrap().menu(&Default::default()).unwrap();
+    assert_eq!(
+        tier_efforts(&menu, "standard", "claude-agent-acp/sonnet"),
+        json!(["high", "xhigh"])
+    );
+}
+
+#[test]
+fn sprint_routes_come_from_the_coordinator_list_ranked_by_provider_limits() {
+    let f = coordinator_list_fixture();
+    let route = |complexity: &str| f.load().unwrap().sprint_route(complexity).unwrap();
+    // Normal work: Standard. Both listed Standard models are unused; the
+    // first configured one wins, at the Standard target inside its range.
+    let normal = route("normal").unwrap();
+    assert_eq!(
+        (normal["model"].as_str(), normal["tier"].as_str()),
+        (Some("untiered"), Some("standard"))
+    );
+    assert_eq!(normal["effort"], "medium");
+    // A used-up provider is skipped: the other Standard model takes it.
+    f.used("cn_claude", 100.0);
+    let normal = route("normal").unwrap();
+    assert_eq!(
+        (normal["model"].as_str(), normal["effort"].as_str()),
+        (Some("legacy"), Some("high"))
+    );
+    // A hot provider goes after a cool one.
+    f.used("cn_claude", 96.0);
+    f.used("cn_fixture", 30.0);
+    assert_eq!(route("normal").unwrap()["model"], "legacy");
+    f.used("cn_claude", 10.0);
+    assert_eq!(route("normal").unwrap()["model"], "untiered");
+    // High work: Frontier from the list (worker flagship models are not listed).
+    let high = route("high").unwrap();
+    assert_eq!(
+        (
+            high["model"].as_str(),
+            high["tier"].as_str(),
+            high["effort"].as_str()
+        ),
+        (Some("legacy"), Some("flagship"), Some("high"))
+    );
+    // Low work: Light from the list, inside its range.
+    let low = route("low").unwrap();
+    assert_eq!(
+        (
+            low["model"].as_str(),
+            low["tier"].as_str(),
+            low["effort"].as_str()
+        ),
+        (Some("opus"), Some("light"), Some("medium"))
+    );
+    // No listed model of the tiers tried: no sprint route.
+    f.used("cn_fixture", 100.0);
+    assert!(route("high").is_none());
+}
+
+#[test]
+fn coordinator_models_refuse_invalid_lists_and_unsupported_ranges() {
+    let (f, rules) = profile_fixture();
+    let entry = |tiers: Value| json!({"engine":"codex-acp","model":"sol","tiers":tiers});
+    let range = json!({"standard":{"min":"low","max":"high"}});
+    for bad in [
+        json!([]),
+        json!({}),
+        json!([entry(json!({}))]),
+        json!([entry(json!({"standard":{"min":"high","max":"low"}}))]),
+        json!([entry(json!({"frontier":{"min":"low","max":"high"}}))]),
+        json!([entry(json!({"standard":{"min":"low","max":"ultra"}}))]),
+        json!([entry(json!({"standard":{"min":"low"}}))]),
+        json!([entry(range.clone()), entry(range.clone())]),
+        json!([{"engine":"gemini","model":"sol","tiers":range}]),
+        json!([{"engine":"codex-acp","model":"has space","tiers":range}]),
+        json!([{"engine":"codex-acp","model":"sol","tiers":range,"extra":true}]),
+    ] {
+        let mut r = rules.clone();
+        r["coordinator_models"] = bad.clone();
+        f.write("config/cortex/routing.json", &r);
+        assert_eq!(code(f.load()), "invalid_routing_overrides", "{bad}");
+    }
+    // A range whose bound the route does not offer is refused, never
+    // substituted: the model cannot coordinate at it.
+    let f = Fixture::new();
+    let mut r = f.rules();
+    r["coordinator_models"] = json!([{"engine":"codex-acp","model":"fixture-model",
+        "tiers":{"standard":{"min":"low","max":"high"}}}]);
+    f.write("config/cortex/routing.json", &r);
+    assert_eq!(
+        code(f.load().unwrap().coordinator()),
+        "portable_coordinator_unavailable"
+    );
+    r["coordinator_models"][0]["tiers"]["standard"] = json!({"min":"high","max":"high"});
+    f.write("config/cortex/routing.json", &r);
+    assert_eq!(
+        f.load().unwrap().coordinator().unwrap().model(),
+        "fixture-model"
+    );
+}
+
+#[test]
+fn consultant_uses_consultation_list_and_falls_back_to_design() {
+    let f = Fixture::new();
+    let mut rules = f.parity();
+    for engine in ["codex-acp", "claude-agent-acp"] {
+        for p in rules["models"][engine]["policy"].as_object_mut().unwrap().values_mut() {
+            p["preferred_for"] = json!(["testing"]);
+        }
+    }
+    // Nothing lists `consultation`: the consultant keeps using the design list.
+    rules["models"]["codex-acp"]["policy"]["sol"]["preferred_for"] = json!(["design"]);
+    f.write("config/cortex/routing.json", &rules);
+    let fallback = f
+        .load()
+        .unwrap()
+        .choose("worker-senior-consultant", &json!({}), &Default::default(), false, None)
+        .unwrap();
+    assert_eq!(fallback.model(), "sol");
+    assert_eq!(fallback.decision["work_kind_policy"]["work_kind"], "design");
+
+    // Once a model lists `consultation`, only that model is eligible and design is ignored.
+    rules["models"]["claude-agent-acp"]["policy"]["sonnet"]["preferred_for"] =
+        json!(["consultation"]);
+    f.write("config/cortex/routing.json", &rules);
+    let listed = f
+        .load()
+        .unwrap()
+        .choose("worker-senior-consultant", &json!({}), &Default::default(), false, None)
+        .unwrap();
+    assert_eq!(listed.model(), "sonnet");
+    assert_eq!(listed.decision["work_kind_policy"]["work_kind"], "consultation");
+    assert_eq!(listed.decision["work_kind_policy"]["mode"], "listed_only");
+
+    // A consultation model placed only at the flagship tier still qualifies: the
+    // owner named it for the consultant, so its tier never excludes it.
+    rules["models"]["claude-agent-acp"]["policy"]["sonnet"]["preferred_for"] = json!(["testing"]);
+    let flagship = rules["models"]["codex-acp"]["tiers"]
+        .as_object()
+        .and_then(|t| t.keys().next().cloned())
+        .unwrap();
+    rules["models"]["codex-acp"]["tiers"][&flagship] = json!(["flagship"]);
+    rules["models"]["codex-acp"]["policy"][&flagship]["preferred_for"] = json!(["consultation"]);
+    f.write("config/cortex/routing.json", &rules);
+    let frontier = f
+        .load()
+        .unwrap()
+        .choose("worker-senior-consultant", &json!({}), &Default::default(), false, None)
+        .unwrap();
+    assert_eq!(frontier.model(), flagship);
+    assert_eq!(frontier.decision["work_kind_policy"]["work_kind"], "consultation");
+
+    // An architect keeps the design list.
+    let architect = f
+        .load()
+        .unwrap()
+        .choose("worker-architect", &json!({}), &Default::default(), false, None)
+        .unwrap();
+    assert_eq!(architect.decision["work_kind_policy"]["work_kind"], "design");
 }

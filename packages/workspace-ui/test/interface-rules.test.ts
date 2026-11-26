@@ -37,14 +37,71 @@ describe("interface rules", () => {
   it("keeps default hints and labels in English, with only the approved Russian overrides", () => {
     const copyPath = join(SRC, "copy.ts");
     const approved = new Set([
-      `${copyPath}: questionRecommended: "Рекомендуется",`,
+      `${copyPath}: questionRecommended: "Рекомендую",`,
+      `${copyPath}: reviewGoalNotMet: "Этап одобрен, цель не достигнута",`,
+      `${copyPath}: verificationWillNotRun: "Не будет запущена: нужны доработки",`,
       `${copyPath}: deleteWorktreeFolder: "Удалить worktree папку",`,
       `${copyPath}: closeDeleteWorktreeFolder: "Закрыть и удалить worktree папку",`,
+      `${copyPath}: sideChat: "Побочный чат",`,
+      `${copyPath}: sideChatNote: "Не влияет на задачу",`,
+      `${copyPath}: sprintRevisionFrom: "Изменения спринта от задачи {task}",`,
+      `${copyPath}: sprintRevisionChangedBy: "изменено задачей {task}",`,
+      `${copyPath}: sprintRevisionAddedBy: "добавлено задачей {task}",`,
+      `${copyPath}: sprintRevisionHistory: "История изменений спринта",`,
+      `${copyPath}: phoneNotify: "Уведомления на телефоне",`,
+      `${copyPath}: phoneNotifyNote: "Вопросы, результаты и сбои с ваших компьютеров. Пока они включены, тихое уведомление показывает, что п`,
+      `${copyPath}: phoneNotifyBlocked: "Android запрещает уведомления этого приложения. Разрешите их в настройках телефона, в разделе «Прил`,
+      `${copyPath}: phoneNotifyBattery: "Во сне телефон может приостанавливать связь. Чтобы она сохранялась, разрешите приложению работать б`,
+      `${copyPath}: phoneNotifyBatteryButton: "Настройки батареи",`,
+      `${copyPath}: phoneNotifyOngoingTitle: "На связи с компьютерами",`,
+      `${copyPath}: phoneNotifyOngoingText: "Следим за вопросами, результатами и сбоями на ваших компьютерах.",`,
+      `${copyPath}: phoneNotifyChannelOngoing: "Связь",`,
+      `${copyPath}: phoneNotifyChannelOngoingNote: "Тихое уведомление, пока приложение держит связь с вашими компьютерами.",`,
+      `${copyPath}: phoneNotifyChannelAnswer: "Нужен ваш ответ",`,
+      `${copyPath}: phoneNotifyChannelAnswerNote: "Задача задала вопрос, остановилась для вашего решения или ей нужен доступ.",`,
+      `${copyPath}: phoneNotifyChannelDone: "Задача завершена",`,
+      `${copyPath}: phoneNotifyChannelDoneNote: "Задача закончила работу, и её результат ждёт вашей проверки.",`,
+      `${copyPath}: phoneNotifyChannelFailure: "Сбой задачи",`,
+      `${copyPath}: phoneNotifyChannelFailureNote: "Сбой задачи, пауза спринта или задача без прогресса.",`,
+      `${copyPath}: phoneNotifyQuestion: "Нужен ваш ответ",`,
+      `${copyPath}: phoneNotifyStop: "Задача остановлена: нужно ваше решение",`,
+      `${copyPath}: phoneNotifyAccess: "Задаче нужен доступ",`,
+      `${copyPath}: phoneNotifyPlanning: "Вопрос по планированию спринта",`,
+      `${copyPath}: phoneNotifyResult: "Задача завершена",`,
+      `${copyPath}: phoneNotifyFailed: "Сбой задачи",`,
+      `${copyPath}: phoneNotifyPaused: "Спринт на паузе",`,
+      `${copyPath}: phoneNotifyStalled: "Нет прогресса",`,
+      `${copyPath}: coordinatorModels: "Модели координатора",`,
+      `${copyPath}: coordinatorModelsLead: "Модели, которые может использовать координатор: каждая в отмеченных категориях и с effort из их `,
+      `${copyPath}: coordinatorModelsListed: "Модели, доступные координатору",`,
+      `${copyPath}: coordinatorModelsAdd: "Добавить модель",`,
+      `${copyPath}: coordinatorModelsSprint: "Как планирование спринта выбирает модель",`,
+      `${copyPath}: coordinatorModelsNone: "Списка моделей координатора ещё нет",`,
+      `${copyPath}: coordinatorModelsLegacy: "В этом профиле нет списка моделей координатора, поэтому координатор может использовать любую м`,
+      `${copyPath}: coordinatorModelsStart: "Создать список",`,
+      `${copyPath}: mcpProjectLead: "Серверы проекта {project}. Серверы машины действуют и здесь: включите или выключите любой только для эт`,
+      `${copyPath}: mcpInherited: "С машины",`,
+      `${copyPath}: mcpInheritedNote: "Менять их можно в MCP-серверах машины. Переключатель здесь меняет только этот проект.",`,
+      `${copyPath}: mcpInheritedNone: "На машине нет MCP-серверов.",`,
+      `${copyPath}: mcpForProject: "В этом проекте",`,
+      `${copyPath}: mcpReplaced: "Заменён сервером этого проекта с тем же именем",`,
+      `${copyPath}: mcpMachineOn: "Включён, как на машине",`,
+      `${copyPath}: mcpMachineOff: "Выключен, как на машине",`,
+      `${copyPath}: mcpHereOn: "Включён только для этого проекта",`,
+      `${copyPath}: mcpHereOff: "Выключен только для этого проекта",`,
+      `${copyPath}: mcpEditOnMachine: "Изменить на машине",`,
+      `${copyPath}: mcpOwn: "Только в этом проекте",`,
+      `${copyPath}: mcpOwnNone: "У проекта нет своих серверов. Добавьте сервер, чтобы дать дополнительные инструменты только этому проекту."`,
+      `${copyPath}: mcpReplacesMachine: "Здесь заменяет сервер машины с тем же именем",`,
     ]);
     expect(hits(/[\u0400-\u04ff]/).filter(line => !approved.has(line))).toEqual([]);
     expect(JSON.stringify(HELP)).not.toMatch(/[\u0400-\u04ff]/);
     expect(workspaceCopy("questionRecommended", "en-US")).toBe("Recommended");
-    expect(workspaceCopy("questionRecommended", "ru-RU")).toBe("Рекомендуется");
+    expect(workspaceCopy("questionRecommended", "ru-RU")).toBe("Рекомендую");
+    expect(workspaceCopy("reviewGoalNotMet", "ru-RU")).toBe("Этап одобрен, цель не достигнута");
+    expect(workspaceCopy("verificationWillNotRun", "en-US")).toBe("Will not run: changes needed");
+    expect(workspaceCopy("coordinatorModels", "en-US")).toBe("Coordinator models");
+    expect(workspaceCopy("coordinatorModels", "ru-RU")).toBe("Модели координатора");
   });
   it("does not name the program inside the program", () => {
     expect(hits(/\bCortex\b/)).toEqual([]);

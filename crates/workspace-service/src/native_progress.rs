@@ -56,6 +56,7 @@ const READ: &[&str] = &[
     "NATIVE_OWNER_CONTROL",
     "NATIVE_RECOVERY_RESUMED",
     "NATIVE_TASK_CONTINUED",
+    "AUTOMATIC_RESUMED",
     "WORKER_FAILED",
     "WORKER_RESULT_REFUSED",
     "VERIFICATION_FAILED",
@@ -117,7 +118,10 @@ fn resumed(e: &Event) -> bool {
         | "USER_STEERING"
         | "NATIVE_OWNER_CONTROL"
         | "NATIVE_RECOVERY_RESUMED"
-        | "NATIVE_TASK_CONTINUED" => true,
+        | "NATIVE_TASK_CONTINUED"
+        // The runtime resumed its own pause (a route block the owner's settings
+        // cleared): what stopped it before is no longer what it is hitting.
+        | "AUTOMATIC_RESUMED" => true,
         _ => false,
     }
 }
@@ -987,6 +991,30 @@ mod tests {
             ]
         );
         assert_eq!(reasons(&events, Some(5)), vec!["verification failed"]);
+    }
+
+    /// 2026-11-25: after the owner added a review model and the runtime resumed its
+    /// pause, the task kept showing the cleared route block as its last failure.
+    #[test]
+    fn a_resumed_automatic_pause_clears_the_route_block_it_resumed_from() {
+        let events = vec![
+            ev("TASK_STATE_CHANGED", json!({"state":"PLANNING","previous":"NEW"}), 1),
+            ev(
+                "NATIVE_WORKER_ROUTE_BLOCKED",
+                json!({"reason":"no_model_listed_for_work_kind",
+                    "work_kind_block":{"work_kind":"review","target_tier":"light"}}),
+                2,
+            ),
+            ev("TASK_STATE_CHANGED", json!({"state":"RECOVERING","previous":"REVIEWING"}), 3),
+            ev("AUTOMATIC_RESUMED", json!({}), 4),
+            ev("TASK_STATE_CHANGED", json!({"state":"PLANNING","previous":"RECOVERING"}), 5),
+        ];
+        assert_eq!(stalled_since(&events), Some(4));
+        assert!(reasons(&events, stalled_since(&events)).is_empty());
+        assert_eq!(
+            reasons(&events[..3], stalled_since(&events[..3])),
+            ["no usable model listed for review work (target tier: light)"]
+        );
     }
 
     #[test]

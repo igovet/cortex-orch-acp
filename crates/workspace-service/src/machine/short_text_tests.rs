@@ -771,3 +771,100 @@ async fn a_title_job_without_an_answer_delays_no_read_and_no_save() {
     service.stop().await.unwrap();
     let _ = std::fs::remove_dir_all(&base);
 }
+
+fn sprint_state(name: &str, sprints: Value) -> (PathBuf, PathBuf) {
+    let dir = temp(name);
+    let state = dir.join("state");
+    std::fs::DirBuilder::new().mode(0o700).create(&state).unwrap();
+    let product = json!({"tasks":{},"sprints":sprints,"drafts":{},"messages":[],"comments":{}});
+    settings::write_json(&super::super::native::product_path(&state, "project").unwrap(), &product).unwrap();
+    (dir, state)
+}
+
+#[test]
+fn a_model_sprint_title_is_saved_from_the_whole_sprint_text() {
+    let (dir, state) = sprint_state("sprint-title", json!([{"id":"sp_1","description":"first\nsecond","title":null}]));
+    let (c, seen) = answering(Ok("\"Title: Upload retries and logging.\""));
+    let reply = sprint_title_job(&state, "project", "sp_1", "Fix uploads\nAlso add logging", Ok(c), Duration::from_secs(10));
+    assert_eq!((reply["source"].as_str(), reply["saved"].as_bool()), (Some("model"), Some(true)));
+    assert!(seen.lock().unwrap().contains("Also add logging"));
+    let saved = super::super::native::product(&state, "project").unwrap();
+    assert_eq!(saved["sprints"][0]["title"], "Upload retries and logging");
+    assert_eq!(saved["sprints"][0]["titleState"], "generated");
+    // A generated title is not replaced by a later job.
+    let (c, _) = answering(Ok("Other"));
+    let again = sprint_title_job(&state, "project", "sp_1", "x", Ok(c), Duration::from_secs(10));
+    assert_eq!(again["saved"], false);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn an_owner_sprint_title_is_never_overwritten() {
+    let (dir, state) = sprint_state("sprint-owner", json!([{"id":"sp_1","description":"d","title":"Mine","titleState":"user"}]));
+    let (c, _) = answering(Ok("Generated"));
+    let reply = sprint_title_job(&state, "project", "sp_1", "d", Ok(c), Duration::from_secs(10));
+    assert_eq!(reply["saved"], false);
+    let saved = super::super::native::product(&state, "project").unwrap();
+    assert_eq!(saved["sprints"][0]["title"], "Mine");
+    // Renaming through the sprint patch marks the title as the owner's.
+    let (dir2, state2) = sprint_state("sprint-rename", json!([{"id":"sp_2","description":"d","title":null,"queueState":"idle","taskIds":[]}]));
+    super::super::product::sprint(&state2, "project", &json!({"action":"patch","sprintId":"sp_2","patch":{"title":"Named"}}), None).unwrap();
+    let (c, _) = answering(Ok("Generated"));
+    assert_eq!(sprint_title_job(&state2, "project", "sp_2", "d", Ok(c), Duration::from_secs(10))["saved"], false);
+    let saved = super::super::native::product(&state2, "project").unwrap();
+    assert_eq!((saved["sprints"][0]["title"].as_str(), saved["sprints"][0]["titleState"].as_str()), (Some("Named"), Some("user")));
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::remove_dir_all(&dir2).unwrap();
+}
+
+#[test]
+fn without_a_route_the_sprint_keeps_its_description_label_and_a_retry_may_name_it() {
+    let (dir, state) = sprint_state("sprint-fallback", json!([{"id":"sp_1","description":"d","title":null}]));
+    let reply = sprint_title_job(&state, "project", "sp_1", "Make uploads retry. Then log it.", Err("no_route"), Duration::from_secs(1));
+    assert_eq!((reply["source"].as_str(), reply["reason"].as_str(), reply["saved"].as_bool()), (Some("fallback"), Some("no_route"), Some(false)));
+    assert_eq!(reply["label"], "Make uploads retry");
+    let saved = super::super::native::product(&state, "project").unwrap();
+    assert!(saved["sprints"][0]["title"].is_null() && saved["sprints"][0]["titleState"].is_null());
+    let (c, _) = answering(Ok("Upload retry"));
+    let retry = sprint_title_job(&state, "project", "sp_1", "d", Ok(c), Duration::from_secs(10));
+    assert_eq!(retry["saved"], true);
+    let saved = super::super::native::product(&state, "project").unwrap();
+    assert_eq!(saved["sprints"][0]["titleState"], "generated");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// No prompt may ask for a reply in the owner's or task's language.
+fn assert_english_only_instruction(prompt: &str, english: &str) {
+    assert!(prompt.contains(english), "missing {english}");
+    let lower = prompt.to_lowercase();
+    for other in ["language of", "owner's language", "task language", "in russian", "по-русски", "на русском"] {
+        assert!(!lower.contains(other), "unexpected language instruction {other}");
+    }
+}
+
+#[tokio::test]
+async fn commit_prompt_asks_for_english_even_with_russian_changes() {
+    let base = temp("english-commit");
+    let root = repository(&base);
+    sh(&root, &["reset", "--", ".env.local"]);
+    std::fs::write(root.join("README.md"), "readme\nИсправлена повторная загрузка файлов.\n").unwrap();
+    let changes = changes(&root, "checkout_commit", "", &[], &mut Git::new()).await.unwrap();
+    let prompt = commit_prompt(&changes);
+    assert!(prompt.contains("Исправлена повторная загрузка файлов."));
+    assert_english_only_instruction(&prompt, "Draft a Git commit message in English.");
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[tokio::test]
+async fn push_summary_prompt_asks_for_english_even_with_russian_commits() {
+    let base = temp("english-push");
+    let root = repository(&base);
+    sh(&root, &["remote", "add", "origin", "./unused.git"]);
+    sh(&root, &["update-ref", "refs/remotes/origin/cw/task", "main"]);
+    sh(&root, &["reset", "--", ".env.local"]);
+    sh(&root, &["commit", "--only", "-m", "Исправить загрузку", "-m", "Загрузка теперь повторяется при сбое.", "--", "README.md"]);
+    let prompt = outgoing(&mut Git::new(), &root, "origin", "cw/task").await.unwrap();
+    assert!(prompt.contains("Исправить загрузку") && prompt.contains("Загрузка теперь повторяется при сбое."));
+    assert_english_only_instruction(&prompt, "Write a detailed English summary");
+    std::fs::remove_dir_all(base).unwrap();
+}

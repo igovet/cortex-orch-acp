@@ -187,7 +187,8 @@ it.each(["Conversation", "worker", "coordinator activity"])("shows recorded deta
     { title: "grep", kind: "search", query: "TODO", output: "", notice: "Only a clipped preview was retained." },
     { title: "web_fetch", status: "completed" },
     { title: "mcp__external__fetch", status: "completed" },
-    { title: "mcp__cortex__result_submit", kind: "edit", output: "PRIVATE OUTPUT", newText: "PRIVATE DIFF" },
+    { title: "mcp__cortex__result_submit", kind: "edit", output: "RESULT RECORDED", input: JSON.stringify({ report: "Report text", api_token: "tok-1234567890", request_key: "k1" }) },
+    { title: "mcp__cortex__read_batch", kind: "read", status: "completed", input: JSON.stringify({ items: [{ tool: "read_report", report_id: "r_1" }] }), output: "{\"items\":[{\"ok\":true}]}" },
   ].map((d, i) => ({ ...d, callId: `tool:${i}` }));
   const session = emptySession("t");
   session.timeline = [{ id: "h", kind: "fold", text: "Worked", steps: steps.map(d => STEP_PREFIX + JSON.stringify(d)) }];
@@ -201,7 +202,7 @@ it.each(["Conversation", "worker", "coordinator activity"])("shows recorded deta
   await mount(`/m/${LOCAL_MACHINE_ID}/t/t${suffix}`, state);
   document.querySelector<HTMLButtonElement>("button.fold")!.click(); await settle();
   const rows = [...document.querySelectorAll<HTMLButtonElement>("button.step-row")];
-  expect(rows).toHaveLength(6);
+  expect(rows).toHaveLength(7);
   for (const row of rows) row.click();
   await settle();
   const details = rows.map(row => row.parentElement!.textContent);
@@ -211,8 +212,16 @@ it.each(["Conversation", "worker", "coordinator activity"])("shows recorded deta
   expect(details[2]).toContain("Only a clipped preview");
   expect(details[3]).toContain("No input was recorded.");
   expect(details[4]).toContain("No output was recorded.");
-  expect(details[5]).toContain("Private or redacted.");
-  expect(document.body.textContent).not.toMatch(/PRIVATE OUTPUT|PRIVATE DIFF/);
+  // A runtime step or a batch shows its real input and output; only the credential-named argument is masked.
+  expect(details[5]).toContain("RESULT RECORDED");
+  expect(details[5]).toContain("Report text");
+  expect(details[5]).toContain("request_key");
+  expect(details[5]).toContain("[REDACTED]");
+  expect(details[5]).not.toContain("tok-1234567890");
+  expect(details[5]).not.toContain("Private or redacted");
+  expect(details[6]).toContain("report_id");
+  expect(details[6]).toContain("\"ok\":true");
+  expect(document.body.textContent).not.toMatch(/Private or redacted|tok-1234567890/);
   for (const row of rows) {
     expect(row.parentElement!.querySelector('section[aria-label="Input"]')).not.toBeNull();
     expect(row.parentElement!.querySelector('section[aria-label="Output"]')).not.toBeNull();

@@ -548,8 +548,10 @@ export function Workspace(props: WorkspaceProps) {
           <main class="main" ref={main} tabindex="-1">
             <Show when={!phone}><TabStrip tabs={tabs} title={titleOf} onSelect={selectTab} onClose={askClose} /></Show>
             <Show when={phone} fallback={<ConnectionNotice />}><PhoneConnection /></Show>
-            <Show when={savedOnScreen().length > 0}>
-              <div class="strip info" role="status">{unreachable() || store.readIssue() || savedProjectIssue() ? "Saved view; live state unavailable" : "Saved view; checking live state"}</div>
+            {/* While the live reads are under way the saved view is shown as it is, with no line: a slow read is no issue.
+                Only a genuine failure (offline, a refused or unreadable read) says the live state is unavailable. */}
+            <Show when={savedOnScreen().length > 0 && (unreachable() || store.readIssue() || savedProjectIssue())}>
+              <div class="strip info" role="status">Saved view; live state unavailable</div>
             </Show>
             <Show when={store.ready() && store.syncing()}>
               <div class="ws-sync" role="status">Updating confirmed state…</div>

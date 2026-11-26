@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-phone-battery-settings"
+description = "Enables the phone_battery_settings command without any pre-configured scope."
+commands.allow = ["phone_battery_settings"]
+
+[[permission]]
+identifier = "deny-phone-battery-settings"
+description = "Denies the phone_battery_settings command without any pre-configured scope."
+commands.deny = ["phone_battery_settings"]

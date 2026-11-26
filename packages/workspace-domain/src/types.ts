@@ -9,20 +9,31 @@ export type Tier = "flagship" | "deep" | "standard" | "light";
 export type ConnectionDetail = { connectionId: string; provider: string; authMode: string; keyKind: string | null; endpoint: string | null; launchCommand: string; credential: string; qualified: boolean; createdAt: string; updatedAt: string };
 export type EngineConnection = { id: string; engine: EngineId; label: string; note: string; sessions: number; state: "connected" | "needs_login" | "unavailable"; checkedAt: number | null; detail: ConnectionDetail };
 export type EngineSetup = { status: "not_downloaded" | "downloaded_no_login" | "ready_to_connect" | "connected"; automatic: boolean; reason: string | null; autoConnectDisabled: boolean };
-export type CatalogueModel = { routeId?: string; id: string; label: string; efforts: string[]; observed: boolean; contextWindow?: number };
+export type CatalogueModel = { routeId?: string; id: string; label: string; efforts: string[]; observed: boolean; contextWindow?: number; previousRouteIds?: string[] };
 export type EngineCatalogue = { observedAt: number | null; failed: boolean; models: CatalogueModel[] };
 export type Problem = { path: string; message: string };
 
 /** Per-model policy of routing.json. Null means neutral: the key is not written. */
-export type ModelPolicy = { effortFloor: string | null; maxEffort: string | null; effortLadder: string[] | null; alsoStandardFor: string[] | null; preferredFor: string[] | null; preferredWhen: string | null; requestNames: string[] | null };
+/** An inclusive effort range for one tier, written as `tier_efforts` in routing.json. */
+export type EffortRange = { min: string; max: string };
+export type ModelPolicy = { effortFloor: string | null; maxEffort: string | null; effortLadder: string[] | null; alsoStandardFor: string[] | null; preferredFor: string[] | null; preferredWhen: string | null; requestNames: string[] | null;
+  /** Per tier the model is placed in; a tier without a range keeps the floor and max rules. */
+  tierEfforts: Partial<Record<Tier, EffortRange>> | null };
 /** `models: null` is shared by the engine, a list is exact, an empty list excludes every model. */
 export type QuotaWindow = { window: string; models: string[] | null };
 export type EngineRules = { enabled: string[]; auto: string[]; tiers: Record<string, Tier[]>; policy: Record<string, ModelPolicy>; quota: QuotaWindow[] };
 export type RoutePin = { engine: EngineKey; model: string; effort: string | null };
+/**
+ * One model the coordinator may use, with an inclusive effort range for each category (tier) it may coordinate at. Written as
+ * an entry of `coordinator_models` in routing.json, apart from the worker tiers.
+ */
+export type CoordinatorModel = { engine: EngineKey; model: string; tiers: Partial<Record<Tier, EffortRange>> };
 /** The `routing` surface: routing.json. Models and Routing edit this one value. */
 export type RoutingRules = {
   version: number; deny: string[]; providers: EngineKey[]; engines: Record<EngineKey, EngineRules>;
   pins: Record<string, RoutePin>; affinity: Record<string, EngineKey | null>; autoAllow: string[]; legacyTiers: string[];
+  /** The models a coordinator may use. Absent in a profile written before the list: the coordinator then follows the worker tiers. */
+  coordinatorModels?: CoordinatorModel[];
 };
 export type StoredLimits = { permissionLevel: string | null; calls: number | null; tokens: number | null; concurrency: number | null; spendLimit: number | null; spendEnforceable: boolean };
 /** Null is unrestricted, an empty list allows nothing. */
@@ -50,6 +61,8 @@ export type McpServer = {
   /** "none": runs without the sandbox (its own value or the registry default). Absent: contained. Machine-local, never a profile policy. */
   containment?: "contained" | "none";
 };
+/** A project's own MCP registry: servers only this project has, and per-project on or off for machine servers by name. A problem means its file could not be read; saving is refused until it is repaired by hand. */
+export type ProjectMcp = { servers: McpServer[]; overrides: Record<string, boolean>; problem?: string };
 export type SecretAction = "keep" | "replace" | "remove";
 export type RoleAccess = "writing" | "read_only" | "consultant";
 export type Surfaces = { routing: RoutingRules; user_defaults: UserDefaults; mcp_servers: McpServer[] };
@@ -62,7 +75,7 @@ export type Profile = { id: string; name: string; description: string; updatedAt
 export type ConfigFault = "env_routing" | "invalid_routing" | "migration" | "interrupted" | "unavailable" | "catalogue" | "engine_missing" | "preset_missing";
 export type ConfigFiles = { envRouting: string | null; invalidRouting: boolean; migration: boolean; missing: string[]; backups: number; preservedRouting: string[]; preservedDefaults: string[]; askpass: boolean; env: { engineUpdate: string | null; engineFollow: string | null; opencodeBinary: string | null } };
 export type MachineConfig = {
-  revisions: Record<SurfaceKey, number>; surfaces: Surfaces; projects: Record<string, { routing?: RoutingRules; ceiling?: Ceiling; revisions?: Partial<Record<SurfaceKey,number>> }>;
+  revisions: Record<SurfaceKey, number>; surfaces: Surfaces; projects: Record<string, { routing?: RoutingRules; ceiling?: Ceiling; mcp?: ProjectMcp; revisions?: Partial<Record<SurfaceKey,number>> }>;
   active: string | null; interrupted: boolean; unavailable: string | null; profiles: Profile[];
   catalogue: Record<EngineKey, EngineCatalogue>; quotaObserved: Record<EngineKey, { window: string; percent: number }[]>;
   mcpObserved: Record<string, McpObservation>; setup: Record<EngineKey, EngineSetup>; files: ConfigFiles;
@@ -145,6 +158,8 @@ export type Task = {
   reworkOwnerEpoch?: string | null;
   reworkExecutionId?: string | null;
   title: string; titleState: "pending" | "generated" | "user" | "failed";
+  /** Set when the runtime chose this task's model from its plan complexity. */
+  sprintRoute?: SprintRoute;
   checkout: Checkout; targetBranch: string | null; dependencies: string[];
   status: TaskStatus; resumeStatus: "working" | "needs_you"; issue: string | null;
   executionId: string | null; result: Result | null; workspaceDigest: string | null;
@@ -201,7 +216,11 @@ export type TaskSpend = {
 };
 /** The route and access of one task. Machine defaults fill a new task; changing them here never touches other tasks. */
 export type TaskSettings = { model: string; effort: string; mode: "development" | "guarded" | "auto"; language: "auto" | "en" | "ru" };
-export type PlanItem = { key: string; description: string; dependsOn: string[]; checkout?: CheckoutChoice; title?: string; acceptance?: string };
+export type PlanComplexity = "low" | "normal" | "high";
+/** `complexity` lets the runtime pick a tier and model for the task when the sprint names no model. */
+export type PlanItem = { key: string; description: string; dependsOn: string[]; checkout?: CheckoutChoice; title?: string; acceptance?: string; complexity?: PlanComplexity };
+/** The route the runtime assigned to a task created from a sprint plan, by its complexity. */
+export type SprintRoute = { routeId: string; engine: EngineKey; model: string; tier: Tier; effort: string; complexity: PlanComplexity; usedPercent: number | null };
 export type PlanVersion = { version: number; items: PlanItem[] };
 /** One line of the planning conversation. `event` lines record what the owner did, not what anyone said. */
 export type SprintEntry = { attachments?: AttachmentInput[]; kind: "question" | "answer" | "note" | "message" | "event"; text: string; options?: string[]; at?: number | null; mock?: true };
@@ -232,7 +251,7 @@ export type Sprint = {
   archivedAt?: number;
   /** A deletion the service started and has not finished: how many tasks it set out to delete and the ones still left. Such
    *  a sprint is archived but stays on view, so its unfinished deletion can be seen and retried. */
-  deletion?: { total: number; left: string[] };
+  deletion?: { total: number; left: string[]; reason?: string };
   /** String is a legacy record with no step or timestamp. */
   planningFailure?: PlanningFailure | string; planningWarning?: PlanningWarning;
   planningTaskId?: string; targetBranch: string | null; planning: "planning" | "question" | "ready" | "created" | "cancelled";
@@ -264,7 +283,16 @@ export type SprintOrderWorking = { taskId: string; startOrder: string | null };
  */
 export type SprintOrderPending = { taskId: string; rank: number | null; reason: string | null; next: boolean; conditional: boolean };
 export type SprintOrder = { mode: SprintRunMode; queueState: "idle" | "running" | "paused" | "complete"; working: SprintOrderWorking[]; notStarted: SprintOrderPending[] };
-export type LiveSprintGraph = { contractVersion: 1; sprintId: string; graphRevision: string; complete: boolean; members: LiveSprintMember[]; priority: string[]; order: SprintOrder };
+/**
+ * A revision of unstarted drafts proposed by a sprint task after the owner changed it (`sprint_revision_submit`). `awaiting_owner`
+ * waits for Apply or Reject on its card; `held` names the drafts that do not start meanwhile.
+ */
+export type SprintRevisionChange = { op: "update" | "add" | "propose_cancel"; memberId: string | null; key: string | null; title: string | null; description: string | null; dependsOn: string[] | null; reason: string | null };
+export type SprintRevision = {
+  revisionId: string; taskId: string | null; status: "review" | "changes_requested" | "approved" | "awaiting_owner" | "applied" | "rejected" | "apply_refused" | "superseded";
+  applied: boolean; reason: string; changes: SprintRevisionChange[]; held: string[]; updated: string[]; added: string[];
+};
+export type LiveSprintGraph = { contractVersion: 1; sprintId: string; graphRevision: string; complete: boolean; members: LiveSprintMember[]; priority: string[]; order: SprintOrder; revisions?: SprintRevision[] };
 export type WorkerStatus = "working" | "waiting_you" | "pending" | "not_started" | "paused" | "completed" | "failed" | "cancelled" | "unknown";
 export type ActivityKind = "note" | "assignment" | "divider" | "tools" | "tool" | "edit" | "command" | "message";
 export type CommandState = "running" | "stopping" | "stopped" | "passed" | "failed" | "native";
@@ -310,6 +338,8 @@ export type WorkerReview = {
   verdict?: "APPROVE" | "REQUEST_CHANGES" | "BLOCK" | "INCOMPLETE";
   notCovered?: { item: string; reason: string; blocker?: string }[];
   rerun?: { reason: string; previousWorkerId: string; followUpWorkerId: string };
+  /** The stage was approved, but the reviewer reported a goal outcome as not delivered: no verification follows. */
+  goalNotMet?: boolean;
 };
 /** A recorded route. `engine` is the engine key (`claude-agent-acp`, `codex-acp`, `opencode`) when the machine recorded it. */
 /** `why`: for a reviewer, why it got this route, as the runtime recorded it. */
@@ -453,7 +483,7 @@ export type EngineUsageInput = {
 export type EngineWeeklyUsage = Omit<EngineUsageInput, "engine"> & { engine: "codex" | "claude"; window: "weekly"; mock?: true };
 /** What the running session offers. A list stays empty until it is reported, and an empty list turns its control off. */
 export type SessionChoice = { id: string; label: string; sub?: string; unavailable?: string };
-export type SessionOptions = { models: (SessionChoice & { engine: string; efforts?: string[] })[]; efforts: SessionChoice[]; modes: SessionChoice[]; languages: SessionChoice[] };
+export type SessionOptions = { models: (SessionChoice & { engine: string; efforts?: string[]; previousIds?: string[] })[]; efforts: SessionChoice[]; modes: SessionChoice[]; languages: SessionChoice[] };
 export type WorkspaceState = {
   mock?: true; options: SessionOptions; machines: Machine[]; projects: Project[]; sprints: Sprint[];
   tasks: Task[]; workers: Worker[]; messages: Message[]; sessions: TaskSession[]; engineUsage: EngineWeeklyUsage[];
@@ -509,6 +539,7 @@ export type WorkspaceCommand =
   | { type: "rename_task"; taskId: string; title: string }
   | { type: "edit_task"; taskId: string; expectedVersion: string; title: string; description: string; attachments: AttachmentInput[]; settings: TaskSettings; checkout: { kind: CheckoutChoice["kind"] } }
   | { type: "generate_title"; taskId: string; fail?: boolean }
+  | { type: "generate_sprint_title"; sprintId: string }
   | { type: "start_task" | "continue_task" | "retry_task" | "confirm_stop" | "clear_issue" | "restore_task" | "flush_queue" | "stop_resolution" | "finish_merge"; taskId: string; now?: number }
   | { type: "abort_merge"; taskId: string; now?: number; discardLegacy?: true }
   /** Merges the task's target branch into its own branch, once the owner confirmed it for the result they reviewed (`digest`). */
@@ -550,7 +581,7 @@ export type WorkspaceCommand =
   | { type: "revert_commit"; checkoutId: string; sha: string; confirmed: boolean; now?: number }
   | { type: "delete_worktree"; checkoutId: string; confirmed: boolean; discard: boolean; now?: number }
   | { type: "attach_worktree"; checkoutId: string }
-  | { type: "create_sprint"; projectId: string; description: string; attachments?: AttachmentInput[]; runMode: Sprint["runMode"]; checkout?: Sprint["checkout"]; settings?: TaskSettings; targetBranch?: string | null }
+  | { type: "create_sprint"; projectId: string; description: string; attachments?: AttachmentInput[]; runMode: Sprint["runMode"]; checkout?: Sprint["checkout"]; settings?: TaskSettings; targetBranch?: string | null; /** `sprint` only when the owner picked the model: the created tasks then all use it; otherwise each gets its automatic route by complexity. */ taskRoute?: "automatic" | "sprint" }
   | { type: "answer_planning"; sprintId: string; answer: string; attachments?: AttachmentInput[]; now?: number; decisionId?: string; optionId?: string | null; answers?: DecisionAnswer[] }
   | { type: "plan_message"; sprintId: string; text: string; attachments?: AttachmentInput[]; now?: number }
   | { type: "replace_planning_request"; sprintId: string; description: string }

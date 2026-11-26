@@ -103,6 +103,33 @@ describe("native read path", () => {
     } finally {stop();}
   });
 
+  it("never turns a read that only took long into a project error, however often it repeats", async () => {
+    const {s,p}=fixture();
+    s.answers["service.capabilities"]=()=>({methods:["native.query","native.board"],machine:true});
+    s.answers["native.board"]=()=>({protocol:{major:2,mapping:2},projectId:"p",generation:"generation",version:"2",highWatermark:"3",
+      data:{type:"board",value:{items:[wireTask()],nextCursor:null,highWatermark:"3"}}});
+    // An older service's deadline answers the slow read with a timeout refusal, or the bridge's busy words.
+    let slow=true, asked=0;
+    s.answers["machine.call"]=raw=>{
+      const op=(raw as {op:string}).op;
+      if(slow && op==="product.read" && ++asked%2) return {ok:false,code:"machine_tool_timeout",message:"The operation deadline expired."};
+      if(slow && op==="product.read") throw new Error("refused:The machine is busy and did not answer in time. Try again.");
+      return {ok:true,result:op==="repo.snapshot"?null:op==="workers"?[]:{tasks:{},sprints:[],messages:[]}};
+    };
+    const updates:PortUpdate[]=[],stop=p.subscribe(u=>updates.push(u));
+    try {
+      await p.query("capabilities.get",{});
+      await p.query("project.snapshot",{});
+      for(let i=0;i<6;i++) await p.query("project.facts",{fresh:true}).catch(()=>[]);
+      expect(asked).toBeGreaterThanOrEqual(6);
+      expect(updates.some(u=>u.kind==="project_state" && u.issue)).toBe(false);
+      slow=false;
+      const facts=await p.query("project.facts",{fresh:true});
+      expect(facts[0]?.issue ?? null).toBeNull();
+      expect(updates.some(u=>u.kind==="project_state" && u.issue)).toBe(false);
+    } finally {stop();}
+  });
+
   it("does not let a failed refresh release new sprint members from an unpublished task read",async()=>{
     const {s,p}=fixture();
     s.answers["service.capabilities"]=()=>({methods:["native.query","native.board"],machine:true});
@@ -299,7 +326,7 @@ describe("native read path", () => {
       await p.query("capabilities.get", {}); await p.query("project.snapshot", {});
       const updates: PortUpdate[] = [], stop = p.subscribe(u => updates.push(u));
       s.send({ type: "native_delta", ...bad });
-      await vi.waitFor(() => expect(updates).toContainEqual({ kind: "refresh" }));
+      await vi.waitFor(() => expect(updates).toContainEqual({ kind: "refresh", projectId: "p" }));
       expect(updates.some(u => u.kind === "delta")).toBe(false); stop();
     }
   });

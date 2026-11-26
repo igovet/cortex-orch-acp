@@ -37,6 +37,9 @@ function eventOf(raw: unknown): TransportEvent | null {
     catch { return null; }
   }
   if (e.type === "refresh") return { type: "refresh" };
+  // Remote access moved, or one project's runtime did: each is read again on its own, never everything.
+  if (e.type === "remote_state") return { type: "remote_state" };
+  if (e.type === "project_state" && typeof e.projectId === "string") return { type: "project_state", projectId: e.projectId };
   if (e.type === "connection" && ["connecting", "connected", "disconnected", "unavailable"].includes(String(e.state)))
     return { type: "connection", state: e.state as "connecting" | "connected" | "disconnected" | "unavailable",
       ...(typeof e.reason === "string" ? { reason: e.reason } : {}) };

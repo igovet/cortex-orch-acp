@@ -43,6 +43,8 @@ fn ignore_in_git(directory: &std::path::Path) -> CoreResult<()> {
         Err(e) => Err(e.into()),
     }
 }
+/// The longest a waiting read ([`Store::open_waiting`]) queues behind an exclusive access lock.
+pub const READ_ACCESS_WAIT: Duration = Duration::from_secs(600);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenMode {
     Initialize,
@@ -64,6 +66,15 @@ pub struct Store {
 impl Store {
     pub fn open(key: ProjectKey, mode: OpenMode) -> CoreResult<Self> {
         Self::open_with_wait(key, mode, Duration::from_secs(2), Duration::from_secs(15))
+    }
+
+    /// Open for a read the owner is waiting on. When the exclusive access lock is held
+    /// (this service migrating or initializing the store, or another bounded exclusive
+    /// operation), the open and every later `read` wait for it with a growing back-off
+    /// instead of refusing `busy` after two seconds. Only a holder that outlasts
+    /// [`READ_ACCESS_WAIT`] still yields `busy`, which clients show as a waiting state.
+    pub fn open_waiting(key: ProjectKey, mode: OpenMode) -> CoreResult<Self> {
+        Self::open_with_wait(key, mode, READ_ACCESS_WAIT, Duration::from_secs(15))
     }
 
     /// A scheduled deletion must not queue behind a busy store.
@@ -256,6 +267,11 @@ impl Store {
                 schema::install(&tx)?;
                 tx.commit()?;
             }
+            // Planner statistics for the read indexes: SQLite's own open-time `optimize`, which analyzes
+            // a table only if it was never analyzed or has grown many times over since, each pass
+            // sampling a bounded number of rows (`analysis_limit`), so its cost does not grow with the store.
+            // It runs under this open's exclusive `.access.lock`, in SQLite's own transaction.
+            db.execute_batch("PRAGMA analysis_limit=1000; PRAGMA optimize=0x10002;")?;
         }
         schema::validate_groups(&db)?;
         if read_only {

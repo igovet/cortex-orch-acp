@@ -1,4 +1,4 @@
-import type { Ceiling, EngineId, EngineKey, McpServer, ModelPolicy, RoleAccess, SessionChoice, Tier } from "./types";
+import type { Ceiling, EngineId, EngineKey, McpServer, ModelPolicy, PlanComplexity, RoleAccess, SessionChoice, Tier } from "./types";
 
 /** The fixed facts of the runtime: engines, tiers, kinds of work and roles. What a machine is set to lives on the machine. */
 export const ENGINES: readonly { id: EngineKey; label: string; usage: "claude" | "codex" | null; recipient: string }[] = [
@@ -34,6 +34,7 @@ export function resolveEffort(chosen = "", setting = "", offered?: readonly stri
     !best || Math.abs(effortRank(level) - target) < Math.abs(effortRank(best) - target) ? level : best, "");
 }
 export const effortLabel = (id: string) => EFFORT_LABELS[id] ?? id;
+export const COMPLEXITY_LABELS: Record<PlanComplexity, string> = { low: "Low", normal: "Normal", high: "High" };
 export const EFFORT_BY_TIER: Record<Tier, string> = { flagship: "high", deep: "high", standard: "medium", light: "low" };
 export const FALLBACK_ORDER: Record<Tier, Tier[]> = {
   flagship: ["flagship", "deep", "standard", "light"], deep: ["deep", "standard", "light"], standard: ["standard", "deep", "light"], light: ["light", "standard", "deep"],
@@ -58,6 +59,7 @@ export const WORK_KINDS: readonly Kind[] = [
   { id: "writing", label: "Writing", lean: "claude-agent-acp" },
   { id: "planning", label: "Planning", lean: "claude-agent-acp" },
   { id: "analysis", label: "Analysis", lean: "claude-agent-acp" },
+  { id: "consultation", label: "Senior consultation", lean: "claude-agent-acp" },
 ];
 export const kindLabel = (id: string) => WORK_KINDS.find(k => k.id === id)?.label ?? id;
 
@@ -86,19 +88,19 @@ export const ROLE_CATALOG: readonly Role[] = [
   role("planner", "Planner", "read_only", "planning"),
   role("security-auditor", "Security Auditor", "read_only", "review", "deep"),
   role("ux-designer", "UX Designer", "read_only", "design"),
-  role("senior-consultant", "Senior Consultant", "consultant", "design", "deep"),
+  role("senior-consultant", "Senior Consultant", "consultant", "consultation", "deep"),
 ];
 export const RESERVED_ROLE = "worker-build-verification";
 export const ACCESS_LABELS: Record<RoleAccess, string> = { writing: "Writing", read_only: "Read-only", consultant: "Consultant" };
 export const RESERVED_WORDS = ["auto", "default", "model", "best", "fast", "cheap"];
-export const NEUTRAL_POLICY: ModelPolicy = { effortFloor: null, maxEffort: null, effortLadder: null, alsoStandardFor: null, preferredFor: null, preferredWhen: null, requestNames: null };
+export const NEUTRAL_POLICY: ModelPolicy = { effortFloor: null, maxEffort: null, effortLadder: null, alsoStandardFor: null, preferredFor: null, preferredWhen: null, requestNames: null, tierEfforts: null };
 export const openCeiling = (): Ceiling => ({
   allowedRoutes: null, allowedConnections: null, allowedRecipients: null, attempts: null, failureClasses: null, targetRoutes: null, budget: null, consent: false,
   stored: { permissionLevel: null, calls: null, tokens: null, concurrency: null, spendLimit: null, spendEnforceable: false },
 });
 export const newMcpServer = (): McpServer => ({
   name: "", command: "", args: [], env: [], enabled: false, roles: null, engines: null, allowedTools: [], readOnlyTools: [], coordinatorTools: null, alwaysLoadTools: null,
-  readPaths: [], writePaths: [], network: false, runtimeDirEnv: [], handTools: [], unsupportedKeys: [], problem: null,
+  readPaths: [], writePaths: [], network: false, runtimeDirEnv: [], handTools: [], unsupportedKeys: [], problem: null, containment: "none",
 });
 /** Access modes and message languages are the runtime's words. Which of them a session offers is in its options. */
 export const ACCESS_MODES = [

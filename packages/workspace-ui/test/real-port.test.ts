@@ -164,7 +164,40 @@ describe("real port", () => {
     s.send({ type: "invalidated", projectId: "p" });
     await flush();
     expect(updates).toHaveLength(1);
-    expect(updates[0]).toEqual({ kind: "refresh" });
+    // That project's reread, not a reread of every project.
+    expect(updates[0]).toEqual({ kind: "refresh", projectId: "p" });
+  });
+
+  it("rereads only the project whose runtime changed, and only the remote access page for a remote access change", async () => {
+    let activation: unknown = {};
+    const s = scriptedTransport({
+      "service.capabilities": () => ({ methods: ["projects.status", "remote.status"], machine: false }),
+      "projects.list": () => ["p", "q"].map(id => ({ projectId: id, displayName: id, canonicalRoot: "/" + id, activation: id === "p" ? activation : {} })),
+      "projects.status": () => ({ ready: true }),
+      "capabilities.get": () => capabilitiesWire(ALL),
+      "project.snapshot": message => snapshot("4", [], (message as { projectId: string }).projectId),
+      "decisions.list": () => ({ items: [], nextCursor: null, highWatermark: "4" }),
+    });
+    const p = createRealPort({ transport: s.transport, actorId: "local-peer", registry: true });
+    await p.query("capabilities.get", {});
+    await p.query("project.snapshot", {});
+    const updates: PortUpdate[] = [];
+    const stop = p.subscribe(u => updates.push(u));
+    let remote = 0;
+    const unwatch = p.remoteAccess!.watch(() => remote++);
+    s.send({ type: "remote_state" });
+    await flush();
+    expect(updates).toEqual([]);
+    expect(remote).toBe(1);
+    s.send({ type: "project_state", projectId: "p" });
+    await vi.waitFor(() => expect(updates).toContainEqual({ kind: "refresh", projectId: "p" }));
+    expect(updates.some(u => u.kind === "refresh" && !u.projectId)).toBe(false);
+    expect(remote).toBe(1);
+    // Its activation changed: a registry fact, so everything is read again.
+    updates.length = 0; activation = null;
+    s.send({ type: "project_state", projectId: "p" });
+    await vi.waitFor(() => expect(updates).toEqual([{ kind: "refresh" }]));
+    unwatch(); stop();
   });
 
   it("starts a draft against its current entity version", async () => {
@@ -191,6 +224,16 @@ describe("real port", () => {
     const p = await loaded(s);
     await p.command(envelope({ type: "answer_decision", taskId: "task-1", decisionId: "d", answer: "line one\nline two" }));
     expect((s.calls.find(c => c.operation === "decisions.answer")!.message as { payload: { answers: { optionId: unknown; text: string }[] } }).payload.answers[0]).toMatchObject({ optionId: null, text: "line one\nline two" });
+  });
+
+  it("keeps every character of an answer that contains semicolons, quotes and URL syntax", async () => {
+    const text = "Retry in this task: replan (outcomes as in my original description) and run a new worker; then verify; do not stop & ?a=1#b %3B \\ \"quoted\"";
+    const s = service([wireTask({ executionId: "e" })], [wireDecision()]);
+    const p = await loaded(s);
+    await p.command(envelope({ type: "answer_decision", taskId: "task-1", decisionId: "d", answer: text }));
+    const sent = s.calls.find(c => c.operation === "decisions.answer")!.message;
+    expect(() => validate("Command", sent)).not.toThrow();
+    expect((sent as { payload: { answers: { optionId: unknown; text: string }[] } }).payload.answers[0]).toMatchObject({ optionId: null, text });
   });
 
   it("a refused outcome is a failed receipt, and an unknown outcome is never read as success", async () => {
@@ -418,6 +461,33 @@ describe("real port", () => {
         // A machine that cannot start a job gives no text, never an error.
         s.answers["machine.call"] = message => (message as {op:string}).op === "product.task" ? {ok:false,code:"unsupported_action",message:"no"} : answer(message);
         expect(await p.draftIntegrationText!({taskId:"task-1",method:"pr",targetBranch:"main"})).toBeNull();
+        stop();
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("names a sprint through a background job and rereads the project when it is written", async () => {
+      vi.useFakeTimers();
+      try {
+        const {s,p,ready} = helper({sprints:[{id:"sp",projectId:"p",planning:"created",materializedVersion:1,taskIds:[],conversation:[],history:[]}]});
+        await ready();
+        const updates: PortUpdate[] = [];
+        const stop = p.subscribe(u => updates.push(u));
+        let polls = 0;
+        const answer = s.answers["machine.call"]!;
+        const seen: Record<string, unknown>[] = [];
+        s.answers["machine.call"] = message => {
+          const call = message as {op:string; params?: Record<string, unknown>};
+          const action = call.op === "product.task" ? call.params?.action : undefined;
+          if (action === "generate_sprint_title") { seen.push(call.params!); return {ok:true,result:{jobId:"st_9"}}; }
+          if (action === "short_text_poll") { seen.push(call.params!); return {ok:true,result:++polls < 2 ? {state:"running"} : {state:"done",source:"model",saved:true}}; }
+          return answer(message);
+        };
+        expect((await p.command(envelope({type:"generate_sprint_title",sprintId:"sp"}))).ok).toBe(true);
+        expect(updates.some(u => u.kind === "refresh")).toBe(false);
+        await vi.advanceTimersByTimeAsync(3000);
+        expect(polls).toBe(2);
+        expect(seen[1]).toMatchObject({action:"short_text_poll",sprintId:"sp",jobId:"st_9"});
+        expect(updates.some(u => u.kind === "refresh")).toBe(true);
         stop();
       } finally { vi.useRealTimers(); }
     });
@@ -849,7 +919,8 @@ describe("real port", () => {
         return original(message);
       };
       expect(await p.command(envelope({type:"create_sprint",projectId:"p",description:"Plan",attachments,runMode:"manual",checkout:{kind:"worktree"},settings:{model:"model",effort:"",mode:"guarded",language:"en"}}))).toMatchObject({ok:true,entityId:"sp"});
-      expect(asked.find(c => c.op === "product.sprint" && c.params?.action === "create")?.params).toMatchObject({attachments:refs,checkout:{kind:"worktree"}});
+      // The planning model is not the tasks' model unless the owner picked it: tasks route by complexity.
+      expect(asked.find(c => c.op === "product.sprint" && c.params?.action === "create")?.params).toMatchObject({attachments:refs,checkout:{kind:"worktree"},taskRoute:"automatic"});
       for (const payload of [{type:"plan_message",sprintId:"sp",text:"Look",attachments},{type:"answer_planning",sprintId:"sp",answer:"Use it",attachments}] as WorkspaceCommand[]) {
         expect(await p.command(envelope(payload))).toMatchObject({ok:true});
       }
@@ -869,7 +940,9 @@ describe("real port", () => {
       const stop = p.subscribe(u => updates.push(u));
       s.answers["executions.control"] = () => ({outcome:"unknown_outcome"});
       expect(await p.command(envelope({type:"resolve_with_cortex",taskId:"task-1",conflictId:"mc_1"},"handoff-1"))).toMatchObject({ok:false,outcome:"unknown_outcome"});
-      expect(updates.some(u => u.kind === "refresh")).toBe(true);
+      // No read followed the action, so the port asks for its project's own reread once it ended.
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(updates).toContainEqual({kind:"refresh",projectId:"p"});
       s.answers["executions.control"] = () => ({done:true,merge:{conflictId:"mc_1"}});
       expect(await p.command(envelope({type:"inspect_merge",taskId:"task-1",conflictId:"mc_1"},"inspect-1"))).toMatchObject({ok:true});
       expect(await p.command(envelope({type:"finish_merge",taskId:"task-1"},"finish-1"))).toMatchObject({ok:true});
@@ -1272,6 +1345,44 @@ describe("real port", () => {
       expect(await p.command(envelope({type:"set_task_settings",taskId:"task-1",settings:{model:"r"}}))).toMatchObject({ok:false,outcome:"partial_effect",message:expect.stringContaining("Not confirmed: language, mode")});
     });
 
+    it("shows a chosen task route at once, never reads first, and keeps it over a stale read", async () => {
+      const old = {model:"old",effort:"low",mode:"guarded",language:"auto"};
+      const chosen = {model:"opus",effort:"medium",mode:"guarded" as const,language:"auto" as const};
+      const {s,p,asked,ready} = helper({tasks:{"task-1":{settings:old}}});
+      const updates: PortUpdate[] = [];
+      p.subscribe(u => updates.push(u));
+      await ready();
+      const shown = () => [...updates].reverse().flatMap(u => u.kind === "facts" ? [u.facts.overlays["task-1"]?.settings] : [])[0];
+      asked.length = 0;
+      let confirm!: (reply: unknown) => void;
+      s.answers["executions.control"] = () => new Promise(resolve => { confirm = resolve; });
+      const done = p.command(envelope({type:"set_task_settings",taskId:"task-1",settings:chosen}));
+      await flush();
+      // The service has not answered yet: the choice is already shown, and no product read stood in front of the command.
+      expect(shown()).toEqual(chosen);
+      expect(asked.filter(c => c.op === "product.read")).toEqual([]);
+      expect(s.calls.find(c => c.operation === "executions.control")?.message).toMatchObject({action:"task_settings",settings:chosen});
+      confirm({outcome:"recorded"});
+      expect(await done).toMatchObject({ok:true});
+      // A read that still carries the old settings (it began before the service recorded them) does not take the choice back.
+      await p.query("project.facts", {});
+      await flush();
+      expect(shown()).toEqual(chosen);
+    });
+
+    it("takes a chosen task route back when the service refuses it", async () => {
+      const old = {model:"old",effort:"low",mode:"guarded",language:"auto"};
+      const {s,p,ready} = helper({tasks:{"task-1":{settings:old}}});
+      const updates: PortUpdate[] = [];
+      p.subscribe(u => updates.push(u));
+      await ready();
+      s.answers["executions.control"] = () => ({outcome:"native_access_mode_unavailable",message:"No"});
+      expect(await p.command(envelope({type:"set_task_settings",taskId:"task-1",settings:{model:"opus",effort:"medium"}}))).toMatchObject({ok:false});
+      await flush();
+      const last = [...updates].reverse().flatMap(u => u.kind === "facts" ? [u.facts.overlays["task-1"]?.settings] : [])[0];
+      expect(last).toEqual(old);
+    });
+
     it("lists unsaved MCP tools through the real service seam", async () => {
       const {s,p,ready} = helper();
       await ready();
@@ -1281,6 +1392,23 @@ describe("real port", () => {
         : previous!(message);
       const result = await p.discoverMcp!({name:"draft"} as never);
       expect(result).toMatchObject({ok:true,observation:{tools:[{name:"read"}]}});
+    });
+
+    it("lists a project draft against that project's own registry", async () => {
+      const {s,p,ready} = helper();
+      await ready();
+      const previous = s.answers["machine.call"];
+      const seen: {op:string;projectId?:string}[] = [];
+      s.answers["machine.call"] = message => {
+        seen.push(message as {op:string;projectId?:string});
+        return (message as {op:string}).op === "config.mcp.discover"
+          ? {ok:true,result:{ok:true,observation:{at:1,name:"draft",version:"reported",tools:[]}}}
+          : previous!(message);
+      };
+      await p.discoverMcp!({name:"draft"} as never, "project-1");
+      expect(seen.filter(a => a.op === "config.mcp.discover").at(-1)?.projectId).toBe("project-1");
+      await p.discoverMcp!({name:"draft"} as never);
+      expect(seen.filter(a => a.op === "config.mcp.discover").at(-1)?.projectId).toBeUndefined();
     });
 
     /** The service creates a plan's tasks and the sprint's transition in one operation; the port only names the plan. */
@@ -1324,6 +1452,15 @@ describe("real port", () => {
       expect(again).toMatchObject({ok:true,message:expect.stringContaining("1 task left by an earlier unfinished Create tasks is not part of the sprint")});
       expect(materializeCalls(asked).map(c => c.params?.planVersion)).toEqual([1, 1]);
     });
+    it("changes a sprint route without a product read in front of it", async () => {
+      const {s,p,asked,ready} = helper({sprints:[{id:"sp",projectId:"p",planning:"ready",plan:{version:1,items:[]},materializedVersion:null,taskIds:[],conversation:[],history:[],settings:{model:"old",effort:"low",mode:"guarded",language:"auto"}}]});
+      await ready();
+      asked.length = 0;
+      expect(await p.command(envelope({type:"set_sprint_settings",sprintId:"sp",settings:{model:"opus",effort:"medium",mode:"guarded",language:"auto"}}))).toMatchObject({ok:true});
+      expect(asked.filter(c => c.op === "product.read")).toEqual([]);
+      expect(asked.find(c => c.op === "product.sprint")?.params).toMatchObject({action:"patch",sprintId:"sp",patch:{settings:{model:"opus"},taskRoute:"sprint"}});
+    });
+
 
     it("a refused Create tasks reads as the service's refusal and creates nothing here", async () => {
       const {s,p,ready} = helper({sprints:[{id:"sp",projectId:"p",planning:"ready",plan:{version:2,items:[]},materializedVersion:null,taskIds:[],conversation:[],history:[]}]});

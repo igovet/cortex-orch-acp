@@ -2899,10 +2899,10 @@ mod native_acceptance_tests {
         )
         .await
         .unwrap_or_else(|e| panic!("{}: {}", e.code, e.message));
-        // Outside a sprint the whole folder still counts.
+        // Outside a sprint the same holds: only the task's own files count (owner rule:
+        // unrelated uncommitted changes in the folder never block acceptance).
         let single = presented_with(&runtime, &draft, json!({"checkout":{"kind":"main"}})).await;
-        assert_eq!(single["reviewActions"]["accept"], false, "{single}");
-        assert_eq!(single["reviewActions"]["workspaceChanged"], true);
+        assert_eq!(single["reviewActions"]["accept"], true, "{single}");
         // A change to a file the task wrote makes it stale again.
         std::fs::write(root.join("work.txt"), "changed by a later task").unwrap();
         let changed = presented_with(&runtime, &draft, sprint).await;

@@ -653,6 +653,7 @@ fn ordered_capture(section: &str, item: &Section) -> Result<O> {
                 "engine_affinity",
                 "models",
                 "quota_windows",
+                "coordinator_models",
             ],
         ),
         "user_defaults" => {

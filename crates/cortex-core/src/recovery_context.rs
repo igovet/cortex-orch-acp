@@ -373,7 +373,7 @@ fn verification_failure(db: &Connection, task: &str) -> CoreResult<Value> {
         "note":"what the runtime's own verification found; the full verifier output is the runtime's record and not readable from a worker channel. Start from these lines instead of rerunning the whole suite."}),
     )
 }
-fn plan_summary(plan: Option<&str>) -> CoreResult<Value> {
+fn plan_summary(db: &Connection, task: &str, plan: Option<&str>) -> CoreResult<Value> {
     let Some(plan) = plan else {
         return Ok(Value::Null);
     };
@@ -382,12 +382,38 @@ fn plan_summary(plan: Option<&str>) -> CoreResult<Value> {
     let each = (VERIFICATION_BUDGET / commands.len().max(1))
         .saturating_sub(120)
         .max(80);
-    Ok(
-        json!({"representation":"node objectives, scopes and results are carried once, in current_nodes",
+    let mut summary = json!({"representation":"node objectives, scopes and results are carried once, in current_nodes",
         "node_ids":plan["tasks"].as_array().map(|t|t.iter().map(|n|n["id"].clone()).collect::<Vec<_>>()),
-        "verification":commands.iter().map(|c|clipped_value(c,each)).collect::<Vec<_>>()}),
-    )
+        "verification":commands.iter().map(|c|clipped_value(c,each)).collect::<Vec<_>>()});
+    // The goal outcomes of the plan in force, verbatim: a replacement plan must keep
+    // each with the same id and statement, so the coordinator always sees them.
+    // Statements are never clipped (admission bounds them to 32 x 1,000 characters);
+    // only deferral reasons are shortened when the list is unusually long.
+    if let Some(outcomes) = crate::lifecycle::plan::stored_outcomes(&plan) {
+        let mut outcomes: Vec<Value> = outcomes.iter().map(crate::lifecycle::plan::verbatim).collect();
+        if Value::from(outcomes.clone()).to_string().chars().count() > OUTCOME_BUDGET {
+            for o in &mut outcomes {
+                if let Some(reason) = o["deferred"].as_str().map(str::to_owned) {
+                    o["deferred"] = json!(reason.chars().take(200).collect::<String>());
+                }
+            }
+        }
+        summary["outcomes"] = json!(outcomes);
+        summary["outcomes_note"] = json!(OUTCOMES_NOTE);
+    }
+    // The verification commands the next plan owes, verbatim (never clipped): a plan that
+    // leaves one out gets it appended by the runtime, so reading them is never required.
+    let required = crate::lifecycle::plan::required_verification_view(db, task)?;
+    if !required.is_empty() {
+        summary["required_verification"] = json!(required);
+        summary["required_verification_note"] = json!(REQUIRED_VERIFICATION_NOTE);
+    }
+    Ok(summary)
 }
+/// Size above which deferral reasons in `plan_summary.outcomes` are shortened.
+const OUTCOME_BUDGET: usize = 40_000;
+const OUTCOMES_NOTE: &str = "the goal outcomes of the plan in force, verbatim. A new plan (replan, continuation or steering amendment) keeps every one with the same id: repeat its exact statement, or send only {\"id\":...} (plus deferred when no task delivers it) and the runtime fills the recorded statement. A changed statement is refused (plan_outcome_dropped); add a new outcome instead. deferred_by \"runtime\" marks an outcome the runtime kept after a plan dropped it: like every outcome it is still owed, and the task completes only when a final result reports it done or the owner closes the task as is";
+pub const REQUIRED_VERIFICATION_NOTE: &str = "verification commands (argv, verbatim) that the next plan owes: unresolved failed checks and the commands of a stage whose review approved it but reported the goal unmet, which never ran. Put them in plan.verification with the same argv; a plan that leaves one out is accepted anyway, and the runtime appends the missing ones itself (event PLAN_VERIFICATION_KEPT, reply verification_kept_by_runtime)";
 const RULE_FILE_NOTE: &str = "writes to these project rule files are refused (rule_file_protected) unless the owner's task or message names the path or the owner sends allow-write: <path>; do not plan edits to them, propose rule changes in the result instead";
 /// Budget for the host facts recorded at task start.
 const ENVIRONMENT_BUDGET: usize = 2_500;
@@ -591,7 +617,7 @@ pub fn snapshot_for(
     let mut context = json!({"task":task,"owner_epoch":owner,"state":state,"revision":revision,"original_goal":goal,
         "retained_user_messages":messages,"retained_decisions":decisions,"constraints":constraints,"questions":questions,
         "owner_write_denials":denials,"rule_file_protection":rule_files,"environment":environment(db, task)?,"verification_failure":verification_failure(db, task)?,"investigation_only":investigation_only_note(db, task)?,"obstacles":crate::lifecycle::obstacles::capsule(db, task)?,
-        "plan_summary":plan_summary(plan.as_deref())?,"current_nodes":nodes,"sources":sources,"attempts":attempts,
+        "plan_summary":plan_summary(db, task, plan.as_deref())?,"current_nodes":nodes,"sources":sources,"attempts":attempts,
         "unresolved_commands":unresolved,"command_events_not_restated":command_events,
         "access_mode":crate::access::current(db,task)?,"clipping":notices});
     if let Some(reservations) = reservations {
@@ -699,14 +725,28 @@ pub fn delivery_tx(db: &Transaction<'_>, c: &Credential) -> CoreResult<(String, 
         } else {
             "changed since then"
         };
-        return Ok((
-            id,
-            format!(
-                "{CAPSULE_REFERENCE} Task state {}, plan revision {}; the retained state has {changed}. Read the current capsule with read_capsule before relying on retained state.",
-                context["state"].as_str().unwrap_or("unknown"),
-                context["revision"],
-            ),
-        ));
+        let mut reference = format!(
+            "{CAPSULE_REFERENCE} Task state {}, plan revision {}; the retained state has {changed}. Read the current capsule with read_capsule before relying on retained state.",
+            context["state"].as_str().unwrap_or("unknown"),
+            context["revision"],
+        );
+        // The coordinator never depends on a large read to replan: the goal outcomes
+        // of the plan in force travel with every prompt, verbatim and compact.
+        if i.role == "coordinator" {
+            if let Some(outcomes) = context["plan_summary"]["outcomes"].as_array() {
+                reference.push_str(&format!(
+                    "\nplan_summary.outcomes ({OUTCOMES_NOTE}): {}",
+                    Value::from(outcomes.clone())
+                ));
+            }
+            if let Some(required) = context["plan_summary"]["required_verification"].as_array() {
+                reference.push_str(&format!(
+                    "\nplan_summary.required_verification ({REQUIRED_VERIFICATION_NOTE}): {}",
+                    Value::from(required.clone())
+                ));
+            }
+        }
+        return Ok((id, reference));
     }
     let id = format!("cd_{}", uuid::Uuid::new_v4().simple());
     db.execute("INSERT OR IGNORE INTO capsule_deliveries(id,recipient,context_generation_id,capsule_revision,task_id,assignment_ref,

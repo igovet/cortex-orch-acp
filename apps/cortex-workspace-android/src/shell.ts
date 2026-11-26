@@ -1,5 +1,6 @@
 import { createDesktopTransport } from "../../cortex-workspace-desktop/src/transport";
-import type { PhoneShell, PhoneState } from "../../../packages/workspace-ui/src/phone-shell";
+import { parseTarget, type NotificationTarget } from "../../../packages/workspace-ui/src/notification-target";
+import type { PhoneNotifications, PhoneNotificationState, PhoneShell, PhoneState } from "../../../packages/workspace-ui/src/phone-shell";
 import type { RealTransport } from "../../../packages/workspace-ui/src/port/real";
 import type { VoicePage, VoicePort } from "../../../packages/workspace-ui/src/voice-client";
 
@@ -51,12 +52,51 @@ export function createPhoneVoice(native: Pick<PhoneNative, "invoke">, now: () =>
   };
 }
 
+const machineId = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 256 && !/[\s\p{Cc}]/u.test(v);
+/** A tap the native side handed back, checked again: a machine id and a target of the closed shapes, or nothing. */
+export function parseTap(raw: unknown): { machineId: string; target: NotificationTarget } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (Object.keys(r).sort().join(",") !== "machineId,target" || !machineId(r.machineId)) return null;
+  const target = parseTarget(r.target);
+  return target ? { machineId: r.machineId, target } : null;
+}
+
+/**
+ * The phone's own notifications through the native bridge. Taps are read one at a time: the native side answers the next one when it
+ * arrives, so nothing is polled. A refused read waits before it asks again.
+ */
+export function createPhoneNotifications(native: Pick<PhoneNative, "invoke">, wait = (ms: number) => new Promise<void>(done => setTimeout(done, ms))): PhoneNotifications {
+  return {
+    set: async (enabled, words) => {
+      const reply = await native.invoke<Partial<PhoneNotificationState>>("phone_notifications", { enabled, words }).catch(error => { throw coded(error); });
+      return { enabled: reply?.enabled === true, permission: reply?.permission === "granted" ? "granted" : "denied", batteryExempt: reply?.batteryExempt === true };
+    },
+    battery: () => native.invoke<void>("phone_battery_settings").catch(error => { throw coded(error); }),
+    taps(listener) {
+      let ended = false;
+      void (async () => {
+        while (!ended) {
+          try {
+            const tap = parseTap(await native.invoke<unknown>("phone_notification_next"));
+            if (!ended && tap) listener(tap);
+            // Nothing that leads anywhere: never ask again in a tight loop.
+            else if (!ended) await wait(250);
+          } catch { if (!ended) await wait(2000); }
+        }
+      })();
+      return () => { ended = true; };
+    },
+  };
+}
+
 /** The phone's native bridge as the interface's PhoneShell. No address, key or link is kept in JavaScript. */
 export function createPhoneShell(native: PhoneNative, info: PhoneInfo): PhoneShell {
   const call = <T>(command: string, args?: Record<string, unknown>) => native.invoke<T>(command, args).catch(error => { throw coded(error); });
   const transports = new Map<string, RealTransport>();
   return {
     voice: createPhoneVoice(native),
+    notifications: createPhoneNotifications(native),
     version: info.version,
     deviceName: info.deviceName,
     state: () => call<PhoneState>("phone_state"),

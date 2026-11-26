@@ -842,6 +842,7 @@ fn journey_phase(
         // The bare Orchestration link intentionally opens the Defaults page.
         ("Orchestration", "Defaults"),
         ("Defaults", "Defaults"),
+        ("Coordinator models", "Coordinator models"),
         ("Models", "Models"),
         ("Engines and models", "Engines and models"),
         ("Project ceiling", "Project ceiling"),

@@ -258,7 +258,7 @@ pub(super) fn home(
         return Ok(());
     };
     let real_home = home.canonicalize()?;
-    if profile != Profile::Development {
+    if !profile.wide() {
         s.mount("--ro-bind", &real_home, &real_home)?;
     }
     for name in [".cache", ".npm"] {
@@ -486,7 +486,7 @@ pub(super) fn git(
     let mut writable = dirs.to_vec();
     let mut readonly = BTreeSet::new();
     let mut watched = Vec::new();
-    let development = profile == Profile::Development;
+    let development = profile.wide();
     if development {
         let mut pending: Vec<_> = dirs.iter().map(|p| p.join("modules")).collect();
         let mut count = 0;
@@ -910,7 +910,7 @@ pub(super) fn links_from(
         links.retain(|l| !private_targets.iter().any(|p| l.path.starts_with(p)));
     }
     groups.retain(|_, links| !links.is_empty());
-    let ignored = if profile == Profile::Development {
+    let ignored = if profile.wide() {
         ignored_directories(root)?
     } else {
         vec![]
@@ -941,7 +941,7 @@ pub(super) fn links_from(
             if bulky.iter().any(|p| l.path.starts_with(p)) {
                 continue;
             }
-            if profile == Profile::Development {
+            if profile.wide() {
                 detaches.push(l.clone());
             } else {
                 *by_owner.entry(l.owner.clone()).or_default() += 1;

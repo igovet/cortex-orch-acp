@@ -240,6 +240,22 @@ async fn project_config_matches_the_oracle_without_provider_and_never_mutates_au
             .await
             .unwrap();
         let expected = rebind(&case["expected"], &root, &config);
+        // The project's own MCP registry is additive to the frozen oracle: none exists in
+        // these cases, so it reads as empty with an absent revision, then leaves the compared shape.
+        let mut reply = reply;
+        if reply["ok"] == true {
+            assert_eq!(
+                reply["result"]["value"]["mcp"],
+                json!({"servers":[],"overrides":{}}),
+                "{}",
+                case["name"]
+            );
+            assert_eq!(reply["result"]["tokens"]["mcp_servers"], "absent");
+            assert_eq!(reply["result"]["value"]["revisions"]["mcp_servers"], 0);
+            reply["result"]["value"].as_object_mut().unwrap().remove("mcp");
+            reply["result"]["value"]["revisions"].as_object_mut().unwrap().remove("mcp_servers");
+            reply["result"]["tokens"].as_object_mut().unwrap().remove("mcp_servers");
+        }
         assert_eq!(reply, expected, "{}", case["name"]);
         assert_eq!(snapshot(&root), before, "project mutated: {}", case["name"]);
         assert_eq!(

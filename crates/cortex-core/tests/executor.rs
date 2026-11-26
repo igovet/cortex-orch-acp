@@ -233,3 +233,94 @@ fn deferred_writes_roll_back_alone_precede_later_jobs_and_commit_on_shutdown() {
         .unwrap();
     assert_eq!(count, 3);
 }
+/// The service unit starts the process at the lowest best-effort disk level for the task
+/// processes it runs; the store's own connection lanes still read and commit at the
+/// session default, so a busy disk cannot starve the owner's reads behind any process.
+#[cfg(target_os = "linux")]
+#[test]
+fn store_lanes_run_at_the_session_disk_priority_under_a_lowered_service() {
+    use cortex_core::io_priority;
+    std::thread::spawn(|| {
+        let lowest = (2 << 13) | 7;
+        let lowered = unsafe { libc::syscall(libc::SYS_ioprio_set, 1, 0, lowest) } == 0;
+        assert!(lowered);
+        assert_eq!(io_priority::current(), Some(lowest));
+        let p = Project::new();
+        let executor = StoreExecutor::open(p.key()).unwrap();
+        let level = |rx: tokio::sync::oneshot::Receiver<cortex_core::CoreResult<Option<i32>>>| {
+            rx.blocking_recv().unwrap().unwrap()
+        };
+        for _ in 0..4 {
+            let read = level(executor.read(|_| Ok(io_priority::current())).unwrap());
+            assert!(!io_priority::below_default(read.unwrap()), "reader lane at {read:?}");
+        }
+        let written = level(executor.write(|_| Ok(io_priority::current())).unwrap());
+        assert!(!io_priority::below_default(written.unwrap()), "writer lane at {written:?}");
+        assert_eq!(io_priority::current(), Some(lowest), "the opening thread keeps its level");
+        drop(executor);
+    })
+    .join()
+    .unwrap();
+}
+
+/// An owner control write (a task's route change) must commit promptly while a
+/// running command's monitor re-authorizes through the writer lane every 50 ms
+/// and the command itself runs for a long time: no write lock or queue slot is
+/// held across command execution.
+#[tokio::test]
+async fn owner_write_commits_within_a_bound_while_a_command_monitor_is_active() {
+    use std::time::{Duration, Instant};
+
+    let p = Project::new();
+    let executor = std::sync::Arc::new(StoreExecutor::open(p.key()).unwrap());
+    executor
+        .write(|db| {
+            db.execute("CREATE TABLE IF NOT EXISTS probe(v TEXT)", [])?;
+            Ok(())
+        })
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The monitor of a long-running command: one authority write per 50 ms.
+    let monitor = {
+        let (ex, stop) = (executor.clone(), stop.clone());
+        tokio::spawn(async move {
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                ex.write(|db| {
+                    db.query_row("SELECT count(*) FROM tasks", [], |r| r.get::<_, i64>(0))?;
+                    Ok(())
+                })
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+    };
+    // The command itself: minutes in production, 1.5 s here, never inside the writer.
+    let command = tokio::spawn(async { tokio::time::sleep(Duration::from_millis(1500)).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut slowest = Duration::ZERO;
+    for n in 0..5 {
+        let started = Instant::now();
+        executor
+            .owner_publication(move |store| {
+                store.write(|db| {
+                    db.execute("INSERT INTO probe VALUES (?)", [n.to_string()])?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        slowest = slowest.max(started.elapsed());
+        tokio::time::sleep(Duration::from_millis(60)).await;
+    }
+    assert!(!command.is_finished(), "the command was still running");
+    assert!(slowest < Duration::from_millis(100), "owner write waited {slowest:?}");
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    monitor.await.unwrap();
+    command.await.unwrap();
+}

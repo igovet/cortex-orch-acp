@@ -41,7 +41,7 @@ export function useRouting() {
     key: () => `${m().id}:${scope() ?? "machine"}:routing`, saved: () => routingFor(m(), scope()), name: () => SURFACE_LABELS.routing, where,
     revision: () => (scope() ? m().config.projects[scope()!]?.revisions?.routing : m().config.revisions.routing) ?? 0, onConflict: () => ws.demo?.touchConfig(m().id, "routing"),
     commit: (value, revision) => ws.run({ type: "save_surface", machineId: m().id, projectId: scope(), surface: "routing", value, revision: revision ?? m().config.revisions.routing }),
-    problems: v => routingProblems(v, m().config.catalogue), stays: onPages(() => m().id, ["models", "engines", "routing", "effective"]),
+    problems: v => routingProblems(v, m().config.catalogue), stays: onPages(() => m().id, ["coordinator", "models", "engines", "routing", "effective"]),
     saveNote() {
       const hidden = projectsWithRouting(m()).map(id => name(id));
       if (scope()) return `Saved on ${where()}.`;
@@ -60,17 +60,43 @@ export function useDefaults() {
     problems: defaultsProblems, stays: onPages(() => m().id, ["defaults", "policy"]), saveNote: () => saved(m().name),
   });
 }
-/** Every list and server edit is one write, so what is saved was always valid as a whole. */
+/** What one MCP write holds: the servers, and in a project the machine servers it switches on or off by name. */
+export type McpDoc = { servers: McpServer[]; overrides: Record<string, boolean> };
+/**
+ * Every list and server edit is one write, so what is saved was always valid as a whole. With a project chosen it edits that
+ * project's own registry (its own servers plus its on or off choices for machine servers) instead of the machine's. `value`
+ * and `set` are the server list in both, so the pages that edit servers need not know which one they edit.
+ */
 export function useMcp() {
-  const ws = useWs(), saved = notSaved();
-  const m = () => ws.machine();
-  return useDraft<McpServer[]>({
-    key: () => `${m().id}:mcp_servers`, saved: () => m().config.surfaces.mcp_servers, name: () => SURFACE_LABELS.mcp_servers, where: () => m().name,
-    revision: () => m().config.revisions.mcp_servers, onConflict: () => ws.demo?.touchConfig(m().id, "mcp_servers"),
-    commit: (value, revision) => ws.run({ type: "save_surface", machineId: m().id, surface: "mcp_servers", value, revision: revision ?? m().config.revisions.mcp_servers }),
-    problems: list => list.flatMap(s => mcpProblems(s, list.filter(x => x !== s), !m().config.surfaces.mcp_servers.some(o => o.name === s.name)).map(p => ({ ...p, path: `${s.name}.${p.path}` }))),
-    stays: onPages(() => m().id, ["tools"]), saveNote: () => saved(m().name),
+  const ws = useWs(), saved = notSaved(), name = useProjectName();
+  const m = () => ws.machine(), scope = () => ws.settings.scope();
+  const stored = createMemo<McpDoc>(prev => share(prev, scope()
+    ? { servers: m().config.projects[scope()!]?.mcp?.servers ?? [], overrides: m().config.projects[scope()!]?.mcp?.overrides ?? {} }
+    : { servers: m().config.surfaces.mcp_servers, overrides: {} }), { servers: [], overrides: {} });
+  const d = useDraft<McpDoc>({
+    key: () => scope() ? `${m().id}:${scope()}:mcp_servers` : `${m().id}:mcp_servers`, saved: stored, name: () => SURFACE_LABELS.mcp_servers, where: () => name(scope()) ?? m().name,
+    revision: () => (scope() ? m().config.projects[scope()!]?.revisions?.mcp_servers : m().config.revisions.mcp_servers) ?? 0, onConflict: () => ws.demo?.touchConfig(m().id, "mcp_servers"),
+    commit: (doc, revision) => scope()
+      ? ws.run({ type: "save_surface", machineId: m().id, projectId: scope(), surface: "mcp_servers", value: doc, revision: revision ?? m().config.projects[scope()!]?.revisions?.mcp_servers ?? 0 })
+      : ws.run({ type: "save_surface", machineId: m().id, surface: "mcp_servers", value: doc.servers, revision: revision ?? m().config.revisions.mcp_servers }),
+    problems: doc => doc.servers.flatMap(s => mcpProblems(s, doc.servers.filter(x => x !== s), !stored().servers.some(o => o.name === s.name)).map(p => ({ ...p, path: `${s.name}.${p.path}` }))),
+    stays: onPages(() => m().id, ["tools"]), saveNote: () => scope() ? `Saved on ${name(scope()) ?? m().name}.` : saved(m().name),
   });
+  const readOnly = useReadOnly();
+  /** Why nothing can be edited here: the machine is offline, or the chosen project's file cannot be changed. */
+  const off = () => readOnly() ?? (!scope() ? undefined : !m().config.projects[scope()!]?.mcp ? "This project's MCP settings could not be read" : m().config.projects[scope()!]!.mcp!.problem);
+  return {
+    ...d, raw: d, scope, off,
+    value: () => d.value().servers,
+    set: (servers: McpServer[]) => d.set({ ...d.value(), servers }),
+    overrides: () => d.value().overrides,
+    /** `undefined` removes the project's choice, so the machine's own setting applies again. */
+    setOverride(server: string, on: boolean | undefined) {
+      const next = { ...d.value().overrides };
+      if (on === undefined) delete next[server]; else next[server] = on;
+      d.set({ ...d.value(), overrides: next });
+    },
+  };
 }
 export function Bar<T>(props: { d: Draft<T>; shadow?: boolean }) {
   const ws = useWs();

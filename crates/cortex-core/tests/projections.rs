@@ -392,12 +392,12 @@ fn contradictory_owner_is_unknown_and_never_asserts_quiescence() {
     assert!(t.warnings.contains(&"contradictory_evidence".into()));
 }
 #[test]
-fn filtered_history_pages_bind_session_and_never_expose_private_bodies() {
+fn filtered_history_pages_bind_session_and_never_expose_read_bodies_or_thoughts() {
     let (p, s) = setup();
     let updates = vec![
         json!({"sessionUpdate":"agent_thought_chunk","content":{"text":"PRIVATE THOUGHT"}}),
         json!({"sessionUpdate":"tool_call","toolCallId":"read","title":"project_read","kind":"read","rawInput":{"path":"README.md"},"rawOutput":"PRIVATE READ"}),
-        json!({"sessionUpdate":"tool_call","toolCallId":"report","title":"draft_write","kind":"edit","rawInput":{"content":"PRIVATE REPORT"},"content":[{"type":"diff","newText":"PRIVATE DIFF"}]}),
+        json!({"sessionUpdate":"tool_call","toolCallId":"report","title":"draft_write","kind":"edit","rawInput":{"content":"REPORT BODY"},"rawOutput":"REPORT RESULT","content":[{"type":"diff","newText":"PRIVATE DIFF"}]}),
         json!({"sessionUpdate":"tool_call","toolCallId":"cmd","title":"Run","kind":"execute","rawInput":{"argv":["git","status"]}}),
         json!({"sessionUpdate":"tool_call_update","toolCallId":"cmd","status":"completed","rawInput":{},"rawOutput":"Selected command output"}),
     ];
@@ -434,6 +434,8 @@ fn filtered_history_pages_bind_session_and_never_expose_private_bodies() {
     let text = serde_json::to_string(&rows).unwrap();
     assert!(!text.contains("PRIVATE"));
     assert!(text.contains("README.md"));
+    // A non-file call carries its real input and result; a file read keeps its link only.
+    assert!(text.contains("REPORT BODY") && text.contains("REPORT RESULT"));
     assert!(text.contains("git status"));
     assert!(text.contains("Selected command output"));
     assert_eq!(rows.len(), 4);
@@ -549,4 +551,26 @@ fn finish_chosen_on_the_stop_question_reads_as_the_owner_closing_the_task() {
     assert!(get(&r)
         .warnings
         .contains(&"owner_resolved_without_certification".into()));
+}
+
+/// A project with no task yet still answers its board: an empty page at a committed watermark. A client must treat that as
+/// a real read of an empty project (it is not a placeholder), so Inbox and Home can say "nothing" instead of loading forever.
+#[test]
+fn a_project_with_no_task_answers_an_empty_board_read() {
+    let p = Project::new();
+    let s = p.open();
+    s.write(|db| {
+        db.execute("INSERT INTO workspace_projects VALUES ('p',?,'owner','2026-11-11T00:00:00Z',1)", [p.0.to_str()])?;
+        Ok(())
+    })
+    .unwrap();
+    let result = reader(&p)
+        .query(CoreQuery::TasksBoard(Target { id: "p".into() }))
+        .unwrap();
+    let QueryReply::Board(page) = result.data else {
+        panic!("not a board")
+    };
+    assert!(page.items.is_empty());
+    assert!(page.next_cursor.is_none());
+    assert_eq!(page.high_watermark, result.high_watermark);
 }

@@ -219,6 +219,17 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
   const label = () => same() ? `Confirm commit to ${target()}` : pending() ? `Accept v${t().result?.version} and ${how() === "squash" ? `merge into ${target()}` : "create PR"}` : how() === "squash" ? `Confirm merge into ${target()}` : ws.store.mode === "demo" ? "Push and create PR" : "Create PR (no push)";
   const noGh = () => !same() && how() === "pr" && gh() !== "yes";
   const blocked = () => noGh() ? (gh() === "no" ? "GitHub CLI (gh) is unavailable." : ghWait()) : why();
+  // The task's own result moved on after acceptance: the way forward is offered here, not only described.
+  const [stale, setStale] = createSignal(false);
+  const rerunnable = () => (t().result?.checks ?? []).filter(c => c.kind !== "manual" && c.kind !== "policy" && c.rerunnable === true && !!c.command?.length && !c.running);
+  const recheck = (e: MouseEvent) => {
+    const r = t().result, todo = rerunnable();
+    if (!r || !todo.length) { seeChecks(); return; }
+    void ws.busy((async () => {
+      for (const c of todo) { const sent = await ws.run({ type: "rerun_check", taskId: t().id, digest: r.digest, checkIndex: r.checks.indexOf(c) }); if (!sent.ok) return; }
+      setStale(false);
+    })(), e.currentTarget as HTMLElement);
+  };
   let working = false;
   const confirm = (e: MouseEvent) => {
     if (working || why()) return;
@@ -237,6 +248,7 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
       }
       const common = { type: "integrate" as const, taskId: t().id, confirmed: true, digest, targetBranch: destination, now: ws.store.clock() };
       const done = await ws.run({ ...common, ...fields });
+      setStale(!done.ok && (done.outcome === "workspace_drift" || done.outcome === "stale_result"));
       if (done.ok) props.onClose();
     })().finally(() => { working = false; }), control);
   };
@@ -301,6 +313,7 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
         </div>
       </Show>
     </div>
+    <Show when={stale()}><div class="dlg-b ws-stale" role="group" aria-label="Result out of date"><span>The result changed after it was accepted. Rerun the checks, then accept the new result here.</span> <button class="btn btn-line btn-sm" data-action="rerun-checks" {...ws.needs("rerun_check")} onClick={recheck}>{rerunnable().length ? "Rerun checks" : "Review the new result"}</button></div></Show>
     <RequestStatus text={ws.store.pendingTask("accept_result", props.d.taskId) ? REQUESTING.accept_result : undefined} />
     <ActionBar place="dialog" hint={same() ? "Nothing is committed until you confirm." : pending() ? "Nothing is accepted or merged until you confirm." : "Nothing happens until you confirm."}>
       <button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Cancel</button>

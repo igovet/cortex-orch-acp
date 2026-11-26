@@ -102,7 +102,7 @@ fn a_review_with_open_items_is_refused_and_named_dead_ends_go_to_automatic_recov
         // exactly that part, and the assignment stays the reviewer's.
         let mut result = json!({"verdict":"INCOMPLETE","report_ref":"first","checks":[],
             "not_covered":[{"item":"README.md","reason":"ran out of time"},
-                {"item":"docs/install.md","blocker":"missing_access","reason":"the install host is not reachable from the review"}]});
+                {"item":"docs/install.md","blocker":"missing_access","reason":"gh auth status shows GitHub is not logged in, so the review cannot reach the pull request"}]});
         assert_eq!(completion::outstanding_tx(db, &task, "first", "review", &result)?,
             Some(("review_coverage_unfinished", vec!["README.md".to_owned()])));
         // An invented category is no dead end either.
@@ -174,7 +174,7 @@ fn automatic_policy_is_host_admitted_and_bound_to_start_replay() {
     let mut model = test_plan();
     model["executionPolicy"] = json!("manual");
     assert!(s
-        .write(|db| plan::accept_tx(db, &task, "coordinator", "fake-policy", &model))
+        .write(|db| plan::accept_tx(db, &task, "coordinator", "fake-policy", &support::with_goal(&model)))
         .is_err());
     assert_eq!(event_count(&s, &task, "AUTOMATIC_POLICY_BOUND"), 1);
     drop(s);
@@ -254,17 +254,20 @@ fn blocked_review_and_failed_verification_continue_every_task_without_asking() {
             .unwrap();
         let mut replacement = test_plan();
         replacement["verification"] = json!([["cargo", "check"]]);
-        let dropped = s.write(|db| plan::accept_tx(db, &task, "coordinator", "skip", &replacement));
-        // A failed check is never dropped from the repair plan.
-        assert_eq!(
-            dropped.unwrap_err().code(),
-            if enabled {
-                "automatic_required_check_missing"
-            } else {
-                "verification_failed_check_missing"
-            }
-        );
-        s.write(|db| plan::accept_tx(db, &task, "coordinator", "repair", &test_plan()))
+        // A failed check is never dropped from the repair plan: the runtime appends it.
+        let kept = s.write(|db| plan::accept_tx(db, &task, "coordinator", "skip", &support::with_goal(&replacement))).unwrap();
+        assert_eq!(kept["verification_kept_by_runtime"][0]["argv"], json!(["cargo", "test"]));
+        assert_eq!(kept["verification_kept_by_runtime"][0]["reason"], "failed_check");
+        assert_eq!(event_count(&s, &task, "PLAN_VERIFICATION_KEPT"), 1);
+        let stored: String = s.read(|db| Ok(db.query_row("SELECT plan_json FROM runtime_tasks WHERE task_id=?", [&task], |r| r.get(0))?)).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(stored["verification"], json!([["cargo", "check"], ["cargo", "test"]]));
+        s.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id=?", [&task])?;
+            Ok(())
+        })
+        .unwrap();
+        s.write(|db| plan::accept_tx(db, &task, "coordinator", "repair", &support::with_goal(&test_plan())))
             .unwrap();
         // The resumed rung gets its own direct repairs again before the next change of
         // approach: one more failed check returns to planning, not to a continuation.
@@ -311,7 +314,7 @@ fn owner_rework_fences_prior_cycle_failed_checks_but_not_current_ones() {
     let mut changed = test_plan();
     changed["verification"] = json!([["cargo", "check"]]);
     // The failure before the rework does not bind the first plan of the new cycle.
-    s.write(|db| plan::accept_tx(db, &task, "coordinator", "rework", &changed))
+    s.write(|db| plan::accept_tx(db, &task, "coordinator", "rework", &support::with_goal(&changed)))
         .unwrap();
     // A failure of the current cycle still cannot be omitted.
     failed(&s);
@@ -322,8 +325,8 @@ fn owner_rework_fences_prior_cycle_failed_checks_but_not_current_ones() {
     .unwrap();
     let mut other = test_plan();
     other["verification"] = json!([["cargo", "fmt"]]);
-    let dropped = s.write(|db| plan::accept_tx(db, &task, "coordinator", "repair", &other));
-    assert_eq!(dropped.unwrap_err().code(), "automatic_required_check_missing");
+    let kept = s.write(|db| plan::accept_tx(db, &task, "coordinator", "repair", &support::with_goal(&other))).unwrap();
+    assert_eq!(kept["verification_kept_by_runtime"][0]["argv"], json!(["cargo", "test"]));
 }
 
 /// No continuation cap: every stop continues on the strategy ladder (repair, escalated
@@ -338,7 +341,7 @@ fn the_strategy_ladder_continues_without_a_cap_and_consults_on_its_rung() {
         let (_p, s, task, _) = start(enabled);
         for n in 1..=4i64 {
             s.write(|db| {
-                domain::stop_tx(db, &task, "coordinator_no_progress_limit")?;
+                domain::stop_tx(db, &task, "worker_failed")?;
                 domain::stop_tx(db, &task, "duplicate_stop")?;
                 let owed = automatic::owed(db, &task)?.unwrap();
                 assert!(!owed.external);
@@ -352,7 +355,7 @@ fn the_strategy_ladder_continues_without_a_cap_and_consults_on_its_rung() {
                 assert_eq!(automatic::escalated(db, &task)?, n >= 2);
                 automatic::resume_tx(db, &task, owed.event)?.unwrap();
                 assert!(automatic::resume_tx(db, &task, owed.event)?.is_none());
-                plan::accept_tx(db, &task, "coordinator", &format!("plan-{n}"), &test_plan())?;
+                plan::accept_tx(db, &task, "coordinator", &format!("plan-{n}"), &support::with_goal(&test_plan()))?;
                 Ok(())
             })
             .unwrap();
@@ -366,7 +369,7 @@ fn the_strategy_ladder_continues_without_a_cap_and_consults_on_its_rung() {
         let question = s
             .write(|db| {
                 assert_eq!(
-                    domain::stop_tx(db, &task, "coordinator_no_progress_limit")?,
+                    domain::stop_tx(db, &task, "worker_failed")?,
                     TaskState::WaitingUser
                 );
                 assert!(automatic::owed(db, &task)?.is_none());
@@ -391,9 +394,9 @@ fn the_strategy_ladder_continues_without_a_cap_and_consults_on_its_rung() {
             let owed = automatic::owed(db, &task)?.unwrap();
             assert_eq!(owed.evidence["owner_choice"], "retry_now");
             automatic::resume_tx(db, &task, owed.event)?.unwrap();
-            plan::accept_tx(db, &task, "coordinator", "plan-5", &test_plan())?;
+            plan::accept_tx(db, &task, "coordinator", "plan-5", &support::with_goal(&test_plan()))?;
             // The resumed attempt was the new round's `repair`: the next stop escalates.
-            domain::stop_tx(db, &task, "coordinator_no_progress_limit")?;
+            domain::stop_tx(db, &task, "worker_failed")?;
             assert_eq!(
                 automatic::owed(db, &task)?.unwrap().evidence["strategy"],
                 "escalate_route"
@@ -417,6 +420,38 @@ fn the_strategy_ladder_continues_without_a_cap_and_consults_on_its_rung() {
 
 /// A degenerate model turn never runs on the same model again: its continuation is at
 /// least an escalated rung and moves the coordinator to another model.
+/// A coordinator that keeps ending turns without a plan, a result or a question has
+/// already burned its turns on every rung: the first sighting repairs, the second moves
+/// the coordinator to another model (`reassign`), and the third is the owner's question
+/// (`LOOP_BROKEN` action `ask_owner`), never the two further rungs of the full ladder.
+#[test]
+fn a_silent_coordinator_takes_two_rungs_and_then_the_owner_is_asked() {
+    let (_p, s, task, _) = start(true);
+    for (n, strategy) in [(1i64, "repair"), (2, "reassign")] {
+        s.write(|db| {
+            domain::stop_tx(db, &task, "coordinator_no_progress_limit")?;
+            let owed = automatic::owed(db, &task)?.unwrap();
+            assert_eq!(owed.evidence["strategy"], strategy, "sighting {n}");
+            assert_eq!(owed.evidence["switch_coordinator"], strategy == "reassign");
+            automatic::resume_tx(db, &task, owed.event)?.unwrap();
+            plan::accept_tx(db, &task, "coordinator", &format!("plan-{n}"), &support::with_goal(&test_plan()))?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    s.write(|db| {
+        assert_eq!(
+            domain::stop_tx(db, &task, "coordinator_no_progress_limit")?,
+            TaskState::WaitingUser
+        );
+        assert!(automatic::owed(db, &task)?.is_none());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(event_count(&s, &task, "LOOP_BROKEN"), 1);
+    assert_eq!(support::count(&s, "pending_questions"), 1);
+}
+
 #[test]
 fn a_degenerate_turn_continues_on_another_model_instead_of_pausing() {
     let (_p, s, task, _) = start(true);
@@ -427,7 +462,7 @@ fn a_degenerate_turn_continues_on_another_model_instead_of_pausing() {
         assert_eq!(owed.evidence["switch_coordinator"], true);
         assert!(automatic::escalated(db, &task)?);
         automatic::resume_tx(db, &task, owed.event)?.unwrap();
-        plan::accept_tx(db, &task, "coordinator", "after-degenerate", &test_plan())?;
+        plan::accept_tx(db, &task, "coordinator", "after-degenerate", &support::with_goal(&test_plan()))?;
         domain::stop_tx(db, &task, "native_turn_degenerate")?;
         let owed = automatic::owed(db, &task)?.unwrap();
         assert_eq!(owed.evidence["count"], 2);
@@ -513,7 +548,7 @@ fn a_real_work_question_is_kept_and_replans_change_approach_without_a_limit() {
             assert_eq!(result["decision"], "senior_consultation");
             assert_eq!(result["strategy"], "consult");
             domain::settle_recovery_tx(db, &task, TaskState::Planning)?;
-            let accepted = plan::accept_tx(db, &task, "coordinator", "consulted", &test_plan())?;
+            let accepted = plan::accept_tx(db, &task, "coordinator", "consulted", &support::with_goal(&test_plan()))?;
             assert_eq!(accepted["state"], "PLAN_READY");
             Ok(())
         })
@@ -809,13 +844,13 @@ fn a_repeated_unreachable_review_item_takes_the_reassign_rung() {
 }
 
 /// A review whose only gaps are items its tools cannot reach, with nothing to repair,
-/// records them as disclosed unverified limits and continues to verification.
+/// gets one follow-up review narrowed to them; it never continues to verification.
 #[test]
-fn a_tool_unavailable_review_dead_end_becomes_a_disclosed_limit() {
+fn a_tool_unavailable_review_dead_end_gets_a_narrow_follow_up_review_not_verification() {
     for enabled in [false, true] {
         let (_p, s, task, _) = start(enabled);
         s.write(|db| {
-            db.execute("UPDATE runtime_tasks SET state='REVIEWING',revision=1,plan_json=? WHERE task_id=?",
+            db.execute("UPDATE runtime_tasks SET state='REVIEWING',revision=1,review_cycle=1,plan_json=? WHERE task_id=?",
                 (test_plan().to_string(), &task))?;
             let result = json!({"verdict":"INCOMPLETE","report_ref":"r","checks":[],
                 "project_digest":"a".repeat(64),
@@ -823,28 +858,22 @@ fn a_tool_unavailable_review_dead_end_becomes_a_disclosed_limit() {
             db.execute("INSERT INTO runtime_nodes VALUES (?,1,'review','worker-code-reviewer','Review','[]','[]','review','completed','r',?)",
                 (&task, result.to_string()))?;
             review::advance_tx(db, &task)?;
-            assert_eq!(domain::task_tx(db, &task)?.0, TaskState::Verifying);
+            // Never verification from an INCOMPLETE review: one follow-up review on
+            // another route covers the unreachable part.
+            assert_eq!(domain::task_tx(db, &task)?.0, TaskState::Reviewing);
+            let pending: String = db.query_row(
+                "SELECT objective FROM runtime_nodes WHERE task_id=? AND stage='review' AND status='pending'",
+                [&task],
+                |r| r.get(0),
+            )?;
+            assert!(pending.contains("assets/font.woff2"), "{pending}");
             Ok(())
         })
         .unwrap();
-        assert_eq!(event_count(&s, &task, "REVIEW_LIMIT_DISCLOSED"), 1);
+        assert_eq!(event_count(&s, &task, "REVIEW_LIMIT_DISCLOSED"), 0);
+        assert_eq!(event_count(&s, &task, "REVIEW_RERUN"), 1);
         assert_eq!(event_count(&s, &task, "AUTOMATIC_CONTINUATION"), 0);
         assert_eq!(support::count(&s, "pending_questions"), 0);
-        let result: Value = s
-            .read(|db| {
-                Ok(serde_json::from_str(&db.query_row(
-                    "SELECT result_json FROM runtime_nodes WHERE task_id=? AND node_id='review'",
-                    [&task],
-                    |r| r.get::<_, String>(0),
-                )?)?)
-            })
-            .unwrap();
-        assert_eq!(result["review_limit_disclosed"], true);
-        assert_eq!(result["checks"][0]["outcome"], "unverified");
-        assert!(result["checks"][0]["name"]
-            .as_str()
-            .unwrap()
-            .contains("assets/font.woff2"));
     }
 }
 

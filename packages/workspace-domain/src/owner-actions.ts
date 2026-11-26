@@ -8,9 +8,11 @@ export type OwnerActionTerminal = { command: string; argv: string[] };
 export type OwnerActionToken = { label: string; hint: string };
 export type OwnerAction = {
   actionId: string; projectId: string; projectName: string | null; taskId: string | null; task: string | null;
-  kind: "access"; service: string; title: string; detail: string;
+  kind: "access" | "mcp_signin"; service: string; title: string; detail: string;
   terminal: OwnerActionTerminal | null; token: OwnerActionToken | null; recheck: boolean;
   openedAt: number; checkedAt: number | null; lastStatus: string | null;
+  /** A machine MCP sign-in card: whether the machine holds a sign-in address to open (the address itself never comes here). */
+  signIn: { available: boolean } | null;
 };
 export type OwnerActions = { actions: OwnerAction[]; phoneTokens: boolean };
 export type OwnerActionVerb = "recheck" | "terminal" | "dismiss";
@@ -39,7 +41,7 @@ export function readOwnerActions(raw: unknown): OwnerActions {
   if (!Array.isArray(r.actions) || typeof r.phoneTokens !== "boolean") throw bad("actions or phoneTokens");
   const actions = r.actions.map((x: unknown): OwnerAction => {
     const a = (x ?? {}) as Record<string, unknown>;
-    if (!isStr(a.actionId) || !ACTION_ID.test(a.actionId) || !isStr(a.projectId) || !a.projectId || a.kind !== "access"
+    if (!isStr(a.actionId) || !ACTION_ID.test(a.actionId) || !isStr(a.projectId) || !a.projectId || (a.kind !== "access" && a.kind !== "mcp_signin")
       || !isStr(a.service) || !a.service || !isStr(a.title) || !isStr(a.detail) || typeof a.recheck !== "boolean" || !isNum(a.openedAt))
       throw bad("action");
     let terminal: OwnerActionTerminal | null = null;
@@ -56,8 +58,9 @@ export function readOwnerActions(raw: unknown): OwnerActions {
     }
     return {
       actionId: a.actionId, projectId: a.projectId, projectName: orNull(a.projectName), taskId: orNull(a.taskId), task: orNull(a.task),
-      kind: "access", service: a.service, title: a.title, detail: a.detail, terminal, token, recheck: a.recheck,
+      kind: a.kind, service: a.service, title: a.title, detail: a.detail, terminal, token, recheck: a.recheck,
       openedAt: a.openedAt, checkedAt: isNum(a.checkedAt) ? a.checkedAt : null, lastStatus: orNull(a.lastStatus),
+      signIn: a.signIn && typeof (a.signIn as Record<string, unknown>).available === "boolean" ? { available: (a.signIn as { available: boolean }).available } : null,
     };
   });
   return { actions, phoneTokens: r.phoneTokens };

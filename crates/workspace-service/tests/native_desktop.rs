@@ -1443,7 +1443,8 @@ async fn queued_message_journey() {
 async fn degenerate_turn_journey(scenario: &str) {
     let f = Fixture::new();
     let refusal = scenario == "usage-refusal-twice";
-    let twice = scenario == "degenerate-twice" || refusal;
+    let tool_loop = scenario == "tool-loop-twice";
+    let twice = scenario == "degenerate-twice" || refusal || tool_loop;
     let worker = scenario == "degenerate-worker";
     std::fs::write(f.0.join("project/scenario.txt"), scenario).unwrap();
     let service = Service::bind_native(f.config(), Arc::new(Routes))
@@ -1500,15 +1501,26 @@ async fn degenerate_turn_journey(scenario: &str) {
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("{scenario}: the degenerate journey did not settle"));
+    .unwrap_or_else(|_| {
+        let dump: Vec<String> = store.read(|db| {
+            let mut q = db.prepare("SELECT type,substr(payload_json,1,160) FROM runtime_events ORDER BY id DESC LIMIT 25")?;
+            let rows = q.query_map([], |r| Ok(format!("{} {}", r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }).unwrap();
+        panic!("{scenario}: the degenerate journey did not settle\n{}", dump.join("\n"))
+    });
     let (rule, role) = match scenario {
         "degenerate-twice" => ("repetition", "coordinator"),
         "usage-refusal-twice" => ("refusal", "coordinator"),
         "degenerate-worker" => ("length", "worker"),
+        "tool-loop-twice" => ("tool_loop", "coordinator"),
         _ => ("echo", "coordinator"),
     };
     // A streamed trip keeps only the rule, message id and size, never the text.
-    let detail = if refusal {
+    let detail = if tool_loop {
+        // A tool-loop trip names the tool and the count, never arguments or text.
+        "AND json_extract(payload_json,'$.tool')='synthesis_submit' AND json_extract(payload_json,'$.count')>=4"
+    } else if refusal {
         "AND json_extract(payload_json,'$.chars')=0"
     } else {
         "AND json_extract(payload_json,'$.message_id') LIKE 'degenerate-%'
@@ -2533,7 +2545,15 @@ async fn positive_owner_control(action: &str) {
             .to_string(),
         "native_execution_binding_invalid"
     );
+    let asked = std::time::Instant::now();
     let receipt = service.control_execution(payload.clone()).await.unwrap();
+    if action == "task_settings" {
+        // Changing the route of a task whose turn is still running records the intent and answers at once: it never
+        // waits for the turn, and the route applies from the next use.
+        assert!(asked.elapsed() < Duration::from_secs(5), "task_settings waited {:?}", asked.elapsed());
+        let activation: String = store.read(|db| Ok(db.query_row("SELECT json_extract(payload_json,'$.activation') FROM runtime_events WHERE type='NATIVE_TASK_SETTINGS' ORDER BY id DESC LIMIT 1", [], |r| r.get(0))?)).unwrap();
+        assert_eq!(activation, "next_use");
+    }
     assert_eq!(receipt["outcome"], "recorded");
     assert_eq!(receipt["native"], true);
     assert_eq!(
@@ -2895,7 +2915,12 @@ async fn worker_route() {
         "SELECT count(*) FROM delegation_provisioning WHERE role_id=? AND engine_session_ref IS NOT NULL", [role], |r| r.get::<_, i64>(0))?)).unwrap()
     };
     tokio::time::timeout(Duration::from_secs(25), async {
-        while roles("worker-backend-dev") == 0 || roles("worker-code-reviewer") == 0 {
+        // Provisioning records the session ref before the engine confirms `configure`:
+        // also wait for both worker sessions' configured events.
+        while roles("worker-backend-dev") == 0
+            || roles("worker-code-reviewer") == 0
+            || configured().iter().filter(|s| s.0 == "worker").count() < 2
+        {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
@@ -3527,7 +3552,9 @@ async fn binary_journey(scenario: &str) {
     write(
         config.join("cortex/routing.json"),
         json!({"model_policy_version":2,"enabled":{(engine):["fixture-model"]},
-        "models":{(engine):{"auto":["fixture-model"],"tiers":{"fixture-model":["light","standard","deep"]}}},
+        "models":{(engine):{"auto":["fixture-model"],"tiers":{"fixture-model":["light","standard","deep"]},
+            // The mandatory review is strict to review-listed models.
+            "policy":{"fixture-model":{"preferred_for":["review"]}}}},
         "pin":{"*":format!("{engine}/fixture-model")}}),
     );
     let mut route = json!({"engine":engine,"connection_id":"cn_fixture","model":"fixture-model","supported_parameters":[]});
@@ -4540,7 +4567,7 @@ async fn worktree_fixture_peer() {
                 let mut stdin = relay.stdin.take().unwrap();
                 let mut stdout = BufReader::new(relay.stdout.take().unwrap());
                 let mut observed = true;
-                for (index, call) in calls.into_iter().enumerate() {
+                for (index, call) in calls.into_iter().map(fixture_defaults).enumerate() {
                     if write_frame(&mut stdin, &json!({"jsonrpc":"2.0","id":index+1,
                         "method":"tools/call","params":call})).await.is_err() {
                         observed = false;
@@ -4935,6 +4962,17 @@ fn main() {
                 "degenerate coordinator and worker turns retried once in a fresh session; the tasks completed"
             );
         }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(60),
+                degenerate_turn_journey("tool-loop-twice"),
+            )
+            .await
+            .expect("tool-loop-twice journey timeout");
+        });
+        println!(
+            "a coordinator turn repeating one refused call is ended, recorded (tool_loop) and continued like a degenerate turn"
+        );
         println!(
             "degenerate coordinator turns: cancelled, recorded, retried once in a fresh session, then continued on an escalated rung (no owner stop)"
         );
@@ -4960,6 +4998,15 @@ fn main() {
         }
     });
     if mode == "saved-settings-probe" {
+        return;
+    }
+    if mode == "task-settings-probe" {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            tokio::time::timeout(Duration::from_secs(30), positive_owner_control("task_settings"))
+                .await
+                .expect("running-task settings timeout");
+        });
+        println!("running task settings: recorded for the next use without waiting for the turn");
         return;
     }
     tokio::runtime::Runtime::new()
@@ -5794,4 +5841,35 @@ async fn answer_attachments_journey() {
     .await;
     service.stop().await.unwrap();
     let _ = runner.await;
+}
+
+/// A fixture tool call with the goal-outcome fields the advertised contract requires
+/// filled in when the fixture leaves them out (one outcome `goal`, delivered and done).
+fn fixture_defaults(mut call: Value) -> Value {
+    let name = call["name"].as_str().unwrap_or_default().to_owned();
+    let arguments = &mut call["arguments"];
+    match name.as_str() {
+        "plan_submit" if arguments["plan"]["outcomes"].is_null() => {
+            arguments["plan"]["outcomes"] = json!([{"id":"goal","statement":"The requested work is done"}]);
+            for task in arguments["plan"]["tasks"].as_array_mut().into_iter().flatten() {
+                if task["delivers"].is_null() {
+                    task["delivers"] = json!(["goal"]);
+                }
+            }
+        }
+        "synthesis_submit" | "answer_submit" if arguments["outcomes"].is_null() => {
+            arguments["outcomes"] = json!([{"id":"goal","status":"done","evidence":"fixture"}]);
+        }
+        "result_submit" if arguments["verdict"].is_null() && arguments["objective_status"].is_null() => {
+            arguments["objective_status"] = json!("complete");
+        }
+        "result_submit"
+            if arguments["verdict"].as_str().is_some_and(|v| v.eq_ignore_ascii_case("APPROVE"))
+                && arguments["goal_coverage"].is_null() =>
+        {
+            arguments["goal_coverage"] = json!([{"id":"goal","delivered":true}]);
+        }
+        _ => {}
+    }
+    call
 }

@@ -41,7 +41,7 @@ it("keeps the startup screen until the machine's models and efforts are in, then
   expect(picker.join("|")).not.toMatch(/Unavailable|Loading/);
 });
 
-it("retries a failed settings read on its own and waits no longer than the bound, saying what is missing", async () => {
+it("retries a slow settings read on its own and waits no longer than the bound, never calling the slowness a failure", async () => {
   vi.useFakeTimers();
   const s = mount(() => Promise.reject(new Error("machine_busy")));
   const store = createRoot(d => { dispose = d; return createWorkspaceStore(s.port); });
@@ -49,12 +49,22 @@ it("retries a failed settings read on its own and waits no longer than the bound
   expect(store.ready()).toBe(true);
   expect(store.loaded()).toBe(false);
   expect(store.machineLoaded()).toBe(false);
-  expect(store.machineIssue()).toBe("machine_busy");
+  expect(store.machineIssue()).toBeNull();
   await vi.advanceTimersByTimeAsync(MACHINE_WAIT_MS);
-  // Waiting has run out: the interface may open, but the settings are still honestly absent.
+  // Waiting has run out: the interface may open, with the settings still honestly absent (they say they are loading).
   expect(store.loaded()).toBe(true);
   expect(store.machineLoaded()).toBe(false);
-  expect(store.machineIssue()).toBe("machine_busy");
+  expect(store.machineIssue()).toBeNull();
+});
+
+it("names a settings read that genuinely failed, and still retries it on its own", async () => {
+  vi.useFakeTimers();
+  const s = mount(() => Promise.reject(new Error("settings_unreadable")));
+  const store = createRoot(d => { dispose = d; return createWorkspaceStore(s.port); });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(store.machineLoaded()).toBe(false);
+  expect(store.machineIssue()).toBe("settings_unreadable");
+  expect(store.loaded()).toBe(true);
 });
 
 it("fills the settings in when a retry succeeds, without waiting for another refresh", async () => {
@@ -81,7 +91,7 @@ it("asks for the machine's settings beside the task reads, not after them", asyn
   const store = createRoot(d => { dispose = d; return createWorkspaceStore(s.port); });
   await flush();
   // A slow repository read is still pending, and the settings are already in.
-  expect(asked).toEqual(["capabilities.get", "machine.facts", "project.snapshot"]);
+  expect(asked).toEqual(["capabilities.get", "machine.facts", "project.snapshot", "project.facts"]);
   expect(store.machineLoaded()).toBe(true);
   expect(store.state().options.models).toHaveLength(1);
   expect(store.loaded()).toBe(false);

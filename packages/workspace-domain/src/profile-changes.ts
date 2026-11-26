@@ -7,7 +7,7 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 const both = <T,>(a: Record<string, T>, b: Record<string, T>) => [...new Set([...Object.keys(a), ...Object.keys(b)])];
 const added = <T,>(from: readonly T[], to: readonly T[]) => to.filter(x => !from.includes(x));
 
-const POLICY: Record<keyof ModelPolicy, string> = { effortFloor: "effort floor", maxEffort: "max effort", effortLadder: "effort ladder", alsoStandardFor: "stretch work", preferredFor: "preferred work", preferredWhen: "prefer when", requestNames: "request names" };
+const POLICY: Record<keyof ModelPolicy, string> = { effortFloor: "effort floor", maxEffort: "max effort", effortLadder: "effort ladder", alsoStandardFor: "stretch work", preferredFor: "preferred work", preferredWhen: "prefer when", requestNames: "request names", tierEfforts: "tier efforts" };
 const LIMITS: Record<keyof Ceiling, string> = { allowedRoutes: "allowed routes", allowedConnections: "allowed connections", allowedRecipients: "data recipients", attempts: "fallback attempts", failureClasses: "fallback failures", targetRoutes: "fallback routes", budget: "model run budget", consent: "fallback consent", stored: "stored limits" };
 const roleName = (id: string) => id === "*" ? "all roles" : ROLE_CATALOG.find(r => r.id === id)?.label ?? id;
 

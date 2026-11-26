@@ -433,6 +433,30 @@ fn trivial_script(script: &str) -> bool {
     }
     trivial_command(&argv)
 }
+/// A `grep`/`rg` run in quiet mode (`-q`, `--quiet`, `--silent`, or a short-option
+/// cluster with `q`) with a pattern: it prints nothing and exits nonzero when the
+/// pattern is absent, so its status is an assertion. Help, version and file-listing
+/// requests never are.
+fn quiet_search(args: &[String]) -> bool {
+    let mut quiet = false;
+    let mut operand = false;
+    for a in args {
+        match a.as_str() {
+            "--help" | "--version" | "-V" | "--files" | "--type-list" => return false,
+            "--quiet" | "--silent" => quiet = true,
+            "-e" | "--regexp" | "-f" | "--file" => operand = true,
+            s if s.starts_with("--") => {}
+            s if s.starts_with('-') && s.len() > 1 => {
+                // Only the flag letters before an attached value (`-qe alpha`, `-m1`).
+                let flags: String = s[1..].chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+                quiet |= flags.contains('q');
+                operand |= flags.ends_with('e') || flags.ends_with('f');
+            }
+            _ => operand = true,
+        }
+    }
+    quiet && operand
+}
 /// Whether a command cannot verify a check: its exit status is not proven to come
 /// from a nontrivial command (see `command_words`, `trivial_script`). A script file
 /// is an ordinary project check, not an inline program.
@@ -440,11 +464,20 @@ pub fn trivial_command(argv: &[String]) -> bool {
     let w = command_words(argv);
     let Some(head) = w.first() else { return true };
     let program = base(head);
+    // A file test or a quiet search asserts: its exit status is the check itself
+    // (`test -f notes/a.txt`, `[ -s out ]`, `grep -q alpha notes/a.txt`). A bare
+    // `test`, a printing search (`rg needle src`) or a help/version request does not.
+    match program {
+        "test" => return w.len() < 2,
+        "[" => return w.len() < 3 || w.last().map(String::as_str) != Some("]"),
+        "grep" | "egrep" | "fgrep" | "rg" => return !quiet_search(&w[1..]),
+        _ => {}
+    }
     if [
-        ":", "[", "ag", "basename", "cat", "cd", "date", "df", "dirname", "du", "echo", "env",
-        "export", "fd", "file", "find", "grep", "head", "hostname", "id", "less", "ls", "more",
-        "printenv", "printf", "pwd", "readlink", "realpath", "rg", "set", "sleep", "sort", "stat",
-        "tail", "tee", "test", "tr", "tree", "true", "type", "uname", "uniq", "wc", "which",
+        ":", "ag", "basename", "cat", "cd", "date", "df", "dirname", "du", "echo", "env",
+        "export", "fd", "file", "find", "head", "hostname", "id", "less", "ls", "more",
+        "printenv", "printf", "pwd", "readlink", "realpath", "set", "sleep", "sort", "stat",
+        "tail", "tee", "tr", "tree", "true", "type", "uname", "uniq", "wc", "which",
         "whoami", "yes", "exit", "return", "",
     ]
     .contains(&program)
@@ -534,6 +567,43 @@ mod evidence_policy_tests {
                 "{argv:?}"
             );
         }
+    }
+    /// 2026-11-25 Dev qualification: a plan for "create notes/a.txt containing alpha"
+    /// was refused because `test -f` and `grep -q` counted as checking nothing. A file
+    /// test or a quiet search with a pattern asserts; printing searches do not.
+    #[test]
+    fn file_tests_and_quiet_searches_are_assertions() {
+        let words = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for argv in [
+            &["test", "-f", "notes/a.txt"][..],
+            &["/usr/bin/test", "-s", "out"],
+            &["[", "-d", "dist", "]"],
+            &["grep", "-q", "alpha", "notes/a.txt"],
+            &["grep", "-qx", "alpha", "notes/a.txt"],
+            &["grep", "--quiet", "-F", "alpha", "notes/a.txt"],
+            &["grep", "-qe", "alpha", "notes/a.txt"],
+            &["timeout", "10", "rg", "-q", "BETA", "notes/b.txt"],
+        ] {
+            assert!(!trivial_command(&words(argv)), "{argv:?}");
+            // The inline-script grammar has no unquoted brackets.
+            if argv[0] != "[" {
+                let script = argv.join(" ");
+                assert!(!trivial_command(&words(&["sh", "-c", &script])), "{script}");
+            }
+        }
+        for argv in [
+            &["test"][..],
+            &["[", "-f", "x"],
+            &["[", "]"],
+            &["grep", "alpha", "notes/a.txt"],
+            &["grep", "-q"],
+            &["grep", "-q", "--version"],
+            &["rg", "-q", "--files"],
+            &["grep", "-c", "alpha", "notes/a.txt"],
+        ] {
+            assert!(trivial_command(&words(argv)), "{argv:?}");
+        }
+        assert!(trivial_command(&words(&["sh", "-c", "grep -q a f || true"])));
     }
     /// Owner stores 2026-11: AGENTS.md requires `umask 022`, which pushed workers
     /// into `bash -c "umask 022; ..."`, and every such check was kept unverified as
@@ -737,7 +807,7 @@ fn schedule_review_tx(
         return Ok(());
     }
     db.execute("INSERT INTO runtime_nodes(task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status)
-        VALUES (?,?,?,'worker-code-reviewer','Independently review the objective, implementation and retained reports. Use the review packet change_boundary: inspect task-written paths across plans and relevant baseline changes. Check the current bytes when a write hash differs or is unavailable. Report any material coverage gap.',?,'[\"**\"]','review','pending')",
+        VALUES (?,?,?,'worker-code-reviewer','Independently review the objective, implementation and retained reports against the original goal: the review packet goal lists it verbatim with the owner messages and the plan outcomes, and an approved stage that leaves an outcome undelivered is not the goal. Use the review packet change_boundary: inspect task-written paths across plans and relevant baseline changes. Check the current bytes when a write hash differs or is unavailable. Report any material coverage gap.',?,'[\"**\"]','review','pending')",
         (task,revision,format!("_review_{cycle}"),json!(nodes.iter().map(|n|&n.0).collect::<Vec<_>>()).to_string()))?;
     // The reviewer routes as review work at the highest complexity of the work it
     // reviews; it names no provider or model (independence is chosen by routing).
@@ -1371,7 +1441,41 @@ pub fn outstanding_tx(
         return Ok(Some(("assignment_blocker_required", Vec::new())));
     }
     if stage != "review" {
+        // A worker whose objective is only partly done names what remains, and may
+        // submit that only at a dead end: as a failed assignment with its blocker,
+        // which returns the remaining work to the coordinator's next plan.
+        if result["objective_status"] == "partial" {
+            let remaining: Vec<String> = result["remaining"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| r.as_str().filter(|r| !r.trim().is_empty()).map(str::to_owned))
+                .collect();
+            if remaining.is_empty() || result["assignment_outcome"] != "failed" {
+                return Ok(Some(("objective_partial_blocker_required", remaining)));
+            }
+        }
         return Ok(None);
+    }
+    // An approval reports, for every goal outcome of the plan, whether the reviewed
+    // work delivers it (`goal_coverage`). A sprint plan review judges a plan.
+    if result["verdict"]
+        .as_str()
+        .is_some_and(|v| v.eq_ignore_ascii_case("APPROVE"))
+        && !super::sprint_planning::is_plan_review(
+            &db.query_row(
+                "SELECT node_id FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
+                (task, assignment),
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_default(),
+        )
+    {
+        let missing = goal_coverage_missing(db, task, result)?;
+        if !missing.is_empty() {
+            return Ok(Some(("review_goal_coverage_required", missing)));
+        }
     }
     // An incomplete review names what it did not cover; only that verdict does.
     let incomplete = result["verdict"]
@@ -1409,6 +1513,54 @@ pub fn outstanding_tx(
     Ok(None)
 }
 
+/// The plan's goal outcomes an approval's `goal_coverage` does not answer exactly
+/// once (and ids it names that the plan does not have). Empty for a plan accepted
+/// before plans named outcomes.
+pub fn goal_coverage_missing(
+    db: &rusqlite::Connection,
+    task: &str,
+    result: &Value,
+) -> CoreResult<Vec<String>> {
+    let Some(planned) = plan::task_outcomes(db, task)? else {
+        return Ok(Vec::new());
+    };
+    let coverage = result["goal_coverage"].as_array().cloned().unwrap_or_default();
+    let mut missing = Vec::new();
+    for outcome in &planned {
+        let answers = coverage
+            .iter()
+            .filter(|c| c["id"] == outcome["id"] && c["delivered"].is_boolean())
+            .count();
+        if answers != 1 {
+            missing.push(format!(
+                "{}: {}",
+                outcome["id"].as_str().unwrap_or(""),
+                outcome["statement"].as_str().unwrap_or("").chars().take(200).collect::<String>()
+            ));
+        }
+    }
+    for c in &coverage {
+        if !planned.iter().any(|o| o["id"] == c["id"]) {
+            missing.push(format!("{} (not an outcome of the plan)", c["id"].as_str().unwrap_or("?")));
+        }
+    }
+    Ok(missing)
+}
+/// The plan outcomes an approval reports as not delivered.
+pub fn undelivered_outcomes(db: &rusqlite::Connection, task: &str, result: &Value) -> CoreResult<Vec<Value>> {
+    let Some(planned) = plan::task_outcomes(db, task)? else {
+        return Ok(Vec::new());
+    };
+    Ok(planned
+        .into_iter()
+        .filter(|o| {
+            !result["goal_coverage"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|g| g["id"] == o["id"] && g["delivered"] == true))
+        })
+        .map(|o| json!({"id":o["id"],"statement":o["statement"]}))
+        .collect())
+}
 fn review_independence_tx(
     db: &Transaction<'_>,
     task: &str,
@@ -1563,7 +1715,10 @@ pub fn record_result_tx(
     let requests_changes = stage == "review"
         && ["REQUEST_CHANGES", "BLOCK", "INCOMPLETE"]
             .contains(&result["verdict"].as_str().unwrap_or(""));
+    // A partly done objective (only with its dead end, `outstanding_tx`) is a node
+    // that did not succeed: the coordinator plans what remains.
     let failed = result["assignment_outcome"] == "failed"
+        || result["objective_status"] == "partial"
         || (!requests_changes
             && result["checks"].as_array().is_some_and(|c| {
                 c.iter()
@@ -1686,7 +1841,8 @@ pub(super) fn review_binding_tx(db: &Transaction<'_>, task: &str) -> CoreResult<
     let review: Option<(String, Option<String>)> = db
         .query_row(
             "SELECT status,result_json FROM runtime_nodes
-        WHERE task_id=? AND revision=? AND stage='review' ORDER BY rowid DESC LIMIT 1",
+        WHERE task_id=? AND revision=? AND stage='review'
+        AND substr(node_id,1,24)!='_sprint_revision_review_' ORDER BY rowid DESC LIMIT 1",
             (task, revision),
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -1694,10 +1850,13 @@ pub(super) fn review_binding_tx(db: &Transaction<'_>, task: &str) -> CoreResult<
     if let Some((status, result)) = review {
         let v: Value = serde_json::from_str(&result.unwrap_or_default())
             .map_err(|_| CoreError::Refused("completion_review_missing"))?;
-        // An INCOMPLETE review whose only gaps are items its tools cannot reach binds
-        // like an approval once the runtime disclosed those gaps as unverified limits
-        // (`REVIEW_LIMIT_DISCLOSED`); the final result must still disclose them.
-        let disclosed = v["verdict"] == "INCOMPLETE" && v["review_limit_disclosed"] == true;
+        // An INCOMPLETE review never binds by itself. Only the owner's own decision to
+        // close its unreachable parts as is (an answered owner question about exactly
+        // those parts) lets it bind like an approval, with the parts disclosed as
+        // unverified limits (`REVIEW_LIMIT_DISCLOSED`, `owner_authorized`).
+        let disclosed = v["verdict"] == "INCOMPLETE"
+            && v["review_limit_disclosed"] == true
+            && v["review_limit_owner_authorized"] == true;
         if status != "completed" || !(v["verdict"] == "APPROVE" || disclosed) {
             return refuse("completion_review_missing");
         }
@@ -2638,7 +2797,7 @@ pub(super) fn unresolved_commands(failure: &Value, planned: &Value) -> Vec<Value
 /// verification_submit may still be acknowledged through the existing owner
 /// question route, but answering a retry prompt never waives an undropped check.
 fn outstanding_commands(
-    db: &Transaction<'_>,
+    db: &rusqlite::Connection,
     task: &str,
     include_retained: bool,
 ) -> CoreResult<Vec<Value>> {
@@ -2713,28 +2872,12 @@ pub fn dropped_failures_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<V
     outstanding_commands(db, task, false)
 }
 
-pub(super) fn require_repair_commands(
-    db: &Transaction<'_>,
-    task: &str,
-    proposed: &Value,
-) -> CoreResult<()> {
-    let commands = proposed
-        .as_array()
-        .ok_or(CoreError::Refused("verification_commands_missing"))?;
-    if unaccepted_commands(db, task)?
-        .iter()
-        .any(|argv| !commands.contains(argv))
-    {
-        return refuse("verification_failed_check_missing");
-    }
-    Ok(())
-}
 /// Failed or dropped verification commands still owed, less those the owner accepted
 /// as disclosed unverified limits after a loop question
 /// (`automatic::owner_accepted_commands`): a repair plan may leave those out and
 /// they do not hold completion, but they stay gaps of the final result
 /// (`reconciliation::gaps` reads their `LOOP_BROKEN.limits`) and are never a pass.
-fn unaccepted_commands(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<Value>> {
+pub(super) fn unaccepted_commands(db: &rusqlite::Connection, task: &str) -> CoreResult<Vec<Value>> {
     let accepted = super::automatic::owner_accepted_commands(db, task)?;
     Ok(outstanding_commands(db, task, true)?
         .into_iter()
@@ -2812,6 +2955,26 @@ pub fn complete_tx(
     if !matches!(state, TaskState::Reconciling | TaskState::AnswerReady) {
         return refuse("completion_not_expected");
     }
+    // The original goal decides completion, not only the stage the plan reached:
+    // the final result reports every goal outcome done (or, on the answer path, not
+    // done by the owner's own close-as-is decision).
+    let source: Option<String> = db
+        .query_row(
+            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type IN (?,?) ORDER BY id DESC LIMIT 1",
+            if state == TaskState::AnswerReady {
+                (task, "ANSWER_SUBMITTED", "ANSWER_SUBMITTED")
+            } else {
+                (task, "SYNTHESIS_SUBMITTED", "SYNTHESIS_RUNTIME_COMPOSED")
+            },
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(source) = source {
+        let payload: Value = serde_json::from_str(&source)?;
+        if !super::reconciliation::goal_met(db, task, &payload)? {
+            return refuse("completion_goal_not_met");
+        }
+    }
     let (blocker, synthesis): (Option<String>, Option<String>) = db.query_row(
         "SELECT blocker,synthesis FROM runtime_tasks WHERE task_id=?",
         [task],
@@ -2841,6 +3004,10 @@ pub fn complete_tx(
             .any(|w| ["open", "ready", "resuming"].contains(&w["status"].as_str().unwrap_or("")))
     {
         return refuse("completion_pending_input");
+    }
+    // An owner change of a sprint member waits for its sprint impact verdict.
+    if super::sprint_impact::pending(db, task)?.is_some() {
+        return refuse("sprint_impact_pending");
     }
     let attempts=db.prepare("SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'")?
         .query_map([task],|r|r.get::<_,Option<String>>(0))?.collect::<Result<Vec<_>,_>>()?;

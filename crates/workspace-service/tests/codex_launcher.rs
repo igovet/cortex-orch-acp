@@ -341,6 +341,14 @@ fn golden_comparisons(root: &Path, binary: &Path, native: &Path) -> usize {
                     "native App Server trust layer missing"
                 );
                 args.drain(n - 3..n - 1);
+                // The Cortex worker permission profile layers precede the trust layer.
+                let n = args.len();
+                assert!(n >= 9, "worker permission profile layers missing");
+                let profile: Vec<&str> = args[n - 9..n - 1].iter().map(|a| a.as_str().unwrap()).collect();
+                assert_eq!(profile[0..2], ["-c", "default_permissions=\":workspace\""], "worker permission profile layers missing");
+                assert!(profile[3].starts_with("permissions.cortex-workspace={extends=\":workspace\""));
+                assert_eq!(profile[4..], ["-c", "approval_policy=\"on-request\"", "-c", "approvals_reviewer=\"user\""]);
+                args.drain(n - 9..n - 1);
             }
         }
         let what = format!("{case} {argv:?} {}", entry["locale"]);

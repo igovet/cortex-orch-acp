@@ -144,3 +144,63 @@ impl ReadReply {
         Ok(())
     }
 }
+
+/// Whether a `machine.call` operation is an owner read: it answers the owner's screen,
+/// starts no task process and changes no saved state. The service runs an owner read
+/// until it completes (bounded only by its lane's concurrency), and a client waits for
+/// its answer: a slow read is never turned into a timeout or a "busy" refusal.
+pub fn owner_read_op(op: &str, params: &serde_json::Value) -> bool {
+    matches!(
+        op,
+        "overview"
+            | "project.config.read"
+            | "config.read"
+            | "repo.snapshot"
+            | "repo.context"
+            | "repo.file"
+            | "repo.file.lease.status"
+            | "repo.locate"
+            | "repo.list"
+            | "repo.skills"
+            | "product.read"
+            | "product.facts"
+            | "product.board"
+            | "workers"
+            | "command.output"
+    ) || (op == "product.sprint" && params["action"] == "live_graph")
+}
+
+/// Whether a service request is a read a client waits for without a deadline: the board
+/// and history projections, a workspace query (no command payload), the project and
+/// owner-prompt lists, and every `machine.call` owner read ([`owner_read_op`]).
+pub fn read_request(method: &str, params: &serde_json::Value) -> bool {
+    match method {
+        "native.query" | "native.board" | "projects.list" | "projects.status"
+        | "service.capabilities" | "askpass.list" | "owner_actions.list" | "remote.status" => true,
+        "workspace" => params.get("payload").is_none(),
+        "machine.call" => params["op"]
+            .as_str()
+            .is_some_and(|op| owner_read_op(op, &params["params"])),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod read_request_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn reads_are_classified_and_actions_are_not() {
+        assert!(read_request("machine.call", &json!({"op":"product.facts","projectId":"p","params":{}})));
+        assert!(read_request("machine.call", &json!({"op":"workers","params":{"workerId":"coordinator:x"}})));
+        assert!(read_request("machine.call", &json!({"op":"product.sprint","params":{"action":"live_graph"}})));
+        assert!(read_request("workspace", &json!({"operation":"history.page"})));
+        assert!(read_request("native.board", &json!({})));
+        assert!(!read_request("machine.call", &json!({"op":"product.sprint","params":{"action":"delete"}})));
+        assert!(!read_request("machine.call", &json!({"op":"product.task","params":{"action":"close"}})));
+        assert!(!read_request("machine.call", &json!({"op":"git","params":{}})));
+        assert!(!read_request("workspace", &json!({"operation":"tasks.start","payload":{}})));
+        assert!(!read_request("executions.prompt", &json!({})));
+        assert!(!read_request("service.status", &json!({})));
+    }
+}

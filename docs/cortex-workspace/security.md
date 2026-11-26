@@ -1,6 +1,6 @@
 # Security design
 
-**Status: security design. The local desktop slice implements the local trust boundary below; its different-OS-user check is unverified. Remote access is built and checked only by no-paid automated tests (see its section below); it is not qualified, and nothing was verified on a physical device or through a relay. Push is planned and not implemented.**
+**Status: security design. The local desktop slice implements the local trust boundary below; its different-OS-user check is unverified. Remote access is built and checked only by no-paid automated tests (see its section below); it is not qualified, and nothing was verified on a physical device or through a relay. FCM push is planned and not implemented; the phone raises its own notifications without it ([SECURITY.md](../../SECURITY.md#phone-notifications)).**
 
 Pair a device with an expiring single-use enrollment secret and explicit local confirmation, binding a device key to a limited grant. Keep secrets in OS-protected storage; never log tokens, source contents, prompts or private keys. Revoke immediately, close active sessions and reject future operations. Authenticate both peers independently of relay location. Apply authorization to every request; remote terminal and Git carry real execution authority.
 
@@ -97,4 +97,4 @@ Honest limits:
 - The allowlist and pairing flow are not qualified: no review by a second party, no device run, no relay run.
 - Nothing restricts which networks can send UDP to the bound port; protection is the iroh handshake and the paired-device check.
 - The phone has no app lock. Anyone holding an unlocked paired phone has the phone's authority. A revoke at the computer is the remedy.
-- The push gateway does not exist; the push rules in the design above remain a plan.
+- The push gateway does not exist; the push rules in the design above remain a plan. Phone notifications need none: the phone reads its paired machines' owner moments over the encrypted connection (`notifications.subscribe`, read-only, no parameters) and raises them itself ([SECURITY.md](../../SECURITY.md#phone-notifications)).

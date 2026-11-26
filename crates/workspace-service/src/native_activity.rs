@@ -17,33 +17,7 @@ fn redacted(s: &str, limit: usize) -> String {
     crate::machine::redact_display_text(&clipped(s, limit))
 }
 const PATHS: [&str; 4] = ["file_path", "filePath", "path", "absolutePath"];
-const QUERIES: [&str; 3] = ["query", "pattern", "q"];
 const REFS: [&str; 5] = ["report_id", "report_ref", "draft_id", "source_ref", "skill"];
-const EDIT_TEXT: [&str; 7] = [
-    "old_string",
-    "oldString",
-    "oldText",
-    "new_string",
-    "newString",
-    "newText",
-    "content",
-];
-/// Report, draft and result bodies are private: never an edit diff in display history.
-const PRIVATE: [&str; 4] = [
-    "create_draft",
-    "draft_write",
-    "write_report",
-    "result_submit",
-];
-const EDITS: [&str; 7] = [
-    "project_edit",
-    "project_write",
-    "outside_write",
-    "edit",
-    "write",
-    "multiedit",
-    "apply_patch",
-];
 const KINDS: [&str; 10] = [
     "read",
     "edit",
@@ -56,66 +30,55 @@ const KINDS: [&str; 10] = [
     "switch_mode",
     "other",
 ];
-fn operation(title: &str) -> String {
-    let name = title.rsplit("__").next().unwrap_or("");
-    name.rsplit('.').next().unwrap_or("").trim().to_lowercase()
+/// Longest text kept for one argument or one result; longer text ends in a clip marker.
+const TEXT_LIMIT: usize = 16_000;
+/// Argument names whose values are credentials (whole words, see `secret_name`): their values never reach display history.
+fn secret_key(key: &str) -> bool {
+    crate::machine::secret_name(key)
 }
-/// The few arguments a row names (path, command, query, skill or report) and,
-/// for a non-private edit, its replacement text. Every other key is dropped.
-fn arguments(raw: &Value, edit: bool) -> Value {
-    let mut out = json!({});
-    let Some(raw) = raw.as_object() else {
-        return out;
-    };
-    let strings = |v: &Value| {
-        v.as_array()
-            .filter(|a| a.len() <= 256 && a.iter().all(Value::is_string))
-            .map(|a| {
-                a.iter()
-                    .map(|s| json!(redacted(s.as_str().unwrap_or(""), 4000)))
-                    .collect::<Vec<_>>()
-            })
-    };
-    for (key, value) in raw {
-        let key = key.as_str();
-        let picked = if PATHS.contains(&key) || REFS.contains(&key) {
-            value.as_str().map(|s| json!(clipped(s, 4096)))
-        } else if matches!(key, "command" | "cmd" | "argv") || QUERIES.contains(&key) {
-            value
-                .as_str()
-                .map(|s| json!(redacted(s, 4000)))
-                .or_else(|| strings(value).map(Value::from))
-        } else if edit && EDIT_TEXT.contains(&key) {
-            value.as_str().map(|s| json!(redacted(s, 16_000)))
-        } else if edit && key == "edits" {
-            value.as_array().map(|a| {
-                json!(a
-                    .iter()
-                    .take(64)
-                    .filter_map(Value::as_object)
-                    .map(|e| {
-                        let mut one = json!({});
-                        for k in ["old_string", "new_string"] {
-                            if let Some(s) = e.get(k).and_then(Value::as_str) {
-                                one[k] = json!(redacted(s, 16_000));
-                            }
-                        }
-                        one
-                    })
-                    .collect::<Vec<_>>())
-            })
-        } else {
-            None
-        };
-        if let Some(v) = picked {
-            out[key] = v;
+/// One argument value as the engine sent it: bounded in depth, width and text, with
+/// credential-looking text and the value of a credential-named key redacted. Nothing
+/// else is dropped, so a row shows the call's real input.
+fn value(v: &Value, key: Option<&str>, depth: usize) -> Value {
+    if key.is_some_and(secret_key) && !matches!(v, Value::Number(_) | Value::Bool(_) | Value::Null)
+    {
+        return json!("[REDACTED]");
+    }
+    match v {
+        Value::String(s) if key.is_some_and(|k| PATHS.contains(&k) || REFS.contains(&k)) => {
+            json!(clipped(s, 4096))
         }
+        Value::String(s) => json!(redacted(s, TEXT_LIMIT)),
+        _ if depth >= 8 => json!("[Content clipped]"),
+        Value::Array(a) => Value::Array(
+            a.iter()
+                .take(256)
+                .map(|e| value(e, None, depth + 1))
+                .collect(),
+        ),
+        Value::Object(m) => Value::Object(
+            m.iter()
+                .take(128)
+                .map(|(k, e)| (k.clone(), value(e, Some(k), depth + 1)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+fn arguments(raw: &Value) -> Value {
+    if !raw.is_object() {
+        return json!({});
+    }
+    let out = value(raw, None, 0);
+    // A whole input past the display bound is kept as its clipped text, never dropped.
+    if out.to_string().len() > 4 * TEXT_LIMIT {
+        return json!({"input": redacted(&out.to_string(), TEXT_LIMIT)});
     }
     out
 }
-/// The selected input in the shape the engine sent it: plain arguments, a JSON
+/// The input in the shape the engine sent it: plain arguments, a JSON
 /// string of them, an `{input}` wrapper or an MCP `{server, tool, arguments}` call.
-fn input(raw: &Value, edit: bool) -> Option<Value> {
+fn input(raw: &Value) -> Option<Value> {
     let parsed;
     let raw = match raw.as_str() {
         Some(s) => {
@@ -129,17 +92,70 @@ fn input(raw: &Value, edit: bool) -> Option<Value> {
         raw["tool"].as_str(),
         raw["arguments"].is_object(),
     ) {
-        json!({"server":clipped(server, 256),"tool":clipped(tool, 256),"arguments":arguments(&raw["arguments"], edit)})
+        json!({"server":clipped(server, 256),"tool":clipped(tool, 256),"arguments":arguments(&raw["arguments"])})
     } else if raw["input"].is_object() {
-        json!({"input":arguments(&raw["input"], edit)})
+        json!({"input":arguments(&raw["input"])})
     } else {
-        arguments(raw, edit)
+        arguments(raw)
     };
     let empty = out.as_object().is_some_and(|m| m.is_empty())
         || out
             .get("input")
             .is_some_and(|v| v.as_object().is_some_and(|m| m.is_empty()));
     (!empty).then_some(out)
+}
+/// The text a result carries, in the shapes both engines send: a plain string, text
+/// blocks (`content`, `result.content`) or a structured object, never a diff or a terminal handle.
+fn output_text(v: &Value, depth: usize) -> Option<String> {
+    if depth > 6 {
+        return None;
+    }
+    if let Some(s) = v.as_str() {
+        return Some(s.to_owned());
+    }
+    if let Some(a) = v.as_array() {
+        let parts: Vec<String> = a
+            .iter()
+            .take(64)
+            .filter(|b| b["type"] != "diff" && b["type"] != "terminal")
+            .filter_map(|b| output_text(b, depth + 1))
+            .filter(|s| !s.is_empty())
+            .collect();
+        return (!parts.is_empty()).then(|| parts.join("\n"));
+    }
+    if !v.is_object() {
+        return None;
+    }
+    for key in [
+        "content",
+        "text",
+        "output",
+        "stdout",
+        "formatted_output",
+        "result",
+    ] {
+        if let Some(t) = v.get(key).and_then(|c| output_text(c, depth + 1)) {
+            return Some(t);
+        }
+    }
+    // A structured result (an MCP `structuredContent`, an error object) reads as its JSON.
+    for key in ["structuredContent", "error"] {
+        if !v[key].is_null() {
+            return Some(unfenced(&v[key].to_string()).to_owned());
+        }
+    }
+    None
+}
+/// The call's result as display text: bounded and credential-redacted like an input.
+fn result_text(update: &Value) -> Option<String> {
+    let raw = &update["rawOutput"];
+    let text = output_text(raw, 0)
+        .filter(|t| !t.is_empty())
+        .or_else(|| output_text(&update["content"], 0).filter(|t| !t.is_empty()))
+        .or_else(|| {
+            (raw.is_object() && !raw.as_object().unwrap().is_empty()).then(|| raw.to_string())
+        })?;
+    Some(redacted(unfenced(&text), TEXT_LIMIT))
 }
 /// A code fence an engine wraps an error text in (claude-agent-acp sends
 /// "```\n…\n```"), removed so the text reads as written.
@@ -213,8 +229,9 @@ fn failure(update: &Value, cortex: bool) -> Option<String> {
         })?;
     Some(redacted(message.trim(), 1000))
 }
-/// What a row shows of one tool update: its kind, input selections, file
-/// locations and, for a non-private edit, the engine's own diff blocks.
+/// What a row shows of one tool update: its kind, its input, its result, file
+/// locations and the engine's own diff blocks. Every text is bounded and
+/// credential-redacted; no call is hidden as a whole.
 /// `prior` is the title and kind of the call's retained announcement: an engine
 /// (claude-agent-acp) sends the input and result in later untitled updates.
 fn selected(update: &Value, safe: &mut Value, prior: &Value) {
@@ -222,22 +239,16 @@ fn selected(update: &Value, safe: &mut Value, prior: &Value) {
     if let Some(kind) = own {
         safe["kind"] = json!(kind);
     }
-    let kind = own.or_else(|| prior["kind"].as_str().filter(|k| KINDS.contains(k)));
-    // Edit text and diffs need the call's title, its own or the one retained for
-    // it: an untitled call could belong to a private report or draft call.
     let title = update["title"].as_str().or_else(|| prior["title"].as_str());
-    let operation = operation(title.unwrap_or(""));
-    let private = title.is_none() || PRIVATE.contains(&operation.as_str());
-    let edit = !private && (kind == Some("edit") || EDITS.contains(&operation.as_str()));
-    if !private {
-        let cortex =
-            title.is_some_and(|t| t.contains("mcp__cortex__") || t.contains("mcp.cortex."));
-        if let Some(reason) = failure(update, cortex) {
-            safe["failure"] = json!(reason);
-        }
+    let cortex = title.is_some_and(|t| t.contains("mcp__cortex__") || t.contains("mcp.cortex."));
+    if let Some(reason) = failure(update, cortex) {
+        safe["failure"] = json!(reason);
     }
-    if let Some(raw) = update.get("rawInput").and_then(|v| input(v, edit)) {
+    if let Some(raw) = update.get("rawInput").and_then(input) {
         safe["rawInput"] = raw;
+    }
+    if let Some(text) = result_text(update) {
+        safe["rawOutput"] = json!(text);
     }
     if let Some(a) = update["locations"].as_array() {
         let locations = a
@@ -255,9 +266,6 @@ fn selected(update: &Value, safe: &mut Value, prior: &Value) {
         if !locations.is_empty() {
             safe["locations"] = json!(locations);
         }
-    }
-    if private {
-        return;
     }
     if let Some(a) = update["content"].as_array() {
         // Only diff blocks: text and terminal content (read bodies, outputs) stay out.
@@ -416,12 +424,15 @@ pub(crate) async fn record(
                     &engine_session,
                     &Value::Null,
                     Some((text, engine_id)),
-                ).map(|_| ())
+                )
+                .map(|_| ())
             })?;
             Ok(())
         }
         Some(Display::Update(_)) => executor
-            .write(move |db| record_tx(db, &credential, &engine_session, &params, None).map(|_| ()))?
+            .write(move |db| {
+                record_tx(db, &credential, &engine_session, &params, None).map(|_| ())
+            })?
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))?,
     }
@@ -796,10 +807,16 @@ mod tests {
         let wrap = |u| json!({"sessionId":"s","update":u});
         assert!(display(&wrap(json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"private"}})), "s","a","r",&json!({})).unwrap().is_none());
         let item = display(&wrap(json!({"sessionUpdate":"tool_call","toolCallId":"c","title":"Read",
-            "status":"completed","rawInput":{"secret":"private"},"rawOutput":"private","content":[{"text":"private"}]})), "s","a","r",&json!({})).unwrap().unwrap();
+            "status":"completed","rawInput":{"secret":"hush","note":"shown"},"rawOutput":"shown result","content":[{"text":"shown"}]})), "s","a","r",&json!({})).unwrap().unwrap();
         let Display::Update(v) = item else { panic!() };
         assert_eq!(v["toolCallId"], "a:c");
-        assert!(!v.to_string().contains("private"));
+        assert_eq!(
+            v["rawInput"],
+            json!({"secret":"[REDACTED]","note":"shown"}),
+            "only a credential-named value is masked"
+        );
+        assert_eq!(v["rawOutput"], "shown result");
+        assert!(!v.to_string().contains("hush"));
         assert!(display(&wrap(json!({})), "other", "a", "r", &json!({})).is_err());
         let Display::Message(text, _) = display(&wrap(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"😀".repeat(16_001)}})),"s","a","r",&json!({})).unwrap().unwrap() else { panic!() };
         assert!(text.ends_with("[Content clipped]"));
@@ -811,32 +828,32 @@ mod tests {
         vec![
             json!({"sessionUpdate":"tool_call","toolCallId":"read","status":"pending","title":"mcp__cortex__project_read","kind":"other",
                 "rawInput":{"path":"src/app.ts","offset":1,"limit":40,"line_numbers":true},
-                "content":[{"type":"content","content":{"type":"text","text":"PRIVATE READ BODY"}}]}),
-            json!({"sessionUpdate":"tool_call_update","toolCallId":"read","status":"completed","rawOutput":"PRIVATE READ BODY",
-                "content":[{"type":"content","content":{"type":"text","text":"PRIVATE READ BODY"}}]}),
+                "content":[{"type":"content","content":{"type":"text","text":"VISIBLE READ BODY"}}]}),
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"read","status":"completed","rawOutput":"VISIBLE READ BODY",
+                "content":[{"type":"content","content":{"type":"text","text":"VISIBLE READ BODY"}}]}),
             json!({"sessionUpdate":"tool_call","toolCallId":"skill","status":"pending","title":"mcp__cortex__read_skill","kind":"other","rawInput":{"skill":"orchestrator-protocol"}}),
             json!({"sessionUpdate":"tool_call","toolCallId":"plan","status":"pending","title":"mcp__cortex__plan_submit","kind":"other",
-                "rawInput":{"plan":{"nodes":[{"goal":"PRIVATE PLAN"}]},"request_key":"PRIVATE-KEY"}}),
+                "rawInput":{"plan":{"nodes":[{"goal":"VISIBLE PLAN"}]},"request_key":"VISIBLE-KEY"}}),
             json!({"sessionUpdate":"tool_call","toolCallId":"edit","status":"pending","title":"mcp__cortex__project_edit","kind":"other",
-                "rawInput":{"path":"src/a.ts","edits":[{"old_string":"let a = 1;","new_string":"let a = 2;","replace_all":false}],"request_key":"PRIVATE-KEY"}}),
+                "rawInput":{"path":"src/a.ts","edits":[{"old_string":"let a = 1;","new_string":"let a = 2;","replace_all":false}],"request_key":"VISIBLE-KEY"}}),
             json!({"sessionUpdate":"tool_call","toolCallId":"write","status":"pending","title":"mcp__cortex__project_write","kind":"other",
-                "rawInput":{"path":"notes.md","content":"hello\nworld","expected_sha256":"PRIVATE-HASH","request_key":"PRIVATE-KEY"}}),
+                "rawInput":{"path":"notes.md","content":"hello\nworld","expected_sha256":"VISIBLE-HASH","request_key":"VISIBLE-KEY"}}),
             json!({"sessionUpdate":"tool_call","toolCallId":"cmd","status":"pending","title":"mcp__cortex__command_run","kind":"other",
-                "rawInput":{"argv":["git","status","--short"],"request_key":"PRIVATE-KEY","timeout_seconds":30}}),
+                "rawInput":{"argv":["git","status","--short"],"request_key":"VISIBLE-KEY","timeout_seconds":30}}),
             json!({"sessionUpdate":"tool_call","toolCallId":"bash","status":"pending","title":"curl -H 'Authorization: Bearer abcdefgh12345678' https://x.test","kind":"execute",
-                "rawInput":{"command":"curl -H 'Authorization: Bearer abcdefgh12345678' https://x.test","description":"PRIVATE DESCRIPTION"}}),
+                "rawInput":{"command":"curl -H 'Authorization: Bearer abcdefgh12345678' https://x.test","description":"VISIBLE DESCRIPTION"}}),
             json!({"sessionUpdate":"tool_call","toolCallId":"native-edit","status":"pending","title":"Edit src/b.ts","kind":"edit",
                 "rawInput":{"file_path":"/p/src/b.ts","old_string":"old line","new_string":"new line"},
                 "locations":[{"path":"/p/src/b.ts","line":3}],
                 "content":[{"type":"diff","path":"/p/src/b.ts","oldText":"old line","newText":"new line"}]}),
-            json!({"sessionUpdate":"tool_call","toolCallId":"grep","status":"pending","title":"grep \"TODO\" src","kind":"search","rawInput":{"pattern":"TODO","path":"src","output_mode":"PRIVATE MODE"}}),
+            json!({"sessionUpdate":"tool_call","toolCallId":"grep","status":"pending","title":"grep \"TODO\" src","kind":"search","rawInput":{"pattern":"TODO","path":"src","output_mode":"VISIBLE MODE"}}),
             json!({"sessionUpdate":"tool_call","toolCallId":"codex-read","status":"pending","title":"mcp.cortex.project_read","kind":"other",
-                "rawInput":{"server":"cortex","tool":"project_read","arguments":{"path":"src/c.ts","PRIVATE":"x"}}}),
+                "rawInput":{"server":"cortex","tool":"project_read","arguments":{"path":"src/c.ts","VISIBLE":"x"}}}),
             json!({"sessionUpdate":"tool_call","toolCallId":"report","status":"pending","title":"mcp__cortex__draft_write","kind":"edit",
-                "rawInput":{"draft_id":"d_1","content":"PRIVATE REPORT","request_key":"PRIVATE-KEY"},
-                "content":[{"type":"diff","path":"report.md","newText":"PRIVATE REPORT"}]}),
-            json!({"sessionUpdate":"tool_call_update","toolCallId":"report","content":[{"type":"diff","path":"report.md","newText":"PRIVATE REPORT"}],
-                "rawInput":{"content":"PRIVATE REPORT"}}),
+                "rawInput":{"draft_id":"d_1","content":"VISIBLE REPORT","request_key":"VISIBLE-KEY"},
+                "content":[{"type":"diff","path":"report.md","newText":"VISIBLE REPORT"}]}),
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"report","content":[{"type":"diff","path":"report.md","newText":"VISIBLE REPORT"}],
+                "rawInput":{"content":"VISIBLE REPORT"}}),
         ]
     }
     /// claude-agent-acp 0.107 announces a call with its title and no input, then
@@ -846,20 +863,20 @@ mod tests {
         let refusal = json!({"code":"plan_invalid","recorded":false,"message":"No plan was recorded (plan_invalid). Correct the proposal and submit it again."}).to_string();
         vec![
             json!({"sessionUpdate":"tool_call","toolCallId":"claude-write","status":"pending","title":"mcp__cortex__project_write","kind":"other"}),
-            json!({"sessionUpdate":"tool_call_update","toolCallId":"claude-write","rawInput":{"path":"ARCHITECTURE.md","content":"# Architecture\n\nModules.","request_key":"PRIVATE-KEY"}}),
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"claude-write","rawInput":{"path":"ARCHITECTURE.md","content":"# Architecture\n\nModules.","request_key":"VISIBLE-KEY"}}),
             json!({"sessionUpdate":"tool_call_update","toolCallId":"claude-write","status":"completed"}),
             json!({"sessionUpdate":"tool_call","toolCallId":"claude-plan","status":"pending","title":"mcp__cortex__plan_submit","kind":"other"}),
-            json!({"sessionUpdate":"tool_call_update","toolCallId":"claude-plan","rawInput":{"plan":{"nodes":[{"goal":"PRIVATE PLAN"}]}}}),
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"claude-plan","rawInput":{"plan":{"nodes":[{"goal":"VISIBLE PLAN"}]}}}),
             json!({"sessionUpdate":"tool_call_update","toolCallId":"claude-plan","status":"failed",
                 "content":[{"type":"content","content":{"type":"text","text":format!("```\n{refusal}\n```")}}]}),
             json!({"sessionUpdate":"tool_call","toolCallId":"claude-draft","status":"pending","title":"mcp__cortex__draft_write","kind":"edit"}),
-            json!({"sessionUpdate":"tool_call_update","toolCallId":"claude-draft","rawInput":{"draft_id":"d_2","content":"PRIVATE DRAFT"},"status":"failed",
-                "content":[{"type":"content","content":{"type":"text","text":"```\n{\"code\":\"x\",\"message\":\"PRIVATE DRAFT\"}\n```"}}]}),
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"claude-draft","rawInput":{"draft_id":"d_2","content":"VISIBLE DRAFT"},"status":"failed",
+                "content":[{"type":"content","content":{"type":"text","text":"```\n{\"code\":\"x\",\"message\":\"VISIBLE DRAFT\"}\n```"}}]}),
             json!({"sessionUpdate":"tool_call","toolCallId":"claude-bash","status":"pending","title":"npm test","kind":"execute","rawInput":{"command":"npm test"}}),
             json!({"sessionUpdate":"tool_call_update","toolCallId":"claude-bash","status":"failed",
-                "content":[{"type":"content","content":{"type":"text","text":"```console\nPRIVATE OUTPUT\n```"}}],"rawOutput":"PRIVATE OUTPUT"}),
+                "content":[{"type":"content","content":{"type":"text","text":"```console\nVISIBLE OUTPUT\n```"}}],"rawOutput":"VISIBLE OUTPUT"}),
             json!({"sessionUpdate":"tool_call","toolCallId":"codex-plan","status":"in_progress","title":"mcp.cortex.plan_submit","kind":"execute",
-                "rawInput":{"server":"cortex","tool":"plan_submit","arguments":{"plan":"PRIVATE PLAN"}}}),
+                "rawInput":{"server":"cortex","tool":"plan_submit","arguments":{"plan":"VISIBLE PLAN"}}}),
             json!({"sessionUpdate":"tool_call_update","toolCallId":"codex-plan","status":"failed",
                 "rawOutput":{"result":{"content":[{"type":"text","text":refusal}],"isError":true},"error":null}}),
         ]
@@ -903,14 +920,12 @@ mod tests {
     }
 
     #[test]
-    fn an_untitled_update_keeps_its_calls_edit_and_refusal_but_never_private_text() {
+    fn an_untitled_update_keeps_its_calls_input_result_and_refusal() {
         let rows = retained(split_calls());
-        let all = serde_json::to_string(&rows).unwrap();
-        assert!(!all.contains("PRIVATE"), "{all}");
         // The write's text arrives in an untitled update; the retained title says it is a project write.
         assert_eq!(
             rows[1]["rawInput"],
-            json!({"path":"ARCHITECTURE.md","content":"# Architecture\n\nModules."})
+            json!({"path":"ARCHITECTURE.md","content":"# Architecture\n\nModules.","request_key":"VISIBLE-KEY"})
         );
         let reason =
             "No plan was recorded (plan_invalid). Correct the proposal and submit it again.";
@@ -922,20 +937,27 @@ mod tests {
             rows[11]["failure"], reason,
             "codex-acp reports it as rawOutput"
         );
-        assert!(
-            rows[7].get("failure").is_none()
-                && rows[7]
-                    .get("rawInput")
-                    .map_or(true, |r| r.get("content").is_none())
+        assert_eq!(rows[7]["failure"], "VISIBLE DRAFT");
+        assert_eq!(
+            rows[7]["rawInput"]["content"], "VISIBLE DRAFT",
+            "a draft body is the call's real input"
         );
         assert!(
             rows[9].get("failure").is_none(),
             "an engine tool's own output is not a refusal"
         );
-        // Without the retained title the same update stays private.
+        assert_eq!(
+            rows[9]["rawOutput"], "VISIBLE OUTPUT",
+            "the shell result is the row's output, unfenced"
+        );
+        assert_eq!(
+            rows[5]["rawOutput"],
+            r#"{"code":"plan_invalid","message":"No plan was recorded (plan_invalid). Correct the proposal and submit it again.","recorded":false}"#
+        );
+        // An untitled update needs no retained title to be shown.
         let blind = displayed(split_calls()[1].clone());
-        assert_eq!(blind["rawInput"], json!({"path":"ARCHITECTURE.md"}));
-        assert!(displayed(split_calls()[5].clone()).get("failure").is_none());
+        assert_eq!(blind["rawInput"]["path"], "ARCHITECTURE.md");
+        assert_eq!(displayed(split_calls()[5].clone())["failure"], reason);
         // A refusal text is bounded.
         let long = displayed_after(
             json!({"sessionUpdate":"tool_call_update","toolCallId":"x","status":"failed",
@@ -1004,39 +1026,41 @@ mod tests {
     }
 
     #[test]
-    fn tool_rows_keep_their_target_and_edit_but_never_private_input() {
+    fn tool_rows_keep_their_real_input_and_result_but_never_a_credential() {
         let rows: Vec<Value> = engine_calls().into_iter().map(displayed).collect();
         let all = serde_json::to_string(&rows).unwrap();
-        assert!(!all.contains("PRIVATE"), "{all}");
         assert!(!all.contains("abcdefgh12345678"), "{all}");
         assert_eq!(rows[0]["title"], "orchestrator: mcp__cortex__project_read");
         assert_eq!(rows[0]["kind"], "other");
-        assert_eq!(rows[0]["rawInput"], json!({"path":"src/app.ts"}));
-        assert!(rows[1].get("rawInput").is_none() && rows[1].get("content").is_none());
+        assert_eq!(
+            rows[0]["rawInput"],
+            json!({"path":"src/app.ts","offset":1,"limit":40,"line_numbers":true})
+        );
+        assert_eq!(rows[0]["rawOutput"], "VISIBLE READ BODY");
+        assert_eq!(rows[1]["rawOutput"], "VISIBLE READ BODY");
         assert_eq!(
             rows[2]["rawInput"],
             json!({"skill":"orchestrator-protocol"})
         );
-        assert!(
-            rows[3].get("rawInput").is_none(),
-            "a plan body is not a row target"
+        assert_eq!(
+            rows[3]["rawInput"]["plan"],
+            json!({"nodes":[{"goal":"VISIBLE PLAN"}]})
         );
+        assert_eq!(rows[3]["rawInput"]["request_key"], "VISIBLE-KEY");
         assert_eq!(
             rows[4]["rawInput"],
-            json!({"path":"src/a.ts","edits":[{"old_string":"let a = 1;","new_string":"let a = 2;"}]})
+            json!({"path":"src/a.ts","edits":[{"old_string":"let a = 1;","new_string":"let a = 2;","replace_all":false}],"request_key":"VISIBLE-KEY"})
         );
-        assert_eq!(
-            rows[5]["rawInput"],
-            json!({"path":"notes.md","content":"hello\nworld"})
-        );
+        assert_eq!(rows[5]["rawInput"]["content"], "hello\nworld");
         assert_eq!(
             rows[6]["rawInput"],
-            json!({"argv":["git","status","--short"]})
+            json!({"argv":["git","status","--short"],"request_key":"VISIBLE-KEY","timeout_seconds":30})
         );
         assert!(rows[7]["rawInput"]["command"]
             .as_str()
             .unwrap()
             .starts_with("curl -H 'Authorization: "));
+        assert_eq!(rows[7]["rawInput"]["description"], "VISIBLE DESCRIPTION");
         assert_eq!(rows[8]["rawInput"]["old_string"], "old line");
         assert_eq!(
             rows[8]["locations"],
@@ -1046,13 +1070,45 @@ mod tests {
             rows[8]["content"],
             json!([{"type":"diff","path":"/p/src/b.ts","oldText":"old line","newText":"new line"}])
         );
-        assert_eq!(rows[9]["rawInput"], json!({"pattern":"TODO","path":"src"}));
+        assert_eq!(
+            rows[9]["rawInput"],
+            json!({"pattern":"TODO","path":"src","output_mode":"VISIBLE MODE"})
+        );
         assert_eq!(
             rows[10]["rawInput"],
-            json!({"server":"cortex","tool":"project_read","arguments":{"path":"src/c.ts"}})
+            json!({"server":"cortex","tool":"project_read","arguments":{"path":"src/c.ts","VISIBLE":"x"}})
         );
-        assert_eq!(rows[11]["rawInput"], json!({"draft_id":"d_1"}));
-        assert!(rows[12].get("content").is_none() && rows[12].get("rawInput").is_none());
+        assert_eq!(rows[11]["rawInput"]["content"], "VISIBLE REPORT");
+        assert_eq!(rows[11]["rawInput"]["draft_id"], "d_1");
+        // A credential-named argument is masked wherever it nests; its neighbours stay.
+        let secret = displayed(
+            json!({"sessionUpdate":"tool_call","toolCallId":"s","title":"mcp__cortex__command_run",
+            "rawInput":{"argv":["deploy"],"env":{"API_TOKEN":"tok-123456","REGION":"eu"},"sudo_password":"hunter2","timeout_seconds":5}}),
+        );
+        assert_eq!(
+            secret["rawInput"],
+            json!({"argv":["deploy"],"env":{"API_TOKEN":"[REDACTED]","REGION":"eu"},"sudo_password":"[REDACTED]","timeout_seconds":5})
+        );
+        let leak = displayed(
+            json!({"sessionUpdate":"tool_call","toolCallId":"l","title":"mcp__cortex__command_run",
+            "rawInput":{"argv":["printf","OPENAI_API_KEY=sk-qa0123456789abcdefghijklmnop\\n"],"graphRevision":"ab12".repeat(16),"input_tokens":42,"tokens":"many"}}),
+        );
+        assert_eq!(leak["rawInput"]["argv"][1], "OPENAI_API_KEY=[REDACTED]");
+        assert_eq!(leak["rawInput"]["graphRevision"], "ab12".repeat(16));
+        assert_eq!(leak["rawInput"]["input_tokens"], 42);
+        assert_eq!(leak["rawInput"]["tokens"], "many");
+        // A result keeps its text in the Claude (content blocks) and Codex (rawOutput.result) shapes.
+        let codex = displayed_after(
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"q","status":"completed",
+            "rawOutput":{"result":{"content":[{"type":"text","text":"batch ok"}],"isError":false},"error":null}}),
+            &json!({"title":"mcp.cortex.read_batch"}),
+        );
+        assert_eq!(codex["rawOutput"], "batch ok");
+        let claude = displayed(
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"q","status":"completed",
+            "content":[{"type":"content","content":{"type":"text","text":"batch ok too"}},{"type":"terminal","terminalId":"t"}]}),
+        );
+        assert_eq!(claude["rawOutput"], "batch ok too");
         // Bounds hold for every selected text.
         let long = displayed(
             json!({"sessionUpdate":"tool_call","toolCallId":"big","title":"Write a.txt","kind":"edit",
@@ -1144,7 +1200,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{id}: {steps:?}"))
         };
         let all = serde_json::to_string(&page).unwrap();
-        assert!(!all.contains("PRIVATE"), "{all}");
+        assert!(!all.contains("abcdefgh12345678"), "{all}");
         assert_eq!(call("read")["path"], "src/app.ts");
         assert_eq!(call("read")["status"], "completed");
         assert_eq!(call("skill")["ref"], "orchestrator-protocol");
@@ -1177,6 +1233,25 @@ mod tests {
         assert_eq!(call("claude-plan")["status"], "failed");
         assert_eq!(call("codex-plan")["failure"], reason);
         assert!(call("claude-bash").get("failure").is_none());
-        assert!(call("claude-draft").get("failure").is_none());
+        assert_eq!(call("claude-draft")["failure"], "VISIBLE DRAFT");
+        // Every other call reads back with its real arguments and result; a file read or edit keeps its link and diff.
+        let input =
+            |id: &str| serde_json::from_str::<Value>(call(id)["input"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            input("plan")["plan"],
+            json!({"nodes":[{"goal":"VISIBLE PLAN"}]})
+        );
+        assert_eq!(input("report")["content"], "VISIBLE REPORT");
+        assert_eq!(input("cmd")["timeout_seconds"], 30);
+        assert_eq!(call("claude-bash")["output"], "VISIBLE OUTPUT");
+        assert_eq!(
+            call("claude-plan")["output"]
+                .as_str()
+                .unwrap()
+                .contains("plan_invalid"),
+            true
+        );
+        assert!(call("read").get("input").is_none() && call("read").get("output").is_none());
+        assert!(call("edit").get("input").is_none());
     }
 }

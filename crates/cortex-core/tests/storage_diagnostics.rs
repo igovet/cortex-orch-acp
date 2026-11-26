@@ -261,3 +261,45 @@ fn unrelated_entries_and_symlinked_old_roots_are_not_legacy_storage() {
         }
     }
 }
+
+/// A read the owner waits for queues behind an exclusive access lock (a migration or an
+/// initialization by this service) and completes once it is released, past the two
+/// seconds after which an ordinary open reports `busy`.
+#[test]
+fn a_waiting_read_outlasts_an_exclusive_access_lock_and_then_completes() {
+    use std::time::Instant;
+    let p = Project::new();
+    let key = release(&p);
+    drop(Store::open(key.clone(), OpenMode::Initialize).unwrap());
+    let reader = Store::open_waiting(key.clone(), OpenMode::LiveReadOnly).unwrap();
+    let hold = |millis| {
+        let path = key.directory().join(".access.lock");
+        let held = AccessLock::acquire(&path, false, true, Duration::ZERO).unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(millis));
+            drop(held);
+        })
+    };
+    // Opening while the lock is held waits, and finishes after the release.
+    let holder = hold(2600);
+    let started = Instant::now();
+    let opened = Store::open_waiting(key.clone(), OpenMode::LiveReadOnly);
+    assert!(opened.is_ok(), "{:?}", opened.err());
+    assert!(started.elapsed() >= Duration::from_millis(2500));
+    holder.join().unwrap();
+    // A reader opened before the lock was taken waits on each read too.
+    let holder = hold(2600);
+    let started = Instant::now();
+    assert_eq!(reader.read(|db| Ok(db.query_row("SELECT 7", [], |r| r.get::<_, i64>(0))?)).unwrap(), 7);
+    assert!(started.elapsed() >= Duration::from_millis(2500));
+    holder.join().unwrap();
+    // The ordinary open still reports busy for the same holder.
+    let holder = hold(2600);
+    diagnostic(
+        Store::open(key, OpenMode::LiveReadOnly).err().unwrap(),
+        "busy",
+        "then try again",
+        true,
+    );
+    holder.join().unwrap();
+}

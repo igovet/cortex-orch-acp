@@ -268,6 +268,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -332,6 +333,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -346,6 +348,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -354,7 +359,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -404,7 +408,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -767,6 +772,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -831,6 +837,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -845,6 +852,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -853,7 +863,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -903,7 +912,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -1572,6 +1582,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -1636,6 +1647,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -1650,6 +1662,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -1658,7 +1673,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -1708,7 +1722,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -2024,6 +2039,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -2088,6 +2104,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -2102,6 +2119,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -2110,7 +2130,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -2160,7 +2179,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -2463,6 +2483,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -2527,6 +2548,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -2541,6 +2563,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -2549,7 +2574,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -2599,7 +2623,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -3271,6 +3296,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -3335,6 +3361,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -3349,6 +3376,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -3357,7 +3387,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -3407,7 +3436,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -3773,6 +3803,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -3837,6 +3868,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -3851,6 +3883,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -3859,7 +3894,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -3909,7 +3943,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -4275,6 +4310,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -4339,6 +4375,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -4353,6 +4390,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -4361,7 +4401,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -4411,7 +4450,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -4788,6 +4828,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -4852,6 +4893,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -4866,6 +4908,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -4874,7 +4919,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -4924,7 +4968,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -5307,6 +5352,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -5371,6 +5417,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -5385,6 +5432,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -5393,7 +5443,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -5443,7 +5492,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -5826,6 +5876,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -5890,6 +5941,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -5904,6 +5956,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -5912,7 +5967,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -5962,7 +6016,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -6344,6 +6399,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -6408,6 +6464,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -6422,6 +6479,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -6430,7 +6490,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -6480,7 +6539,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -6853,6 +6913,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -6917,6 +6978,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -6931,6 +6993,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -6939,7 +7004,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -6989,7 +7053,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -7415,6 +7480,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -7479,6 +7545,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -7493,6 +7560,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -7501,7 +7571,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -7551,7 +7620,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {
@@ -7986,6 +8056,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -8050,6 +8121,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -8064,6 +8136,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -8072,7 +8147,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -8122,7 +8196,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -8483,6 +8558,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -8547,6 +8623,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -8561,6 +8638,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -8569,7 +8649,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -8619,7 +8698,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -8980,6 +9060,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -9044,6 +9125,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -9058,6 +9140,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -9066,7 +9151,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -9116,7 +9200,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -9477,6 +9562,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -9541,6 +9627,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -9555,6 +9642,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -9563,7 +9653,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -9613,7 +9702,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -9974,6 +10064,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -10038,6 +10129,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -10052,6 +10144,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -10060,7 +10155,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -10110,7 +10204,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -10471,6 +10566,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -10535,6 +10631,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -10549,6 +10646,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -10557,7 +10657,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -10607,7 +10706,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -10970,6 +11070,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -11034,6 +11135,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -11048,6 +11150,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -11056,7 +11161,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -11106,7 +11210,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -11469,6 +11574,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -11533,6 +11639,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -11547,6 +11654,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -11555,7 +11665,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -11605,7 +11714,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -12101,6 +12211,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -12165,6 +12276,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -12179,6 +12291,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -12187,7 +12302,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -12237,7 +12351,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -12758,6 +12873,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -12822,6 +12938,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -12836,6 +12953,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -12844,7 +12964,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -12894,7 +13013,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -13513,6 +13633,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -13577,6 +13698,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -13591,6 +13713,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -13599,7 +13724,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -13649,7 +13773,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -14268,6 +14393,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -14332,6 +14458,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -14346,6 +14473,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -14354,7 +14484,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -14404,7 +14533,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -15023,6 +15153,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -15087,6 +15218,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -15101,6 +15233,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -15109,7 +15244,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -15159,7 +15293,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -15778,6 +15913,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -15842,6 +15978,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -15856,6 +15993,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -15864,7 +16004,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -15914,7 +16053,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -16533,6 +16673,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -16597,6 +16738,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -16611,6 +16753,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -16619,7 +16764,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -16669,7 +16813,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -17288,6 +17433,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -17352,6 +17498,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -17366,6 +17513,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -17374,7 +17524,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -17424,7 +17573,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -18043,6 +18193,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -18107,6 +18258,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -18121,6 +18273,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -18129,7 +18284,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -18179,7 +18333,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -18798,6 +18953,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -18862,6 +19018,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -18876,6 +19033,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -18884,7 +19044,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -18934,7 +19093,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -19440,6 +19600,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -19504,6 +19665,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -19518,6 +19680,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -19526,7 +19691,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -19576,7 +19740,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -19984,6 +20149,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -20048,6 +20214,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -20062,6 +20229,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -20070,7 +20240,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -20120,7 +20289,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -20528,6 +20698,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -20592,6 +20763,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -20606,6 +20778,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -20614,7 +20789,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -20664,7 +20838,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -21072,6 +21247,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -21136,6 +21312,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -21150,6 +21327,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -21158,7 +21338,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -21208,7 +21387,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -21616,6 +21796,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -21680,6 +21861,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -21694,6 +21876,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -21702,7 +21887,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -21752,7 +21936,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -22160,6 +22345,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -22224,6 +22410,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -22238,6 +22425,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -22246,7 +22436,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -22296,7 +22485,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -22704,6 +22894,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -22768,6 +22959,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -22782,6 +22974,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -22790,7 +22985,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -22840,7 +23034,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -23248,6 +23443,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -23312,6 +23508,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -23326,6 +23523,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -23334,7 +23534,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -23384,7 +23583,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -23877,6 +24077,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -23941,6 +24142,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -23955,6 +24157,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -23963,7 +24168,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -24013,7 +24217,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -24394,6 +24599,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -24458,6 +24664,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -24472,6 +24679,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -24480,7 +24690,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -24530,7 +24739,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -24939,6 +25149,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -25003,6 +25214,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -25017,6 +25229,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -25025,7 +25240,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -25075,7 +25289,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -25532,6 +25747,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -25596,6 +25812,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -25610,6 +25827,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -25618,7 +25838,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -25668,7 +25887,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -26129,6 +26349,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -26193,6 +26414,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -26207,6 +26429,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -26215,7 +26440,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -26265,7 +26489,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -26731,6 +26956,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -26795,6 +27021,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -26809,6 +27036,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -26817,7 +27047,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -26867,7 +27096,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -27300,6 +27530,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -27364,6 +27595,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -27378,6 +27610,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -27386,7 +27621,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -27436,7 +27670,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -27848,6 +28083,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -27912,6 +28148,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -27926,6 +28163,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -27934,7 +28174,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -27984,7 +28223,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -28372,6 +28612,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -28436,6 +28677,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -28450,6 +28692,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -28458,7 +28703,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -28508,7 +28752,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -28888,6 +29133,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -28952,6 +29198,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -28966,6 +29213,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -28974,7 +29224,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -29024,7 +29273,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -29421,6 +29671,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -29485,6 +29736,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -29499,6 +29751,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -29507,7 +29762,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -29557,7 +29811,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -29947,6 +30202,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -30011,6 +30267,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -30025,6 +30282,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -30033,7 +30293,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -30083,7 +30342,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -30473,6 +30733,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -30537,6 +30798,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -30551,6 +30813,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -30559,7 +30824,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -30609,7 +30873,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},
@@ -30991,6 +31256,7 @@
             "result": {
               "builtin": {
                 "builtin_affinity": {
+                  "consultation": "claude-agent-acp",
                   "analysis": "claude-agent-acp",
                   "debugging": null,
                   "design": "claude-agent-acp",
@@ -31055,6 +31321,7 @@
                   "light"
                 ],
                 "work_kind_labels": {
+                  "consultation": "Senior consultation",
                   "analysis": "Analysis",
                   "debugging": "Debugging",
                   "design": "Design and architecture",
@@ -31069,6 +31336,9 @@
                   "writing": "Documentation and writing"
                 },
                 "work_kind_roles": {
+                  "consultation": [
+                    "worker-senior-consultant"
+                  ],
                   "analysis": [],
                   "debugging": [
                     "worker-debugger",
@@ -31077,7 +31347,6 @@
                   "design": [
                     "worker-architect",
                     "worker-database-architect",
-                    "worker-senior-consultant",
                     "worker-ux-designer"
                   ],
                   "implementation_backend": [
@@ -31127,7 +31396,8 @@
                   "design",
                   "writing",
                   "planning",
-                  "analysis"
+                  "analysis",
+                  "consultation"
                 ]
               },
               "effective_rules": {},

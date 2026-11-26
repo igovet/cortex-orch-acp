@@ -1,10 +1,14 @@
 //! The actual service binary starts an engine helper (its own model-catalogue
-//! read at startup) in the connection's engine filesystem view: a synthetic
-//! native Codex account, private sentinels beside it and a scripted no-model
-//! peer that reports what it can see. No real engine, account or network.
-//! Without user namespaces (inside a Cortex command view) the debug service
-//! starts the peer without a view, so the view checks are not run unless
-//! `CORTEX_REQUIRE_NAMESPACE_FIXTURES` demands them.
+//! read at startup) with a synthetic native Codex account, private sentinels
+//! beside it and a scripted no-model peer that reports what it can see. No real
+//! engine, account or network.
+//!
+//! The Claude/Codex catalogue and usage helpers run without an engine
+//! filesystem view (SECURITY.md, "No general engine filesystem jail"): they get
+//! a cleared environment, the owner's HOME and native sign-in in place and a
+//! private scratch working directory. This test pins that documented launch; it
+//! does not establish confinement. (Until 2026-11-25 it asserted a view the
+//! service never applied, and only ever reported NOT_RUN inside a command view.)
 #[path = "support/hermetic.rs"]
 mod hermetic;
 use serde_json::{json, Value};
@@ -85,27 +89,8 @@ impl Fixture {
     }
 }
 
-fn namespaces() -> bool {
-    let available = Command::new("/usr/bin/bwrap")
-        .args(["--unshare-pid", "--ro-bind", "/usr", "/usr", "--symlink", "usr/lib", "/lib"])
-        .args(["--symlink", "usr/lib64", "/lib64", "--symlink", "usr/bin", "/bin"])
-        .args(["--proc", "/proc", "--dev", "/dev", "--", "/usr/bin/true"])
-        .env_clear()
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    if std::env::var_os("CORTEX_REQUIRE_NAMESPACE_FIXTURES").is_some() {
-        assert!(available, "engine view service fixtures require user namespaces");
-    }
-    available
-}
-
 #[tokio::test]
-async fn the_service_starts_its_catalogue_helper_in_the_connection_view() {
-    if !namespaces() {
-        println!("NOT_RUN engine view service check: user namespaces unavailable");
-        return;
-    }
+async fn the_service_starts_its_catalogue_helper_with_the_owners_native_account() {
     let root = PathBuf::from(format!("/tmp/cw-ev-{}", std::process::id()));
     fs::create_dir(&root).unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
@@ -119,6 +104,7 @@ async fn the_service_starts_its_catalogue_helper_in_the_connection_view() {
     f.write(&f.root.join("home/.codex/auth.json"), b"synthetic-auth", 0o600);
     f.write(&f.root.join("home/.codex/sessions/owner.jsonl"), b"owner", 0o600);
     f.write(&f.root.join("home/owner-sentinel"), b"owner", 0o600);
+    f.write(&f.root.join("home/.cache/.keep"), b"", 0o600);
     f.write(&f.root.join("outside-sentinel"), b"host", 0o600);
     let producer: Value =
         serde_json::from_str(include_str!("fixtures/config-catalog-producer-python.json")).unwrap();
@@ -193,34 +179,18 @@ async fn the_service_starts_its_catalogue_helper_in_the_connection_view() {
         2,
         "{done}"
     );
-    let private = f.state().join("cortex/engine-private/cn_000000000001/cache");
-    let probe = fs::read_to_string(private.join("probe")).expect("the peer ran in its view");
+    // The peer's `~/.cache` is the owner's own: no private view was applied.
+    let probe = fs::read_to_string(f.root.join("home/.cache/probe")).expect("the peer ran");
     let seen: Vec<&str> = probe.lines().collect();
-    assert_eq!(
-        seen,
-        [
-            "owner-home-hidden",
-            "host-hidden",
-            "cortex-state-hidden",
-            "native-auth-visible",
-            "owner-sessions-hidden",
-            "pid-private"
-        ],
-        "{probe}"
-    );
-    assert!(private.join("seen").is_file());
-    // The native sign-in file is the owner's own, rewritten in place; everything
-    // else the peer wrote stayed private to its view.
+    assert_eq!(seen.len(), 6, "{probe}");
+    assert!(seen.contains(&"native-auth-visible"), "{probe}");
+    assert!(f.root.join("home/.cache/seen").is_file());
+    // The native sign-in file is the owner's own, rewritten in place.
     assert_eq!(
         fs::read_to_string(f.root.join("home/.codex/auth.json")).unwrap(),
         "synthetic-auth refreshed"
     );
-    assert!(!f.root.join("home/.codex/cortex-own-file").exists());
-    assert!(f
-        .state()
-        .join("cortex/engine-private/cn_000000000001/codex-home/cortex-own-file")
-        .is_file());
-    assert!(!f.root.join("outside-new").exists());
-    assert!(!f.root.join("home/.cache/probe").exists());
+    // Nothing Cortex-private was created for a view that does not exist.
+    assert!(!f.state().join("cortex/engine-private").exists());
     println!("ENGINE_VIEW_SERVICE {}", seen.join(" "));
 }

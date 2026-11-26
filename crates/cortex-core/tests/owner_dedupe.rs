@@ -148,10 +148,29 @@ fn a_reworded_answered_review_item_is_disclosed_not_asked() {
         db.execute("INSERT INTO runtime_nodes VALUES (?,44,'_review_1','worker-code-reviewer','Review','[]','[\"**\"]','review','completed','rv44',?)",
             (&task, result.to_string()))?;
         review::advance_tx(db, &task)?;
+        // The image no tool reached gets one narrow follow-up review; the decided
+        // items are not asked again and nothing goes to verification yet.
+        assert_eq!(domain::task_tx(db, &task)?.0, TaskState::Reviewing);
+        let rerun: String = db.query_row(
+            "SELECT objective FROM runtime_nodes WHERE task_id=? AND revision=44 AND stage='review' AND status='pending'",
+            [&task],
+            |r| r.get(0),
+        )?;
+        assert!(rerun.contains("assets/preview.png") && !rerun.contains("shopper-freezer"), "{rerun}");
+        // The follow-up read the image; only the owner's decided items stay open.
+        let mut follow = result.clone();
+        follow["report_ref"] = json!("r_follow");
+        follow["not_covered"].as_array_mut().unwrap().pop();
+        db.execute(
+            "UPDATE runtime_nodes SET status='completed',assignment_ref='rv44b',result_json=? WHERE task_id=? AND revision=44 AND status='pending'",
+            (follow.to_string(), &task),
+        )?;
+        review::advance_tx(db, &task)?;
         assert_eq!(domain::task_tx(db, &task)?.0, TaskState::Verifying);
         Ok(())
     })
     .unwrap();
+    assert_eq!(count(&s, &task, "REVIEW_RERUN"), 1);
     assert_eq!(count(&s, &task, "REVIEW_LIMIT_DISCLOSED"), 1);
     assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 0);
     assert_eq!(count(&s, &task, "AUTOMATIC_CONTINUATION"), 0);
@@ -164,7 +183,7 @@ fn a_reworded_answered_review_item_is_disclosed_not_asked() {
         .as_str()
         .unwrap()
         .contains("accepted in substance"));
-    let result = node_result(&s, &task, "rv44");
+    let result = node_result(&s, &task, "rv44b");
     let names: Vec<&str> = result["checks"]
         .as_array()
         .unwrap()

@@ -484,8 +484,8 @@ retained ACP session directly in Rust. The existing messages, plans, selected to
 and confirmed route DTOs retain the 100-row scan and 60,000-byte page budget. `wh1` continuations bind
 project, task, session, page size and a fixed high watermark; later inserts cannot enter older pages, and
 session replacement invalidates old cursors. Sparse tool updates enrich retained input across page
-boundaries, with the original 100-update clipping notice. Hidden bookkeeping, thoughts, read bodies and
-report bodies stay out of the display. Malformed retained updates retain an unavailable-content row;
+boundaries, with the original 100-update clipping notice. Hidden bookkeeping and thoughts stay out of the display; every other call keeps its bounded, credential-redacted input and
+result (a file read or edit keeps its path link and diff only). Malformed retained updates retain an unavailable-content row;
 unsupported request/display shapes, private report diff blocks, noncanonical timestamps and intermediate
 reads above 1,000 rows or 8 MiB still use the retained interpreter. Offline Python DTOs in
 `fixtures/coordinator-facts.json` are captured by the former generator `generate_coordinator_fixture`
@@ -1266,7 +1266,11 @@ leaves the sprint in place, marked Deleting in the project's sidebar row and as 
 sprint's summary; it is not listed under Archive's closed sprints, and it never hides or blocks other sprints. The confirmation dialog shows a refusal once, on the action's error line. A
 deletion that started but still waits for a task closes the dialog (pressing again would change nothing) and its receipt line names each remaining task by its title with what to do (for
 example, still waiting for Cortex to confirm that its engine processes stopped: stop or close it; reopening Cortex while no other agent app works in the project folder lets Cortex confirm
-it), never by its internal id or a raw refusal code; the sprint's Deleting strip and Retry delete… carry it on. A worker left running when the service was killed is settled when the
+it), never by its internal id or a raw refusal code; the sprint's Deleting strip and Retry delete… carry it on. The service also saves that reason on the sprint
+(`deleteReason`), so the strip says it after any later read ("Deleting, 1 task left: <title>. <reason>"). A stop that is refused or not confirmed does not end the pass early: every
+member that is quiet is deleted in the same pass and each one that is not is named. When the bounded owner action answers before its deletion pass ends, the reply names the stage it
+reached (or the last concrete reason), the pass keeps going, and when it ends the service announces the project as changed so every screen reads the sprint's remaining count again
+instead of keeping the count from part-way through. A worker left running when the service was killed is settled when the
 service restarts (see [native attempts left unconfirmed](../features/recovery-and-replacement/index.md#native-attempts-left-unconfirmed-by-an-earlier-host)), so a retried deletion completes.
 Members already deleted (`purged`, or listed in the sprint's `deletedTaskIds`) leave the sprint's displayed membership and are never required on the task board; only the members that still
 exist are. When a project's data read keeps failing, the board's strip keeps its owner wording and adds the read's precise cause (for example the sprint and the task identities a board did
@@ -1291,6 +1295,16 @@ A created sprint has two graphs. The **approved plan** (`Plan vN`) is the plan v
 **Execution order.** The reply's `order {mode, queueState, working, notStarted}` is the single projection the desktop uses. Working tasks come first, in the durable order in which they started (`startOrder`; unknown order sorts last). Not-started tasks follow by `rank` (1-based) from the same readiness and priority rule the queue applies: Hybrid ranks behind a prerequisite that is Ready to merge or Done, Automatic only behind Done; picks that assume a running prerequisite settles are `conditional`. Unranked tasks follow in priority order with a `reason` (`task_missing`, `task_state_unknown`, `sprint_closed`, `queue_paused`, `queue_held`, `queue_complete`, `queue_blocked`, `dependencies_blocked`, `native_worktree_unavailable`). `next` is set on at most one task, only for a running queue with a live runtime; it is the current candidate, not a reservation. In Manual the ranks are suggestions and nothing is Next. Board, List and the queue bar of a sprint show this order (Working before Not started, then blocked, paused and unknown tasks with their reason); the status text reads "Next in", "Queued 2nd in" or, in Manual, "Suggested 2nd in". The All work view keeps its global grouping; only the tasks of one sprint are ordered within the places they already hold.
 
 The live read and both edits are owner actions of the local desktop. Paired remote devices are refused all three, and the model-facing `sprint_graph` read keeps its contract and scope.
+
+### Re-checking the sprint after an owner change
+
+When the owner changes a running sprint task (an owner message delivered to its coordinator, an owner rework request, or an owner answer to the coordinator's or a worker's question) while other tasks of the sprint are still unstarted drafts, the runtime records `SPRINT_IMPACT_CHECK_REQUIRED` for that task. A worker's replan or scope request is not such a change. At each coordinator turn of a sprint member the service records which members are still drafts with no execution identity (`SPRINT_MEMBER_BOUND`); the check is required only while one of them is left. Until a verdict for the newest trigger is recorded, completion is refused (`sprint_impact_pending`, recorded once as `SPRINT_IMPACT_PENDING`) and the coordinator's next planning or reconciling turn names the trigger.
+
+The coordinator reads the drafts with `sprint_graph` `include: "pending_descriptions"` (full descriptions, versions, links and the live `graphRevision`, in pages of about 48 KB with a cursor) and calls `sprint_revision_submit`. The tool's schema carries its contract. Verdict `unchanged` resolves the check. Verdict `revise` names the trigger, the `base_graph_revision` and up to 50 changes: `update` (an unstarted draft at its `expected_version`: title, description and/or its whole link set), `add` (a new draft with key, title, description and links to members or other new keys) and `propose_cancel`. Under the machine lock the service refuses a change of a started, finished, archived or purged task (`sprint_member_read_only`), a stale draft version (`stale_version`) or graph (`stale_graph_revision`), and runs the same ID-only validator as Create tasks and owner link edits (`dependency_self`, `dependency_missing`, `dependency_cross_sprint`, `dependency_duplicate`, `dependency_cycle`) plus the prerequisite rule (`predecessor_unavailable` for a new link to a cancelled or unavailable task). A refusal names the change and rule; the coordinator corrects it in the same turn.
+
+A recorded revision gets a mandatory independent review (a fresh read-only reviewer, `_sprint_revision_review_N`), which never binds the task's own review or completion. Findings return the task to the coordinator for a new revision; after three reviewed revisions for one trigger the last one goes to the owner with its findings. While a revision waits for its review or the owner's decision, the drafts it changes are not started: the queue shows them with the reason `sprint_revision_pending` and records no hold, and independent drafts continue. An approved revision of an **Automatic** sprint is applied by the runtime: every draft change, every new draft (appended to the roster, last in priority), the saved product record and `SPRINT_REVISION_APPLIED` (with digests of the graph before and after and the replaced titles, links and descriptions) commit together or not at all, after the versions and the whole graph are checked again. An owner-chosen title is kept. In a **Hybrid** or **Manual** sprint the owner sees the card **Sprint changes from task X** (Russian interface: «Изменения спринта от задачи X») on the Live sprint page and chooses **Apply** (`product.sprint` action `apply_revision {sprintId, revisionId, expectedGraphRevision}`) or **Reject** (`reject_revision {sprintId, revisionId}`); both are local desktop actions refused to paired devices. Proposed cancellations are only shown on that card, also in Automatic (after the other changes are applied the card offers **Dismiss**); the service never cancels a task for them. Before an owner decision the service checks the drafts and the graph again, and **Apply** also names the `graphRevision` the owner saw. A revision that cannot be applied any more is recorded as refused and the coordinator submits a new one.
+
+The trigger task's conversation shows one runtime line in the task's language when the check resolves: "Проверены оставшиеся задачи спринта: без изменений", "…: изменено N, добавлено M" or that the changes wait for the owner (English: "Checked the sprint's remaining tasks: no changes" and so on). A changed task's Details on Live sprint say "changed by task X" (Russian «изменено задачей X»), held drafts show "Waits for a sprint revision" in the order, and the sprint Summary lists the revision history. The live read (`live_graph`) carries the newest 20 revisions as `revisions` (`revisionId`, proposing `taskId`, `status`, `applied`, `reason`, `changes`, `held`, `updated`, `added`, `previous`, `findings`). Previous titles, links and descriptions are kept in the revision record; there is no separate draft-version table. Nothing here writes the approved plan, its history or `materializedVersion`, lifts Pause or deletes anything.
 
 ## Choices and checkout
 
@@ -1968,6 +1982,23 @@ titleState=generated, not as an owner rename, and never over an owner's title. A
 item without a title of its own keeps the description label. A user rename always records titleState=user, even for identical text.
 No storage migration or wire-version change is required.
 
+### Automatic sprint titles
+
+A new sprint is created without a title (`title: null`) and shown by the label of
+its description. Right after `product.sprint` `create` saves it, the service starts the
+same kind of background job for the sprint and returns its id as `titleJobId` next to
+`sprintId`; creating never waits for it, and every client (desktop, phone) gets the
+result. The job uses the same route choice as task titles (cheapest model of the
+connection whose plan limit is the least used, so Haiku or Luna by current usage) and a
+sprint prompt: at most eight words summarizing the whole sprint text, in its language.
+The title is saved with `titleState: "generated"` only while the sprint has no title
+and no owner rename (`product.sprint` `patch` with `title` records `titleState: "user"`).
+Without a route or a usable answer nothing is saved: the sprint keeps showing the label of its
+first sentence, and a retry stays possible. `product.task` `generate_sprint_title`
+(`{sprintId}`; workspace command `generate_sprint_title`) starts one new job; it answers
+`{"jobId":null,"skipped":"owner_title"}` for a sprint that is already named. `short_text_poll`
+reads a sprint job with `sprintId`. When the job ends the app rereads the project.
+
 ## Short model texts
 
 Task titles and Commit, squash and Push drafts use one short text mechanism
@@ -2019,7 +2050,7 @@ summary with `push_summary_too_long` before running Git, never shortening it.
   no runtime task or channel, writes nothing to a project store, takes no
   `machine.lock` and never appears in a task's history. At most two runs go at
   once; a job over that uses its fallback text.
-- Jobs: `generate_title`, `draft_integration_text`, `draft_checkout_commit` and
+- Jobs: `generate_title`, `generate_sprint_title`, `draft_integration_text`, `draft_checkout_commit` and
   `draft_push_summary` return `{"jobId"}`. `short_text_poll` takes the job ID and,
   for task-bound jobs only, the task ID. A finished job reports `source`
   (`model`, `fallback`, `template` for unmatched PR drafts, or `saved` for a

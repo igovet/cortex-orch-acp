@@ -16,14 +16,21 @@
 // A breach of LIMITS on any surface fails the run; KNOWN lists, per surface, what does not meet them yet and how far it may
 // go, and each use is printed. Numbers go to <label>-metrics.json, captures to <label>-<surface>.png. Arguments after the
 // label: `flat` turns compositing off (as the layout gate runs), `idle` instead watches each picked page untouched for 70 s
-// (past the 30 s facts poll) for long frames and DOM changes, and any other word picks surfaces by name.
+// (past the 30 s facts poll) for long frames and DOM changes, `earlier` instead climbs the paged conversation and worker feed
+// (`earlier` in layout-fit-fixture.tsx) to their start, and any other word picks surfaces by name.
+//
+// `earlier`: each feed opens on its newest part and is scrolled up continuously, first SPEED px a frame by script (`steady`:
+// every painted frame must show the rows moved by exactly what was scrolled) and then by the real wheel through X (`wheel`).
+// It records where each earlier read was asked for (how much of the drawn rows was still above the viewport), how far the
+// rows the reader looked at moved when a page was put above them, how long the reader sat at the top waiting, whether any
+// drawn row was re-created, and the frame times of the whole climb. EARLIER_LIMITS fail the run.
 import {Host, startXvfb, engineEnv, main, sleep, xdotool, probe, quote, join, writeJson, sub} from "./rendered/webkit.mjs";
 
 const base = process.argv[2], label = process.argv[3], args = process.argv.slice(4), evidence = "/evidence";
-const picked = args.filter(a => a !== "flat" && a !== "idle");
+const picked = args.filter(a => a !== "flat" && a !== "idle" && a !== "earlier");
 const [WIDTH, HEIGHT] = [1440, 900];
 const INSTRUMENT = probe("scroll-perf.INSTRUMENT.js"), FIND = probe("scroll-perf.FIND.js"), DRAG = probe("scroll-perf.DRAG.js");
-const FACTS_TEXTS = probe("scroll-perf.FACTS_TEXTS.js"), IDLE = probe("scroll-perf.IDLE.js");
+const FACTS_TEXTS = probe("scroll-perf.FACTS_TEXTS.js"), IDLE = probe("scroll-perf.IDLE.js"), CLIMB = probe("scroll-perf.EARLIER.js");
 const POSITION = "const el=document.querySelector('[data-perf=\"ID\"]');return AXIS==='y'?el.scrollTop:el.scrollLeft";
 
 const at = route => "route=" + quote(route);
@@ -51,6 +58,14 @@ const SURFACES = [
   ["terminal", "scroll=1&terminal=1&" + at("/m/<M>/p/p/git"), on(".xterm-rows > div"), ".terminal-screen"],
   ["review-changes", "world=review&" + at("/m/<M>/t/rg/changes"), on(".fhead"), null],
 ];
+// The paged feeds of `earlier`, and how they must climb: no row the reader sees moves by more than 1 px when a page goes above
+// it, no frame over 32 ms, a read is not asked for while more than two viewports of drawn rows are still above the reader, and
+// the reader scrolling at SPEED never waits at the top for a page.
+const EARLIER = [
+  ["conversation-earlier", "world=conversation&scroll=1&earlier=1&" + at("/m/<M>/t/c-work"), on(".timeline .ai") + " && document.querySelector('.timeline .ws-earlier')", ".timeline"],
+  ["worker-earlier", "world=conversation&scroll=1&earlier=1&" + at("/m/<M>/t/c-work/workers/w-be2"), on(".stream .stream-in > *") + " && document.querySelector('.stream .ws-earlier')", ".stream"],
+];
+const SPEED = 24, EARLIER_LIMITS = {maxJump: 1, over32: 0, aboveMax: 2, topWaitMs: 0};
 // Scrollers every page of the frame has, measured on the first page they are found on.
 const SHARED = ["div.sb-scroll"];
 const LIVE = ["conversation-live", "worker-feed-live"];
@@ -168,14 +183,52 @@ await main(async () => {
     }
   };
 
+  const earlier = async (results, problems) => {
+    for (const [name, query, ready, selector] of EARLIER) {
+      if (picked.length && !picked.includes(name)) continue;
+      const surface = (results.earlier ??= {})[name] = {};
+      for (const mode of ["steady", "wheel"]) {
+        await openPage(query, ready);
+        // Leave the end as the reader does (a wheel turned up), so following lets the feed be moved.
+        await js(`document.querySelector('${selector}').dispatchEvent(new WheelEvent('wheel', {deltaY: -1, bubbles: true})); return 1`);
+        const limit = mode === "steady" ? 40000 : 16000;
+        await js(sub(sub(sub(sub(CLIMB, "SELECTOR", selector), "MODE", mode), "SPEED", String(SPEED)), "LIMIT_MS", String(limit)));
+        if (mode === "wheel") {
+          const box = await js(`const r=document.querySelector('${selector}').getBoundingClientRect();return [r.left,r.top,r.width,r.height].map(Math.round)`);
+          const [ox, oy] = await host.origin();
+          xdotool("mousemove", "--sync", Math.trunc(ox + box[0] + box[2] / 2), Math.trunc(oy + box[1] + box[3] / 2));
+          xdotool("click", "--repeat", "360", "--delay", "40", "4");
+        }
+        await wait("window.__climb", 600);
+        const climb = await js("return window.__climb");
+        const reads = await js(`return window.__earlier.reads.filter(r => r.feed === '${name.startsWith("worker") ? "worker" : "conversation"}')`);
+        const appMs = await js("return window.__earlier.appMs.map(Math.round)");
+        const viewport = await js(`return document.querySelector('${selector}').clientHeight`);
+        // How far from the top each page started: a read of the machine (`reads`), or held rows drawn (a prepend with no read).
+        const above = reads.map(r => r.above ?? r.scrollTop);
+        const r = surface[mode] = {...climb, viewport, reads: reads.length, aboveAtRead: above, publishMs: appMs.length ? Math.max(...appMs) : 0};
+        console.log(`earlier ${name} ${mode}: ${r.ms} ms, ${r.prepends.length} pages put above, ${r.reads} machine reads, read at [${above.slice(0, 12).join(", ")}] px above (viewport ${viewport}), max jump ${r.maxJump} px (${r.jumpsOver1} over 1 px, ${r.stalls ?? 0} stalls), frames p50 ${r.p50} p95 ${r.p95} max ${r.max} (${r.over32} over 32 ms, ${r.over50} over 50 ms) ${JSON.stringify(r.slow)}, waited at the top ${r.topWaitMs} ms, rows re-created ${r.recreated}, publish max ${r.publishMs} ms, reached start ${r.reachedStart}, ${r.rows} rows drawn, one change at the top lays out in ${r.relayoutMs} ms`);
+        console.log(`earlier ${name} ${mode} pages: ${JSON.stringify(r.prepends.slice(0, 8))} jumps [t, px, scrollTop, grown]: ${JSON.stringify(r.jumpsAt.slice(0, 12))} slow frames [t, ms]: ${JSON.stringify(r.slowAt)} pages at ${JSON.stringify(r.prepends.map(p => p.t))} publish ms ${JSON.stringify(appMs)}`);
+        const where = `earlier ${name} ${mode}`;
+        if (r.maxJump > EARLIER_LIMITS.maxJump) problems.push(`${where}: rows on screen moved ${r.maxJump} px when a page was put above them`);
+        if (r.over32 > EARLIER_LIMITS.over32) problems.push(`${where}: ${r.over32} frames over 32 ms: ${JSON.stringify(r.slow)}`);
+        if (above.some(a => a > EARLIER_LIMITS.aboveMax * viewport)) problems.push(`${where}: a read started with more than ${EARLIER_LIMITS.aboveMax} viewports of rows above the reader: ${JSON.stringify(above)}`);
+        if (mode === "steady" && r.topWaitMs > EARLIER_LIMITS.topWaitMs) problems.push(`${where}: the reader waited ${r.topWaitMs} ms at the top for a page`);
+        if (r.recreated) problems.push(`${where}: ${r.recreated} rows the reader looked at were drawn again`);
+        if (!r.prepends.length) problems.push(`${where}: no page was put above`);
+      }
+    }
+  };
+
   const results = {engine: "WebKitGTK", version: host.version, compositing: !args.includes("flat"), window: [WIDTH, HEIGHT], limits: LIMITS, surfaces: {}};
   const problems = [];
   let exit;
   try {
     await host.resize(WIDTH, HEIGHT);
     if (args.includes("idle")) await idle(results, problems);
+    if (args.includes("earlier")) await earlier(results, problems);
     const shared = new Set();
-    for (const [name, query, ready, pan] of args.includes("idle") ? [] : SURFACES) {
+    for (const [name, query, ready, pan] of args.includes("idle") || args.includes("earlier") ? [] : SURFACES) {
       if (picked.length && !picked.includes(name)) continue;
       await openPage(query, ready);
       await capture(name);

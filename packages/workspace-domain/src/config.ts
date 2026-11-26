@@ -1,7 +1,7 @@
 import type { Ceiling, EngineKey, Machine, MachineConfig, McpPolicy, McpServer, Problem, Profile, ProfileSection, ProfileSections, RoutingRules, SurfaceKey, TaskSettings, UserDefaults } from "./types";
 import { engineLabel, ENGINE_KEYS, orderedEfforts, resolveEffort } from "./catalog";
 import { pathMissing } from "./mcp";
-import { modelLabel, notOffered, type PreviewContext } from "./routing-rules";
+import { coordinatorAllowed, coordinatorEntry, modelLabel, notOffered, profileConstrained, type PreviewContext } from "./routing-rules";
 
 export const SURFACE_LABELS: Record<SurfaceKey | "connections", string> = { routing: "routing rules", user_defaults: "defaults", project_ceiling: "project ceiling", mcp_servers: "MCP servers", connections: "connections" };
 export const PROFILE_SECTION_LABELS: Record<ProfileSection, string> = { routing: "routing", defaults: "defaults and ceiling", mcp: "MCP usage policy", sessions: "session limits" };
@@ -36,20 +36,31 @@ export function machineEffort(machine: Machine): string {
     : resolveEffort(coordinator?.effort, coordinator?.parameters.thought_level);
 }
 
-/** What a new task on this machine starts with. A task keeps its own copy, so saving here never touches running work. */
+/**
+ * What a new task on this machine starts with. A task keeps its own copy, so saving here never touches running work. When the
+ * profile constrains the coordinator, the effort moves to the nearest one its tiers allow (a tie goes lower).
+ */
 export function machineDefaults(machine: Machine): { settings: TaskSettings; checkout: "worktree" | "main" } {
   const d = machine.config.surfaces.user_defaults;
   const choice = d.coordinator;
   const model = d.routeDefault?.routeId ?? (choice ? machine.config.catalogue[choice.engine].models.find(m => m.id === choice.model)?.routeId ?? choice.model : "");
-  const offered = ENGINE_KEYS.flatMap(engine => machine.config.catalogue[engine].models)
-    .find(m => (m.routeId ?? m.id) === model)?.efforts;
-  const effort = resolveEffort(machineEffort(machine), "", offered);
+  const engine = ENGINE_KEYS.find(e => machine.config.catalogue[e].models.some(m => (m.routeId ?? m.id) === model));
+  const entry = engine ? machine.config.catalogue[engine].models.find(m => (m.routeId ?? m.id) === model) : undefined;
+  const allowed = engine && entry ? coordinatorAllowed(machine.config.surfaces.routing, engine, entry.id, entry.efforts) : null;
+  const effort = resolveEffort(machineEffort(machine), "", allowed?.length ? allowed : entry?.efforts);
   return { settings: { model, effort, mode: d.mode, language: d.language }, checkout: d.checkout };
 }
-/** The levels this model reports. Max stays for light work. An unknown model gets a list that says it was not observed. */
-export function coordinatorEfforts(catalogue: MachineConfig["catalogue"], engine: EngineKey, model: string) {
+/**
+ * The levels this model reports. Max stays for light work. An unknown model gets a list that says it was not observed. With
+ * `rules` whose profile constrains the coordinator, only the levels the model's tiers allow; a model outside the profile keeps
+ * its own levels, marked `outside`, so a saved choice stays visible.
+ */
+export function coordinatorEfforts(catalogue: MachineConfig["catalogue"], engine: EngineKey, model: string, rules?: RoutingRules): { levels: string[]; observed: boolean; outside?: boolean } {
   const found = catalogue[engine].models.find(m => m.id === model);
-  return found ? { levels: orderedEfforts(found.efforts).filter(e => e !== "max"), observed: true } : { levels: ["low", "medium", "high"], observed: false };
+  const allowed = rules ? coordinatorAllowed(rules, engine, model, found?.efforts ?? ["low", "medium", "high"]) : null;
+  if (allowed?.length) return { levels: orderedEfforts(allowed), observed: !!found };
+  const own = found ? { levels: orderedEfforts(found.efforts).filter(e => e !== "max"), observed: true } : { levels: ["low", "medium", "high"], observed: false };
+  return allowed ? { ...own, outside: true } : own;
 }
 export type Resolution = { ok: true; route: string } | { ok: false; code: string; text: string };
 export function coordinatorResolution(machine: Machine): Resolution {
@@ -61,6 +72,8 @@ export function coordinatorResolution(machine: Machine): Resolution {
   if (routing.deny.includes(model) || routing.deny.includes(`${engine}/${model}`)) return { ok: false, code: "coordinator_route_denied", text: "A deny rule refuses this model." };
   if (!routing.engines[engine].enabled.includes(model)) return { ok: false, code: "coordinator_model_disabled", text: "This model is off in Models." };
   if (!catalogue[engine].models.some(m => m.id === model)) return { ok: false, code: "coordinator_model_unavailable", text: "The engine does not offer this model now." };
+  if (routing.coordinatorModels) { if (!coordinatorEntry(routing, engine, model)) return { ok: false, code: "coordinator_outside_profile", text: "This model is not in Coordinator models, so it cannot coordinate." }; }
+  else if (profileConstrained(routing) && !(routing.engines[engine].tiers[model]?.length)) return { ok: false, code: "coordinator_outside_profile", text: "This model has no tier in Models, so it cannot coordinate." };
   return { ok: true, route: `${engineLabel(engine)} · ${modelLabel(catalogue, engine, model)}` };
 }
 

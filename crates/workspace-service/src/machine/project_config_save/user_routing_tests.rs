@@ -230,3 +230,50 @@ fn user_routing_lock_serializes_competing_revision_admission() {
     );
     thread.join().unwrap();
 }
+
+#[test]
+fn the_coordinator_list_is_written_in_order_kept_when_omitted_and_refused_when_malformed() {
+    let f = Fixture::new();
+    let save = |value: Value| {
+        let before = fs::read(f.path()).ok();
+        let mut p = params();
+        p["value"] = value;
+        p["tokens"]["routing"] = json!(super::token(before.as_deref()));
+        PreparedUserRouting::prepare(&f.config, &p).and_then(|p| p.commit())
+    };
+    let saved = || serde_json::from_slice::<Value>(&fs::read(f.path()).unwrap()).unwrap();
+    // The form's own order does not matter: the file lists engine, model and
+    // the categories from Frontier (flagship) to Light, each min then max.
+    let list = json!([{"tiers":{"light":{"max":"xhigh","min":"medium"},"flagship":{"max":"high","min":"low"}},
+        "model":"gpt-6.2-sol","engine":"codex-acp"}]);
+    save(json!({"version":2,"coordinatorModels":list})).unwrap();
+    let text = fs::read_to_string(f.path()).unwrap();
+    assert!(
+        text.contains(concat!(
+            "  \"coordinator_models\": [\n    {\n      \"engine\": \"codex-acp\",\n",
+            "      \"model\": \"gpt-6.2-sol\",\n      \"tiers\": {\n        \"flagship\": {\n",
+            "          \"min\": \"low\",\n          \"max\": \"high\"\n        },\n",
+            "        \"light\": {\n          \"min\": \"medium\",\n          \"max\": \"xhigh\"\n"
+        )),
+        "{text}"
+    );
+    // A form that does not name the list keeps the file's.
+    save(json!({"version":2,"deny":["opencode/*"]})).unwrap();
+    assert_eq!(saved()["deny"], json!(["opencode/*"]));
+    assert_eq!(saved()["coordinator_models"][0]["tiers"]["light"]["min"], "medium");
+    // Malformed lists are refused and change nothing.
+    let before = fs::read(f.path()).unwrap();
+    for bad in [
+        json!([]),
+        json!([{"engine":"codex-acp","model":"gpt-6.2-sol","tiers":{}}]),
+        json!([{"engine":"codex-acp","model":"gpt-6.2-sol","tiers":{"deep":{"min":"xhigh","max":"low"}}}]),
+        json!([{"engine":"codex-acp","model":"gpt-6.2-sol","tiers":{"frontier":{"min":"low","max":"high"}}}]),
+    ] {
+        let e = save(json!({"version":2,"coordinatorModels":bad})).unwrap_err();
+        assert!(e.message.contains("rules.coordinator_models"), "{}", e.message);
+        assert_eq!(fs::read(f.path()).unwrap(), before);
+    }
+    // An explicit null removes the list (the coordinator follows the worker tiers again).
+    save(json!({"version":2,"coordinatorModels":null})).unwrap();
+    assert!(saved().get("coordinator_models").is_none());
+}

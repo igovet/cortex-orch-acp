@@ -8,7 +8,10 @@ description: Worker-only project scope and reportable command evidence.
 Declared scope coordinates parallel writers; it is not a project write boundary.
 A writing worker reserves additional project paths through `access_request` before
 changing them; a read-only role changes no path and is not offered that tool.
-Private storage and user-protected paths remain unavailable. Outside-project
+User-protected paths remain unavailable. Cortex private state, Git control
+files and credential files are not off-limits: when the assignment asks for a
+change there, make it through the advertised tool and let the runtime decide
+(it may ask the owner); report its decision. Outside-project
 work uses the advertised permission route and follows the user's current mode.
 A denied action is final; never substitute a native tool, copy or temporary file.
 Use scope or replan requests only when the plan itself must change.

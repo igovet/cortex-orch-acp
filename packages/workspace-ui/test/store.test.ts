@@ -324,8 +324,8 @@ describe("a real backend failure", () => {
         if (parameters.projectId === "p") await new Promise<void>(resolve => { release=resolve; });
         else full = !!parameters.full;
       }
-      // Like the real adapter, an event-scoped unscoped read need not include Q.
-      return operation === "project.facts" && full ? [facts] : [];
+      // Like the real adapter, an event-scoped unscoped read need not include Q; a read of Q itself does.
+      return operation === "project.facts" && (full || parameters.projectId === "q") ? [facts] : [];
     }) as typeof s.port.query;
     const command = store.dispatch({type:"rename_task",taskId:"t",title:"A new"});
     s.receipt(); await command;
@@ -333,7 +333,8 @@ describe("a real backend failure", () => {
     s.emit({kind:"facts",facts});
     if (!eventFirst) s.emit({kind:"refresh"});
     release(); await flush();
-    expect(scopes).toEqual([{projectId:"p"},{full:true}]);
+    // The unnumbered facts' project is read on its own first, then the whole refresh: never a full reread for them.
+    expect(scopes).toEqual([{projectId:"p"},{projectId:"q"},{}]);
     expect(store.state().tasks.find(t => t.id === "u")?.targetBranch).toBe("fresh");
     expect(store.syncing()).toBe(false);
   });
@@ -360,7 +361,8 @@ describe("a real backend failure", () => {
     s.receipt(); await command;
     s.emit({kind:"facts",facts});
     release(); await vi.advanceTimersByTimeAsync(0);
-    expect(store.readIssue()).toBe("facts unavailable");
+    // One failed read over a confirmed view is not shown: the view stays and the read is simply retried.
+    expect(store.readIssue()).toBeNull();
     expect(store.state().tasks.find(t => t.id === "u")?.targetBranch).toBeNull();
     await vi.advanceTimersByTimeAsync(3000);
     expect(reads).toBe(2);
@@ -390,7 +392,8 @@ describe("a real backend failure", () => {
     await reload;
     expect(store.state().tasks[0].title).toBe("Confirmed");
     await flush();
-    expect(reads).toBe(2);
+    // The action's project first, then the discarded whole read again.
+    expect(reads).toBe(3);
     expect(store.syncing()).toBe(false);
   });
 
@@ -424,7 +427,10 @@ describe("a real backend failure", () => {
     finish(); await reload; await flush();
     expect(store.syncing()).toBe(true);
     expect(store.state().tasks.find(t => t.id === "u")?.title).toBe("B old");
-    expect(scopes).toEqual([{}, {full:true}]);
+    // The action's project is read first; the discarded whole read follows it, in full.
+    expect(scopes).toEqual([{}, {projectId:"p"}]);
+    release(); await flush();
+    expect(scopes).toEqual([{}, {projectId:"p"}, {full:true}]);
     release(); await flush();
     expect(titles(store.state())).toEqual(["A new", "B new"]);
     expect(store.state().tasks.find(t => t.id === "u")?.targetBranch).toBe("new-target");

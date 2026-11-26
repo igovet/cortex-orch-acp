@@ -61,12 +61,14 @@ A created sprint has **New task** and **Close sprint…** in its title band; a n
   is expanded it is labelled "To Coordinator — not an answer to the question". Both drafts are preserved.
 - Batch questions: questions asked together are one form. Every question is on view under "Question N of M" with its own options and answer box, and one Send answers button sends every answer at once as the one answer of their batch; it stays unavailable, with "Answer every question first: N of M answered", until each question has an answer. Once the service records the answers the form reads as answered and never offers the same questions again; a refused send keeps every chosen and typed answer and shows the reason, so the owner can send again. The answers read as given from the press, with "Sending the answers…", while their fields stay behind them; a refusal brings the fields back as they were, with the reason and Retry.
 - A conversation opens whole or not at all. Opened for the first time in a window (after a restart, on the
-  desktop and on the phone alike), it shows a skeleton: one line "Loading the conversation…" over quiet
+  desktop and on the phone alike), it shows only a skeleton, with no visible words: quiet
   shapes of messages, with the region marked busy, never a made-up row or count. The skeleton stays until
   its latest messages, the questions of its run and its workers and result are all in; then the whole
   conversation appears at once, at its end, following. Answered questions never show first on their own.
-  If that takes more than 5 seconds, or the machine is offline, the skeleton stops: what has arrived shows,
-  with one notice naming what has not ("Couldn’t finish loading the conversation.", or questions, or
+  A slow read is never an error: however long the machine takes, the skeleton stays until the data arrives,
+  with no notice, no "busy" line and no timeout. Only a genuine failure ends it early: the machine is offline,
+  or a read was refused or could not be read (an unreadable or corrupt store, say). Then what has arrived
+  shows, with one notice naming what has not ("Couldn’t finish loading the conversation.", or questions, or
   workers and results) and **Retry**; it never reads as ready, and the notice goes once the rest arrives.
   Left and opened again before then, it shows no skeleton but keeps that notice and **Retry** until the
   missing parts arrive.
@@ -77,10 +79,17 @@ A created sprint has **New task** and **Close sprint…** in its title band; a n
   same skeleton for its worker list and a picked worker until the task's first facts read is in, so a worker
   never reads as "not part of the task" while it is still on its way. A task's workers stay shown while
   another task of the same project is open; a new run of the task waits for its own workers. The
-  coordinator's activity has the same skeleton, 5-second limit, offline notice and **Retry**; a reply
+  coordinator's activity has the same skeleton (with no time limit), failure and offline notice and **Retry**; a reply
   for an earlier run of the task never shows in it. Board, Inbox, Home and Archive show a
   list skeleton instead of "nothing here" while a project's tasks are still being read, and panels that wait
   for the machine's details show a panel skeleton.
+  **Loading rule:** while anything loads (a view's first read, earlier messages, a worker's recorded activity, a report,
+  a file, remote access, attachments, command output, the startup wait), only a skeleton is visible, never a caption such
+  as "Loading…". Its words exist only as a screen-reader label (`ws-sr`) inside a region marked `aria-busy`. Errors,
+  refusals and the Retry notice are not loading and keep their words. Slowness is loading, never an error: a
+  read that takes long (a slow store, product file, Git or disk) keeps its skeleton, or the confirmed saved view
+  with no line about it, until it answers. "This project's data could not be read", "Couldn’t finish loading …"
+  and "Saved view; live state unavailable" appear only for a genuine failure (offline, refused, unreadable).
 - Long conversations open on their latest part. The Conversation opens at its end with about one screen of
   its newest rows (as many as fill the window: each request asks for one screen's worth of rows, at most
   100, and when steps fold together into fewer entries further requests of the same size follow until
@@ -89,21 +98,26 @@ A created sprint has **New task** and **Close sprint…** in its title band; a n
   so every later read of that conversation, earlier parts as the reader scrolls up and new rows below,
   asks for the same size; a new size is used only when the conversation is read afresh.
   If the boundary below the task description is on screen or within one screen above it, earlier
-  content loads automatically, even while following. This repeats as needed on opening, resizing or
-  scrolling up. **Show earlier** remains a fallback. "Loading earlier…" stays until there is more
-  conversation to show or the beginning is reached. The earlier content goes above the held rows
-  without shifting the reader's position. A failed read shows "Earlier conversation could not be
+  content loads automatically, even while following; a reader in the middle of a long conversation
+  reads nothing. This repeats as needed on opening, resizing or scrolling up. The boundary is a quiet
+  skeleton strip, the same before and while a page is read; its words and **Show earlier** (a fallback
+  that shows itself when focused) are for screen readers and the keyboard. Above it the feed keeps
+  room of still skeleton shapes for the pages to come: earlier rows go into that room, a few each
+  frame, so no row the reader sees moves and the scroll position is not written while a wheel or
+  touchpad scroll runs. The room is grown back, or taken away once the beginning is reached, while
+  the reader holds still. A failed read shows "Earlier conversation could not be
   read:" with its reason and **Retry**; it does not keep retrying by itself. Once the first row is read the line is gone and the
   conversation reads exactly as a complete read shows it. Until then a message or a "Worked …" line that
   may have begun before the rows read is not shown. A settled question from before them is not shown at
   their top, and the follow pill does not count rows read above as new. A short conversation reads in one
   request and looks exactly as before.
 - A worker's or the coordinator's activity opens the same way, on about one screen of its newest rows.
-  Earlier rows are drawn when the reader scrolls up to within half a screen of the top, or while the feed
+  Earlier rows are drawn when the reader scrolls up to within one screen of the top, or while the feed
   does not fill its box yet; only once every held row is drawn is the next older page read from the
-  machine. "Earlier activity is not shown." with **Show earlier** stands at the top while more exists,
-  "Loading recorded activity…" while a page is read, and a failed page says why with **Retry**. Rows drawn
-  above keep the row being read where it is. Picking another worker in Work details and coming back shows
+  machine. The same skeleton strip and room stand at the top while more exists (its words "Earlier
+  activity is not shown." and **Show earlier** for screen readers and the keyboard; "Loading recorded
+  activity…" while a page is read), and a failed page says why with **Retry**. Rows drawn above go into
+  the room a few each frame and keep the row being read where it is. Picking another worker in Work details and coming back shows
   the rows already read at the same place, without reading them again.
 - Sent messages read at once. A message, a steer, a request for changes, a message to the planner and a direct message to a worker leave the composer and read in their place the moment they are sent, marked "Sending…", then "Sent"; a queued message stands at the end of the queue as "Queuing…". The service's own record takes its place without a second copy or a move: a saved, queued or worker message by the request id it was saved under, a history line by its text among the lines that arrived after the send, each record answering one send in order. A send that did not arrive stays on its line, text and files, with "Not sent:" and the reason, Retry (in the same place) and Edit (back into the composer). A confirmed message whose record does not arrive within a minute stops being shown on its own.
 - Suggestions while writing. The task's message field reads "Message the agent, tag @files, or use
@@ -113,11 +127,11 @@ A created sprint has **New task** and **Close sprint…** in its title band; a n
   order; case and script do not matter, so Cyrillic names match as typed). Before anything is typed after
   `@` it shows only files picked earlier in this window, or "Type to search project files". Typing `/`
   where a line begins opens Commands (the screen's own Stop or Resume, Queue and Send now, Work details,
-  Changes, Code and New task) and Project skills. Up and Down move, Enter or Tab picks, a press picks,
+  Changes, Code and New task), Project skills and Cortex skills (the built-in topic skills the coordinator reads with `read_skill`, such as requirements-intake, design-workflow or documentation-sync; role profiles and command-only skills are not listed; filtered by what is typed, from the same `repo.skills` read). Up and Down move, Enter or Tab picks, a press picks,
   Escape closes the list and leaves the field and the draft as they are, and removing the `@` or `/`
   closes it. While the list has options Enter picks instead of sending; with only a note in it ("No
   matching files", "Searching project files…") Enter sends as usual. A picked file is written as `@path`,
-  a skill as a sentence naming it and its path, and a command runs and leaves nothing in the field. The
+  a project skill as a sentence naming it and its path, a Cortex skill as a sentence naming its id and telling the coordinator to read it with `read_skill`, and a command runs and leaves nothing in the field. The
   list sits in the top layer against the field and never moves the layout. The same `@` list is offered in
   every message field that knows its project: answers to questions (which offer no `/` list), messages to
   a worker, the planner, New task and New sprint, Edit task and Request changes; `/` skills are offered
@@ -437,7 +451,7 @@ Links. In the Graph toolbar **Edit links** (key L) is a toggle. Pick the prerequ
 
 Priority. Not-started tasks the owner can edit show **Move up** and **Move down** in the Live list and in Details with the task's place in the order; a disabled arrow states why. Task numbers do not change.
 
-Order. In one sprint, Board, List, the toolbar Now/Next and the queue bar use one order: Working tasks first in the order they started, then Not started by the service's rank, then blocked, paused and unknown tasks with their reason. A task reads `Next in <sprint>` only when the service names it, `Queued 2nd in <sprint>` when ranked and `Suggested 2nd in <sprint>` in Manual, which has no Next. Existing `Waits for …` text keeps priority. Without a current order, or on an older service, the screens are unchanged. All work keeps its global grouping; tasks of a sprint are ordered within the places they already hold, and standalone tasks and other sprints never move.
+Order. Columns and list groups always run Needs you, Not started, Working, Review, Ready to merge, Done, in a sprint too. In one sprint, Board, List, the toolbar Now/Next and the queue bar use one order within their groups: Working tasks in the order they started, Not started by the service's rank, then blocked, paused and unknown tasks with their reason. A task reads `Next in <sprint>` only when the service names it, `Queued 2nd in <sprint>` when ranked and `Suggested 2nd in <sprint>` in Manual, which has no Next. Existing `Waits for …` text keeps priority. Without a current order, or on an older service, the screens are unchanged. All work keeps its global grouping; tasks of a sprint are ordered within the places they already hold, and standalone tasks and other sprints never move.
 
 ## Task workers (desktop)
 
@@ -502,7 +516,8 @@ Live worker view:
   opens Code, even when the file is in the checkout; it opens the path menu with Open in default app and Copy
   path (see Result links in local-task-execution.md). A path in text is recognized when it is absolute, starts
   with `./` or `../`, contains a `/` and ends in an extension, or carries a line suffix (`:12`, `#L12`); a bare
-  name such as `README.md` with no folder and no line stays text. http(s) and
+  file name in backticks (`README.md`, `Makefile`) is a link only when the checkout lists that file, and a
+  token not in the tree (`ws.store`, `npm run test`) stays text. http(s) and
   mailto links open outside the app; other schemes stay text. Question options and their per-option detail
   render inline Markdown (including these links); a link in an option does not select or submit it. Tool labels, icons, Worked summaries and which calls appear reuse the Paseo integration’s
   presentation functions, so both clients show the same rows; an engine's raw tool name never reaches the
@@ -513,7 +528,7 @@ Live worker view:
   updates stay hidden before grouping and counting; report bodies are never shown, and the published
   worker result remains visible. Native commands never invent an exit code or offer gateway Stop.
 - Recorded output: the output of an opened step, a command's output tail and an edit's diff each sit in one labelled box that keeps lines exactly as written. A long line scrolls sideways inside its box, and the box scrolls vertically as well, up to 280 px (320 px for a diff). Nothing is cut off at the column's edge, and the column and the page do not scroll sideways for it. The box is a named stop in the Tab order; once focused, arrow keys, Shift+wheel and a trackpad move it. Its name is the label, such as Command output, Output, Diff or Edit.
-- Tool call detail: every tool call except file reads and edits opens on click into one shared detail, the same in the Conversation, a worker's page and the coordinator's activity. It shows two separately labelled boxes, Input and Output, taken from what the runtime recorded for that call. A box says why it is empty and never claims more than it holds: "Waiting for output…" while the call is pending, "No input was recorded." or "No output was recorded.", "Private or redacted." (private report, draft and result bodies are never shown), "Recorded empty.", or a notice that the recorded value is clipped. Text over 1,000 characters starts as a preview ending in an ellipsis; Show all retained text reveals the whole recorded text (Show preview folds it again) and Copy copies it, then says whether it copied. A file read keeps its path link and a file edit keeps its diff; neither gets a generic Input/Output detail. The runtime's own steps (command status checks, skills, task context, report drafts, questions, access and scope requests and result submissions) stay hidden unless Settings › Tool calls › Show every tool call is on; with it on they are listed and open like any other call. The setting changes visibility only; everything stays recorded either way.
+- Tool call detail: every tool call except file reads and edits opens on click into one shared detail, the same in the Conversation, a worker's page and the coordinator's activity. It shows two separately labelled boxes, Input and Output, taken from what the runtime recorded for that call: the call's real arguments and its result text, for Cortex tools (`read_batch`, `read_report`, plan, draft and result submissions) and engine tools alike, in both the Claude and the Codex shapes. Only a credential is masked, never a whole row: the value of an argument named like a password, token, secret, API key, authorization, credential, private key or sudo answer reads `[REDACTED]`, and bearer tokens, `password=` assignments and private keys in text are masked, while the rest stays visible. A box says why it is empty and never claims more than it holds: "Waiting for output…" while the call is pending, "No input was recorded." or "No output was recorded.", "Recorded empty.", or a notice that the recorded value is clipped. A recorded text is bounded at 16,000 characters per argument and per result and ends with a clip marker beyond that; a command's output is paged from the command-output reader instead. Text over 1,000 characters starts as a preview ending in an ellipsis; Show all retained text reveals the whole recorded text (Show preview folds it again) and Copy copies it, then says whether it copied. A file read keeps its path link and a file edit keeps its diff; neither gets a generic Input/Output detail. The runtime's own steps (command status checks, skills, task context, report drafts, questions, access and scope requests and result submissions) stay hidden unless Settings › Tool calls › Show every tool call is on; with it on they are listed and open like any other call. The setting changes visibility only; everything stays recorded either way.
 - Command output on demand: a `command_run` or `outside_command` call recorded by the runtime's command broker carries only a reference (attempt and call identity), never the output. Opening the step asks the local service for a 4,096-byte preview; Load more output fetches further pages of up to 16,384 bytes. The detail shows the exit status or signal, the bytes loaded of the total, and whether capture was complete or truncated, and its Copy copies only the loaded text. The output is the broker's combined stdout and stderr, never separate streams. Bytes that are not text are shown as base64 or labelled as converted. Output that was never captured or has since been removed reads "Command output is unavailable."; a command still running reads "Waiting for output…". A call with no broker reference (an engine's own shell, a coordinator row recorded before the reference existed) shows only what its row recorded and offers no output read. The read exists on the desktop; the phone and remote services refuse it.
 - Live activity: a quiet Working… indicator remains while the task or worker runs. On a worker's page it reads Reading…, Editing… or Running command… only when that worker's recorded activity establishes it. The Conversation's line speaks for the coordinator: while workers run it reads Waiting for and the running worker's role (or the number of running workers), never a worker's step. It stops for terminal or waiting states and respects reduced motion. While the task waits for the owner (Needs you) and no worker runs, the Conversation's last line says Waiting for you, as the header does, with no spinner. The stream arrives at tool boundaries; missing output and clipped previews are explicit.
 - Following: every feed follows one rule, on the desktop and the phone alike: a task or sprint's
@@ -813,22 +828,23 @@ Per-machine orchestration settings reach field-level parity with the Cortex conf
 
 Each section is scoped to one machine. The context bar shows the machine name and connection state, and the profile bar below it shows the active profile and its state. The Project picker appears only where a project scope applies.
 
-Eight sidebar sub-items sit under the machine's Orchestration item, in this order:
+Nine sidebar sub-items sit under the machine's Orchestration item, in this order:
 
 | # | Sidebar label | Paseo section | Writes | Project picker |
 |---|---|---|---|---|
 | 1 | Defaults | User defaults, with the default preset card | `user_defaults` (preset actions run at once) | Hidden |
-| 2 | Models | Models | `routing` | Shown |
-| 3 | Engines and models | Engines & models | `routing` | Shown |
-| 4 | Project ceiling | Project ceiling | `project_ceiling` | Shown (required) |
-| 5 | Routing | Routing | `routing` | Shown |
-| 6 | Profiles | Profiles | Profile commands (at once) | Hidden |
-| 7 | MCP servers | MCP servers | `mcp_servers` | Hidden |
-| 8 | Connections | Connections | `connections` (commands at once) | Hidden |
+| 2 | Coordinator models | (Workspace only) | `routing` (`coordinator_models`) | Shown |
+| 3 | Models | Models | `routing` | Shown |
+| 4 | Engines and models | Engines & models | `routing` | Shown |
+| 5 | Project ceiling | Project ceiling | `project_ceiling` | Shown (required) |
+| 6 | Routing | Routing | `routing` | Shown |
+| 7 | Profiles | Profiles | Profile commands (at once) | Hidden |
+| 8 | MCP servers | MCP servers | `mcp_servers` | Hidden |
+| 9 | Connections | Connections | `connections` (commands at once) | Hidden |
 
-- Deliberate difference from the Paseo panel: the Paseo panel shows its workspace picker above every section. Workspace shows the Project picker only on sections 2 to 5, which take a project scope; sections 1, 6, 7 and 8 are machine-wide.
-- Engine connections is no longer a separate top-level machine item; Connections is section 8. The `section: "connections"` route stays, so existing links keep working.
-- The bare Orchestration route opens Defaults. Existing deep links resolve: `defaults` opens Defaults; `models` opens Models; `routing` with tab `roles`, `kinds`, `quota` or `rules` opens Routing, scrolled to the matching group; `effective` opens Route preview; `policy` opens Defaults › Machine ceiling under machine scope, or Project ceiling under project scope; `tools` opens MCP servers; `profiles` opens Profiles; `files` opens Files and sources.
+- Deliberate difference from the Paseo panel: the Paseo panel shows its workspace picker above every section. Workspace shows the Project picker only on sections 2 to 6, which take a project scope; sections 1, 7, 8 and 9 are machine-wide. Coordinator models has no Paseo counterpart: the Paseo panel keeps `coordinator_models` as a key it preserves without editing.
+- Engine connections is no longer a separate top-level machine item; Connections is section 9. The `section: "connections"` route stays, so existing links keep working.
+- The bare Orchestration route opens Defaults. Existing deep links resolve: `defaults` opens Defaults; `coordinator` opens Coordinator models; `models` opens Models; `routing` with tab `roles`, `kinds`, `quota` or `rules` opens Routing, scrolled to the matching group; `effective` opens Route preview; `policy` opens Defaults › Machine ceiling under machine scope, or Project ceiling under project scope; `tools` opens MCP servers; `profiles` opens Profiles; `files` opens Files and sources.
 - Secondary pages are not in the sidebar. Each opens from a link in the section named, and has a "Back to <section>" link: Route preview (from Routing and from Engines and models); Files and sources (from Routing, from the Defaults notice about kept keys, and from the invalid-routing and migration strips); MCP server add and edit pages (from MCP servers).
 - The Overview page is removed. Its needs-attention list moves to the top of Defaults.
 
@@ -836,12 +852,12 @@ Eight sidebar sub-items sit under the machine's Orchestration item, in this orde
 
 From top to bottom:
 
-1. **Context bar**: the machine name and connection state, as today. At its end is the **Project** picker, a choice of "Machine only" and then the machine's projects. It is shown only on sections 2 to 5 and writes the same scope as today. With no projects it offers only "Machine only", and the status lane says "This machine has no projects, so only machine settings can be chosen." Below about 720 px a **Section** choice that lists the eight labels sits at the start of the bar, because the sidebar is held away there. Below about 720 px the machine name is not shown in this bar. Below about 560 px the connection state keeps only its icon beside the Project picker; its word is still read by assistive technology.
+1. **Context bar**: the machine name and connection state, as today. At its end is the **Project** picker, a choice of "Machine only" and then the machine's projects. It is shown only on sections 2 to 6 and writes the same scope as today. With no projects it offers only "Machine only", and the status lane says "This machine has no projects, so only machine settings can be chosen." Below about 720 px a **Section** choice that lists the nine labels sits at the start of the bar, because the sidebar is held away there. Below about 720 px the machine name is not shown in this bar. Below about 560 px the connection state keeps only its icon beside the Project picker; its word is still read by assistive technology.
 2. **Profile bar** (see below).
-3. **Status lane**: the offline, remote-write and no-projects strips as today, and the routing source strips on sections 2, 3 and 5.
+3. **Status lane**: the offline, remote-write and no-projects strips as today, and the routing source strips on sections 2, 3, 4 and 6.
 4. **Title and lead**, with section actions at the end of the title row.
 5. **Section body.**
-6. **Save bar** on the draft sections 1 to 5 and 7. Sections 6 and 8 act at once and have no save bar.
+6. **Save bar** on the draft sections 1 to 6 and 8. Sections 7 and 9 act at once and have no save bar.
 
 ### Profile bar
 
@@ -861,7 +877,7 @@ Title "Defaults". Lead: "What a new task on this machine starts with, and the wi
 
 1. **Needs attention**, shown only when there are configuration issues: one link per issue to its section.
 2. **Default preset**. "Apply preset" creates only the files that are missing and never replaces one; it is off with "Every file exists, so there is nothing to create". "Reset to default…" replaces routing and defaults with the preset after a warning that names the files replaced and the backups kept (`<name>.json.cortex-backup-<time>`), and a literal confirmation. Both are commands, not draft edits; their outcome shows under the group, with "Read again" after a conflict.
-3. **Coordinator**. Model: a picker over enabled, available models; each option names its engine. Recommended: "A strong general model; it plans and checks the work." Effort: the model's observed levels; a general list is labelled "Not observed: this is a general list". Status: "Bound to <route>" (the engine and model, or the exact route), or the error with "Fix in Models". "More coordinator parameters" is a closed block of name and value rows that opens when it holds a value.
+3. **Coordinator**. Model: a picker over enabled, available models; each option names its engine. Recommended: "A strong general model; it plans and checks the work." Effort: the model's observed levels; a general list is labelled "Not observed: this is a general list". Coordinator models: the listed models with their categories, or "No list yet: the coordinator may use any model with a tier under Engines and models.", with "Edit" or "Set up" opening Coordinator models. The model picker offers only listed models (in a profile without the list, models with a tier); a saved one outside stays shown, marked "Not in Coordinator models". Effort: the levels of that model's ranges. Status: "Bound to <route>" (the engine and model, or the exact route), or the error with "Fix in Coordinator models" (without the list, "Fix in Models"). "More coordinator parameters" is a closed block of name and value rows that opens when it holds a value.
 4. **Language**: Automatic, English or Russian. Recommended: "Automatic, or Russian to always get Russian."
 5. **New tasks**: Access mode (Development, Guarded or Auto) and Checkout for new tasks (Worktree or Project folder).
 6. **Exact default route**: closed by default, and open when set or in error. Use an exact route or clear it, with pickers for the connection and model and the route parameters. Recommended: "Leave this off and use the coordinator above."
@@ -870,7 +886,16 @@ Title "Defaults". Lead: "What a new task on this machine starts with, and the wi
 
 Save bar: one draft for groups 3 to 7, labelled "Save defaults on <machine>". After a save: "Saved on <machine>. Not yet in profile <name>.", with "Save to profile". With a project selected this section shows no project picker, because machine defaults never become project values.
 
-### 2. Models (`routing`)
+### 2. Coordinator models (`routing`)
+
+Title "Coordinator models" ("Модели координатора" in a Russian interface). Lead: "The models the coordinator may use, each in the categories you tick and at the efforts of their ranges. The coordinator pickers and sprint planning offer only these." A "Coordinator default" link at the end of the title row opens Defaults. Groups, in order:
+
+1. **Models the coordinator may use**, with the count. One card per listed model: its name, exact id and engine, a warning when it is off in Models, refused by a deny rule or not offered by the engine now (it stays listed), and **Remove**. Under it, **Categories and effort**: a checkbox each for Frontier (the flagship tier), Deep, Standard and Light; a ticked category shows "Lowest" and "Highest" pickers over the levels the model offers (a stored level it does not offer stays, labelled "Not offered by this model"). Moving one end past the other moves the other with it. A newly ticked category starts at its usual effort (Light low, Standard medium, Deep and Frontier high), moved to the nearest level the model offers. Errors: "Choose at least one category.", "Lowest must not be above highest.", and on the list "Keep at least one model, so a task can start." Below the cards, **Add a model**: a picker over switched-on, non-denied models that are not listed yet; a new model starts on Standard over the levels nearest medium to high.
+2. **How sprint planning picks a model**: low complexity Light then Standard, normal Standard then Deep then Light, high Frontier then Deep; within a category a used-up provider is skipped, one above 95% goes last, then the least used goes first; the effort starts at the category's usual level and moves into the range.
+
+A profile without the list shows "No coordinator list yet" with "This profile has no coordinator list, so the coordinator may use any model with a tier under Engines and models, at the efforts of those tiers." and **Start the list**, which fills the draft from what the worker tiers allow now. The page shares the routing draft with Models, Engines and models and Routing ("Save routing rules on <machine or project>").
+
+### 3. Models (`routing`)
 
 Title "Models". Lead: "Switch on the models tasks may use. Only these appear in the model selector and in automatic routing. New models stay off until you switch them on."
 
@@ -885,7 +910,7 @@ Title "Models". Lead: "Switch on the models tasks may use. Only these appear in 
 - Strips: the routing source strips (invalid routing, migration, project and environment notes). A connection whose model list could not be read shows "Not read" on its row under Model lists.
 - Save bar: "Save routing rules on <machine or project>".
 
-### 3. Engines and models (`routing`)
+### 4. Engines and models (`routing`)
 
 Title "Engines and models". Lead: "How automatic routing uses the models you switched on. Every model stays selectable by hand."
 
@@ -904,14 +929,14 @@ Title "Engines and models". Lead: "How automatic routing uses the models you swi
 - **Other entries in this file**: deny or auto-allow tokens that match no listed model, each with Remove. Shown only when there are any.
 - Strips and save bar as on Models: one shared routing draft.
 
-### 4. Project ceiling (`project_ceiling`)
+### 5. Project ceiling (`project_ceiling`)
 
 Title "Project ceiling". Lead: "Narrows the machine ceiling for one project. It is stored in that project and never in a profile." Recommended: "Only for projects that must stay on specific models or providers."
 
 - **Machine only** (no project chosen): one state line, "Choose a project in the bar above to read or set its ceiling.", or "This machine has no projects." when none exists. No save bar.
 - **Project chosen**: the notice "This project has no ceiling of its own. Saving creates one." when none is set; a table of Limit, Machine, Project and Effective, with the states "Starts from the machine ceiling", "No longer narrows" (warning) and "Must stay within the machine limit." (danger); "Remove project ceiling…" with a confirmation; and the save bar "Save project ceiling on <project>". A project ceiling may only narrow the machine limit. Its rows are attempts per task, connections, data recipients, failure classes, fallback budget, consent to move work to another provider, allowed routes and fallback target routes.
 
-### 5. Routing (`routing`)
+### 6. Routing (`routing`)
 
 Title "Routing". Lead: "Who runs what. Pins are strict; leans and preferences only rank what is eligible." Head actions: "Preview routes" and "Files and sources". Groups, in order:
 
@@ -926,11 +951,11 @@ Title "Routing". Lead: "Who runs what. Pins are strict; leans and preferences on
 
 Save bar: the shared routing draft, labelled "Save routing rules on <machine or project>".
 
-### 6. Profiles
+### 7. Profiles
 
 Title "Profiles". Lead: the first two sentences of the profiles help. A table of saved profiles (name, description, stored sections, updated, matches, and actions), where a name is changed by clicking it. "Activate…" is a visible line button; Edit description, Detach and Delete are in the More menu. Empty state: "No saved profiles. Current settings still apply; use Save as new in the bar above to keep them." Note: "Profiles never hold project settings, MCP commands, arguments, environment or credentials." The environment-override note stays. This section acts at once and has no save bar.
 
-### 7. MCP servers (`mcp_servers`)
+### 8. MCP servers (`mcp_servers`)
 
 Title "MCP servers". Lead: "External tools for agents on this machine, and who may use each one. Servers are per machine; a project cannot add its own."
 
@@ -948,7 +973,7 @@ Title "MCP servers". Lead: "External tools for agents on this machine, and who m
 
 Open owner decisions, not in the current configuration schema: per-tool engine access (today set by duplicating a server per engine) and access per worker role. The prototype simulates tool listing, the route preview and the new runtime operations, and labels each as simulated; none is runtime behaviour.
 
-### 8. Connections
+### 9. Connections
 
 The existing Connections page, rendered inside the orchestration shell so that it gets the profile bar. Groups: Engines: download and connect, polled every 3 seconds; the connections table; "Details of <name>" for the generated fields; and session limits, which are profile-bound. Every action is immediate: rename, max concurrent sessions, validate, remove, download, add connection and OpenCode enable. A line on the page names the models each engine offers and links "Models" to section 2.
 
@@ -959,7 +984,7 @@ The existing Connections page, rendered inside the orchestration shell so that i
 
 ### Shared rules
 
-- **Drafts** are per surface, not per page. Models, Engines and models, Routing and Route preview share one routing draft and one save. Defaults holds one `user_defaults` draft for the coordinator, language, new tasks, exact default route and machine ceiling. The project ceiling and MCP servers each keep their own draft. Moving between sections that share a draft never prompts and never loses an edit. The save bar names what it covers, for example "4 unsaved changes in routing rules", and adds that running tasks keep their configuration.
+- **Drafts** are per surface, not per page. Coordinator models, Models, Engines and models, Routing and Route preview share one routing draft and one save. Defaults holds one `user_defaults` draft for the coordinator, language, new tasks, exact default route and machine ceiling. The project ceiling and MCP servers each keep their own draft. Moving between sections that share a draft never prompts and never loses an edit. The save bar names what it covers, for example "4 unsaved changes in routing rules", and adds that running tasks keep their configuration.
 - **Save bar**: Discard; "Go to the first" when a field has an error; and Save, which is off with the reason "Fix <n> fields" until the errors are fixed. An error opens its disclosure by itself.
 - **Conflict**: a save over a surface that changed elsewhere writes nothing. The bar reads "Changed elsewhere since you opened it. Nothing was written." with "Discard mine" and "Review changes". The review lists changes made elsewhere, changes you made and collisions. "Reapply mine" is offered only after that review.
 - **Unknown outcome**: "No answer. It may have been saved." with "Read again". Nothing is replayed.
@@ -987,7 +1012,7 @@ The existing Connections page, rendered inside the orchestration shell so that i
 
 ### Responsive and keyboard
 
-- Reading width: Defaults, Project ceiling, Profiles and Connections use the narrow column (about 860 px). Models, Engines and models, Routing, MCP servers and Route preview use the wide column (about 1120 px).
+- Reading width: Defaults, Project ceiling, Profiles and Connections use the narrow column (about 860 px). Coordinator models, Models, Engines and models, Routing, MCP servers and Route preview use the wide column (about 1120 px).
 - From 900 px: the context bar shows its labels, rows are two columns, and the engine table shows all four columns. From 720 to 900 px: the context bar hides its caption words but keeps the Project and Profile pickers, and the tier toggles wrap inside their cell.
 - Below 720 px: the Section choice appears in the context bar; the profile bar takes two lines; each row puts its control under its description; engine model rows become labelled rows below 560 px of table width; the preferred-work checklist is one column; and the MCP tool matrix keeps its own horizontal scroller.
 - No page scrolls sideways. On the phone shell the same eight items sit in the drawer's settings navigation.
@@ -1013,7 +1038,7 @@ The section, page and group names are the labels above. Recommendations use the 
 - The project picker appears only on sections 2 to 5.
 - Every editable row shows a visible description, and every row with a recommendation shows it.
 - Tiers show full words in the order Light, Standard, Deep, Flagship. No single-letter tier control remains.
-- Models, Engines and models, Routing and Route preview share one routing draft, and their edits are never lost when moving between them.
+- Coordinator models, Models, Engines and models, Routing and Route preview share one routing draft, and their edits are never lost when moving between them.
 - A save over a surface that changed elsewhere writes nothing until the owner has reviewed the changes.
 - Offline, every write and profile action is off with its reason, and nothing is queued.
 - No interface text shows a route, connection or task identifier, the program name or a dash for an absent value. Use the shared [desktop tooltip](#desktop-tooltip-inventory), not native `title`.

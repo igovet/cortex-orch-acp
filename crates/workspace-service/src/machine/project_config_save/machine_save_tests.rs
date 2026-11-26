@@ -283,3 +283,92 @@ fn machine_mcp_containment_is_kept_inherited_or_explicit() {
         "invalid_mcp_registry"
     );
 }
+
+fn project_params(servers: Value, overrides: Value, token: &str) -> Value {
+    json!({"surface":"mcp_servers","value":{"servers":servers,"overrides":overrides},
+        "tokens":{"mcp_servers":token}})
+}
+#[test]
+fn project_mcp_registry_is_private_per_project_and_leaves_the_machine_file_alone() {
+    let f = Fixture::new();
+    f.write(
+        "mcp-servers.json",
+        r#"{"version":1,"servers":{"kling":{"command":"/never/launch","allowed_tools":["read"]}}}"#,
+    );
+    let machine = fs::read(f.folder().join("mcp-servers.json")).unwrap();
+    let (a, b) = (f.root.join("a"), f.root.join("b"));
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&b).unwrap();
+    // Nothing yet: absent token, no servers, no file created by reading.
+    let (view, token) = reader::project_mcp(&a, &f.config);
+    assert_eq!((token.as_str(), &view["servers"], &view["overrides"]), ("absent", &json!([]), &json!({})));
+    assert!(!user_mcp::project_path(&a, &f.config).unwrap().exists());
+    // Another name and a secret; the value is never read back.
+    let server = json!({"name":"mine","command":"/never/launch","enabled":true,"allowedTools":["read"],
+        "env":[{"name":"API_KEY","value":"s3cret","action":"replace"}]});
+    let reply = user_mcp::save_project(
+        &a,
+        &f.config,
+        &project_params(json!([server]), json!({"kling":false,"extra":true}), "absent"),
+    )
+    .unwrap();
+    assert_eq!(reply["changed"], true);
+    assert_eq!(reply["overrides"], json!({"extra":true,"kling":false}));
+    let path = user_mcp::project_path(&a, &f.config).unwrap();
+    assert!(path.starts_with(f.folder().join("projects")) && !path.starts_with(&a));
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(path.parent().unwrap()), 0o700);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["overrides"], json!({"extra":true,"kling":false}));
+    assert_eq!(saved["servers"]["mine"]["env"]["API_KEY"], "s3cret");
+    // The machine registry and another project are untouched.
+    assert_eq!(fs::read(f.folder().join("mcp-servers.json")).unwrap(), machine);
+    assert!(!user_mcp::project_path(&b, &f.config).unwrap().exists());
+    // The editor sees presence only, and keeps a stored value with `keep`.
+    let (view, token) = reader::project_mcp(&a, &f.config);
+    assert_eq!(view["overrides"], json!({"extra":true,"kling":false}));
+    assert_eq!(view["servers"][0]["env"], json!([{"name":"API_KEY","stored":true,"action":"keep","value":""}]));
+    assert!(!view.to_string().contains("s3cret"));
+    let mut kept = server.clone();
+    kept["env"] = json!([{"name":"API_KEY","stored":true,"action":"keep","value":""}]);
+    kept["args"] = json!(["--x"]);
+    let reply = user_mcp::save_project(&a, &f.config, &project_params(json!([kept]), json!({"kling":false}), &token)).unwrap();
+    assert_eq!(reply["changed"], true);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["servers"]["mine"]["env"]["API_KEY"], "s3cret");
+    assert_eq!(saved["servers"]["mine"]["args"], json!(["--x"]));
+    // A stale revision is refused and nothing changes.
+    let before = fs::read(&path).unwrap();
+    let stale = user_mcp::save_project(&a, &f.config, &project_params(json!([]), json!({}), &token)).err().unwrap();
+    assert_eq!(stale.code, "revision_conflict");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    // The same validation as the machine editor: tools are required, 'cortex' is reserved,
+    // an override cannot also be a project entry, and bad names are refused.
+    let (_, token) = reader::project_mcp(&a, &f.config);
+    for (servers, overrides) in [
+        (json!([{"name":"x","command":"/never/launch","enabled":true}]), json!({})),
+        (json!([{"name":"cortex","command":"/never/launch","enabled":true,"allowedTools":["r"]}]), json!({})),
+        (json!([server.clone()]), json!({"mine":false})),
+        (json!([server.clone()]), json!({"cortex":false})),
+        (json!([server.clone()]), json!({"x":7})),
+        (json!([server.clone()]), json!(["x"])),
+    ] {
+        assert!(
+            user_mcp::save_project(&a, &f.config, &project_params(servers, overrides, &token)).is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    // Removing everything leaves a valid, empty project registry.
+    let reply = user_mcp::save_project(&a, &f.config, &project_params(json!([]), json!({}), &token)).unwrap();
+    assert_eq!(reply["changed"], true);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["servers"], json!({}));
+    assert!(saved.get("overrides").is_none());
+    // A hand-damaged project file is shown as a problem, never as an empty registry,
+    // and the save refuses to overwrite it.
+    fs::write(&path, b"{not json").unwrap();
+    let (view, _) = reader::project_mcp(&a, &f.config);
+    assert!(view["problem"].is_string());
+    assert!(user_mcp::save_project(&a, &f.config, &project_params(json!([]), json!({}), "absent")).is_err());
+}

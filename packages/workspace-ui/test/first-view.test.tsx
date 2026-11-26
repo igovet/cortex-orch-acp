@@ -88,6 +88,11 @@ it.each(["history", "decisions", "facts"] as const)("shows the conversation skel
   const busy = feed()!;
   expect(busy.getAttribute("aria-busy")).toBe("true");
   expect(busy.querySelector(".ws-skel [role=status]")?.textContent).toBe("Loading the conversation…");
+  // Loading shows only the skeleton: the words are for screen readers (ws-sr), and nothing else in the feed carries text.
+  expect(busy.querySelector(".ws-skel [role=status]")?.classList.contains("ws-sr")).toBe(true);
+  const visible = [...busy.querySelectorAll(".ws-skel *")].filter(el => !el.closest(".ws-sr")).flatMap(el => [...el.childNodes].filter(n => n.nodeType === 3 && n.textContent!.trim()));
+  expect(visible).toEqual([]);
+  expect(busy.querySelector(".ws-skel-rows")?.getAttribute("aria-hidden")).toBe("true");
   expect(busy.textContent).not.toContain("Which branch");
   expect(busy.textContent).not.toContain("Owner words");
   expect(root.querySelector(".dock .ws-team")).toBeNull();
@@ -105,7 +110,7 @@ it.each(["history", "decisions", "facts"] as const)("shows the conversation skel
   expect(root.querySelector(".ws-first-notice")).toBeNull();
 });
 
-it("after five seconds shows what was confirmed with one notice naming the rest and Retry, never as ready", async () => {
+it("keeps the conversation skeleton, with no error, for as long as a slow read takes, then shows all of it at once", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout"] });
   const svc = machine();
   const wait = hold();
@@ -113,26 +118,21 @@ it("after five seconds shows what was confirmed with one notice naming the rest 
   const { root } = open(svc);
   await vi.waitFor(() => expect(feed()?.querySelector(".ws-skel")).not.toBeNull(), { timeout: 4000 });
   await settle();
-  // The fake clock also moves with real time here, so stop well short of the budget, then pass it.
-  vi.advanceTimersByTime(FIRST_VIEW_MS - 2000);
-  await settle(2);
-  expect(feed()?.querySelector(".ws-skel")).not.toBeNull();
-  vi.advanceTimersByTime(2100);
-  await settle(4);
-  expect(feed()?.querySelector(".ws-skel")).toBeNull();
-  const notice = () => root.querySelector<HTMLElement>(".ws-first-notice");
-  expect(notice()?.getAttribute("role")).toBe("alert");
-  expect(notice()?.textContent).toContain("Couldn’t finish loading the conversation.");
-  // What arrived is shown as it is; the transcript still says it is loading, and nothing stands in for it.
-  expect(feed()!.textContent).toContain("Which branch for exec-1?");
-  expect(feed()!.textContent).toContain("Loading the conversation…");
-  expect(feed()!.textContent).not.toContain("Owner words");
-  notice()!.querySelector<HTMLButtonElement>("button")!.click();
-  await settle(2);
-  expect(notice()?.textContent).toContain("Loading the conversation again…");
+  // Far past the old five-second budget and every former request deadline: still the skeleton, and nothing says it failed.
+  for (const step of [FIRST_VIEW_MS + 100, 30_000, 60_000, 120_000]) {
+    vi.advanceTimersByTime(step);
+    await settle(2);
+    expect(feed()?.querySelector(".ws-skel")).not.toBeNull();
+    expect(root.querySelector(".ws-first-notice")).toBeNull();
+    expect(root.querySelector(".timeline [role=alert], .ws-app > [role=alert]")).toBeNull();
+    expect(root.textContent).not.toContain("Couldn’t finish loading");
+    expect(root.textContent).not.toContain("could not be read");
+    expect(feed()!.textContent).not.toContain("Which branch");
+  }
   wait.release();
   await vi.waitFor(() => expect(feed()?.textContent).toContain("Coordinator reply for task-1."), { timeout: 4000 });
-  await vi.waitFor(() => expect(notice()).toBeNull());
+  expect(feed()!.textContent).toContain("Which branch for exec-1?");
+  expect(root.querySelector(".ws-first-notice")).toBeNull();
 });
 
 it("reads the questions of the task on screen first, before the board's other tasks", async () => {
@@ -231,21 +231,23 @@ it("opens a worker on about one screen of its newest rows and shows earlier ones
   expect(notes()[0].textContent).toBe(`Observation ${100 - firstWindowEntries()}`);
   // jsdom has no layout: every row is 50 px, the feed 400 px high.
   let top = 0;
-  const height = () => inner.children.length * 50;
+  // The reserve above the rows (FollowEdge in follow.ts) is as tall as the follow controller sets it.
+  const h = (r: Element) => r.classList.contains("ws-reserve") ? parseFloat((r as HTMLElement).style.height) || 0 : 50;
+  const height = () => [...inner.children].reduce((n, r) => n + h(r), 0);
   Object.defineProperties(box, { clientHeight: { get: () => 400 }, scrollHeight: { get: () => height() }, scrollTop: { get: () => top, set: (v: number) => { top = Math.max(0, Math.min(v, height() - 400)); } } });
   const rect = Element.prototype.getBoundingClientRect;
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
     if (this === box) return { top: 0, bottom: 400, height: 400 } as DOMRect;
-    if (this.parentElement === inner) { const y = [...inner.children].indexOf(this) * 50 - top; return { top: y, bottom: y + 50, height: 50 } as DOMRect; }
+    if (this.parentElement === inner) { const rows = [...inner.children], y = rows.slice(0, rows.indexOf(this)).reduce((n, r) => n + h(r), 0) - top; return { top: y, bottom: y + h(this), height: h(this) } as DOMRect; }
     return rect.call(this);
   });
   box.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
-  top = 100; box.dispatchEvent(new Event("scroll"));
+  top = (parseFloat(inner.querySelector<HTMLElement>(".ws-reserve")?.style.height ?? "") || 0) + 100; box.dispatchEvent(new Event("scroll"));
   const anchor = [...inner.children].find(r => !r.hasAttribute("data-follow-skip") && r.getBoundingClientRect().bottom > 0)!;
   const y = anchor.getBoundingClientRect().top;
-  await settle(2);
+  // Drawn in steps over a few frames, into the reserve above.
+  await vi.waitFor(() => expect(notes()).toHaveLength(2 * firstWindowEntries()));
   for (const cb of observers) cb();
-  expect(notes()).toHaveLength(2 * firstWindowEntries());
   expect(anchor.isConnected).toBe(true);
   expect(anchor.getBoundingClientRect().top).toBe(y);
 });
@@ -301,7 +303,7 @@ function heldActivity() {
 }
 const coordinatorPath = `/m/${LOCAL_MACHINE_ID}/t/t/workers/cortex`;
 
-it("gates the coordinator's own activity: a notice with Retry after five seconds, and a late reply only for its own execution", async () => {
+it("gates the coordinator's own activity: the skeleton for as long as its read is slow, and a late reply only for its own execution", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout"] });
   const held = heldActivity();
   const { p, root, state } = await scripted(emptySession("t"), [], coordinatorPath, held.extend);
@@ -309,14 +311,16 @@ it("gates the coordinator's own activity: a notice with Retry after five seconds
   const notice = () => pane().querySelector<HTMLElement>(".ws-first-notice");
   await vi.waitFor(() => expect(held.reads.length).toBeGreaterThan(0));
   expect(pane().querySelector(".ws-skel [role=status]")?.textContent).toBe("Loading activity…");
-  vi.advanceTimersByTime(FIRST_VIEW_MS - 2000); await settle(2);
+  vi.advanceTimersByTime(FIRST_VIEW_MS + 100); await settle(4);
+  // Slow is not failed: the skeleton stays and no notice comes.
   expect(pane().querySelector(".ws-skel")).not.toBeNull();
-  vi.advanceTimersByTime(2100); await settle(4);
-  expect(pane().querySelector(".ws-skel")).toBeNull();
-  expect(notice()?.textContent).toContain("Couldn’t finish loading activity.");
-  expect(notice()?.querySelector("button")?.textContent).toBe("Retry");
+  expect(notice()).toBeNull();
+  // An older service's deadline answers a slow read with a timeout: that is still not a failure.
+  held.reads[0].reject(new Error("service_timeout")); await settle(4);
+  expect(pane().querySelector(".ws-skel")).not.toBeNull();
+  expect(notice()).toBeNull();
   // The task runs again under a new execution: the reply the old one waited for is not this feed's.
-  const old = held.reads[0], asked = held.reads.length;
+  const old = held.reads[held.reads.length - 1], asked = held.reads.length;
   Object.assign(state.tasks[0], { executionId: "e2" });
   p.emit(projection("2", structuredClone(state))); await settle();
   await vi.waitFor(() => expect(held.reads.length).toBeGreaterThan(asked));
@@ -377,16 +381,18 @@ it("keeps naming what a view was shown without, with Retry, when it is opened ag
   expect(shown.view.loading()).toBe(false);
   expect(shown.view.missing()).toEqual([]);
   shown.done();
-  // The same after the budget ran out: closed before the late reply, opened again it still names what is missing.
+  // Online and only slow, it is never marked incomplete: closed and opened again before the reply, it is still loading.
   shown = mount("b");
   expect(shown.view.loading()).toBe(true);
-  vi.advanceTimersByTime(FIRST_VIEW_MS);
-  expect(shown.view.missing()).toEqual(["the conversation"]);
+  vi.advanceTimersByTime(FIRST_VIEW_MS * 20);
+  expect(shown.view.loading()).toBe(true);
+  expect(shown.view.missing()).toEqual([]);
   shown.done();
   shown = mount("b");
-  expect(shown.view.loading()).toBe(false);
-  expect(shown.view.missing()).toEqual(["the conversation"]);
+  expect(shown.view.loading()).toBe(true);
+  expect(shown.view.missing()).toEqual([]);
   setReads(conversation("settled"));
+  expect(shown.view.loading()).toBe(false);
   expect(shown.view.missing()).toEqual([]);
   shown.done();
 });
@@ -415,26 +421,28 @@ it("brings the question into view when Answer is pressed while the conversation 
   } finally { Element.prototype.scrollIntoView = original; }
 });
 
-it("holds the skeleton for exactly the first-view budget, which new events do not restart, and clears the notice when the rest arrives", () => {
+it("holds the skeleton for as long as a first read is pending, never on a timer, and names only a read that failed", () => {
   vi.useFakeTimers();
   const [reads, setReads] = createSignal<FirstRead[]>([{ section: "the conversation", state: "pending" }, { section: "questions", state: "pending" }]);
   const [id, setId] = createSignal("a");
   const { view, done } = createRoot(done => ({ view: createFirstView({ scope: {}, identity: id, reads, offline: () => false }), done }));
   expect(view.loading()).toBe(true);
-  vi.advanceTimersByTime(FIRST_VIEW_MS - 1);
+  vi.advanceTimersByTime(FIRST_VIEW_MS * 100);
   setReads([{ section: "the conversation", state: "pending" }, { section: "questions", state: "settled" }]);
   expect(view.loading()).toBe(true);
-  vi.advanceTimersByTime(1);
+  expect(view.missing()).toEqual([]);
+  // A read that genuinely failed is named, with what arrived shown.
+  setReads([{ section: "the conversation", state: "settled" }, { section: "questions", state: "failed", reason: "decision_store_unreadable" }]);
   expect(view.loading()).toBe(false);
-  expect(view.missing()).toEqual(["the conversation"]);
+  expect(view.missing()).toEqual(["questions"]);
   setReads([{ section: "the conversation", state: "settled" }, { section: "questions", state: "settled" }]);
   expect(view.missing()).toEqual([]);
-  // Another identity starts cold, with a new budget of its own.
+  // Another identity starts cold, and is waited for just the same.
   setReads([{ section: "the conversation", state: "pending" }]);
   setId("b");
   expect(view.loading()).toBe(true);
-  vi.advanceTimersByTime(FIRST_VIEW_MS);
-  expect(view.loading()).toBe(false);
-  expect(view.missing()).toEqual(["the conversation"]);
+  vi.advanceTimersByTime(FIRST_VIEW_MS * 100);
+  expect(view.loading()).toBe(true);
+  expect(view.missing()).toEqual([]);
   done();
 });

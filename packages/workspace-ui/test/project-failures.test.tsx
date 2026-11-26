@@ -91,7 +91,8 @@ describe("a project whose Cortex is away", () => {
 describe("the connection", () => {
   it("comes back by itself after a passing failure, with no one pressing Retry", async () => {
     vi.useFakeTimers();
-    const failure = new Error("service_timeout");
+    // A lost connection is a genuine failure; a read that is only slow is never one (below).
+    const failure = new Error("service_disconnected");
     const s = scriptedPort({ failQuery: failure });
     const store = createRoot(d => { dispose = d; return createWorkspaceStore(s.port); });
     await vi.advanceTimersByTimeAsync(10);
@@ -100,5 +101,27 @@ describe("the connection", () => {
     await vi.advanceTimersByTimeAsync(3100);
     expect(query).toHaveBeenCalled();
     expect(store.connection().state).toBe("connected");
+  });
+
+  it("never reports a read that only took long as a failure, and keeps reading until it answers", async () => {
+    vi.useFakeTimers();
+    const s = scriptedPort({ failQuery: new Error("service_timeout") });
+    const store = createRoot(d => { dispose = d; return createWorkspaceStore(s.port); });
+    await vi.advanceTimersByTimeAsync(10);
+    console.log("DBG0", store.readIssue(), store.connection().state);
+    expect(store.readIssue()).toBeNull();
+    expect(store.connection().state).not.toBe("unavailable");
+    for (const slow of ["service_timeout", "refused:The machine is busy and did not answer in time. Try again.", "machine_tool_timeout", "busy", "refused:The project store is busy. Wait for the other Cortex operation to finish, then try again. Close other Cortex sessions for this project if the store stays busy."]) {
+      vi.spyOn(s.port, "query").mockImplementation((() => Promise.reject(new Error(slow))) as never);
+      await vi.advanceTimersByTimeAsync(3100);
+      expect(store.readIssue()).toBeNull();
+      expect(store.machineIssue()).toBeNull();
+      expect(store.connection().state).not.toBe("unavailable");
+    }
+    const query = vi.spyOn(s.port, "query").mockImplementation(((operation: string) => Promise.resolve(operation === "capabilities.get" ? { everything: false, operations: [] } : [])) as never);
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(query).toHaveBeenCalled();
+    expect(store.connection().state).toBe("connected");
+    expect(store.readIssue()).toBeNull();
   });
 });

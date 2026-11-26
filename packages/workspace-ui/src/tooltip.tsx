@@ -2,40 +2,25 @@ import { createUniqueId, onCleanup, onMount } from "solid-js";
 
 export const TOOLTIP_DELAY = 500;
 const TRIGGER = "[data-tooltip], [data-whole], [data-tooltip-cut]";
-const CONTROL = "button, a[href], input, textarea, select, [tabindex], [contenteditable='true']";
 type Rect = Pick<DOMRect, "left" | "right" | "top" | "bottom">;
-const overlaps = (a: Rect, b: Rect) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+type Point = { x: number; y: number };
+const MARGIN = 8;
+const clamp = (n: number, size: number, end: number) => Math.max(MARGIN, Math.min(n, end - MARGIN - size));
 
-export function tooltipPlacement(anchor: Rect, width: number, height: number, vw: number, vh: number, controls: Rect[]) {
-  const margin = 8, gap = 6;
-  if (width > vw - 2 * margin || height > vh - 2 * margin) return null;
-  const shift = (n: number, end: number) => Math.min(Math.max(n, margin), end - margin);
-  const preferredX = shift(anchor.left, vw - width), preferredY = shift(anchor.top, vh - height);
-  const candidates = [
-    ...[anchor.bottom + gap, anchor.top - gap - height].flatMap((top, side) => {
-      if (top < margin || top + height > vh - margin) return [];
-      const xs = [preferredX, ...controls.filter(r => r.top < top + height && r.bottom > top)
-        .flatMap(r => [r.left - width - 4, r.right + 4])];
-      return xs.map(x => {
-        const left = shift(x, vw - width);
-        return { left, top, score: Math.abs(left - preferredX) + side };
-      });
-    }),
-    ...[anchor.right + gap, anchor.left - gap - width].flatMap((left, side) => {
-      if (left < margin || left + width > vw - margin) return [];
-      const ys = [preferredY, ...controls.filter(r => r.left < left + width && r.right > left)
-        .flatMap(r => [r.top - height - 4, r.bottom + 4])];
-      return ys.map(y => {
-        const top = shift(y, vh - height);
-        return { left, top, score: Math.abs(top - preferredY) + 16 + side };
-      });
-    }),
-  ].sort((a, b) => a.score - b.score);
-  const at = candidates.find(({ left, top }) => {
-    const rect = { left, top, right: left + width, bottom: top + height };
-    return !overlaps(rect, anchor) && !controls.some(control => overlaps(rect, control));
-  });
-  return at ? { left: at.left, top: at.top } : null;
+/** Pointer tooltips sit just below-right of the cursor; at an edge they flip to the other side so the hotspot stays uncovered. */
+export function pointerPlacement(at: Point, width: number, height: number, vw: number, vh: number) {
+  const dx = 12, dy = 16;
+  const left = at.x + dx + width > vw - MARGIN ? at.x - dx - width : at.x + dx;
+  const top = at.y + dy + height > vh - MARGIN ? at.y - 8 - height : at.y + dy;
+  return { left: clamp(left, width, vw), top: clamp(top, height, vh) };
+}
+
+/** Keyboard tooltips stay at the element's start edge, below it (above when there is no room). */
+export function anchorPlacement(anchor: Rect, width: number, height: number, vw: number, vh: number) {
+  const gap = 6;
+  const below = anchor.bottom + gap;
+  const top = below + height > vh - MARGIN ? anchor.top - gap - height : below;
+  return { left: clamp(anchor.left, width, vw), top: clamp(top, height, vh) };
 }
 
 const cutText = (el: Element) => {
@@ -58,11 +43,14 @@ export function Tooltip() {
     let trigger: Element | null = null, owner: Element | null = null;
     // Keyboard focus is tracked apart from the pointer so leaving a hovered trigger never drops the focused one's tip.
     let focused: Element | null = null;
+    // Latest pointer position for a hover-started tip; null when focus started it.
+    let point: Point | null = null;
     const hide = () => {
       clearTimeout(timer);
       timer = undefined;
       trigger = null;
       focused = null;
+      point = null;
       if (!owner) return;
       const ids = (owner.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(part => part && part !== id);
       if (ids.length) owner.setAttribute("aria-describedby", ids.join(" "));
@@ -72,11 +60,12 @@ export function Tooltip() {
       tip.hidden = true;
       home.append(tip);
     };
-    const start = (el: Element, described: Element = el, force = false) => {
+    const start = (el: Element, described: Element = el, force = false, at: Point | null = null) => {
       if (trigger === el && !force) return;
       hide();
       if (el.closest('[data-shell="phone"], [aria-hidden="true"]') || !textFor(el)) return;
       trigger = el;
+      point = at;
       timer = setTimeout(() => {
         const message = textFor(el);
         if (!el.isConnected || !described.isConnected || !message) return hide();
@@ -87,18 +76,9 @@ export function Tooltip() {
         tip.hidden = false;
         tip.style.visibility = "hidden";
         tip.showPopover?.();
-        const anchor = el.getBoundingClientRect(), rect = tip.getBoundingClientRect();
-        const controls = [...document.querySelectorAll(CONTROL)]
-          .filter(control => !control.contains(el) && !el.contains(control) && !control.closest("[inert]"))
-          .map(control => control.getBoundingClientRect()).filter(box => box.width > 0 && box.height > 0);
-        // A cut label within a button must not cover that button either.
-        if (described !== el) controls.push(described.getBoundingClientRect());
-        else {
-          const parent = el.parentElement?.closest(CONTROL);
-          if (parent) controls.push(parent.getBoundingClientRect());
-        }
-        const at = tooltipPlacement(anchor, rect.width, rect.height, innerWidth, innerHeight, controls);
-        if (!at) return hide();
+        const rect = tip.getBoundingClientRect();
+        const at = point && focused !== el ? pointerPlacement(point, rect.width, rect.height, innerWidth, innerHeight)
+          : anchorPlacement(el.getBoundingClientRect(), rect.width, rect.height, innerWidth, innerHeight);
         tip.style.left = `${at.left}px`;
         tip.style.top = `${at.top}px`;
         const ids = owner.getAttribute("aria-describedby");
@@ -110,7 +90,10 @@ export function Tooltip() {
       if ((trigger && trigger === focused) || e.pointerType === "touch" ||
         window.matchMedia?.("(hover: hover) and (pointer: fine)")?.matches === false) return;
       const el = targetOf(e.target);
-      if (el && el !== targetOf(e.relatedTarget)) start(el);
+      if (el && el !== targetOf(e.relatedTarget)) start(el, el, false, { x: e.clientX, y: e.clientY });
+    };
+    const move = (e: PointerEvent) => {
+      if (point && trigger && trigger !== focused && e.pointerType !== "touch") point = { x: e.clientX, y: e.clientY };
     };
     const leave = (e: PointerEvent) => {
       if (trigger && trigger !== focused && e.pointerType !== "touch" &&
@@ -142,6 +125,7 @@ export function Tooltip() {
     const events = new AbortController();
     const opts = { capture: true, signal: events.signal };
     document.addEventListener("pointerover", hover, opts);
+    document.addEventListener("pointermove", move, opts);
     document.addEventListener("pointerout", leave, opts);
     document.addEventListener("focusin", focus, opts);
     document.addEventListener("focusout", e => {

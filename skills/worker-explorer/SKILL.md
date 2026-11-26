@@ -18,8 +18,9 @@ solutions.
 
 ## Communication
 
-Write everything another worker or the coordinator reads in English: progress,
-reports and their headings, summaries and final responses. The owner's language
+Write everything another worker or the coordinator reads in English: reports and
+their headings, tool arguments, summaries and final responses. Progress, findings
+and reasoning belong in those reports and tool arguments, not in interim prose. The owner's language
 (the runtime's per-turn directive) and the original user message do not change
 that. The one exception is a question to the owner: its question text and option
 labels use the turn's `user_question_language`. Preserve exact source quotations
@@ -47,7 +48,7 @@ The brief's `acceptance` and `constraints` (owner messages, write denials, acces
 bind the work together with its objective and scope.
 
 For writing roles, prefer focused changes that follow the project's conventions.
-Explain assumptions, record risks, and distinguish evidence from hypotheses.
+In the report, explain assumptions, record risks, and distinguish evidence from hypotheses.
 Follow the inlined tool discipline and code-and-evidence discovery procedures.
 
 If information needed to finish the assignment is missing, use the worker's

@@ -177,6 +177,42 @@ describe("a partially deleted sprint", () => {
   });
 });
 
+describe("a deletion pass that outlives its reply", () => {
+  it("counts what the service has left after the pass ends, and says the reason the service recorded", async () => {
+    const { s, product } = service();
+    const store = open(s);
+    await vi.waitFor(() => expect(store.state().tasks).toHaveLength(8), { timeout: 4000 });
+    const original = s.answers["machine.call"]!;
+    const markDeleted = (deleted: string[], reason?: string) => {
+      for (const id of deleted) product.tasks[id] = { purged: true };
+      Object.assign(product.sprints[0], { deleting: true, archivedAt: 1_794_905_642_111, queueState: "paused", pauseReason: "Deletion pending — retry Delete sprint",
+        deleteTaskIds: [...MEMBERS], deletedTaskIds: deleted, keptWorktrees: [], ...(reason ? { deleteReason: reason } : {}) });
+    };
+    s.answers["machine.call"] = raw => {
+      const { op, params } = raw as { op: string; params?: Record<string, unknown> };
+      if (op === "product.sprint" && params?.action === "delete") {
+        // The bounded owner action answers while its pass is still deleting: three are gone so far.
+        markDeleted(MEMBERS.slice(5));
+        return { ok: true, result: { done: false, reason: "Cortex is still stopping this sprint's runs or deleting its tasks. Retry Delete sprint if it still shows as deleting." } };
+      }
+      return original(raw);
+    };
+    const removed = await store.dispatch({ type: "delete_sprint", projectId: "p", sprintId: OLD, confirmed: true });
+    expect(removed).toMatchObject({ ok: false, outcome: "partial_effect" });
+    await vi.waitFor(() => expect(store.state().sprints.find(x => x.id === OLD)?.deletion?.left).toHaveLength(5), { timeout: 4000 });
+    expect(sprintView(store.index(), store.state().sprints.find(x => x.id === OLD)!).state).toBe("Deleting, 5 tasks left, waiting for them to stop");
+
+    // The pass ends with one member that is not quiet yet; it records why and announces the change.
+    const reason = "Not every task could be deleted yet. “Stuck member” is still running, or Cortex is still waiting to confirm that its engine processes stopped. Retry Delete sprint.";
+    markDeleted(MEMBERS.slice(1), reason);
+    s.send({ type: "invalidation", projectId: "p" } as never);
+    await vi.waitFor(() => expect(store.state().sprints.find(x => x.id === OLD)?.deletion).toEqual({ total: 8, left: [STUCK], reason }), { timeout: 4000 });
+    expect(sprintView(store.index(), store.state().sprints.find(x => x.id === OLD)!).state).toBe(`Deleting, 1 task left: Stuck member. ${reason}`);
+    // The next launch paints the same words from the cached board.
+    expect(readBoards(localStorage, "owner")[0]?.product.sprints.find(x => x.id === OLD)?.deletion?.reason).toBe(reason);
+  });
+});
+
 describe("a project read that keeps failing", () => {
   it("keeps the owner's words and retains the read's precise cause", async () => {
     const { s, product } = service();

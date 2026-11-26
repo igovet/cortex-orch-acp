@@ -172,6 +172,8 @@ export type TreeRow = { kind: "dir" | "file" | "more"; path: string; name: strin
  * What Code's tree knows beyond the repository snapshot: `items` are every path to show, sorted, a folder ending in `/`;
  * a `lazy` folder's entries are read only when the owner opens it; `notes` stand under a folder ("" is the top).
  */
+/** The note of a folder whose entries are still being read: shown as a skeleton bar, never as words. */
+export const READING_NOTE = "Reading…";
 export type CodeTree = { items: string[]; ignored: ReadonlySet<string>; lazy: ReadonlySet<string>; links: ReadonlySet<string>; notes: ReadonlyMap<string, string> };
 /** One listed folder: its read, the machine's refusal, or still being read. */
 export type FolderView = { entries: FolderEntry[]; more: number; exact: boolean } | { error: string } | { loading: true };
@@ -191,7 +193,7 @@ export function codeTree(paths: string[], overview: FolderOverview | null, folde
   for (const e of overview?.entries ?? []) add(e.path, e.dir, e.ignored);
   if (overview?.truncated) notes.set("", "Some ignored files are not listed");
   for (const [dir, view] of folders) {
-    if ("loading" in view) notes.set(dir, "Reading…");
+    if ("loading" in view) notes.set(dir, READING_NOTE);
     else if ("error" in view) notes.set(dir, view.error);
     else {
       for (const e of view.entries) { add(joinPath(dir, e.name), e.dir, e.ignored); if (e.link) links.add(joinPath(dir, e.name)); }

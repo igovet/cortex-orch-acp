@@ -122,6 +122,12 @@ impl Sandbox {
             "/etc/ld.so.cache",
             "/etc/alternatives",
             "/etc/localtime",
+            // Public TLS/name-resolution configuration a runtime such as Node reads at start.
+            "/etc/ssl",
+            "/etc/ca-certificates",
+            "/etc/resolv.conf",
+            "/etc/hosts",
+            "/etc/nsswitch.conf",
         ] {
             let p = Path::new(path);
             if p.exists() {

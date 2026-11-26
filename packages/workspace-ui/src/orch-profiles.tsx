@@ -63,7 +63,7 @@ export function Files() {
     { t: "User routing file", path: "~/.config/cortex/routing.json", label: "In your user settings", exists: !f().missing.includes("routing.json"), sub: "", on: active() === "machine", rev: c().revisions.routing },
   ]), []);
   const others = createMemo<{ t: string; d: string; rev: number | null }[]>(prev => share(prev, [
-    { t: "defaults.json", d: "Coordinator default, language and ceiling.", rev: c().revisions.user_defaults }, { t: "mcp-servers.json", d: "External servers. Per machine only.", rev: c().revisions.mcp_servers },
+    { t: "defaults.json", d: "Coordinator default, language and ceiling.", rev: c().revisions.user_defaults }, { t: "mcp-servers.json", d: "External servers for the whole machine. A project's own servers and choices are kept apart, in a private file per project.", rev: c().revisions.mcp_servers },
     { t: "connections.json", d: "Registered engine accounts.", rev: null }, { t: "routing-profiles.json", d: "Saved profiles.", rev: null },
   ]), []);
   const envs = createMemo<[string, string, string][]>(prev => share(prev, [["Engine updates", "CORTEX_ENGINE_UPDATE", f().env.engineUpdate ?? "on"], ["Engine version following", "CORTEX_ENGINE_FOLLOW", f().env.engineFollow ?? "on"], ["OpenCode executable", "CORTEX_OPENCODE_BINARY", f().env.opencodeBinary]].filter(([, , v]) => v) as [string, string, string][]), []);

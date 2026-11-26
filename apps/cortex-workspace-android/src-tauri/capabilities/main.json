@@ -1,6 +1,6 @@
 {
   "identifier": "main",
-  "description": "Only the bundled main view can use the closed phone bridge, receive its events and open the QR scanner.",
+  "description": "Only the bundled main view can use the closed phone bridge, receive its events, open the QR scanner and turn the phone's own notifications on or off.",
   "local": true,
   "windows": [
     "main"
@@ -17,6 +17,9 @@
     "allow-phone-forget",
     "allow-phone-retry",
     "allow-phone-listen",
+    "allow-phone-notifications",
+    "allow-phone-notification-next",
+    "allow-phone-battery-settings",
     "allow-phone-exit",
     "core:event:allow-listen",
     "core:event:allow-unlisten",

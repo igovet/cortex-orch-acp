@@ -16,7 +16,7 @@ const PLUMBING = new Set([
   "command_status", "read_large_output", "tools_discover", "read_skill", "read_capsule", "task_get_context",
   "list_reports", "list_sources", "list_route_options", "check_preflight", "create_draft", "draft_write", "read_draft",
   "write_report", "result_submit", "plan_submit", "synthesis_submit", "answer_submit", "verification_submit",
-  "sprint_plan_submit", "escalation_request", "replan_request", "scope_request", "user_question_request",
+  "sprint_plan_submit", "sprint_revision_submit", "escalation_request", "replan_request", "scope_request", "user_question_request",
   "ask_question", "access_request", "list_projects", "index_status", "check_index_coverage", "index_repository",
   "toolsearch", "todowrite",
 ]);

@@ -90,7 +90,8 @@ it("shows a read's file on its row and opens it in Code from there", async () =>
   expect(skill.querySelector(".step-l")?.textContent).toBe("Read report: r_0123456789ab");
   expect(skill.getAttribute("aria-expanded")).toBe("false");
   skill.click(); await settle();
-  expect(skill.parentElement?.textContent).toContain("Private or redacted.");
+  expect(skill.parentElement?.textContent).toContain("r_0123456789ab");
+  expect(skill.parentElement?.textContent).not.toContain("Private or redacted");
   open.click(); await settle();
   expect(location.search).toContain("file=src%2Fapp.ts");
 });
@@ -109,4 +110,21 @@ it("opens an edit on its diff and a command on its command line", async () => {
   command.click(); await settle();
   expect(document.querySelector(".ws-step-detail [role=region][aria-label=Input]")?.textContent).toBe("git status --short");
   expect(document.querySelector(".timeline")!.textContent).not.toMatch(/mcp[._]|orchestrator:|worker-frontend-dev:/);
+});
+
+it.each([
+  ["Claude", "mcp__cortex__read_report"],
+  ["Codex", "mcp.cortex.read_report"],
+])("opens a %s Cortex read_report call on its real input and output, masking only a credential", async (_engine, tool) => {
+  const row = step({ title: `orchestrator: ${tool}`, callId: "xa_1:report", kind: "other", status: "completed", ref: "r_0123456789ab",
+    input: JSON.stringify({ report_id: "r_0123456789ab", password: "hunter2-secret", offset: 0 }, null, 2),
+    output: "# Findings\nThe report body line.\nAuthorization: Bearer abcdefgh12345678" });
+  const [report] = await mountFold([row]);
+  report.click(); await settle();
+  const text = report.parentElement!.textContent!;
+  expect(text).toContain("r_0123456789ab");
+  expect(text).toContain("offset");
+  expect(text).toContain("The report body line.");
+  expect(text).toContain("[REDACTED]");
+  expect(text).not.toMatch(/hunter2-secret|abcdefgh12345678|Private or redacted|No input was recorded|No output was recorded/);
 });

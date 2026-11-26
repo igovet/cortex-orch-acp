@@ -555,11 +555,13 @@ fn narration(
     before: Option<(i64, i64)>,
 ) -> CoreResult<(Vec<Value>, bool)> {
     let prefix = format!("{attempt}:");
+    // The identities that start with `{attempt}:` are exactly those in [`{attempt}:`, `{attempt};`) (`;` follows `:`),
+    // a range `host_transcript_by_message` answers without visiting the session's other messages.
     // A page after a cursor reads from the cursor's time on (with slack for a message's chunks), then keeps exact keys below.
     let until = before.map_or(i64::MAX, |(at, _)| at.saturating_add(600_000));
     let rows = db.prepare(&format!("SELECT seq,message_id,text,{ms} FROM host_transcript
-            WHERE session_id=? AND kind='agent_message' AND substr(message_id,1,?)=? AND coalesce({ms},0)<=? ORDER BY seq DESC LIMIT {}", NARRATION_CHUNKS + 1, ms = ms("created_at")))?
-        .query_map(rusqlite::params![session, prefix.chars().count() as i64, prefix, until], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<i64>>(3)?)))?
+            WHERE session_id=? AND kind='agent_message' AND message_id>=? AND message_id<? AND coalesce({ms},0)<=? ORDER BY seq DESC LIMIT {}", NARRATION_CHUNKS + 1, ms = ms("created_at")))?
+        .query_map(rusqlite::params![session, prefix, format!("{attempt};"), until], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<i64>>(3)?)))?
         .collect::<Result<Vec<_>, _>>()?;
     let mut partial = rows.len() as i64 > NARRATION_CHUNKS;
     // Chunks of one message are adjacent and share an identity; walk newest to oldest and join them back in order.
@@ -733,6 +735,9 @@ pub(crate) fn receipts_partial(db: &rusqlite::Connection, task: &str) -> CoreRes
 pub(crate) const RECEIPTS_PARTIAL_REASON: &str = "This result has more check receipts than can be shown here. Request changes for a fresh, reviewable result.";
 /// Brings a facts reply under the frame without refusing it: drops the oldest half of the largest worker
 /// activity (naming the cursor that reads it back), then the oldest queued messages. True if anything moved.
+/// The reply is serialized once (and once more to confirm a trimmed result): every cut is accounted for by
+/// the serialized sizes of what it removes and changes, so a reply with hundreds of large worker pages is
+/// fitted in linear time instead of being serialized again after each cut.
 fn fit_frame(value: &mut Value) -> CoreResult<bool> {
     let limit = workspace_protocol::FRAME_BYTES - 2048;
     let key = |a: &Value| {
@@ -741,60 +746,87 @@ fn fit_frame(value: &mut Value) -> CoreResult<bool> {
             a["sequence"].as_i64().unwrap_or(0),
         )
     };
+    let size = |v: &Value| serde_json::to_vec(v).map(|b| b.len());
+    // The compact length of a JSON array of items of these serialized lengths.
+    let array = |items: &[usize]| 2 + items.iter().sum::<usize>() + items.len().saturating_sub(1);
     let mut trimmed = false;
-    while serde_json::to_vec(&*value)?.len() > limit {
-        trimmed = true;
-        let largest = value["workers"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .enumerate()
-            .map(|(n, w)| {
-                (
-                    n,
-                    w["activity"]
-                        .as_array()
-                        .map_or(0, |a| a.iter().map(|i| i.to_string().len()).sum::<usize>()),
-                )
-            })
-            .filter(|(n, size)| {
-                *size > 0
-                    && value["workers"][*n]["activity"]
-                        .as_array()
-                        .is_some_and(|a| !a.is_empty())
-            })
-            .max_by_key(|(_, size)| *size);
-        if let Some((n, _)) = largest {
-            let worker = &mut value["workers"][n];
-            let items = worker["activity"].as_array_mut().expect("measured above");
-            let drop = items.len().div_ceil(2);
-            let dropped: Vec<Value> = items.drain(..drop).collect();
-            let boundary = match items.first() {
-                Some(first) => key(first),
-                None => {
-                    let last = key(dropped.last().expect("one dropped"));
-                    (last.0, last.1 + 1)
-                }
-            };
-            worker["activityPartial"] = json!(true);
-            // The queued-message bound a cursor already carries stays: only the activity bound moves.
-            let messages = worker["activityCursor"]
-                .as_str()
-                .and_then(parse_cursor)
-                .map(|c| c.1)
-                .filter(|m| *m != (0, 0));
-            worker["activityCursor"] = json!(cursor_text(Some(boundary), messages));
-            continue;
+    loop {
+        let mut total = size(&*value)?;
+        if total <= limit {
+            return Ok(trimmed);
         }
-        match value["product"]["messages"].as_array_mut() {
-            Some(m) if !m.is_empty() => {
-                let n = m.len().div_ceil(2);
-                m.drain(..n);
+        let mut activity: Vec<Vec<usize>> = match value["workers"].as_array() {
+            Some(workers) => workers
+                .iter()
+                .map(|w| {
+                    w["activity"].as_array().map_or(Ok(Vec::new()), |a| {
+                        a.iter().map(size).collect::<Result<Vec<_>, _>>()
+                    })
+                })
+                .collect::<Result<_, _>>()?,
+            None => Vec::new(),
+        };
+        let mut messages: Option<Vec<usize>> = None;
+        while total > limit {
+            trimmed = true;
+            let largest = activity
+                .iter()
+                .enumerate()
+                .map(|(n, items)| (n, items.iter().sum::<usize>()))
+                .filter(|(_, size)| *size > 0)
+                .max_by_key(|(_, size)| *size);
+            if let Some((n, _)) = largest {
+                let worker = &mut value["workers"][n];
+                // The worker without its activity, before and after its cursor fields change.
+                let shell = |worker: &mut Value| -> CoreResult<usize> {
+                    let items = std::mem::take(&mut worker["activity"]);
+                    worker["activity"] = json!([]);
+                    let len = size(worker);
+                    worker["activity"] = items;
+                    Ok(len?)
+                };
+                let before = shell(worker)?;
+                let sizes = &mut activity[n];
+                let old = array(sizes);
+                let items = worker["activity"].as_array_mut().expect("measured above");
+                let drop = items.len().div_ceil(2);
+                let dropped: Vec<Value> = items.drain(..drop).collect();
+                sizes.drain(..drop);
+                let boundary = match items.first() {
+                    Some(first) => key(first),
+                    None => {
+                        let last = key(dropped.last().expect("one dropped"));
+                        (last.0, last.1 + 1)
+                    }
+                };
+                worker["activityPartial"] = json!(true);
+                // The queued-message bound a cursor already carries stays: only the activity bound moves.
+                let carried = worker["activityCursor"]
+                    .as_str()
+                    .and_then(parse_cursor)
+                    .map(|c| c.1)
+                    .filter(|m| *m != (0, 0));
+                worker["activityCursor"] = json!(cursor_text(Some(boundary), carried));
+                let after = shell(worker)?;
+                total = (total + after + array(&activity[n])).saturating_sub(before + old);
+                continue;
             }
-            _ => return refused("native_facts_limit"),
+            match value["product"]["messages"].as_array_mut() {
+                Some(m) if !m.is_empty() => {
+                    let sizes = match &mut messages {
+                        Some(sizes) => sizes,
+                        None => messages.insert(m.iter().map(size).collect::<Result<Vec<_>, _>>()?),
+                    };
+                    let old = array(sizes);
+                    let n = m.len().div_ceil(2);
+                    m.drain(..n);
+                    sizes.drain(..n);
+                    total = (total + array(sizes)).saturating_sub(old);
+                }
+                _ => return refused("native_facts_limit"),
+            }
         }
     }
-    Ok(trimmed)
 }
 /// Count published result generations through the identity of the presented or
 /// accepted result. A synthesis that never completes and a reopen with no result
@@ -936,6 +968,15 @@ pub(super) fn worker_status(node: &str, process: &str, task_state: &str) -> &'st
         ("running", "ready" | "starting") => "working",
         ("completed", _) => "completed",
         ("cancelled", _) => "cancelled",
+        // A worker that reported its assignment failed stays failed (with its dead end, `blockerKind`) whatever the task does
+        // next: read as cancelled while the task waited for the owner, it flipped Cancelled -> Failed once the task moved on.
+        ("failed", _) => "failed",
+        // No outcome is recorded yet (its session ended, or stopped while the task waits
+        // for the owner): never a terminal label the runtime has not recorded. Inferred
+        // from the task state, it read Cancelled -> Failed -> its real dead end
+        // ("Could not run here") as the task moved on (2026-11-25).
+        ("running" | "pending", _) if task_state == "WAITING_USER" => "paused",
+        ("running" | "pending", _) => "unknown",
         _ if task_state == "WAITING_USER" => "cancelled",
         _ => "failed",
     }
@@ -1224,6 +1265,8 @@ impl Runtime {
                 }
                 // The task's command receipts, read once for all its workers (each worker filters its own below).
                 let mut command_rows=None;
+                // Each channel's write receipts by (path, content), oldest first (see the edit rows below).
+                let mut receipts=std::collections::HashMap::<String,std::collections::HashMap<(String,String),Vec<i64>>>::new();
                 // The plan revisions the workers ran under: a superseded worker names the one that replaced it.
                 let revisions:std::collections::BTreeSet<i64>=nodes.iter().map(|n|n.7).collect();
                 for (id,role,goal,status,process,scope,node_result,revision,attempt,node,started,updated) in nodes {
@@ -1255,11 +1298,28 @@ impl Runtime {
                         let (add,del)=(v["add"].as_u64().unwrap_or(0),v["del"].as_u64().unwrap_or(0));
                         let (channel,sha)=(v["channel_id"].as_str().unwrap_or_default().to_owned(),v["sha256"].as_str().unwrap_or_default().to_owned());
                         let nth=seen.entry((channel.clone(),path.to_owned(),sha.clone())).or_insert(0);
-                        let recorded:Option<(Option<String>,Option<bool>)>=if listed {db.query_row("SELECT json_extract(result_json,'$.reply.structuredContent.diff'),json_extract(result_json,'$.reply.structuredContent.diff_truncated')
-                            FROM runtime_requests WHERE task_id=? AND actor=? AND operation IN ('project_write','project_edit') AND json_valid(result_json)
-                              AND json_extract(result_json,'$.complete')=1 AND json_extract(result_json,'$.reply.structuredContent.path')=?
-                              AND json_extract(result_json,'$.reply.structuredContent.sha256')=? ORDER BY rowid LIMIT 1 OFFSET ?",
-                            rusqlite::params![&task,&channel,path,&sha,*nth],|r|Ok((r.get(0)?,r.get(1)?))).optional()?} else {None};
+                        let recorded:Option<(Option<String>,Option<bool>)>=if listed {
+                            // The channel's complete write receipts, read once per task: each listed edit
+                            // then looks its n-th receipt up by row instead of rescanning the channel's requests.
+                            let own=match receipts.entry(channel.clone()) {
+                                std::collections::hash_map::Entry::Occupied(e)=>e.into_mut(),
+                                std::collections::hash_map::Entry::Vacant(e)=>{
+                                    let mut by=std::collections::HashMap::<(String,String),Vec<i64>>::new();
+                                    let mut q=db.prepare("SELECT rowid,json_extract(result_json,'$.reply.structuredContent.path'),json_extract(result_json,'$.reply.structuredContent.sha256')
+                                        FROM runtime_requests WHERE task_id=? AND actor=? AND operation IN ('project_write','project_edit') AND json_valid(result_json)
+                                          AND json_extract(result_json,'$.complete')=1 AND json_type(result_json,'$.reply.structuredContent.path')='text'
+                                          AND json_type(result_json,'$.reply.structuredContent.sha256')='text' ORDER BY rowid")?;
+                                    let mut rows=q.query((&task,&channel))?;
+                                    while let Some(r)=rows.next()? { by.entry((r.get(1)?,r.get(2)?)).or_default().push(r.get(0)?); }
+                                    e.insert(by)
+                                }
+                            };
+                            match own.get(&(path.to_owned(),sha.clone())).and_then(|rows|rows.get(*nth as usize)) {
+                                Some(row)=>db.query_row("SELECT json_extract(result_json,'$.reply.structuredContent.diff'),json_extract(result_json,'$.reply.structuredContent.diff_truncated') FROM runtime_requests WHERE rowid=?",
+                                    [row],|r|Ok((r.get(0)?,r.get(1)?))).optional()?,
+                                None=>None,
+                            }
+                        } else {None};
                         *nth+=1;
                         match edits.iter_mut().find(|e|e.0==path) {
                             Some(e)=>{e.1+=add;e.2+=del;}
@@ -1313,7 +1373,7 @@ impl Runtime {
                                 if matches!(operation.as_str(),"command_run"|"project_edit"|"project_write") && d["failure"].as_str().is_none_or(|f|f.trim().is_empty()) {continue;}
                                 // Edit text and command output share one bound per read; beyond it a step names its target only.
                                 let size=body.len();
-                                if size>step_budget { for key in ["oldText","newText","output"] { if let Some(m)=d.as_object_mut() {m.remove(key);} } }
+                                if size>step_budget { for key in ["oldText","newText","output","input"] { if let Some(m)=d.as_object_mut() {m.remove(key);} } }
                                 let args=d.to_string();
                                 step_budget=step_budget.saturating_sub(args.len());
                                 item["text"]=json!(if title.is_empty() {"Tool activity"} else {title.as_str()});
@@ -1384,6 +1444,11 @@ impl Runtime {
                         let mut info = serde_json::Map::new();
                         if let Some(verdict)=recorded.as_ref().and_then(|r|r["verdict"].as_str()).filter(|v| matches!(*v,"APPROVE"|"REQUEST_CHANGES"|"BLOCK"|"INCOMPLETE")) {
                             info.insert("verdict".into(),json!(verdict));
+                            // The stage was approved but the reviewer reported a goal outcome
+                            // as not delivered: the task went back to planning, not to verification.
+                            let undelivered=recorded.as_ref().and_then(|r|r["goal_coverage"].as_array())
+                                .is_some_and(|c|c.iter().any(|g|g["delivered"]==false));
+                            if verdict=="APPROVE"&&undelivered { info.insert("goalNotMet".into(),json!(true)); }
                         }
                         if let Some(items)=recorded.as_ref().and_then(|r|r["not_covered"].as_array()) {
                             let covered=items.iter().filter_map(|item|{
@@ -1652,7 +1717,8 @@ fn present_worker_commands(
         let text: String = if own {
             argv.as_array().filter(|a| !a.is_empty() && a.iter().all(Value::is_string))
                 .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>()
-                    .join(" ").chars().take(2000).collect())
+                    .join(" ").chars().take(2000).collect::<String>())
+                .map(|t| crate::machine::redact_display_text(&t))
                 .unwrap_or_else(|| "Command".into())
         } else {
             "Host verification".into()
@@ -1713,6 +1779,77 @@ mod tests {
         assert_eq!(notes[0]["text"], "Then the typecheck.");
     }
     /// A reply over the frame loses its oldest rows to a cursor, never to a refusal; the cursor reads them back.
+    /// The frame fit accounts for each cut by sizes instead of serializing the reply again after it, and
+    /// still cuts exactly what serializing after every cut would: the same rows, cursors and messages.
+    /// A board read with hundreds of worker pages took most of a minute in that loop.
+    #[test]
+    fn the_frame_fit_cuts_what_reserializing_after_every_cut_would() {
+        fn reference(value: &mut Value) -> bool {
+            let limit = workspace_protocol::FRAME_BYTES - 2048;
+            let key = |a: &Value| (a["at"].as_i64().unwrap_or(0), a["sequence"].as_i64().unwrap_or(0));
+            let mut trimmed = false;
+            while serde_json::to_vec(&*value).unwrap().len() > limit {
+                trimmed = true;
+                let largest = value["workers"].as_array().into_iter().flatten().enumerate()
+                    .map(|(n, w)| (n, w["activity"].as_array().map_or(0, |a| a.iter().map(|i| i.to_string().len()).sum::<usize>())))
+                    .filter(|(n, size)| *size > 0 && value["workers"][*n]["activity"].as_array().is_some_and(|a| !a.is_empty()))
+                    .max_by_key(|(_, size)| *size);
+                if let Some((n, _)) = largest {
+                    let worker = &mut value["workers"][n];
+                    let items = worker["activity"].as_array_mut().unwrap();
+                    let drop = items.len().div_ceil(2);
+                    let dropped: Vec<Value> = items.drain(..drop).collect();
+                    let boundary = match items.first() {
+                        Some(first) => key(first),
+                        None => { let last = key(dropped.last().unwrap()); (last.0, last.1 + 1) }
+                    };
+                    worker["activityPartial"] = json!(true);
+                    let messages = worker["activityCursor"].as_str().and_then(parse_cursor).map(|c| c.1).filter(|m| *m != (0, 0));
+                    worker["activityCursor"] = json!(cursor_text(Some(boundary), messages));
+                    continue;
+                }
+                let m = value["product"]["messages"].as_array_mut().unwrap();
+                assert!(!m.is_empty());
+                let n = m.len().div_ceil(2);
+                m.drain(..n);
+            }
+            trimmed
+        }
+        // Many workers of uneven sizes, some already paged, with a long queue of messages.
+        let workers: Vec<Value> = (0..60)
+            .map(|w| {
+                let items: Vec<Value> = (0..(w % 37 + 3))
+                    .map(|i| json!({"sequence":i,"at":1000+i,"kind":"tool","text":"y".repeat(1 + (w * 7919 + i * 104729) % 900)}))
+                    .collect();
+                let mut worker = json!({"id":format!("w{w}"),"activity":items});
+                if w % 5 == 0 {
+                    worker["activityPartial"] = json!(true);
+                    worker["activityCursor"] = json!(cursor_text(Some((1, 2)), Some((3, 4))));
+                }
+                worker
+            })
+            .collect();
+        let messages: Vec<Value> = (0..400).map(|i| json!({"id":i,"text":"m".repeat(3000)})).collect();
+        for scale in [1usize, 20] {
+            let mut value = json!({"product":{"messages":messages},"workers":workers});
+            for w in value["workers"].as_array_mut().unwrap() {
+                for item in w["activity"].as_array_mut().unwrap() {
+                    item["text"] = json!(item["text"].as_str().unwrap().repeat(scale));
+                }
+            }
+            let mut expected = value.clone();
+            let cut = reference(&mut expected);
+            assert_eq!(fit_frame(&mut value).unwrap(), cut);
+            assert_eq!(value, expected, "scale {scale}");
+            assert!(serde_json::to_vec(&value).unwrap().len() <= workspace_protocol::FRAME_BYTES - 2048);
+        }
+        // Over the frame with no activity left to page, the oldest queued messages go, as before.
+        let mut value = json!({"product":{"messages":(0..4000).map(|i| json!({"id":i,"text":"m".repeat(3000)})).collect::<Vec<_>>()},"workers":[]});
+        let mut expected = value.clone();
+        assert!(reference(&mut expected));
+        assert!(fit_frame(&mut value).unwrap());
+        assert_eq!(value, expected);
+    }
     #[test]
     fn an_oversized_reply_trims_the_oldest_activity_and_names_its_cursor() {
         let big = "x".repeat(200_000);
@@ -1921,12 +2058,16 @@ mod tests {
             worker_status("cancelled", "terminated", "PAUSED"),
             "cancelled"
         );
-        assert_eq!(worker_status("running", "terminated", "RUNNING"), "failed");
+        // An unsettled node keeps a non-terminal label until its outcome is recorded.
+        assert_eq!(worker_status("running", "terminated", "RUNNING"), "unknown");
+        assert_eq!(worker_status("running", "ambiguous", "EXECUTING"), "unknown");
         assert_eq!(worker_status("failed", "terminated", "RUNNING"), "failed");
         assert_eq!(
             worker_status("running", "terminated", "WAITING_USER"),
-            "cancelled"
+            "paused"
         );
+        // One label for a failed worker, whether or not the task waits for the owner.
+        assert_eq!(worker_status("failed", "terminated", "WAITING_USER"), "failed");
     }
 }
 impl NativeHost {

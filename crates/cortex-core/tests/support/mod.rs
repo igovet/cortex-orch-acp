@@ -29,3 +29,18 @@ pub fn count(store: &Store, table: &str) -> i64 {
         .read(|db| Ok(db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?))
         .unwrap()
 }
+/// A plan fixture with the goal outcomes every plan names: one outcome `goal`,
+/// delivered by every task.
+#[allow(dead_code)]
+pub fn with_goal(plan: &serde_json::Value) -> serde_json::Value {
+    let mut plan = plan.clone();
+    if plan["outcomes"].is_null() {
+        plan["outcomes"] = serde_json::json!([{"id":"goal","statement":"The requested work is done"}]);
+        for task in plan["tasks"].as_array_mut().into_iter().flatten() {
+            if task["delivers"].is_null() {
+                task["delivers"] = serde_json::json!(["goal"]);
+            }
+        }
+    }
+    plan
+}

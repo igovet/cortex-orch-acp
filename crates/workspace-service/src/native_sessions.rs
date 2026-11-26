@@ -67,6 +67,9 @@ struct StartFailure {
     engine: &'static str,
     /// The task stop code for a final failure; `None` for an attempt that starts once more.
     blocker: Option<&'static str>,
+    /// A static, secret-free refusal detail (the invalid launch field and its reason) for a
+    /// failure that has no engine process diagnostics, so the event is never opaque.
+    detail: Option<Value>,
     diagnostics: Option<cortex_engine::engine::DiagnosticSnapshot>,
     /// Withheld servers no event records yet (final failure only).
     withheld: Vec<(String, &'static str)>,
@@ -105,6 +108,7 @@ async fn record_start_failure(
             }
             v
         });
+        let diagnostics = diagnostics.or_else(|| failure.detail.clone().map(|d| json!({"refusal": d})));
         store.write(|db| {
             let mut payload = json!({"channel_id":channel,"phase":failure.phase,"error":failure.error,
                 "attempt":failure.attempt,"role":failure.role,"engine":failure.engine,"diagnostics":diagnostics});
@@ -197,7 +201,7 @@ async fn note_withheld(
     for w in withheld {
         let update = json!({"sessionId":session,"update":{"sessionUpdate":"tool_call",
             "toolCallId":format!("cortex-external-mcp-withheld:{}", w.server),
-            "title":format!("External MCP server {} was not attached ({}); this session continues without it", w.server, w.reason),
+            "title":format!("External MCP server {} was not attached ({}{}); this session continues without it", w.server, w.reason, w.detail.as_ref().map(|d| format!(": {d}")).unwrap_or_default()),
             "kind":"other","status":"failed"}});
         crate::native_activity::record(executor, credential, session, update).await?;
     }
@@ -729,7 +733,7 @@ impl NativeHost {
                         instructions.push_str(" Have execution workers use Cortex project file tools for changes that must be included in the task's local finish.");
                     }
                 } else if automatic && identity.stage.as_deref() == Some("execution") {
-                    instructions.push_str("\n\nAutomatic sprint: make the task's final file changes through Cortex project file tools so the runtime retains attributable write receipts. Do not stage or commit changes yourself; automatic finish only commits changes it can attribute to this task.");
+                    crate::native_instructions::append(&mut instructions, "\n\nAutomatic sprint: make the task's final file changes through Cortex project file tools so the runtime retains attributable write receipts. Do not stage or commit changes yourself; automatic finish only commits changes it can attribute to this task.");
                 }
                 let reservation = scheduler::reserve_tx(
                     db,
@@ -891,6 +895,10 @@ impl NativeHost {
             engine: engine_kind,
             mcp_servers: std::sync::Mutex::new(Vec::new()),
             activity: Default::default(),
+            turn_guard: crate::native_turn_guard::TurnGuard::new(
+                crate::native_turn_guard::TurnLimits::default(),
+                assignment.is_some(),
+            ),
             guidance_changed: self.guidance_changed.clone(),
             #[cfg(test)]
             guidance_read_busy: self.guidance_read_busy.clone(),
@@ -948,9 +956,11 @@ impl NativeHost {
         } else {
             "native_session_start_failed"
         };
-        let mut instructions = format!("{instructions}\n\n{}", route.instructions);
+        // Later parts go before a closing output rule, which stays the last text.
+        let mut instructions = instructions;
+        crate::native_instructions::append(&mut instructions, &format!("\n\n{}", route.instructions));
         if worktree.is_some() {
-            instructions.push_str("\n\nThis task uses an isolated checkout. Use Cortex project file tools for repository writes. Commands can read this checkout and write only to private scratch, not the repository. Outside effects, native mutations and external MCP servers are unavailable for this task.");
+            crate::native_instructions::append(&mut instructions, "\n\nThis task uses an isolated checkout. Use Cortex project file tools for repository writes. Commands can read this checkout and write only to private scratch, not the repository. Outside effects, native mutations and external MCP servers are unavailable for this task.");
         }
         let project_context = crate::native_skills::project_files(
             &identity.role,
@@ -1036,14 +1046,20 @@ impl NativeHost {
                     if external[index].exited() {
                         let a = external.remove(index);
                         let server = a.name().unwrap_or_default();
+                        let detail = a.stderr_line();
+                        crate::native_mcp_signin::request(&server);
                         a.shutdown().await?;
                         withheld.push(crate::native_mcp::Withheld {
                             server,
                             reason: "server_exited_before_session",
+                            detail,
                         });
                     } else {
                         index += 1;
                     }
+                }
+                for a in external.iter().filter(|a| a.needs_sign_in()) {
+                    if let Some(name) = a.name() { crate::native_mcp_signin::request(&name); }
                 }
                 *policy.mcp_servers.lock().unwrap() =
                     external.iter().filter_map(|a| a.name()).collect();
@@ -1164,7 +1180,7 @@ impl NativeHost {
             // external server) is started.
             let never_spawned = engine.is_none()
                 && (phase == "broker"
-                    || (phase == "launch" && matches!(error, Error::Invalid | Error::Forbidden)));
+                    || (phase == "launch" && matches!(error, Error::Invalid | Error::InvalidField { .. } | Error::Forbidden)));
             let diagnostics = engine.as_ref().map(Engine::diagnostics);
             let mut observation = if let Some(e) = engine.take() {
                 if e.shutdown().await.is_ok() {
@@ -1230,6 +1246,12 @@ impl NativeHost {
                 role: identity.role.clone(),
                 engine: engine_kind.name(),
                 blocker: (!retry && provider_limit.is_none()).then_some(blocker),
+                detail: match &error {
+                    Error::InvalidField { field, reason } => {
+                        Some(json!({"field":field,"reason":reason}))
+                    }
+                    _ => None,
+                },
                 diagnostics: diagnostics.filter(|_| provider_limit.is_none()).map(|d| d.snapshot()),
                 withheld: if withheld_recorded {
                     vec![]
@@ -1501,6 +1523,8 @@ struct WriterTurn {
 }
 /// How often an active worker prompt checks whether its authority was revoked.
 const REVOCATION_POLL: Duration = Duration::from_secs(1);
+/// How often a running turn is checked for silence.
+const SILENCE_POLL: Duration = Duration::from_secs(15);
 /// How long a revoked worker turn may keep running to end by itself (its closing
 /// reply after its own accepted replan or escalation) before it is cancelled.
 const REVOKED_FINISH_GRACE: Duration = Duration::from_secs(10);
@@ -1776,6 +1800,9 @@ impl SessionDriver {
         let mut compacted = false;
         let mut watch = degenerate::Watch::default();
         let mut tripped = false;
+        self.policy.turn_guard.begin_turn();
+        let mut silence_tick = tokio::time::interval(SILENCE_POLL);
+        silence_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let result = {
             let call = &usage.call;
             let session_ref = &usage.session;
@@ -1835,10 +1862,35 @@ impl SessionDriver {
                         };
                         revocation.as_mut().reset(tokio::time::Instant::now() + next);
                     }
+                    // A turn that repeats refused calls, re-reads an unchanged result, calls
+                    // tools without end or goes silent trips like a degenerate message.
+                    _=self.policy.turn_guard.tripped(), if !tripped=>{
+                        if let Some(trip) = self.policy.turn_guard.take_trip() {
+                            tripped = true;
+                            self.record_degenerate(&trip, worker).await?;
+                            if self.prompt_active() {
+                                let _ = self.engine.cancel(&self.session).await;
+                            }
+                            cancel_sent = true;
+                            revocation.as_mut().reset(tokio::time::Instant::now() + REVOKED_CANCEL_GRACE);
+                        }
+                    }
+                    _=silence_tick.tick(), if !tripped=>{
+                        if let Some(trip) = self.policy.turn_guard.check_silence() {
+                            tripped = true;
+                            self.record_degenerate(&trip, worker).await?;
+                            if self.prompt_active() {
+                                let _ = self.engine.cancel(&self.session).await;
+                            }
+                            cancel_sent = true;
+                            revocation.as_mut().reset(tokio::time::Instant::now() + REVOKED_CANCEL_GRACE);
+                        }
+                    }
                     event=self.engine.next_event()=>{
                         match event {
                             Some(Event::Update(params))=>{
                                 updates+=1;
+                                self.policy.turn_guard.touch();
                                 if !tripped && params["sessionId"] == self.session.id() {
                                     if let Some(trip) = watch.observe(&params["update"]) {
                                         tripped = true;
@@ -2307,7 +2359,7 @@ impl SessionDriver {
                     "role":if worker {"worker"} else {"coordinator"},
                     "assignment_ref":assignment,"node":node.as_ref().map(|n|&n.0),"revision":node.as_ref().map(|n|n.1),
                     "rule":trip.rule,"message_id":trip.message_id,"chars":trip.chars,
-                    "repeated_share":trip.repeated_share}),
+                    "repeated_share":trip.repeated_share,"tool":trip.tool,"count":trip.count}),
             )?;
             Ok(())
         })?)
@@ -2779,6 +2831,8 @@ struct CorePolicy {
     /// that launched it before the session is bound.
     mcp_servers: std::sync::Mutex<Vec<String>>,
     activity: Arc<std::sync::atomic::AtomicBool>,
+    /// Per-turn bounds on repeated calls, call volume and silence.
+    turn_guard: crate::native_turn_guard::TurnGuard,
     guidance_changed: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     guidance_read_busy: Arc<tokio::sync::Notify>,
@@ -2860,7 +2914,28 @@ fn auto_channel_allow(
 }
 impl PermissionPolicy for CorePolicy {
     fn authority(&self) -> FutureResult<'_, ()> {
-        Box::pin(async move { self.check(false).await.map(|_| ()) })
+        Box::pin(async move {
+            // The engine closes the turn on any error here. A saturated reader queue is a
+            // transient admission failure of this poll, not a revocation: the next poll
+            // decides. Only a definite refusal ends the process.
+            if self.worktree.is_none() {
+                let c = self.credential.clone();
+                let read = match self
+                    .executor
+                    .read(move |db| channels::authenticate(db, &c.channel_id, c.secret(), false))
+                {
+                    Ok(read) => read,
+                    Err(error) if error.code() == "busy" => return Ok(()),
+                    Err(error) => return Err(engine_error(error)),
+                };
+                return match receive(read).await {
+                    Ok(_) => Ok(()),
+                    Err(error) if error.code() == "busy" => Ok(()),
+                    Err(error) => Err(engine_error(error)),
+                };
+            }
+            self.check(false).await.map(|_| ())
+        })
     }
     fn decide<'a>(
         &'a self,
@@ -3071,6 +3146,7 @@ impl GatewayCore for CorePolicy {
         ) || crate::native_documents::supports(name)
             || crate::native_access::supports(name)
             || crate::native_sprint_plan::supports(name)
+            || crate::native_sprint_revision::supports(name)
             || crate::native_sources::supports(name)
             || crate::native_project::supports(name)
             || crate::native_project_ops::supports(name)
@@ -3092,6 +3168,10 @@ impl GatewayCore for CorePolicy {
             self.check(false).await.map(|i| view(&i))
         })
     }
+    fn call_rejected(&self, name: &str, arguments: &Value, code: &str) {
+        let key = crate::native_turn_guard::call_key(name, arguments);
+        self.turn_guard.finish(name, key, crate::native_turn_guard::Outcome::Refused(code));
+    }
     fn execute<'a>(
         &'a self,
         credentials: &'a Credentials,
@@ -3104,9 +3184,31 @@ impl GatewayCore for CorePolicy {
         // authentication is reported as a structured, correctable tool error.
         Box::pin(async move {
             self.activity.store(true, std::sync::atomic::Ordering::SeqCst);
+            // A turn that keeps repeating a refused call, re-reads an unchanged result or
+            // calls tools without end is ended (see `native_turn_guard`).
+            let key = crate::native_turn_guard::call_key(name, &arguments);
+            let _in_flight = match self.turn_guard.enter(name) {
+                Ok(call) => call,
+                Err(code) => return Ok(crate::native_tool_errors::reply(code)),
+            };
             let result = self
                 .dispatch_call(credentials, channel, name, arguments, false)
                 .await;
+            {
+                use crate::native_turn_guard::Outcome;
+                match &result {
+                    Ok(v) if v["isError"] == true => {
+                        let code = v["structuredContent"]["code"].as_str()
+                            .or_else(|| v["structuredContent"]["error"].as_str()).unwrap_or("tool_error");
+                        self.turn_guard.finish(name, key, Outcome::Refused(code));
+                    }
+                    Ok(v) => self.turn_guard.finish(name, key, Outcome::Result(v)),
+                    Err(error) => {
+                        let code = format!("{error:?}");
+                        self.turn_guard.finish(name, key, Outcome::Refused(&code));
+                    }
+                }
+            }
             // result_submit keeps its own classification (native_results::correctable):
             // its other refusals stay named refusals, never a retryable tool error.
             if result.is_ok() && name == "steer_worker" {
@@ -3235,6 +3337,10 @@ impl CorePolicy {
                             .map_err(tool_error)?;
                     }
                     let result_sha256 = crate::native_project::digest(&bytes);
+                    // A deferred context or capsule keeps the plan outcomes inline: the coordinator
+                    // needs them to replan, and the deferred body may not fit any batch item.
+                    let outcomes = matches!(tool.as_str(), "task_get_context" | "read_capsule")
+                        .then(|| crate::native_context_tools::plan_outcomes(&data));
                     let c = self.credential.clone();
                     let expected = channel.clone();
                     let deferred = receive(
@@ -3257,6 +3363,9 @@ impl CorePolicy {
                     item["large_output_id"] = deferred["large_output_id"].clone();
                     item["byte_count"] = deferred["byte_count"].clone();
                     item["result_sha256"] = json!(result_sha256);
+                    if let Some(outcomes) = outcomes {
+                        crate::native_context_tools::merge(&mut item, outcomes);
+                    }
                 }
             }
             results.push(item);
@@ -3411,6 +3520,23 @@ impl CorePolicy {
             }
             if crate::native_project::supports(&name) || crate::native_sources::supports(&name) {
                 let root = self.root.clone();
+                // A protected project path (Cortex private state, Git controls) is
+                // decided by the runtime first; the admission covers only this call.
+                // A batched read never waits for an owner: there a protected path keeps
+                // its refusal, and a direct project_read asks.
+                let protection = (!batched && matches!(name.as_str(), "project_read" | "project_write" | "project_edit"))
+                    .then(|| arguments["path"].as_str())
+                    .flatten()
+                    .and_then(|path| crate::native_project::protected(&root, path).map(|p| (path.to_owned(), p)));
+                if let Some((_, protection)) = &protection {
+                    if let Err(e) = crate::native_access::admit_protected(
+                        self.executor.clone(), self.credential.clone(), root.clone(),
+                        self.permissions.clone(), &name, &arguments, *protection,
+                    ).await {
+                        return Ok(crate::native_tool_errors::reply(e.code()));
+                    }
+                }
+                let admitted = protection.map(|(path, _)| path);
                 let result = receive(
                     self.executor
                         .publication(move |store| {
@@ -3421,6 +3547,9 @@ impl CorePolicy {
                                 return Err(CoreError::Refused("channel_identity_changed"));
                             }
                             if crate::native_project::supports(&name) {
+                                let _admitted = admitted
+                                    .as_deref()
+                                    .map(crate::native_project::Admitted::enter);
                                 crate::native_project::execute(
                                     store, &i, &c, &name, &arguments, batched, &root, scoped,
                                 )
@@ -3437,6 +3566,16 @@ impl CorePolicy {
                     Ok(v) => crate::native_tool_errors::enrich(v),
                     Err(e) => crate::native_tool_errors::reply(e.code()),
                 });
+            }
+            if crate::native_sprint_revision::supports(&name) {
+                return crate::native_sprint_revision::execute(
+                    self.executor.clone(),
+                    self.credential.clone(),
+                    self.workspace_state.clone(),
+                    arguments,
+                )
+                .await
+                .map_err(tool_error);
             }
             if crate::native_sprint_plan::supports(&name) {
                 return crate::native_sprint_plan::execute(
@@ -3572,7 +3711,7 @@ impl CorePolicy {
                     )
                     .await
                     {
-                        return Ok(content_refusal("verification", error));
+                        return Ok(content_refusal("verification", error, None));
                     }
                 }
             }
@@ -3597,7 +3736,7 @@ impl CorePolicy {
                         )
                             .await
                     {
-                        return Ok(content_refusal("plan", error));
+                        return Ok(content_refusal("plan", error, Some(&arguments["plan"])));
                     }
                 }
             }
@@ -3685,6 +3824,48 @@ impl CorePolicy {
             let routing = self.routes.clone();
             let root = self.logical.clone();
             let synthesis = matches!(name.as_str(), "synthesis_submit" | "answer_submit");
+            // A plan that drops or rewords an outcome of the plan in force is answered with
+            // the exact outcomes to carry, so the coordinator corrects it in the same turn.
+            let outcome_plan = (matches!(name.as_str(), "plan_submit" | "steer_plan") && channel.role == "coordinator")
+                .then(|| arguments["plan"].clone());
+            let outcome_key = arguments["request_key"].as_str().unwrap_or_default().to_owned();
+            let outcome_relief = name == "plan_submit";
+            let execution_root = self.root.clone();
+            let mut answer_evidence = if name == "answer_submit" && channel.role == "coordinator" {
+                let i = self.identity(true).await?;
+                if !same(&i, &expected) {
+                    return Err(Error::Refused("channel_identity_changed"));
+                }
+                let actor = c.channel_id.clone();
+                let key = arguments["request_key"]
+                    .as_str()
+                    .ok_or(Error::Invalid)?
+                    .to_owned();
+                let planned_answer = receive(
+                    self.executor.read(move |db| {
+                        Ok(db.query_row(
+                            "SELECT revision>0 AND state='PLANNING' AND NOT EXISTS(
+                                SELECT 1 FROM runtime_requests WHERE task_id=t.task_id AND actor=? AND request_key=?
+                            ) FROM runtime_tasks t WHERE task_id=?",
+                            (&actor, &key, &i.task),
+                            |row| row.get::<_, bool>(0),
+                        )?)
+                    }).map_err(tool_error)?,
+                ).await.map_err(tool_error)?;
+                if planned_answer {
+                    let mut evidence = crate::native_effects::observe(execution_root.clone())
+                        .await
+                        .map_err(tool_error)?;
+                    if let Some(checkout) = self.worktree_receipt() {
+                        evidence.checkout_evidence = Some(json!({"checkout":checkout,"cwd":execution_root}));
+                    }
+                    Some(evidence)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let value = receive(
                 self.executor
                     .write(move |db| {
@@ -3751,15 +3932,42 @@ impl CorePolicy {
                             "verification_submit" if i.role=="coordinator" => lifecycle::reconciliation::submit_verification_tx(db,&i.task,&c.channel_id,key,&arguments),
                             "replan_request" | "scope_request" | "escalation_request" => lifecycle::domain::propose_replan_tx(db,&i.task,&c.channel_id,key,&name,&arguments),
                             "answer_submit" if i.role == "coordinator" => {
-                                gap_reply(db, &i.task, lifecycle::reconciliation::submit_answer_tx(db,&i.task,&c.channel_id,key,&arguments))
+                                if let Some(evidence) = answer_evidence.as_mut() {
+                                    crate::native_change_set::bind_task_files_tx(db, &execution_root, &i.task, evidence)?;
+                                }
+                                gap_reply(db, &i.task, lifecycle::reconciliation::submit_answer_tx(db,&i.task,&c.channel_id,key,&arguments,answer_evidence.as_ref()))
                             }
                             _ => Err(CoreError::Refused("tool_refused")),
                         }
                     })
                     .map_err(tool_error)?,
             )
-            .await
-            .map_err(tool_error)?;
+            .await;
+            let value = match value {
+                Err(CoreError::Refused(code @ ("plan_outcome_dropped" | "plan_outcome_statement_required" | "plan_outcome_uncovered" | "plan_outcome_unknown" | "plan_outcome_deferral_conflict" | "plan_outcome_deferral_reason_required"))) if outcome_plan.is_some() => {
+                    let i = self.identity(true).await?;
+                    let plan = outcome_plan.unwrap_or_default();
+                    let c = self.credential.clone();
+                    let expected = channel.clone();
+                    let reply = receive(self.executor.write(move |db| {
+                        let current = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
+                        if !same(&current, &expected) {
+                            return Err(CoreError::Refused("channel_identity_changed"));
+                        }
+                        // The same outcomes refused again and again are kept by the runtime
+                        // instead of spinning (`refused_outcomes_tx`).
+                        if outcome_relief && code == "plan_outcome_dropped" {
+                            if let Some(value) = lifecycle::plan::refused_outcomes_tx(db, &i.task, &c.channel_id, &outcome_key, &plan)? {
+                                return Ok(json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":false}));
+                            }
+                        }
+                        outcome_refusal(db, &i.task, code, &plan)
+                    }).map_err(tool_error)?)
+                        .await.map_err(tool_error)?;
+                    return Ok(reply);
+                }
+                other => other.map_err(tool_error)?,
+            };
             if synthesis {
                 return Ok(value);
             }
@@ -3776,20 +3984,66 @@ fn tool_error(error: CoreError) -> Error {
 /// A plan or verification the runtime refuses before recording anything is a correctable
 /// content error, not an authority failure: the coordinator gets the exact code and submits
 /// a corrected proposal instead of giving up on `authority_refused`.
-fn content_refusal(what: &str, error: CoreError) -> Value {
+fn content_refusal(what: &str, error: CoreError, plan: Option<&Value>) -> Value {
     let code = error.code();
     let hint = match code {
-        "verification_trivial_command" => " A verification command only prints, reads, lists or searches (echo, cat, ls, grep, rg, find, test, true, read-only git and the like), so its exit status cannot prove the work. Use the project's documented check (test runner, build, linter, type checker) or another command that exits nonzero when the result is wrong.",
+        "verification_trivial_command" => " A verification command only prints, reads, lists or searches (echo, cat, ls, a grep or rg without -q, find, true, read-only git and the like), so its exit status cannot prove the work. Use the project's documented check (test runner, build, linter, type checker) or another command that exits nonzero when the result is wrong; a file test (test -f path, [ -s path ]) or a quiet search (grep -q pattern path) is such a check.",
         "verification_executable_unavailable" => " A verification program was not found on the command search path that worker commands and the final verifier use (the project's own tool directories, then the owner's PATH); use a program that is installed there.",
         "read_only_scope_not_writable" => " A read-only step names a path that does not exist and that no dependent writer creates.",
+        "plan_outcomes_required" | "invalid_plan_outcome" => " plan.outcomes lists every required result of the original goal and the owner's messages, each with a unique id and a statement in the owner's terms.",
+        "plan_outcome_uncovered" => " Every outcome needs a task that lists its id in delivers, or deferred with the reason a later plan delivers it.",
+        "plan_outcome_unknown" => " A task's delivers names an id that plan.outcomes does not define.",
+        "plan_outcome_deferral_conflict" => " An outcome a task delivers is not deferred as well.",
+        "plan_outcome_deferral_reason_required" => " A deferred outcome needs a concrete reason.",
         _ => "",
     };
-    let value = json!({
+    let mut value = json!({
         "code": code,
         "recorded": false,
         "message": format!("No {what} was recorded ({code}).{hint} Correct the proposal and submit it again."),
     });
+    // The items to fix, named (uncovered, unknown_delivers, ...), like the outcome refusals.
+    if let (Some(plan), true) = (plan, matches!(code, "plan_outcome_uncovered" | "plan_outcome_unknown" | "plan_outcome_deferral_conflict" | "plan_outcome_deferral_reason_required")) {
+        if let (Some(extra), Some(fields)) = (lifecycle::plan::outcome_diagnosis(plan).as_object(), value.as_object_mut()) {
+            fields.extend(extra.clone());
+            fields.insert("field".into(), json!("plan.outcomes"));
+        }
+    }
     json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":true})
+}
+/// The correctable reply to a plan refused for its goal outcomes: the outcomes of the
+/// plan in force it must still carry, verbatim, or the id-only references that name
+/// none of them. Read after the refused write, so nothing was recorded.
+fn outcome_refusal(
+    db: &rusqlite::Connection,
+    task: &str,
+    code: &'static str,
+    plan: &Value,
+) -> CoreResult<Value> {
+    let previous: Option<Value> = db
+        .query_row("SELECT plan_json FROM runtime_tasks WHERE task_id=?", [task], |r| {
+            r.get::<_, Option<String>>(0)
+        })?
+        .and_then(|p| serde_json::from_str(&p).ok());
+    let value = if matches!(code, "plan_outcome_uncovered" | "plan_outcome_unknown" | "plan_outcome_deferral_conflict" | "plan_outcome_deferral_reason_required") {
+        let mut value = lifecycle::plan::outcome_diagnosis(plan);
+        value["code"] = json!(code);
+        value["recorded"] = json!(false);
+        value["field"] = json!("plan.outcomes");
+        value["message"] = json!("Nothing was recorded. The plan's outcomes and tasks disagree: uncovered lists outcomes that no task delivers and the plan does not defer, unknown_delivers lists delivers ids that no outcome defines (defined_outcome_ids lists the ids), delivered_and_deferred lists outcomes that are both, deferral_reason_missing lists deferred outcomes without a reason. Fix exactly these items and submit the corrected plan again now.");
+        value
+    } else if code == "plan_outcome_statement_required" {
+        json!({"code":code,"recorded":false,"field":"plan.outcomes",
+            "unknown_outcome_ids":lifecycle::plan::unknown_references(previous.as_ref(), plan),
+            "plan_outcomes":previous.as_ref().and_then(lifecycle::plan::stored_outcomes)
+                .map(|o| o.iter().map(lifecycle::plan::verbatim).collect::<Vec<_>>()),
+            "message":"Nothing was recorded. An outcome without a statement refers to an outcome of the plan in force by its id, and these ids name none (plan_outcomes lists the plan in force). Give a new outcome its statement in the owner's terms, then submit again."})
+    } else {
+        json!({"code":code,"recorded":false,"field":"plan.outcomes",
+            "missing_outcomes":previous.as_ref().map(|p| lifecycle::plan::dropped_outcomes(p, plan)).unwrap_or_default(),
+            "message":"Nothing was recorded. The plan in force names these goal outcomes and the new plan drops or rewords them (missing_outcomes, verbatim). Keep each with its exact id and statement, or send only {\"id\":...} (plus deferred when no task delivers it) and the runtime fills the recorded statement; add a new outcome instead of rewording one. Submit the corrected plan again now; after three identical refusals the runtime keeps the missing outcomes itself (deferred, still owed)."})
+    };
+    Ok(json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":true}))
 }
 fn engine_error_to_core(_: Error) -> CoreError {
     CoreError::Refused("invalid_native_tool")
@@ -3817,6 +4071,14 @@ fn gap_reply(
 ) -> CoreResult<Value> {
     let (value, is_error) = match submitted {
         Ok(value) => (value, false),
+        Err(CoreError::Refused("answer_project_revision_changed")) => (
+            json!({
+                "code":"answer_project_revision_changed",
+                "recorded":false,
+                "message":"The checkout or files bound to the review changed after it was recorded. Use the retained reports and the owner's latest input to propose a fresh, scoped plan with verification of the current checkout. Do not repeat the answer against the old review."
+            }),
+            true,
+        ),
         Err(CoreError::Refused("synthesis_gaps_undisclosed")) => {
             let names = lifecycle::reconciliation::gaps(db, task)?
                 .into_values()
@@ -3831,6 +4093,35 @@ fn gap_reply(
                 true,
             )
         }
+        Err(CoreError::Refused(code @ ("completion_goal_not_met" | "final_outcomes_required" | "final_outcome_unknown"))) => {
+            let context: Value = db
+                .query_row("SELECT plan_json FROM runtime_tasks WHERE task_id=?", [task], |r| {
+                    r.get::<_, Option<String>>(0)
+                })?
+                .and_then(|p| serde_json::from_str::<Value>(&p).ok())
+                .unwrap_or(Value::Null);
+            (
+                json!({
+                    "code":code,
+                    "recorded":false,
+                    "plan_outcomes":context["outcomes"],
+                    "message":if code == "completion_goal_not_met" {
+                        "Nothing was recorded: the original goal is not met, so the task cannot finish. Do not synthesize unfinished work. Continue now: call replan_request and then submit a plan whose tasks deliver every outcome that is not done (keep every outcome and the unresolved verification commands), or, when only the owner can decide (for example whether to close the task as is), ask with user_question_request."
+                    } else {
+                        "Nothing was recorded. Report every goal outcome of the accepted plan (plan_outcomes) exactly once in outcomes with done or not_done and its evidence; for a plan without outcomes, list the required results of the original goal and the owner's messages yourself."
+                    }
+                }),
+                true,
+            )
+        }
+        Err(CoreError::Refused("not_verified_not_a_check")) => (
+            json!({
+                "code":"not_verified_not_a_check",
+                "recorded":false,
+                "message":"Nothing was recorded. not_verified lists only recorded checks and runtime limits that did not pass, by their exact names. Unfinished work (a deliverable not made, a step not done) is not a check gap: it is a not_done outcome, and the work continues with replan_request instead of a final result."
+            }),
+            true,
+        ),
         Err(CoreError::Refused("synthesis_disclosure_in_text")) => (
             json!({
                 "code":"synthesis_disclosure_in_text",
@@ -3881,6 +4172,10 @@ pub(crate) mod degenerate {
         pub message_id: Option<String>,
         pub chars: usize,
         pub repeated_share: Option<f64>,
+        /// The tool a `tool_loop` or `tool_calls` trip is about, or the seconds of a
+        /// `silence` trip in `count`.
+        pub tool: Option<String>,
+        pub count: Option<usize>,
     }
     impl Trip {
         pub(crate) fn refusal() -> Self {
@@ -3889,6 +4184,8 @@ pub(crate) mod degenerate {
                 message_id: None,
                 chars: 0,
                 repeated_share: None,
+                tool: None,
+                count: None,
             }
         }
     }
@@ -3951,6 +4248,8 @@ pub(crate) mod degenerate {
                 chars: self.chars.len(),
                 repeated_share: (rule == "repetition")
                     .then(|| (self.share() * 1000.0).round() / 1000.0),
+                tool: None,
+                count: None,
             }
         }
         pub(crate) fn push(&mut self, text: &str) -> Option<Trip> {

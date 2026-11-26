@@ -59,6 +59,10 @@ const STALL_DEFAULT: u32 = 3;
 const STALL_REPEAT_MS: i64 = 3 * 3_600_000;
 /// How often the working tasks are looked at for a no-progress moment.
 const STALL_TICK: Duration = Duration::from_secs(300);
+/// The moments one snapshot for paired phones carries at most.
+const MOMENTS_LIMIT: usize = 200;
+/// A moment's title on a phone, in characters.
+const MOMENT_TITLE: usize = 120;
 
 /// The moments that need the owner, one setting each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -139,6 +143,9 @@ impl Item {
         )
     }
     fn summary(&self) -> &'static str {
+        if self.state.starts_with("mcp:") {
+            return "MCP sign-in needed";
+        }
         if self.state.starts_with("oa:") {
             "Task needs access"
         } else {
@@ -165,6 +172,26 @@ impl Item {
         }
         body
     }
+}
+
+/// One owner moment as a paired phone reads it (`notifications.subscribe`): its kind, an
+/// opaque fingerprint of its state, the task or sprint title and the closed target the
+/// desktop opens. Never a detail, a question body, a path or a runtime id beyond the target.
+pub(crate) fn moment(item: &Item) -> Value {
+    use sha2::{Digest, Sha256};
+    let kind = if item.state.starts_with("oa:") {
+        Value::from("access")
+    } else {
+        serde_json::to_value(item.kind).unwrap_or(Value::Null)
+    };
+    let title: String = item
+        .label
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MOMENT_TITLE)
+        .collect();
+    let digest = format!("{:x}", Sha256::digest(item.fingerprint().as_bytes()));
+    json!({"kind":kind,"fingerprint":&digest[..32],"title":title,"target":item.target()})
 }
 
 /// Notification text is read by the owner: a bare internal code becomes a
@@ -868,6 +895,10 @@ struct Inner {
     /// No saved state yet: the first read of each project only records what is open.
     first: bool,
     primed: BTreeSet<String>,
+    /// Started by the real service: projects are read for moments, with or without a bus.
+    running: bool,
+    /// Per project, the moments its last read found, for paired phones.
+    moments: BTreeMap<String, Vec<Value>>,
     bus: Option<Arc<Bus>>,
     server: Option<String>,
     status: &'static str,
@@ -880,8 +911,37 @@ pub(crate) struct Notifier {
     inner: Mutex<Inner>,
     dirty: Mutex<BTreeSet<String>>,
     wake: tokio::sync::Notify,
+    /// Every project's moments as one snapshot (`{"moments":[…]}`), for paired phones.
+    moments: tokio::sync::watch::Sender<Value>,
 }
 impl Notifier {
+    /// The moments snapshot and its later changes (`notifications.subscribe`).
+    pub(crate) fn moments(&self) -> tokio::sync::watch::Receiver<Value> {
+        self.moments.subscribe()
+    }
+    /// One project's moments after a read; the snapshot changes only when they did.
+    fn publish_moments(&self, inner: &mut Inner, project: &str, found: Vec<Value>) {
+        if found.is_empty() {
+            inner.moments.remove(project);
+        } else {
+            inner.moments.insert(project.to_owned(), found);
+        }
+        let all: Vec<Value> = inner
+            .moments
+            .values()
+            .flatten()
+            .take(MOMENTS_LIMIT)
+            .cloned()
+            .collect();
+        let next = json!({"moments": all});
+        self.moments.send_if_modified(|current| {
+            let changed = *current != next;
+            if changed {
+                *current = next;
+            }
+            changed
+        });
+    }
     pub(crate) fn status(&self) -> Value {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         json!({"state": if inner.status.is_empty() { "not_started" } else { inner.status }})
@@ -891,7 +951,8 @@ impl Notifier {
     }
     /// A project changed in a way that can move an item: read it again soon.
     pub(crate) fn touch(&self, project: &str) {
-        if !self.raising() || !id_ok(project) {
+        let running = self.inner.lock().map(|i| i.running).unwrap_or(false);
+        if !running || !id_ok(project) {
             return;
         }
         if let Ok(mut dirty) = self.dirty.lock() {
@@ -1009,6 +1070,9 @@ impl crate::Service {
                     inner.book.see(seen.to_owned());
                 }
             }
+            // Without a bus nothing is raised here, but projects are still read for the
+            // moments paired phones subscribe to.
+            inner.running = true;
             match connected {
                 Ok(bus) => {
                     inner.bus = Some(bus);
@@ -1020,7 +1084,6 @@ impl crate::Service {
                         "{}",
                         json!({"event":"notifications_unavailable","code":code})
                     );
-                    return;
                 }
             }
         }
@@ -1178,6 +1241,18 @@ impl crate::Service {
             json!({})
         };
         let mut found = items(project, &tasks, &product, &decisions, &cards);
+        if project == crate::native_mcp_signin::MACHINE {
+            for (id, name, since) in crate::native_mcp_signin::notices() {
+                found.push(Item {
+                    kind: Kind::Stop,
+                    state: format!("mcp:{id}:{since}"),
+                    decision: None,
+                    detail: Some(format!("Sign in to {name} to let sessions use it.")),
+                    place: Place { project: project.into(), sprint: false, id: id.clone() },
+                    label: name,
+                });
+            }
+        }
         let taken: BTreeSet<Place> = found.iter().map(|i| i.place.clone()).collect();
         let stalled = stalls(project, &tasks, &product, &working, &taken, now, hours);
         let (actions, bus) = {
@@ -1195,6 +1270,13 @@ impl crate::Service {
                     .stall_numbers
                     .insert(s.item.place.clone(), (s.runtime, s.numbers));
                 found.push(s.item);
+            }
+            // Paired phones read every moment, whatever a desktop window shows or wants.
+            let moments = found.iter().map(moment).collect();
+            self.notifier.publish_moments(&mut inner, project, moments);
+            if inner.bus.is_none() {
+                // Nothing is raised, so nothing is marked as announced either.
+                return Ok(());
             }
             let now = Instant::now();
             let focus = inner
@@ -1272,7 +1354,7 @@ impl crate::Service {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             (
-                inner.bus.is_some() && Notifier::enabled(&inner).contains(&Kind::Stalled),
+                inner.running && Notifier::enabled(&inner).contains(&Kind::Stalled),
                 Notifier::stall_hours(&inner),
             )
         };
@@ -1378,6 +1460,45 @@ impl crate::Service {
                 }
             }
         });
+    }
+
+    /// `notifications.subscribe`: the current moments snapshot at once, then a new one after
+    /// every change, as `notification_moments` service events. A frame from the caller, its
+    /// close or the service stopping ends it.
+    pub(crate) async fn serve_moments(
+        &self,
+        mut reader: tokio::net::unix::OwnedReadHalf,
+        mut writer: tokio::net::unix::OwnedWriteHalf,
+        mut moments: tokio::sync::watch::Receiver<Value>,
+    ) -> io::Result<()> {
+        let mut shutdown = self.shutdown.subscribe();
+        let frame = crate::read_frame(&mut reader);
+        tokio::pin!(frame);
+        loop {
+            let mut event = {
+                let current = moments.borrow_and_update();
+                if current.is_object() {
+                    current.clone()
+                } else {
+                    json!({"moments": []})
+                }
+            };
+            event["type"] = json!("notification_moments");
+            tokio::time::timeout(
+                self.config.request_timeout,
+                crate::write_frame(
+                    &mut writer,
+                    &json!({"jsonrpc":"2.0","method":"service.event","params":event}),
+                ),
+            )
+            .await
+            .map_err(|_| crate::failure("client_write_timeout"))??;
+            tokio::select! {
+                changed = moments.changed() => if changed.is_err() { return Ok(()) },
+                _ = &mut frame => return Ok(()),
+                _ = shutdown.changed() => return Ok(()),
+            }
+        }
     }
 
     /// `notifications.report`, `notifications.opened` and `notifications.take`.

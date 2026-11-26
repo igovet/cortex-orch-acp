@@ -7,6 +7,7 @@ pub mod error;
 pub mod events;
 pub mod external;
 pub mod input;
+pub mod io_priority;
 pub mod lifecycle;
 pub mod ownership;
 pub mod permission_decisions;

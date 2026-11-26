@@ -1,6 +1,6 @@
-use crate::phone::Phone;
+use crate::{moments::Delivery, phone::Phone};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tauri::{plugin::PluginHandle, AppHandle, Emitter, Manager, State, WebviewWindow, Wry};
 use tokio::sync::OnceCell;
 
@@ -187,6 +187,116 @@ async fn phone_listen(window: WebviewWindow, speech: State<'_, Speech>) -> Resul
     Ok(json!({"text": text.chars().take(16_000).collect::<String>()}))
 }
 
+/// This phone's own notifications, reached through the native plugin (`NotifyService.kt`): the
+/// foreground service that keeps the connection while the app is in the background, the
+/// notifications it raises for owner moments, and the taps on them.
+struct Notify(Arc<PluginHandle<Wry>>);
+
+/// Hands each raise or withdrawal to the plugin. A plugin that does not answer in time loses
+/// that one notification, never the subscription.
+fn deliver(handle: Arc<PluginHandle<Wry>>) -> crate::phone::Deliver {
+    Arc::new(move |delivery| {
+        let handle = handle.clone();
+        tauri::async_runtime::spawn(async move {
+            let (command, payload) = match delivery {
+                Delivery::Show {
+                    tag,
+                    channel,
+                    title,
+                    text,
+                    machine_id,
+                    target,
+                } => (
+                    "show",
+                    json!({"tag":tag,"channel":channel,"title":title,"text":text,
+                        "machineId":machine_id,"target":target.to_string()}),
+                ),
+                Delivery::Withdraw { tag } => ("withdraw", json!({"tag":tag})),
+            };
+            let _ = tokio::time::timeout(
+                Duration::from_secs(10),
+                handle.run_mobile_plugin_async::<Value>(command, payload),
+            )
+            .await;
+        });
+    })
+}
+
+/// Turns this phone's notifications on (the foreground service starts and every paired
+/// machine's owner moments are followed) or off. On asks Android for the notification
+/// permission when it is not granted yet. `words` are the texts Android shows, in the
+/// interface's language; each is checked (`moments::words`) and English stays where one is not.
+#[tauri::command]
+async fn phone_notifications(
+    window: WebviewWindow,
+    app: AppHandle,
+    native: State<'_, Native>,
+    notify: State<'_, Notify>,
+    enabled: bool,
+    words: Value,
+) -> Result<Value, String> {
+    bundled(&window)?;
+    let phone = phone(&app, &native).await?;
+    let words = crate::moments::words(&words);
+    let reply: Value = notify
+        .0
+        .run_mobile_plugin_async(if enabled { "start" } else { "stop" }, words.android)
+        .await
+        .map_err(|_| "notifications_unavailable".to_string())?;
+    phone.set_notifications(enabled.then(|| deliver(notify.0.clone())), words.titles);
+    let permission = match reply["permission"].as_str() {
+        Some("granted") => "granted",
+        _ => "denied",
+    };
+    Ok(
+        json!({"enabled":enabled,"permission":permission,"batteryExempt":reply["batteryExempt"] == true}),
+    )
+}
+
+/// The next tap on one of this phone's notifications. The plugin answers when one arrives;
+/// what it hands back is checked again here (a paired machine, a target of the closed
+/// shapes), since any app can start this activity with extras of its own. `null` leads nowhere.
+#[tauri::command]
+async fn phone_notification_next(
+    window: WebviewWindow,
+    app: AppHandle,
+    native: State<'_, Native>,
+    notify: State<'_, Notify>,
+) -> Result<Value, String> {
+    bundled(&window)?;
+    let phone = phone(&app, &native).await?;
+    let tap: Value = notify
+        .0
+        .run_mobile_plugin_async("next", ())
+        .await
+        .map_err(|_| "notifications_unavailable".to_string())?;
+    let machine = tap["machineId"].as_str().unwrap_or_default();
+    let target = tap["target"]
+        .as_str()
+        .filter(|t| t.len() <= 2048)
+        .and_then(|t| serde_json::from_str::<Value>(t).ok())
+        .unwrap_or(Value::Null);
+    Ok(phone
+        .notification_tap(machine, &target)
+        .unwrap_or(Value::Null))
+}
+
+/// Opens Android's battery optimisation list, where the owner can exempt the app so the
+/// connection is kept while the phone sleeps.
+#[tauri::command]
+async fn phone_battery_settings(
+    window: WebviewWindow,
+    notify: State<'_, Notify>,
+) -> Result<(), String> {
+    bundled(&window)?;
+    notify
+        .0
+        .run_mobile_plugin_async::<Value>("battery", ())
+        .await
+        .map(|_| ())
+        .map_err(|_| "notifications_unavailable".to_string())
+}
+
 #[tauri::command]
 fn phone_exit(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
     bundled(&window)?;
@@ -208,6 +318,16 @@ pub fn run() {
                 })
                 .build(),
         )
+        .plugin(
+            tauri::plugin::Builder::<Wry>::new("notify")
+                .setup(|app, api| {
+                    let handle =
+                        api.register_android_plugin("dev.cortex.workspace.notify", "NotifyPlugin")?;
+                    app.manage(Notify(Arc::new(handle)));
+                    Ok(())
+                })
+                .build(),
+        )
         .manage(Native::default())
         .invoke_handler(tauri::generate_handler![
             workspace_request,
@@ -221,6 +341,9 @@ pub fn run() {
             phone_forget,
             phone_retry,
             phone_listen,
+            phone_notifications,
+            phone_notification_next,
+            phone_battery_settings,
             phone_exit
         ])
         .run(tauri::generate_context!())

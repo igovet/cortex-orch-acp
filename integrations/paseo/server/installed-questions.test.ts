@@ -148,14 +148,14 @@ let tree = nodes(render());
 assert.equal(questionText(tree), "Layout?");
 assert.ok(tree.some((node) => node.props.accessibilityRole === "radiogroup" && node.props.accessibilityLabel === "Layout?"));
 assert.deepEqual(tree.filter((node) => node.props.option).map((node) => node.props.option.label), ["Compact", "Spacious"]);
-assert.deepEqual(tree.filter((node) => node.props.option).map((node) => node.props.option.description), ["Рекомендуется", undefined]);
+assert.deepEqual(tree.filter((node) => node.props.option).map((node) => node.props.option.description), ["Рекомендую", undefined]);
 assert.ok(tree.some((node) => node.props.onChange && node.props.accessibilityLabel === "Layout?"));
 assert.equal(tree.find((node) => node.props.testID === "question-form-primary-action").props.disabled, true);
 assert.ok(tree.some((node) => node.props.questions?.length === 2)); // one paginated form, not two cards
 const optionNodes = tree.filter((node) => node.props.option);
 assert.deepEqual(optionNodes.map(node => nodes(node.type(node.props))
   .filter(child => child.props.testID === "question-form-option-description")
-  .flatMap(child => nodes(child.props.children).map(text => text.props.text))), [["Рекомендуется"], []]);
+  .flatMap(child => nodes(child.props.children).map(text => text.props.text))), [["Рекомендую"], []]);
 // Select the first answer, then advance through the installed card. Some
 // versions advance on selection; the current card has an explicit Next action.
 optionNodes[0].props.onToggle(0, 0, false);

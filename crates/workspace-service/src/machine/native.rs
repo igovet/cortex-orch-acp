@@ -241,9 +241,10 @@ pub async fn run(
         "engine.connection" => super::engine_connection::action(config, params),
         "config.read" => super::config_read::read(config),
         "config.save" => super::config_save::save(config, params),
-        "config.mcp.discover" => {
-            Ok(super::mcp_discovery::discover(&params["server"], config).await)
-        }
+        "config.mcp.discover" => Ok(match root {
+            Some(root) => super::mcp_discovery::discover_in_project(&params["server"], config, root).await,
+            None => super::mcp_discovery::discover(&params["server"], config).await,
+        }),
         "cleanup.run" => {
             super::retention::cleanup(state, projects, &mut git::Git::for_service(config)).await
         }
@@ -285,24 +286,46 @@ pub async fn run(
         }
         // Create tasks from a plan: every task and the sprint's transition commit together.
         "product.sprint" if params["action"] == "materialize" => {
-            super::sprint_materialize::materialize(
-                root.ok_or_else(|| refuse("project_required", "Unknown project."))?,
-                project,
-                state,
-                params,
-            )
+            let root = root.ok_or_else(|| refuse("project_required", "Unknown project."))?;
+            // The profile's routes as they are now; unreadable settings leave
+            // every task on the owner's default coordinator.
+            let resolver = super::config_read::environment(config).ok().and_then(|env| {
+                let key = super::context::key(root).ok()?;
+                crate::native_routes::RouteResolver::load(root, &key.directory(), env).ok()
+            });
+            super::sprint_materialize::materialize_routed(root, project, state, params, &|c| {
+                resolver.as_ref()?.sprint_route(c).ok().flatten()
+            })
         }
         "product.sprint" if super::sprint_live::handles(params) => {
-            super::sprint_live::owner_action(
-                root.ok_or_else(|| refuse("project_required", "Unknown project."))?,
-                state, project, params,
-            )
+            let root = root.ok_or_else(|| refuse("project_required", "Unknown project."))?;
+            // Revision-added tasks route by complexity like a created sprint's tasks.
+            let resolver = super::config_read::environment(config).ok().and_then(|env| {
+                let key = super::context::key(root).ok()?;
+                crate::native_routes::RouteResolver::load(root, &key.directory(), env).ok()
+            });
+            super::sprint_live::owner_action(root, state, project, params, &|c| {
+                resolver.as_ref()?.sprint_route(c).ok().flatten()
+            })
         }
-        "product.sprint" => private_product::sprint(state, project, params, root),
+        "product.sprint" => {
+            let mut reply = private_product::sprint(state, project, params, root)?;
+            // A new sprint is named in the background by the cheapest light model.
+            if params["action"] == "create" {
+                if let (Some(root), Some(id)) = (root, reply["sprintId"].as_str().map(str::to_owned)) {
+                    if let Ok(Some(job)) = super::short_text::start_sprint_title(root, project, state, config, &id) {
+                        reply["titleJobId"] = json!(job);
+                    }
+                }
+            }
+            Ok(reply)
+        }
         "automatic.queue" => private_product::automatic_queue(state, project, params, root),
         _ => {
             let root = root.ok_or_else(|| refuse("project_required", "Unknown project."))?;
-            let mut git = git::Git::for_service(config);
+            let git = git::Git::for_service(config);
+            // An owner read waits for a slow repository instead of failing it.
+            let mut git = if super::owner_read(op, params) { git.owner_read() } else { git };
             match op {
                 "product.read" if params["attachments"] == true => {
                     context::attachments(root, state, project, string(params, "taskId")?)
@@ -325,6 +348,10 @@ pub async fn run(
                 // Short model texts never take machine.lock or wait for a model.
                 "product.task" if super::short_text::handles(params) => {
                     super::short_text::run(root, project, state, params, config).await
+                }
+                // The side chat reads the task and answers off it; it never changes the task.
+                "product.task" if super::side_chat::handles(params) => {
+                    super::side_chat::run(root, project, state, params, config).await
                 }
                 "product.task" => {
                     let mut reply =

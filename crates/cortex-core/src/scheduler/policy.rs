@@ -549,17 +549,9 @@ fn safe_path(root: &str, path: &str) -> bool {
     if path.is_empty()
         || path.contains(['*', '?', '\\', '\0'])
         || path.starts_with('/')
-        || path.split('/').any(|p| {
-            [
-                "..",
-                ".git",
-                ".cortex",
-                ".cortex-dev",
-                ".cortex-dev-owner.json",
-                ".cortex-workspace-dev.json",
-            ]
-            .contains(&p)
-        })
+        // Cortex private state and Git control paths may be reserved; each write
+        // there is still decided by the runtime.
+        || path.split('/').any(|p| p == "..")
     {
         return false;
     }

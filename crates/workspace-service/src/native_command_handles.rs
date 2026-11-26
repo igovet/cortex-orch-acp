@@ -87,7 +87,7 @@ pub(super) fn nested_sandbox_hint(profile: &str, output: &[&[u8]]) -> Option<Val
             .iter()
             .any(|chunk| chunk.windows(s.len()).any(|w| w == s.as_bytes()))
     })?;
-    let writer = matches!(profile, "development" | "guarded");
+    let writer = matches!(profile, "development" | "guarded" | "auto");
     Some(json!({
         "code": "nested_sandbox_denied",
         "signature": signature,
@@ -116,7 +116,7 @@ pub(super) fn privilege_hint(profile: &str, output: &[&[u8]]) -> Option<Value> {
             .iter()
             .any(|chunk| chunk.windows(s.len()).any(|w| w == s.as_bytes()))
     })?;
-    let writer = matches!(profile, "development" | "guarded");
+    let writer = matches!(profile, "development" | "guarded" | "auto");
     Some(json!({
         "code": "privilege_refused_in_sandbox",
         "signature": signature,
@@ -126,6 +126,23 @@ pub(super) fn privilege_hint(profile: &str, output: &[&[u8]]) -> Option<Value> {
         } else {
             "This role cannot run privileged commands: report the check as not run with this blocker, or leave it to a writing specialist."
         },
+    }))
+}
+/// A write below `.cortex` or `.cortex-dev` that the command view refused. Guarded and
+/// Development keep those directories read-only for shell commands: a command cannot
+/// pause for a per-write owner prompt. The file tools can, so they are the route.
+pub(super) fn cortex_store_hint(mode: &str, argv: &Value, output: &[&[u8]]) -> Option<Value> {
+    if mode == "auto" || mode == "read_only" {
+        return None;
+    }
+    let has = |chunk: &[u8], needle: &[u8]| chunk.windows(needle.len()).any(|w| w == needle);
+    let read_only = output.iter().any(|c| has(c, b"Read-only file system"));
+    let named = argv.to_string().contains(".cortex")
+        || output.iter().any(|c| has(c, b".cortex"));
+    (read_only && named).then(|| json!({
+        "code": "cortex_store_read_only_for_commands",
+        "explanation": "In this access mode .cortex and .cortex-dev are read-only inside shell commands; the live store files are read-only in every mode.",
+        "next": "Use project_write or project_edit for .cortex files; the runtime will ask the owner. Do not retry the shell write.",
     }))
 }
 /// A program the command (or a script it ran) could not find: bubblewrap's own
@@ -390,6 +407,9 @@ fn settle(
     if let Some(hint) = missing_program_hint(code, &[&prefix, &tail]) {
         value["missing_program"] = hint;
     }
+    if let Some(hint) = cortex_store_hint(h["mode"].as_str().unwrap_or(""), &h["argv"], &[&prefix, &tail]) {
+        value["cortex_store"] = hint;
+    }
     store.write(|db|{
         let raw:String=db.query_row("SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?",
             (task,actor,key),|r|r.get(0))?;
@@ -472,6 +492,7 @@ pub(super) async fn execute(
         cwd: cwd.clone(),
         argv: argv.clone(),
         profile: profile.clone(),
+        auto: mode == "auto",
         checkout: checkout.clone(),
         writes,
         protected,
@@ -1552,6 +1573,16 @@ mod resettle_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn cortex_store_hint_points_guarded_commands_at_the_file_tools() {
+        let argv = json!(["/bin/sh", "-c", "echo x > .cortex/x"]);
+        let out: &[&[u8]] = &[b"sh: 1: cannot create .cortex/x: Read-only file system"];
+        let hint = cortex_store_hint("guarded", &argv, out).unwrap();
+        assert!(hint["next"].as_str().unwrap().contains("project_write"));
+        assert!(cortex_store_hint("development", &argv, out).is_some());
+        assert!(cortex_store_hint("auto", &argv, out).is_none());
+        assert!(cortex_store_hint("guarded", &json!(["ls"]), &[b"Read-only file system"]).is_none());
+    }
     #[test]
     fn nested_sandbox_hint_names_the_route_the_profile_actually_has() {
         let bwrap: &[u8] = b"bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.\n";

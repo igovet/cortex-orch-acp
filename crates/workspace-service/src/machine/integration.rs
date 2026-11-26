@@ -51,6 +51,23 @@ fn task_already_landed(facts: &Value) -> bool {
             .is_some_and(|paths| paths.is_empty())
         && !facts["repairPaths"].is_array()
 }
+/// A project-folder task shares its folder with other tasks and the owner, so its
+/// accepted result is compared on the files it wrote, never on the whole folder.
+pub(super) fn own_files_intact_since_acceptance(
+    root: &Path,
+    project: &str,
+    task: &str,
+    record: &Value,
+    path: &Path,
+) -> Result<bool> {
+    if !super::task_facts::own_writes(record) {
+        return Ok(false);
+    }
+    let Some(store) = context::open(root, OpenMode::LiveReadOnly)? else {
+        return Ok(false);
+    };
+    super::task_facts_work::own_files_intact(&store, project, task, path).map_err(context::core)
+}
 /// The task's current runtime result, bound to the `digest` the owner reviewed: only a
 /// completed execution (no worker still running, nothing paused or failed) whose
 /// evidence still matches. `incomplete` is what the owner reads otherwise.
@@ -409,7 +426,9 @@ async fn integrate(
     }
     if truth(&record["acceptedRevision"]) && !(binding.is_some() && record["acceptance"]["committedDigest"].is_string()) {
         let current = super::legacy_source::capture(&path).map_err(context::core)?;
-        if current.as_deref() != record["acceptedRevision"].as_str() {
+        if current.as_deref() != record["acceptedRevision"].as_str()
+            && !own_files_intact_since_acceptance(root, project, task, record, &path)?
+        {
             return Err(refuse(
                 "workspace_drift",
                 "Files changed after acceptance. Rerun checks and accept the new result.",

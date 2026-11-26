@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-phone-notifications"
+description = "Enables the phone_notifications command without any pre-configured scope."
+commands.allow = ["phone_notifications"]
+
+[[permission]]
+identifier = "deny-phone-notifications"
+description = "Denies the phone_notifications command without any pre-configured scope."
+commands.deny = ["phone_notifications"]

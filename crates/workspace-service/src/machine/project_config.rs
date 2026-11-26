@@ -2,7 +2,7 @@
 #[cfg(test)]
 #[path = "project_config_tests.rs"]
 mod tests;
-use super::{context, native::*, project_routing};
+use super::{context, native::*, project_config_save, project_routing};
 use cortex_core::OpenMode;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
@@ -319,7 +319,54 @@ fn validate_user(config: &crate::Config) -> Result<()> {
     }
     Ok(())
 }
+/// The project's own MCP registry for the editor: its servers (environment values as
+/// presence only) and the machine servers it switches on or off (`overrides`). A file that cannot be read
+/// safely or does not parse is reported as a problem, never as an empty registry that
+/// the next save could silently replace.
+pub(super) fn project_mcp(root: &Path, config: &crate::Config) -> (Value, String) {
+    let broken = |message: String, token: String| {
+        (json!({"servers":[],"overrides":{},"problem":message}), token)
+    };
+    let path = match project_config_save::user_mcp::project_path(root, config) {
+        Ok(path) => path,
+        Err(e) => return broken(e.message.to_string(), "absent".into()),
+    };
+    let bytes = match read_plain(&path, true) {
+        Ok(bytes) => bytes,
+        Err(e) => return broken(e.message.to_string(), "absent".into()),
+    };
+    let Some(bytes) = bytes else {
+        return (json!({"servers":[],"overrides":{}}), "absent".into());
+    };
+    let token = revision(&bytes);
+    let observed = match crate::config_read_model::mcp::observation(&path, Some(&bytes)) {
+        Ok(observed) if observed["ok"] == true => observed["result"].clone(),
+        Ok(observed) => {
+            return broken(observed["error"]["message"].as_str().unwrap_or("The project MCP registry is invalid.").to_owned(), token)
+        }
+        Err(e) => return broken(e.code().to_owned(), token),
+    };
+    let overrides: std::collections::BTreeMap<String, bool> = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| {
+            v["overrides"].as_object().map(|o| {
+                o.iter().filter_map(|(k, v)| Some((k.clone(), v.as_bool()?))).collect()
+            })
+        })
+        .unwrap_or_default();
+    (
+        json!({"servers":crate::config_read_model::mcp::editor_rows(&observed),"overrides":overrides}),
+        token,
+    )
+}
 pub(super) fn read(root: &Path, config: &crate::Config) -> Result<Value> {
+    read_with(root, config, true)
+}
+/// The same read for a save: a mutation never queues behind an exclusive store lock.
+pub(super) fn read_now(root: &Path, config: &crate::Config) -> Result<Value> {
+    read_with(root, config, false)
+}
+fn read_with(root: &Path, config: &crate::Config, wait: bool) -> Result<Value> {
     // A broken project routing file is visible as a resettable empty editor, with
     // its exact byte token. It must not select effective user/environment rules.
     // The legacy project editor is root-scoped, not an effective/logical-root
@@ -362,7 +409,7 @@ pub(super) fn read(root: &Path, config: &crate::Config) -> Result<Value> {
             "The project store refused the request.",
         ));
     }
-    let store = context::open(root, OpenMode::LiveReadOnly)?
+    let store = if wait { context::open(root, OpenMode::LiveReadOnly)? } else { context::open_now(root, OpenMode::LiveReadOnly)? }
         .ok_or_else(|| {
             refuse(
                 "project_store_missing",
@@ -408,8 +455,10 @@ pub(super) fn read(root: &Path, config: &crate::Config) -> Result<Value> {
             )
         }
     };
-    value["revisions"] = json!({"routing":number(&token),"project_ceiling":number(&ceiling_token)});
-    let reply = json!({"value":value,"tokens":{"routing":token,"project_ceiling":ceiling_token}});
+    let (mcp_value, mcp_token) = project_mcp(root, config);
+    value["mcp"] = mcp_value;
+    value["revisions"] = json!({"routing":number(&token),"project_ceiling":number(&ceiling_token),"mcp_servers":number(&mcp_token)});
+    let reply = json!({"value":value,"tokens":{"routing":token,"project_ceiling":ceiling_token,"mcp_servers":mcp_token}});
     if serde_json::to_vec(&reply).unwrap().len() > FRAME_BUDGET {
         return Err(refuse(
             "machine_reply_too_large",

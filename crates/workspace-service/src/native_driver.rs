@@ -245,7 +245,7 @@ impl NativeHost {
                             let mut item=assignment_brief(db,&t,&a,&node,&role,&objective,&scope,&stage)?;
                             // A reviewer is told exactly what the work changed and how much
                             // predecessor evidence there is to read.
-                            if stage=="review"{
+                            if stage=="review" && !lifecycle::sprint_impact::is_revision_review(&node){
                                 let mut packet=lifecycle::reconciliation::review_packet_tx(db,&t,&node,baseline_manifest.as_ref(),e.ignored_digest.as_deref(),&raw_manifest)?;
                                 // What the review binds is kept with the recorded packet,
                                 // not in the reviewer's brief.
@@ -272,6 +272,12 @@ impl NativeHost {
                                     }
                                     completion::start_review_tx(db,&t,&a,&e)?;
                                 }
+                            } else if stage=="review" {
+                                // A sprint revision review reads a proposed graph, not the
+                                // task's changes: no change packet binds it.
+                                let bound:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED' AND json_extract(payload_json,'$.assignment_ref')=?)",
+                                    (&t,&a),|r|r.get(0))?;
+                                if !bound { completion::start_review_tx(db,&t,&a,&e)?; }
                             }
                             assignments.push(item);
                         }
@@ -314,8 +320,16 @@ impl NativeHost {
                     let ignored = e.ignored_digest.clone();
                     let t = task.clone();
                     let o = owner.clone();
+                    let sprint_state = self.workspace_state.clone();
+                    let sprint_routes = self.routes.read().unwrap().clone();
                     let completed=recv(self.executor.publication(move|store|{
                         let publisher=Publisher::new(store);
+                        // A reviewed sprint revision is applied or handed to the owner first.
+                        if let Some(state) = &sprint_state {
+                            let root = store.key().root().to_owned();
+                            let _ = crate::machine::sprint_revision::settle(store, state, &t,
+                                &|c| sprint_routes.as_ref()?.sprint_route(&root, c).ok().flatten());
+                        }
                         let rows=store.read(|db|{
                             let mut q=db.prepare("SELECT json_set(n.result_json,'$.assignment_ref',n.assignment_ref) FROM runtime_nodes n JOIN runtime_tasks t USING(task_id) WHERE n.task_id=? AND n.revision=t.revision AND n.result_json IS NOT NULL ORDER BY n.rowid")?;
                             let rows=q.query_map([&t],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
@@ -387,6 +401,12 @@ impl NativeHost {
                                 // each blocking item is named once, and the coordinator's next
                                 // turn (which carries it in its capsule) delivers it, instead
                                 // of the driver stopping into the strategy ladder.
+                                // An owner change of a sprint member waits for its impact
+                                // verdict: named once, the coordinator's next turn records it.
+                                Err(CoreError::Refused("sprint_impact_pending")) => {
+                                    lifecycle::sprint_impact::record_pending_tx(db,&t)?;
+                                    return Ok(false);
+                                }
                                 Err(CoreError::Refused("completion_pending_input")) => {
                                     let items=completion::pending_input_tx(db,&t)?;
                                     let last:Option<String>=db.query_row("SELECT json_extract(payload_json,'$.items') FROM runtime_events
@@ -964,6 +984,14 @@ done
         );
         let missing = validate_tasks(&json!([{"key":"a","description":"A"}])).unwrap();
         assert_eq!(missing[0]["dependsOn"], json!([]));
+        assert!(missing[0].get("complexity").is_none());
+        let complex =
+            validate_tasks(&json!([{"key":"a","description":"A","complexity":"high"}])).unwrap();
+        assert_eq!(complex[0]["complexity"], "high");
+        assert_eq!(
+            rule(json!([{"key":"a","description":"A","complexity":"huge"}])).1,
+            "task 1 (a): complexity must be low, normal or high"
+        );
         let single = validate_tasks(
             &json!([{"key":"a","description":"A"},{"key":"b","description":"B","dependsOn":"a"}]),
         )
@@ -1542,6 +1570,18 @@ pub(crate) mod sprints {
                     return Err(fail("invalid_task", format!("{label}: title must be text")))
                 }
             };
+            let complexity = match item.get("complexity") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(c)) if ["low", "normal", "high"].contains(&c.as_str()) => {
+                    Some(json!(c))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        "invalid_task",
+                        format!("{label}: complexity must be low, normal or high"),
+                    ))
+                }
+            };
             let mut clean = serde_json::Map::new();
             clean.insert("key".into(), json!(key));
             if let Some(title) = title {
@@ -1549,6 +1589,9 @@ pub(crate) mod sprints {
             }
             clean.insert("description".into(), item["description"].clone());
             clean.insert("dependsOn".into(), Value::Array(deps));
+            if let Some(complexity) = complexity {
+                clean.insert("complexity".into(), complexity);
+            }
             kept.push(Value::Object(clean));
         }
         if json!(kept).to_string().len() > MAX_PLAN_BYTES {
@@ -7598,6 +7641,8 @@ pub(crate) mod sprints {
                 _ => match held["reason"].as_str() {
                     Some("engine_authentication_required" | "authorization_required") => "The engine needs you to sign in again. Automatic continues by itself once it can connect.",
                     Some("engine_quota_exhausted") => "The engine usage limit is reached. Automatic continues by itself when the engine is available again.",
+                    Some(cortex_core::lifecycle::automatic::NO_MODEL_LISTED_FOR_REVIEW) => "No model may review this work: no usable model has Review in its Preferred work. Add Review to a model in Settings > Orchestration > Engines and models; Automatic continues by itself once one can review.",
+                    Some(cortex_core::lifecycle::automatic::NO_MODEL_LISTED_FOR_WORK_KIND) => "No usable model has this kind of work in its Preferred work. Add it to a model in Settings > Orchestration > Engines and models; Automatic continues by itself once one can do it.",
                     _ => "The engine or its route is not available right now. Automatic continues by itself once it is.",
                 },
             };
@@ -7916,11 +7961,16 @@ pub(crate) mod sprints {
                 .find(|dep| !dep.as_str().is_some_and(done))
                 .map(|dep| dep.as_str().unwrap_or_default().to_owned())
         };
-        let eligible: BTreeSet<_> = pending.iter().copied().collect();
+        // A draft that a proposed sprint revision holds back waits for it, without a hold.
+        let held = |id: &str| records[id]["revisionPending"] == true;
+        let eligible: BTreeSet<_> = pending.iter().copied().filter(|id| !held(id)).collect();
         if let Some(id) = priority.iter().map(String::as_str)
             .find(|id| eligible.contains(id) && dependencies_ready(&records[*id], done))
         {
             return QueueStep::Start(id);
+        }
+        if pending.iter().any(|id| held(id)) {
+            return QueueStep::Wait;
         }
         // Name the task that is actually stuck: one whose unfinished prerequisite this
         // queue will never run (cancelled, skipped or outside the sprint), not merely
@@ -8060,7 +8110,9 @@ pub(crate) mod sprints {
             if matches!(phase, Some("planning" | "execution" | "review" | "verification" | "finalizing")) {
                 working.push((claim, id.as_str()));
             }
-            if draft {
+            if draft && record["revisionPending"] == true {
+                unranked.insert(id.as_str(), "sprint_revision_pending");
+            } else if draft {
                 pending.insert(id.as_str());
             } else if fact.is_some_and(|t| t["executionId"].is_string())
                 && matches!(phase, Some("planning" | "execution" | "review" | "verification" | "finalizing" |

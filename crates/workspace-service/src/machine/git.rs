@@ -43,6 +43,8 @@ pub struct Git {
     configs: BTreeMap<PathBuf, Vec<String>>,
     runtime_config: Option<crate::Config>,
     local_only: bool,
+    /// An owner read's Git: each command runs until it completes, never `git_timeout`.
+    owner_read: bool,
 }
 struct Output {
     bytes: Vec<u8>,
@@ -56,6 +58,40 @@ fn too_large() -> Refused {
         "Git output exceeds the bounded inspection limit.",
     )
 }
+const REFUSED: &str = "Git refused this operation. Inspect the checkout in Git; no automatic retry was made.";
+/// The generic refusal plus, for commands that cannot run hooks or reach a remote, a secret-free
+/// summary of Git's own first error line (`git <verb>: <line>`). Commands that run hooks or talk
+/// to a remote keep the bare text, because their output is not Git's alone.
+pub(super) fn refused_message(verb: &str, stderr: &str) -> String {
+    if matches!(
+        verb,
+        "commit" | "merge" | "rebase" | "revert" | "cherry-pick" | "am" | "push" | "pull" | "fetch" | "clone" | "checkout" | "switch" | "reset" | "stash"
+    ) {
+        return REFUSED.to_owned();
+    }
+    let line = stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("hint:"))
+        .unwrap_or("");
+    let cleaned = line
+        .split_whitespace()
+        .map(|w| {
+            if w.contains("://") || w.contains('@') || w.to_ascii_lowercase().contains("token") {
+                "<redacted>"
+            } else {
+                w
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cleaned: String = cleaned.chars().filter(|c| !c.is_control()).take(200).collect();
+    if cleaned.is_empty() {
+        REFUSED.to_owned()
+    } else {
+        format!("{REFUSED} (git {verb}: {cleaned})")
+    }
+}
 /// Why Git refused a command, from its own (C locale) error text, as a code and what to do next. Only the
 /// classification leaves this function: stderr can name remote URLs, hook output or credentials.
 pub(super) fn failure(verb: &str, stderr: &str) -> Refused {
@@ -63,10 +99,7 @@ pub(super) fn failure(verb: &str, stderr: &str) -> Refused {
     // callers such as the squash integration rely on to restore the index after a refused merge
     // or commit, and whose output (a hook's, say) can contain any of the words below.
     if !matches!(verb, "push" | "pull" | "fetch") {
-        return refuse(
-            "git_failed",
-            "Git refused this operation. Inspect the checkout in Git; no automatic retry was made.",
-        );
+        return refuse("git_failed", refused_message(verb, stderr));
     }
     let e = stderr.to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|n| e.contains(n));
@@ -191,7 +224,7 @@ pub(super) fn failure(verb: &str, stderr: &str) -> Refused {
     }
     refuse(
         "git_failed",
-        "Git refused this operation. Inspect the checkout in Git; no automatic retry was made.",
+        refused_message(verb, stderr),
     )
 }
 /// A pull or another merge or rebase is stopped in the checkout.
@@ -243,6 +276,7 @@ impl Git {
             configs: BTreeMap::new(),
             runtime_config: None,
             local_only: false,
+            owner_read: false,
         }
     }
     pub fn for_service(config: &crate::Config) -> Self {
@@ -250,7 +284,14 @@ impl Git {
             configs: BTreeMap::new(),
             runtime_config: Some(config.clone()),
             local_only: false,
+            owner_read: false,
         }
+    }
+    /// The Git of an owner read (`machine::owner_read`): a slow repository is waited for,
+    /// so its commands have no time limit. Their output bounds still apply.
+    pub(crate) fn owner_read(mut self) -> Self {
+        self.owner_read = true;
+        self
     }
     /// Drafts inspect only local objects. In a partial clone a missing object
     /// must not trigger an implicit fetch (including a configured helper).
@@ -370,6 +411,9 @@ impl Git {
                 error: String::from_utf8_lossy(&err).into_owned(),
             }))
         };
+        if self.owner_read {
+            return run.await;
+        }
         tokio::time::timeout(Duration::from_secs(25),run).await.map_err(|_|refuse("git_timeout","Git did not answer in time; a write may have completed. Inspect before retrying."))?
     }
     async fn raw(&self, path: &Path, argv: &[String], input: Option<Vec<u8>>) -> Result<Output> {
@@ -1182,7 +1226,7 @@ impl Git {
                 .map_err(|_| refuse("git_failed", "Commit statistics could not be read."))??
                 .ok_or_else(too_large)?;
             if !out.ok {
-                return Err(refuse("git_failed","Git refused this operation. Inspect the checkout in Git; no automatic retry was made."));
+                return Err(failure("log", &out.error));
             }
             for block in out.text.split('\x1e').filter(|b| !b.trim().is_empty()) {
                 let (hash, tail) = block.split_once('\n').unwrap_or((block, ""));
@@ -1599,6 +1643,22 @@ impl Git {
             let key = (path.to_path_buf(), revisions.clone(), removed);
             if let Some(seen) = task_diffs.get(&key) {
                 snapshot["taskDiffs"][task] = seen.clone();
+                continue;
+            }
+            // A recorded revision that Git no longer has (rewritten or pruned history) leaves this one
+            // task without a diff; it must not stop the whole project's snapshot.
+            let mut absent = false;
+            for revision in &revisions {
+                let probe = format!("{revision}^{{commit}}");
+                if !self.success(path, &["cat-file", "-e", &probe]).await? {
+                    absent = true;
+                    break;
+                }
+            }
+            if absent {
+                let value = json!({"files":[],"reason":"The task's recorded base revision is no longer in this repository, so its diff cannot be shown. Review the checkout in Git."});
+                snapshot["taskDiffs"][task] = value.clone();
+                task_diffs.insert(key, value);
                 continue;
             }
             if self.diff_certainly_over(path, &revisions).await? {

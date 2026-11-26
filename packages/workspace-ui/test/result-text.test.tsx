@@ -81,7 +81,7 @@ async function mountConversation(text: string, openResultTarget?: (target: Resul
     session.timeline = [];
   }
   s.sessions = [session];
-  if (!pendingFacts) s.repos = [{ projectId: "p", remote: "", tree: ["src/app.ts", "out/video.mp4", "out/sub titles.srt"], sources: {}, commits: [], branches: [], fetchedAt: null,
+  if (!pendingFacts) s.repos = [{ projectId: "p", remote: "", tree: ["README.md", "src/app.ts", "out/video.mp4", "out/sub titles.srt"], sources: {}, commits: [], branches: [], fetchedAt: null,
     checkouts: [{ id: "p:main", projectId: "p", kind: "main", path: "/fixture", branch: "main", files: [], sources: {}, taskId: null, label: null, base: "main", ahead: 0, behind: 0, behindOf: {}, draft: "", updateConflict: null }] }];
   const p = scriptedPort({ capabilities: { everything: true, operations: [] } });
   if (pendingFacts) {
@@ -106,6 +106,16 @@ it.each([
   clickLink(link); await settle();
   expect(location.pathname).toBe(`/m/${LOCAL_MACHINE_ID}/t/t/code`);
   expect([...new URLSearchParams(location.search)]).toEqual([["file", "src/app.ts"], ["line", "42"]]);
+});
+
+it("links a bare root-level file name in a code span only when the checkout has it", async () => {
+  const [link, ...rest] = await mountConversation("See `README.md`, `ws.store`, `npm run test`, `NOTES.md` and plain README.md.");
+  expect(link?.textContent).toBe("README.md");
+  expect(rest).toEqual([]);
+  expect([...document.querySelectorAll(".ws-result-copy code")].map(c => c.textContent)).toEqual(["README.md", "ws.store", "npm run test", "NOTES.md"]);
+  clickLink(link); await settle();
+  expect([...new URLSearchParams(location.search)]).toEqual([["file", "README.md"]]);
+  expect(location.pathname).toBe(`/m/${LOCAL_MACHINE_ID}/t/t/code`);
 });
 
 it("shows a copyable full path outside the checkout, and requests native open only on the second click", async () => {

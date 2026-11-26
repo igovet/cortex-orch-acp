@@ -188,7 +188,7 @@ fn detail(update: &Value) -> Value {
     }
     // A refused call's reason as display history retained it (bounded and
     // redacted there), never for a private report or draft call.
-    if let Some(s) = field(update, "failure").filter(|s| !private && !s.trim().is_empty()) {
+    if let Some(s) = field(update, "failure").filter(|s| !s.trim().is_empty()) {
         d["failure"] = json!(s.chars().take(1000).collect::<String>());
     }
     let edit = !private
@@ -240,8 +240,19 @@ fn detail(update: &Value) -> Value {
             }
         }
     }
-    if d.get("command").is_some() && !private {
-        if let Some(text) = retained_command_text(update) {
+    // A file read or edit keeps its path link and diff; every other call carries its real
+    // arguments and result, already bounded and credential-redacted when retained.
+    let file_call = d.get("path").is_some()
+        && (matches!(kind, "read" | "edit")
+            || matches!(
+                operation.as_str(),
+                "project_read" | "project_edit" | "project_write" | "project_delete" | "project_mkdir" | "outside_write" | "project_skill_link"
+            ));
+    if !file_call {
+        if raw.as_object().is_some_and(|m| !m.is_empty()) {
+            d["input"] = json!(serde_json::to_string_pretty(&raw).unwrap_or_default());
+        }
+        if let Some(text) = retained_command_text(update).filter(|_| d.get("commandOutputRef").is_none()) {
             d["output"] = json!(text);
         }
     }
@@ -1240,7 +1251,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_calls_retained_reason_reads_on_its_step_but_never_a_private_ones() {
+    fn a_refused_calls_retained_reason_reads_on_its_step() {
         let db = fixture();
         for (seq, update) in [
             json!({"sessionUpdate":"tool_call","toolCallId":"plan","title":"orchestrator: mcp__cortex__plan_submit","kind":"other","status":"pending"}),
@@ -1273,7 +1284,7 @@ mod tests {
             "No plan was recorded (plan_invalid)."
         );
         assert_eq!(last("plan")["status"], "failed");
-        assert!(last("draft").get("failure").is_none());
+        assert_eq!(last("draft")["failure"], "PRIVATE", "a refusal reason shows for every call");
     }
 
     /// The store's schema with an empty session `s` of task `t` (runtime task `r`), whose coordinator attempt is `xa_c`

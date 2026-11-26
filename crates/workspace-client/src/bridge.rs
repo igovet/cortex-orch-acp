@@ -133,6 +133,8 @@ fn refusal(code: &str) -> Option<&'static str> {
 const REFUSED: &str = "refused:";
 /// Starting a child includes engine and store setup, which can outlast an ordinary request.
 const ACTIVATION_DEADLINE: Duration = Duration::from_secs(120);
+/// The deadline of an action. A read (`workspace_protocol::read::read_request`) has none: it
+/// waits for the machine's answer, and only a lost connection ends it.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(35);
 /// How long a first subscription may fail silently while a freshly started service binds.
 pub const STARTUP_DEADLINE: Duration = Duration::from_secs(30);
@@ -327,6 +329,19 @@ impl Bridge {
         self.call(method, params, method != "service.status").await
     }
     async fn call(&self, method: &str, params: Value, ordinary: bool) -> Result<Value, String> {
+        // A read waits for its answer however long the machine takes: a slow read is never
+        // a timeout. Only a lost connection (`service_disconnected`) ends it as an error.
+        if workspace_protocol::read::read_request(method, &params) {
+            let _permit = if ordinary {
+                Some(self.ordinary.acquire().await.map_err(|_| {
+                    format!("{REFUSED}{}", refusal("service_stopping").unwrap_or_default())
+                })?)
+            } else {
+                None
+            };
+            let mut stream = self.connection().await?;
+            return self.send(&mut stream, method, params).await;
+        }
         let deadline = if method == "projects.activate" {
             ACTIVATION_DEADLINE
         } else {
@@ -704,8 +719,14 @@ pub fn incoming(message: &Value) -> Result<Incoming, Refused> {
             }
             Ok(Incoming::Forward(event.clone()))
         }
-        // Remote access changed (pairing, a device, the relay): an open settings page rereads it.
-        Some("project_state" | "remote_state") => Ok(Incoming::Forward(json!({"type":"refresh"}))),
+        // Remote access changed (pairing, a device, the relay): an open remote access page rereads it, and nothing else.
+        Some("remote_state") => Ok(Incoming::Forward(json!({"type":"remote_state"}))),
+        // One project gained or lost its runtime, or settled a merge: the window rereads that project, not every project.
+        // One it cannot name is still a change: the whole window rereads, as before, and the subscription stays up.
+        Some("project_state") => Ok(Incoming::Forward(match project_named(event) {
+            Some(project) => json!({"type":"project_state","projectId":project}),
+            None => json!({"type":"refresh"}),
+        })),
         Some(kind @ ("invalidation" | "public_events")) => {
             let project = project_named(event).ok_or(refused("invalid_project"))?;
             Ok(Incoming::Forward(if kind == "public_events" {
@@ -872,6 +893,52 @@ mod tests {
     }
     fn event(params: serde_json::Value) -> serde_json::Value {
         serde_json::json!({"jsonrpc":"2.0","method":"service.event","params":params})
+    }
+
+    /// A machine that answers every request after `delay` (on a paused clock), or drops the
+    /// connection without answering when `delay` is `None`.
+    struct Slow(Option<std::time::Duration>);
+    impl super::Connector for Slow {
+        fn connect(&self) -> super::BoxFuture<'_, Result<super::Stream, String>> {
+            let delay = self.0;
+            Box::pin(async move {
+                let (client, mut service) = tokio::io::duplex(1 << 16);
+                tokio::spawn(async move {
+                    let request = crate::frames::read_frame(&mut service).await.unwrap();
+                    let Some(delay) = delay else { return };
+                    tokio::time::sleep(delay).await;
+                    let _ = crate::frames::write_frame(
+                        &mut service,
+                        &serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":{"ok":true,"result":{"tasks":{}}}}),
+                    )
+                    .await;
+                });
+                Ok(Box::new(client) as super::Stream)
+            })
+        }
+    }
+
+    /// A read that takes longer than any request deadline is waited for, never a timeout; an
+    /// action keeps its deadline; a read whose connection is lost is still an error.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_read_waits_for_its_answer_and_only_a_disconnect_fails_it() {
+        use serde_json::json;
+        let slow = Bridge::new(std::sync::Arc::new(Slow(Some(std::time::Duration::from_secs(600)))));
+        let read = slow
+            .rpc("machine.call", json!({"op":"product.facts","projectId":"p","params":{}}))
+            .await;
+        assert_eq!(read.unwrap()["ok"], true);
+        let history = slow.rpc("workspace", json!({"operation":"history.page","projectId":"p"})).await;
+        assert!(history.is_ok(), "{history:?}");
+        let action = slow
+            .rpc("machine.call", json!({"op":"product.task","projectId":"p","params":{"action":"close"}}))
+            .await;
+        assert_eq!(action.unwrap_err(), "service_timeout");
+        let lost = Bridge::new(std::sync::Arc::new(Slow(None)));
+        let read = lost
+            .rpc("machine.call", json!({"op":"product.facts","projectId":"p","params":{}}))
+            .await;
+        assert_eq!(read.unwrap_err(), "service_disconnected");
     }
 
     #[test]
@@ -1352,12 +1419,24 @@ mod tests {
 
     #[test]
     fn a_remote_access_change_refreshes_the_window() {
-        let Ok(super::Incoming::Forward(event)) =
-            super::incoming(&event(serde_json::json!({"type":"remote_state"})))
-        else {
-            panic!("remote_state is a refresh");
+        // Neither is a whole-window refresh: remote access rereads its own page, a project rereads only itself.
+        let forwarded = |raw: serde_json::Value| match super::incoming(&event(raw)) {
+            Ok(super::Incoming::Forward(forwarded)) => forwarded,
+            _ => panic!("forwarded"),
         };
-        assert_eq!(event, serde_json::json!({"type":"refresh"}));
+        assert_eq!(
+            forwarded(serde_json::json!({"type":"remote_state"})),
+            serde_json::json!({"type":"remote_state"})
+        );
+        assert_eq!(
+            forwarded(serde_json::json!({"type":"project_state","projectId":"p"})),
+            serde_json::json!({"type":"project_state","projectId":"p"})
+        );
+        // One it cannot name still rereads the window, and keeps the subscription.
+        assert_eq!(
+            forwarded(serde_json::json!({"type":"project_state"})),
+            serde_json::json!({"type":"refresh"})
+        );
     }
 
     /// A connector that refuses until the owner acts: shown as `unavailable` at once and

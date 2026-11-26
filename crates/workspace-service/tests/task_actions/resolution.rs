@@ -164,11 +164,12 @@ async fn file_resolution_matches_real_git() {
         let authority_before = store.as_ref().map(authority);
         let reply = f.call(f.replace(&case["params"])).await;
         if case["name"] == "plain" {
-            // Existing native Git deliberately never exposes process stderr.
-            assert_eq!(
-                reply,
-                json!({"ok":false,"code":"git_failed","message":"Git refused this operation. Inspect the checkout in Git; no automatic retry was made."})
-            );
+            // A read-only Git refusal names Git's own first error line, redacted and bounded.
+            assert_eq!(reply["ok"], false);
+            assert_eq!(reply["code"], "git_failed");
+            let message = reply["message"].as_str().unwrap();
+            assert!(message.starts_with("Git refused this operation. Inspect the checkout in Git; no automatic retry was made."), "{message}");
+            assert!(message.contains("(git ls-files: fatal: not a git repository"), "{message}");
             assert_eq!(case["expected"]["code"], "git_failed");
         } else {
             assert_eq!(reply, case["expected"], "{} reply", case["name"]);

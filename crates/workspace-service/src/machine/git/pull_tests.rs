@@ -364,3 +364,39 @@ async fn a_task_worktree_pulls_alone_and_a_task_merge_stays_with_the_task() {
     assert_eq!(run(&wt, &["rev-parse", "HEAD"]), before);
     assert_eq!(run(&wt, &["status", "--porcelain"]), "");
 }
+/// A task whose recorded base revision is not in the repository leaves only that task without a
+/// diff; the project's Git snapshot still answers, and a failing Git command reports Git's own
+/// first error line.
+#[tokio::test]
+async fn snapshot_survives_task_base_revision_missing_from_the_repository() {
+    let r = Repo::new("missing-base");
+    let missing = "5725cf4c5f28043d1a73656d89a47aef1e3dcc27";
+    let context = json!({"tasks":{"t1":{
+        "checkout":{"kind":"main","branch":"main"},
+        "baseRevision":missing,
+    }}});
+    let snapshot = Git::new()
+        .snapshot(&r.local, "p", &r.state, Some(&context))
+        .await
+        .unwrap();
+    assert_eq!(snapshot["hasGit"], true);
+    assert_eq!(snapshot["taskDiffs"]["t1"]["files"], json!([]));
+    assert!(snapshot["taskDiffs"]["t1"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("base revision"));
+    let refused = Git::new()
+        .out(&r.local, &["diff", "--name-only", missing])
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, "git_failed");
+    assert!(
+        refused.message.contains("git diff: fatal: bad object"),
+        "{}",
+        refused.message
+    );
+    // Remote addresses and credentials in Git's text never reach the message.
+    let message = refused_message("log", "fatal: unable to access 'https://user:tok@host/x.git/': nope\n");
+    assert!(!message.contains("tok@") && !message.contains("host"), "{message}");
+    assert_eq!(refused_message("commit", "fatal: hook said hi\n"), REFUSED);
+}

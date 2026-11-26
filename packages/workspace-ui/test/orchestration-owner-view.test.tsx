@@ -141,10 +141,12 @@ describe("failed attempts", () => {
       workers: [worker({ id: "w1", node: "qa", status: "failed", superseded: true, replacedIn: 2 }), worker({ id: "w2", node: "qa", status: "failed", blockerKind: "tool_unavailable" })] }), "/m/local/t/t/workers");
     const toggle = button(document, "Show 1 earlier attempt of this step")!;
     expect(toggle).toBeTruthy();
-    expect(document.body.textContent).toContain("Could not run here");
-    expect(document.body.textContent).not.toContain("Replaced in plan v2");
+    // The Workers tab itself; the inspector beside it lists every worker with the same labels.
+    const tab = () => document.querySelector(".l-task")?.textContent ?? "";
+    expect(tab()).toContain("Could not run here");
+    expect(tab()).not.toContain("Replaced in plan v2");
     toggle.click(); await settle();
-    expect(document.body.textContent).toContain("Replaced in plan v2");
+    expect(tab()).toContain("Replaced in plan v2");
   });
 });
 

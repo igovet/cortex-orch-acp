@@ -493,6 +493,10 @@ export const WORK_KIND_HELP: Record<string, HelpText> = {
     "Bounded research or analysis when no specialist fits.",
     "Ограниченное исследование или анализ, когда не подходит ни один специалист.",
   ),
+  consultation: h(
+    "Senior consultant only: second opinions requested by the coordinator. Until a model lists it, the consultant uses the Design list.",
+    "Только старший консультант: вторые мнения по запросу координатора. Пока ни одна модель не отмечена, консультант использует список Дизайна.",
+  ),
 };
 
 /** What each worker role does (keys are the runtime's role ids). */

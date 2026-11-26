@@ -33,11 +33,24 @@ engine-advertised identity and the external server's description and schema.
 An unavailable tool or server does not become a Cortex tool.
 
 The [unified system prompt](../unified-system-prompt/index.md#parts-in-order)
-instructs delegated Claude execution workers and reviewers to use tools without
-interim assistant text, with at most one short closing sentence if needed. The
-Claude coordinator and senior consultant do not receive this instruction. This
-is prompt guidance, not enforcement or filtering: interim assistant text, if
-generated, is still recorded in worker activity.
+opens and closes the prompt of delegated Claude execution workers and reviewers
+with a tool-calls-only rule: while work remains, no assistant text before,
+between or after tool calls, everything in tool arguments, and after the final
+tool call no text or one short sentence. The Claude coordinator and senior
+consultant do not receive it. Cortex sends its text as a plain
+`_meta.systemPrompt` string, which `sessionSystemPrompt` in
+`dist/client-system-prompt.js` passes through unchanged, so the SDK runs the
+CLI with a custom system prompt instead of the `claude_code` preset; the
+preset's "Text output" guidance ("Before your first tool call, state in one
+sentence what you're about to do. While working, give short updates…") is not
+sent. This is an instruction, not enforcement: read-only inspection of the
+installed 0.107.0 adapter, SDK 0.3.323 (`sdk.d.ts`) and Claude Code 2.1.323
+binary found no option that stops or limits assistant text alone. `outputStyle`
+and `viewMode: "focus"` only change preset sections or the transcript view,
+`tool_choice` is internal and not an SDK option (and is demoted to `auto` with
+extended thinking), and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` caps the whole reply,
+tool calls included. Interim assistant text, if generated, is still recorded in
+worker activity; it is never hidden.
 
 Behavior changes relevant to Cortex:
 

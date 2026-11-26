@@ -180,6 +180,15 @@ describe("the task page", () => {
     expect(p.commands.map(c => c.payload.type)).toEqual(["continue_task"]);
   });
 
+  it("a task Automatic paused offers no plain Resume the service would refuse: Automatic continues it, a message steers it", async () => {
+    const s = world("paused");
+    s.tasks[0] = { ...s.tasks[0], automaticContinuation: { ...continuation, pause: { eventId: "ev", kind: "obstacle", reason: "something_unclassified" } } };
+    expect(sessionModel(buildIndex(s, 0), "t")!.mode).toBe("automatic");
+    const p = await mount(s);
+    expect(composerAction().getAttribute("aria-label")).not.toBe("Resume");
+    expect(p.commands.map(c => c.payload.type)).not.toContain("continue_task");
+  });
+
   it("a held interruption waits for you: Continue in the title band and the menu, the strip names it, no Resume", async () => {
     const p = await mount(world("interrupted"));
     expect(strip()).toContain("waits for you");

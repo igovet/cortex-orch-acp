@@ -1,3 +1,4 @@
+import { LoadingBar } from "./skeleton";
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import { useWs } from "./ctx";
 import { Srow } from "./settings-kit";
@@ -67,7 +68,7 @@ export function Updates() {
     <h1 class="set-title">Updates</h1>
     <p class="set-lead">Release packages update only after your consent and the system privilege prompt. Dev builds are separate.</p>
     <div class="surface">
-      <Srow t="Channel" d={channel().message ?? "Reading installed channel…"}><span>{channel().phase === "dev" ? "Dev" : channel().phase ? "Release" : ""}</span></Srow>
+      <Srow t="Channel" d={channel().message ?? <LoadingBar label="Reading installed channel…" />}><span>{channel().phase === "dev" ? "Dev" : channel().phase ? "Release" : ""}</span></Srow>
       <Show when={channel().current}><Srow t="Installed version" d="Reported by the Debian package manager."><span class="mono">{channel().current}</span></Srow></Show>
       <Show when={channel().phase === "idle"}>
         <Srow t="GitHub releases" d={candidate().message ?? "Stable releases only. Downgrades are refused."}><button class="btn btn-line" disabled={checking() || job.busy()} onClick={() => void check()}>{checking() ? "Checking…" : "Check for updates"}</button></Srow>

@@ -248,6 +248,10 @@ pub(crate) fn owner_readable_blocker(blocker: &str, ru: bool) -> String {
             "the independent review could not cover the whole change",
             "независимое ревью не смогло охватить всё изменение",
         ),
+        "goal_not_met" | "completion_goal_not_met" => (
+            "the approved work does not yet deliver everything the task asked for",
+            "одобренная работа пока не выполняет всё, что требовала задача",
+        ),
         "verification_review_revision_changed" => (
             "the files changed after the review",
             "файлы изменились после ревью",
@@ -934,16 +938,9 @@ pub fn propose_replan_tx(
                             || s.chars().count() > 512
                             || s.starts_with('/')
                             || s.contains(['\\', '\0'])
-                            || s.split('/').any(|s| {
-                                matches!(
-                                    s,
-                                    ".." | ".git"
-                                        | ".cortex"
-                                        | ".cortex-dev"
-                                        | ".cortex-dev-owner.json"
-                                        | ".cortex-workspace-dev.json"
-                                )
-                            })
+                            // Cortex private state and Git control paths may be named; each
+                            // write there is still decided by the runtime.
+                            || s.split('/').any(|s| s == "..")
                     })
                 })
             {

@@ -303,17 +303,17 @@ describe("the sprint's Live sprint view", () => {
 });
 
 describe("a sprint's Board and List", () => {
-  it("put Working before Not started, in start order and by the service's rank, with Next only where it says", async () => {
+  it("put Not started before Working, in start order and by the service's rank, with Next only where it says", async () => {
     await open(`/m/${LOCAL_MACHINE_ID}/p/p/s/sp/board`);
     const columns = all<HTMLElement>(".board-wrap .col").map(c => c.dataset.col);
-    expect(columns.indexOf("work")).toBeLessThan(columns.indexOf("todo"));
+    expect(columns.indexOf("work")).toBeGreaterThan(columns.indexOf("todo"));
     const todo = all<HTMLElement>('.col[data-col="todo"] .card').map(c => c.dataset.task);
     expect(todo).toEqual(["t4", "t5", "t2", "t3"]);
     expect(document.body.textContent).toContain("Next in Data");
     dispose?.(); document.body.innerHTML = "";
     await open(`/m/${LOCAL_MACHINE_ID}/p/p/s/sp/list`);
     const heads = all(".ws-list-h").map(h => h.textContent ?? "");
-    expect(heads.findIndex(h => h.startsWith("Working"))).toBeLessThan(heads.findIndex(h => h.startsWith("Not started")));
-    expect(all(".ws-list .lrow .w500").map(t => t.textContent)).toEqual(["Lay the schema", "Add the audit log", "Document the format", "Write the importer", "Write the exporter"]);
+    expect(heads.findIndex(h => h.startsWith("Working"))).toBeGreaterThan(heads.findIndex(h => h.startsWith("Not started")));
+    expect(all(".ws-list .lrow .w500").map(t => t.textContent)).toEqual(["Add the audit log", "Document the format", "Write the importer", "Write the exporter", "Lay the schema"]);
   });
 });

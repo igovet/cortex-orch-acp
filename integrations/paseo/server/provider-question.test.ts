@@ -54,7 +54,7 @@ const question = seen.find((event) => event.type === "session.permission");
 assert.equal(question.request.kind, "question");
 assert.equal(question.request.input.questions[0].allowOther, true);
 assert.deepEqual(question.request.input.questions[0].options, [
-  { label: "1. Approve" }, { label: "2. Finish", description: "Рекомендуется" },
+  { label: "1. Approve" }, { label: "2. Finish", description: "Рекомендую" },
 ]);
 
 // A typed answer reaches Cortex first, shows in the chat paired with the

@@ -122,7 +122,7 @@ export function Palette(props: { open: boolean; onClose: () => void }) {
 const KEYS: [string, string][] = [
   ["Ctrl+K", "Search and actions"], ["Ctrl+N", "New task"], ["Ctrl+Shift+N", "New sprint"], ["Ctrl+I", "Inbox"],
   ["Ctrl+B", "Sidebar"], ["Ctrl+Alt+B", "Inspector"], ["Ctrl+J", "Terminal"], ["Ctrl+\\", "Worker pane"], ["Ctrl+,", "Settings"],
-  ["Enter", "Send, or queue while Queue beside the send button is on"], ["Shift+Enter", "New line in a message"], ["Ctrl+.", "Stop the task"], ["1 to 8", "Choose an answer to the open question; the send button sends it"],
+  ["Enter", "Send, or queue while Queue beside the send button is on"], ["Shift+Enter", "New line in a message"], ["Ctrl+.", "Stop the task"], ["Ctrl+Shift+J", "Open, collapse or expand the task side chat; Esc collapses it"], ["1 to 8", "Choose an answer to the open question; the send button sends it"],
   ["/", "Filter the board or list"], ["Space", "Preview a card in the Inspector"], ["Enter", "Open"], ["Arrow keys", "Move between cards and columns"],
   ["Ctrl+P", "Go to file, in Code"], ["Ctrl+Shift+F", "Search in files, in Code"], ["Ctrl+Enter", "Commit, or send diff comments"],
   ["Ctrl+T", "New tab"], ["Ctrl+W", "Close tab"], ["Ctrl+Tab, Ctrl+Shift+Tab", "Next and previous tab"], ["Ctrl+1 to Ctrl+9", "Go to tab; 9 is the last"],

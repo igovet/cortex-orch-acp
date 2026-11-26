@@ -1,5 +1,5 @@
 import { automaticQueueOf, boardPhase, dependencyReady, descriptionLabel, isOpen, orderReasonText, plainModel, targetBranch } from "@cortex/workspace-domain";
-import type { Decision as TaskDecision, Check, CheckOutcome, EngineWeeklyUsage, HoldActor, Machine, OwnerHoldAction, Project, PlanningFailure, Sprint, SprintOrder, SprintOrderPending, SprintRunMode, Task, TaskStatus, Worker, WorkspaceState } from "@cortex/workspace-domain";
+import type { Decision as TaskDecision, Check, CheckOutcome, EngineWeeklyUsage, HoldActor, LiveSprintGraph, Machine, OwnerHoldAction, Project, PlanningFailure, Sprint, SprintOrder, SprintOrderPending, SprintRunMode, Task, TaskStatus, Worker, WorkspaceState } from "@cortex/workspace-domain";
 import type { Scope } from "./router";
 import { share } from "./stable";
 import { plainPhase, plainReason, plainStop } from "./status-text";
@@ -231,6 +231,18 @@ export type WorkspaceIndex = {
   orders?: ReadonlyMap<string, SprintOrder>;
 };
 const NO_ORDERS: ReadonlyMap<string, SprintOrder> = new Map();
+const NONE_HELD: ReadonlySet<string> = new Set();
+/** The revision outcomes that no longer hold a draft back. */
+const SETTLED_REVISION = new Set(["applied", "rejected", "apply_refused", "superseded"]);
+/**
+ * The drafts a sprint revision still holds back: they do not start until the owner (or Automatic) applies or rejects it.
+ * The service leaves them out of the order (`sprint_revision_pending`); this reads the same fact straight from the revision,
+ * so a draft never shows a queue place or Start while its revision waits, even when the order was read before it.
+ */
+export function revisionHeld(graph: Pick<LiveSprintGraph, "revisions"> | null | undefined): string[] {
+  return (graph?.revisions ?? []).filter(r => !SETTLED_REVISION.has(r.status) && !(r.status === "awaiting_owner" && r.applied)).flatMap(r => r.held);
+}
+export const REVISION_WAIT = "Waits for a sprint revision";
 const ordinal = (n: number) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? "th" : (["th", "st", "nd", "rd"][n % 10] ?? "th")}`;
 /** A sprint's order, only while it still describes this sprint: an order read under another run mode or queue state is stale. */
 export const orderOf = (index: Pick<WorkspaceIndex, "orders">, sprint: Sprint | null | undefined): SprintOrder | null => {
@@ -332,7 +344,7 @@ function automaticStatusFact(task: Task, sprint: Sprint | null): Fact | undefine
   }
 }
 
-function statusFact(task: Task, filesWait: TaskView["filesWait"], ctx: { target: string; running: number; title: (id: string) => string; sprint: Sprint | null; ready: (id: string) => boolean; pending?: SprintOrderPending | null }): Fact {
+function statusFact(task: Task, filesWait: TaskView["filesWait"], ctx: { target: string; running: number; title: (id: string) => string; sprint: Sprint | null; ready: (id: string) => boolean; pending?: SprintOrderPending | null; held?: boolean }): Fact {
   if (task.status === "closed_unverified") return { text: "Closed by you · Not verified", tone: "st-idle", icon: "alert" };
   const handoff = task.merge?.handoff?.state;
   if (task.conflict !== "none" && (task.merge?.gitState === "unknown" || handoff === "unknown" || handoff === "dispatch_unknown"))
@@ -354,6 +366,7 @@ function statusFact(task: Task, filesWait: TaskView["filesWait"], ctx: { target:
   if (task.conflict === "failed") return { text: "Automatic resolution failed", tone: "st-bad", icon: "alert" };
   switch (task.status) {
     case "draft": {
+      if (ctx.held) return { text: REVISION_WAIT, tone: "st-idle", icon: "hourglass" };
       const waiting = task.dependencies.find(id => !ctx.ready(id));
       if (waiting) return { text: `Waits for ${ctx.title(waiting)}`, tone: "st-idle", icon: "hourglass" };
       // With the service's order, its words: Next only for its current candidate, a place for a ranked task, a reason otherwise.
@@ -394,6 +407,9 @@ function statusFact(task: Task, filesWait: TaskView["filesWait"], ctx: { target:
 }
 
 /** A route the engines stopped offering has no label left. Its id is still not one. */
+/** A saved route id the catalogue replaced, read as the current id of the same model; any other id is returned as it is. */
+export const currentModelId = (models: readonly { id: string; previousIds?: string[] }[], id: string) =>
+  models.some(m => m.id === id) ? id : models.filter(m => m.previousIds?.includes(id)).length === 1 ? models.find(m => m.previousIds?.includes(id))!.id : id;
 export const plainChoice = (id: string) => /^xr_[0-9a-f]{6,}$/.test(id) ? "Model no longer offered" : plainModel(id);
 /** The version people talk about. The build hash stays on the diagnostics page. */
 export const plainVersion = (version: string) => version.split("+")[0];
@@ -402,16 +418,18 @@ export const plainVersion = (version: string) => version.split("+")[0];
  *  hide the tasks it still has to delete and the retry. */
 export const onView = (sprint: Sprint) => !sprint.archivedAt || !!sprint.deletion;
 
-/** An unfinished deletion in words: how many tasks are left, the one by name, and what it waits for. */
+/** An unfinished deletion in words: how many tasks are left, the one by name, and what it waits for. What it waits for is the
+ *  service's own reason when it has found one (a task that is not quiet yet, one it cannot confirm), never a guess. */
 export function deletionState(index: WorkspaceIndex, sprint: Sprint) {
-  const left = sprint.deletion?.left ?? [];
-  if (!left.length) return "Deleting, no tasks left, waiting to finish";
+  const left = sprint.deletion?.left ?? [], reason = sprint.deletion?.reason?.trim();
+  if (!left.length) return reason ? `Deleting, no tasks left. ${reason}` : "Deleting, no tasks left, waiting to finish";
   const named = left.length === 1 ? index.state.tasks.find(t => t.id === left[0])?.title : undefined;
-  return left.length === 1 ? `Deleting, 1 task left${named ? `: ${named}` : ""}, waiting for its stop`
-    : `Deleting, ${left.length} tasks left, waiting for them to stop`;
+  const count = left.length === 1 ? `Deleting, 1 task left${named ? `: ${named}` : ""}` : `Deleting, ${left.length} tasks left`;
+  if (reason) return `${count}. ${reason}`;
+  return left.length === 1 ? `${count}, waiting for its stop` : `${count}, waiting for them to stop`;
 }
 
-export function buildIndex(state: WorkspaceState, now: number, orders: ReadonlyMap<string, SprintOrder> = NO_ORDERS): WorkspaceIndex {
+export function buildIndex(state: WorkspaceState, now: number, orders: ReadonlyMap<string, SprintOrder> = NO_ORDERS, held: ReadonlySet<string> = NONE_HELD): WorkspaceIndex {
   const projects = new Map(state.projects.map(p => [p.id, p]));
   const machines = new Map(state.machines.map(m => [m.id, m]));
   const sprints = new Map(state.sprints.filter(onView).map(s => [s.id, s]));
@@ -470,7 +488,7 @@ export function buildIndex(state: WorkspaceState, now: number, orders: ReadonlyM
       : STATUS_COLUMN[phase === "unknown" ? task.status : phase];
     const fact: Fact = !unknown ? ownerDecision ? { text: ownerDecision.text, tone: "st-warn", icon: ownerDecision.kind === "permission" ? "shield" : "question" }
       : ownerIntegration ? { text: humanStatus(ownerIntegration.reason), tone: "st-warn", icon: "merge" }
-      : automaticFact ?? statusFact(task, filesWait, { target, running, title, sprint, ready: id => ready(id, sprint?.runMode), pending: sprint ? pendingOf.get(task.id) ?? null : null })
+      : automaticFact ?? statusFact(task, filesWait, { target, running, title, sprint, ready: id => ready(id, sprint?.runMode), pending: sprint ? pendingOf.get(task.id) ?? null : null, held: held.has(task.id) })
       : machine.connection !== "connected" ? { text: `Last known: ${STATUS_WORD[task.status]}`, tone: "st-idle", icon: "help" }
       : task.status === "stopping" ? { text: "Stop not confirmed", tone: "st-warn", icon: "hourglass" }
       : replanStopping(task) ? { text: replanStopping(task)!.replace(/\..*$/, ""), tone: "st-warn", icon: "hourglass" }
@@ -760,10 +778,14 @@ export function sideRows(index: WorkspaceIndex, summary: ProjectSummary, keep?: 
   const needs = summary.views.filter(v => v.column === "needs");
   const work = sideColumns.flatMap(c => summary.views.filter(v => v.column === c.id));
   const finished = keep ? summary.views.filter(v => finishedColumn(v) && keep.task(v)) : [];
-  const children = sprintChildren([...needs, ...work, ...finished], ids);
+  // A sprint still in progress lists only its tasks that ask or work: a Done task is never a row of its tree, whether or not the
+  // sprint was opened. Only a completed sprint keeps its finished tasks under it.
+  const completed = new Set(sprints.filter(s => s.queueState === "complete").map(s => s.id));
+  const keptHere = finished.filter(v => !v.sprint || completed.has(v.sprint.id) || !ids.has(v.sprint.id));
+  const children = sprintChildren([...needs, ...work, ...keptHere], ids);
   return [
     ...needs.filter(v => !hasParent(v)).map(v => sideTask(v)),
-    ...finished.filter(v => !hasParent(v)).map(v => sideTask(v)),
+    ...keptHere.filter(v => !hasParent(v)).map(v => sideTask(v)),
     ...sprints.flatMap(s => [sideSprint(index, s), ...(children.get(s.id) ?? [])]),
     ...work.filter(v => !hasParent(v)).map(v => sideTask(v)),
   ].slice(0, 5);
@@ -786,7 +808,11 @@ export function topWorkRows(index: WorkspaceIndex, machine: string, keep?: SideK
   const done = keep ? projects.flatMap(({ project, sprints }) => sprints.filter(s => !ids.has(s.id) && keep.sprint(s)).map(sprint => ({ sprint, projectName: project.name }))) : [];
   // Every sprint with a tree here, in progress or finished, holds its tasks: none of them is listed again on its own.
   const parents = new Set([...ids, ...done.map(({ sprint }) => sprint.id)]);
-  const children = sprintChildren([...groups.flatMap(c => c.views), ...finished], parents);
+  // A sprint in progress lists only the tasks that ask or work: its Done tasks are not rows of its tree, opened or not.
+  // Only a finished sprint's tree holds its kept finished tasks.
+  const inProgress = ids;
+  const keptFinished = finished.filter(v => !v.sprint || !inProgress.has(v.sprint.id));
+  const children = sprintChildren([...groups.flatMap(c => c.views), ...keptFinished], parents);
   const result: TopWorkGroup[] = groups.map(({ id, label, views }) => ({
     id, label, rows: views.filter(v => !v.sprint || !parents.has(v.sprint.id)).map(v => ({ ...sideTask(v), projectName: v.project.name })),
   }));
@@ -796,7 +822,7 @@ export function topWorkRows(index: WorkspaceIndex, machine: string, keep?: SideK
   ]);
   result.push({ id: "sprints", label: "Sprints in progress", rows: tree(sprints) });
   result.push({ id: "finished", label: "Finished", rows: [
-    ...finished.filter(v => !v.sprint || !parents.has(v.sprint.id)).map(v => ({ ...sideTask(v), projectName: v.project.name })),
+    ...keptFinished.filter(v => !v.sprint || !parents.has(v.sprint.id)).map(v => ({ ...sideTask(v), projectName: v.project.name })),
     ...tree(done),
   ] });
   return result.filter(group => group.rows.length > 0);

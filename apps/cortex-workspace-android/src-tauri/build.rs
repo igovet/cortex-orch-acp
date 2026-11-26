@@ -15,6 +15,9 @@ fn main() {
                 "phone_forget",
                 "phone_retry",
                 "phone_listen",
+                "phone_notifications",
+                "phone_notification_next",
+                "phone_battery_settings",
                 "phone_exit",
             ]),
         ))

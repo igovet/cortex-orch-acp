@@ -1,6 +1,24 @@
 # Decisions
 
 > Historical record. Module, test and script paths in this page that name `.py` files, `src/`, `tests/test_*.py` or the former Python scripts refer to the former Python runtime, which was removed on 2026-11-16; they are kept as dated history, no longer exist in the checkout and are not current commands. The behavior statements are unverified against the Rust runtime unless a Rust source path is given.
+## 2026-11-25 The original goal decides completion
+
+The owner approved making the task's goal, not only the stage a plan reached, the
+completion criterion. A plan names the goal's outcomes (`plan.outcomes`, each delivered
+by a task or deferred with its reason, kept through replans and steering); the reviewer
+judges the work against the verbatim goal, the owner's messages and those outcomes
+(`goal_coverage`), and an approved stage that misses one returns to the coordinator
+without verification. Workers report `objective_status`; a partial objective is only a
+dead-end failure. A synthesis or answer reports every outcome, one not done is refused
+(`completion_goal_not_met`, also in `complete_tx`), and `not_verified` holds only real
+check gaps (`not_verified_not_a_check`). An INCOMPLETE review never reaches
+verification: findings, cross-cutting ones included, are fixed; unreachable parts get
+one narrowed follow-up review, then the owner decides whether to close them as is, and
+only that decision lets the review bind like an approval. Plans accepted before this
+change keep working; the coordinator supplies their outcomes at its next plan or final
+result. See [the original goal decides completion](../features/task-lifecycle/index.md#the-original-goal-decides-completion)
+(`crates/cortex-core/src/lifecycle/plan.rs`, `reconciliation.rs`, `review.rs`, `completion.rs`).
+
 ## 2026-11-23 Rule files are edited with the runtime's approval
 
 The owner decided that project rule files (`AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`,
@@ -143,8 +161,10 @@ releases a direct answer. Only an answer in the user's own words releases the qu
 
 An answer that closes planned work is certified before it becomes `COMPLETED`. If a work
 gate (review or verification) did not pass, the task ends `FAILED` with blocker
-`answer_not_certified:<gap>` and an `ANSWER_NOT_CERTIFIED` event. Informational answers,
-and follow-up answers after a reopened completed task, are unchanged.
+`answer_not_certified:<gap>` and an `ANSWER_NOT_CERTIFIED` event. A follow-up
+that relies on an existing review also checks its current binding before
+recording the answer. A changed binding keeps the task in planning. See
+[steering and questions](../features/steering-and-questions/index.md).
 
 ### User revocation of a model grant
 

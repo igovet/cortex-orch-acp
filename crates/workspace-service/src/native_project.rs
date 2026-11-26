@@ -35,6 +35,66 @@ pub(super) fn supports(n: &str) -> bool {
 fn text<'a>(v: &'a Value, k: &str) -> CoreResult<&'a str> {
     v[k].as_str().ok_or(CoreError::Refused("invalid_arguments"))
 }
+/// Protected project paths the gateway reaches only through a runtime decision
+/// (`native_access::admit_protected`): Cortex private state, the live store files
+/// inside it, Git control files and credential files
+/// ([`crate::native_engine_policy::credential_file`]; decided for writes only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Protected {
+    Private,
+    LiveStore,
+    Git,
+    Credential,
+}
+const PRIVATE_NAMES: [&str; 4] = [
+    ".cortex",
+    ".cortex-dev",
+    ".cortex-dev-owner.json",
+    ".cortex-workspace-dev.json",
+];
+/// The protection of a project-relative path, if any.
+pub(super) fn protected(root: &Path, path: &str) -> Option<Protected> {
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.iter().any(|p| PRIVATE_NAMES.contains(p)) {
+        return Some(
+            if crate::native_engine_policy::live_store_file(&root.join(path)) {
+                Protected::LiveStore
+            } else {
+                Protected::Private
+            },
+        );
+    }
+    if parts.contains(&".git") {
+        return Some(Protected::Git);
+    }
+    crate::native_engine_policy::credential_file(path).then_some(Protected::Credential)
+}
+thread_local! {
+    /// The protected path the runtime admitted for the gateway call running on
+    /// this thread (the store's publication lane runs each call to its end).
+    static ADMITTED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+/// Admits one protected path (and the parents an effect on it creates) for the
+/// duration of one gateway call on this thread.
+pub(super) struct Admitted;
+impl Admitted {
+    pub(super) fn enter(path: &str) -> Self {
+        ADMITTED.with(|a| *a.borrow_mut() = Some(path.to_owned()));
+        Self
+    }
+}
+impl Drop for Admitted {
+    fn drop(&mut self) {
+        ADMITTED.with(|a| *a.borrow_mut() = None);
+    }
+}
+fn admitted(path: &str) -> bool {
+    ADMITTED.with(|a| {
+        a.borrow()
+            .as_deref()
+            .is_some_and(|p| p == path || p.starts_with(&format!("{path}/")))
+    })
+}
 pub(super) fn safe(path: &str) -> CoreResult<()> {
     if path == "." {
         return Ok(());
@@ -44,16 +104,10 @@ pub(super) fn safe(path: &str) -> CoreResult<()> {
         || path.contains(['\\', '\0'])
         || path.split('/').any(|p| {
             p.is_empty()
-                || [
-                    ".",
-                    "..",
-                    ".git",
-                    ".cortex",
-                    ".cortex-dev",
-                    ".cortex-dev-owner.json",
-                    ".cortex-workspace-dev.json",
-                ]
-                .contains(&p)
+                || p == "."
+                || p == ".."
+                // A protected name passes only for the path the runtime admitted.
+                || ((p == ".git" || PRIVATE_NAMES.contains(&p)) && !admitted(path))
         })
     {
         return Err(CoreError::Refused("private_or_invalid_path"));
@@ -116,6 +170,11 @@ impl WorkerLeaseFence {
         use cortex_core::store::owner_file_leases::{Checkout, RelativePath};
         if path == "." {
             // The only supported effect at "." is the no-op mkdir.
+            return Ok(Self(None));
+        }
+        if admitted(path) {
+            // The owner's editor never leases a protected path (Cortex state, Git
+            // controls), so an admitted write cannot conflict with an owner lease.
             return Ok(Self(None));
         }
         let mut paths = vec![RelativePath::new(path)?];
@@ -271,7 +330,7 @@ pub(super) fn writable_target(
     scoped: bool,
 ) -> CoreResult<()> {
     writable(db, i, Some(path))?;
-    if crate::native_engine_policy::project_private(&root.join(path)) {
+    if crate::native_engine_policy::project_private(&root.join(path)) && !admitted(path) {
         return Err(CoreError::Refused("private_or_invalid_path"));
     }
     if scoped {

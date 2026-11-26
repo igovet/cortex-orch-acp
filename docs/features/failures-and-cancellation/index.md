@@ -343,6 +343,7 @@ Failures are classified into access, owner decision, external outage and technic
 - **Access on a review node.** A reviewer blocked only by access is classified like a worker node (`park_review_access_tx`): its review node is parked with an owner action, its result stays attributable to the old assignment, and resolving the action retries that review with a fresh packet rather than pausing the whole task.
 - **Recheck schedule in the store.** The environment recheck of an open owner action is persisted as `OWNER_ACTION_RECHECK_SCHEDULED {id, attempt, next_check_at}` and read back by `claim_environment_rechecks_tx`, so the backoff survives a store reopen or service restart and a second claim at the same instant is empty. External waits keep `next_check_at` in `EXTERNAL_WAIT_STARTED` and `EXTERNAL_WAIT_RECHECKED`.
 - **Terminal closure.** When a task is cancelled, completed or otherwise reaches a terminal state, every open owner action is closed with `OWNER_ACTION_RESOLVED {by: task_terminal, state}`, every open external wait with `EXTERNAL_WAIT_ENDED {reason: task_terminal}` and open `pending_questions` are cancelled. This grants no access and is never recorded as a successful probe; a later environment claim for a terminal task returns nothing.
+- **No access card without a named service.** A missing-access claim that names no service, host or credential (for example a worker that could not obtain data) is classified `technical` (`blocker_missing_access_unnamed`) and stays in the task's own flow; an owner action always names a concrete service. An open owner action is shown inside its task's page (same card and actions) as well as in the floating stack, so Open task lands on it.
 - **Service-side rechecks.** `recheck_obstacles` (`native_runtime.rs`) runs due external waits through `probe_external` and the claimed environment actions through one preflight, without any model call. Covered by no-paid tests with a stand-in listener (down, then up) and a private D-Bus bus; no live-engine timer for task or coordinator elapsed time was exercised.
 
 ## 3. Cancellation (`session/cancel`)
@@ -402,7 +403,8 @@ A model turn can stream unusable text instead of acting: replay its own prompt,
 loop on the same words, or write tens of kilobytes without a tool call. The
 runtime does not settle such a turn as an ordinary reply. Every agent message of
 a coordinator or worker turn streams through a watchdog
-(`degenerate` in `crates/workspace-service/src/native_sessions.rs`) with four rules:
+(`degenerate` in `crates/workspace-service/src/native_sessions.rs`) with four
+text rules, and the turn's tool calls and silence add three more:
 
 | Rule | Trips when |
 | --- | --- |
@@ -410,11 +412,25 @@ a coordinator or worker turn streams through a watchdog
 | `repetition` | a message of at least 1,000 characters repeats 30 % or more of its 16-character windows (sampled every 4 characters) |
 | `length` | one agent message reaches 16,000 characters with no tool call between its parts |
 | `refusal` | a runtime-driven turn ends with the ACP `refusal` stop reason |
+| `tool_loop` | the turn repeats one tool call without any change in the task: the same call (tool and arguments, apart from `request_key`) refused with the same code 4 times (16 for refusals that only say the world has not settled, such as `command_not_settled`, `review_resubmit_required`, `review_project_revision_changed`, `busy` and `storage_unavailable`), or returning the same result 12 times with no call new to the turn in between. Calls the gateway refuses against the advertised schema (`invalid_arguments`, `tool_not_offered`) count as refusals |
+| `tool_calls` | one turn makes more than 400 tool calls (coordinator) or 2,000 (worker) |
+| `silence` | a turn gets no engine update for 20 minutes while none of its tool calls is in flight (a long command in flight is not silence) |
+
+The last three rules live in `crates/workspace-service/src/native_turn_guard.rs`
+(`TurnLimits`: `REPEATED_REFUSAL_LIMIT`, `REPEATED_RESULT_LIMIT`,
+`COORDINATOR_CALL_CEILING`, `WORKER_CALL_CEILING`, `SILENCE_LIMIT`), count per
+turn (every new prompt starts the counts again) and need nothing but the calls the
+runtime already receives on the channel and `session/cancel`. Their
+`NATIVE_TURN_DEGENERATE` event adds the tool name and the count (`tool`, `count`;
+the seconds of silence for `silence`), never arguments or text. After a trip every
+further call of the turn is refused with `turn_tool_loop_limit` until the engine
+answers the cancel. From the trip on the turn is handled exactly like any other
+degenerate turn (below), so it counts as a turn without progress.
 
 The bounds come from retained production sessions: the largest ordinary message
 was 4,748 characters (one legitimate consultant message 13,121), the largest
 ordinary repeated-window share 0.045, and none of the markers appeared in seven
-days of ordinary agent text. Agent thoughts and tool calls are not watched.
+days of ordinary agent text. Agent thoughts are not watched by the text rules, and a tool call only ends a message; the tool-call rules count calls, not text.
 
 On a trip the runtime records `NATIVE_TURN_DEGENERATE` (channel, session, role,
 the worker's node and plan revision, the rule, the engine message id, the message
@@ -480,6 +496,31 @@ process is confirmed gone (Resume refuses `native_shutdown_unconfirmed`
 otherwise) it then continues like an owner message: the coordinator is
 relaunched to replan from the retained state, instead of the task silently
 staying in RECOVERING with no driver.
+
+### What bounds every wait
+
+No coordinator state or wait is left to run without a bound or a visible owner
+state. The runtime's own bounds, in the order a stuck task meets them:
+
+| State or wait | What bounds it | Exit |
+| --- | --- | --- |
+| One coordinator or worker turn that acts without effect | `tool_loop`, `tool_calls` and `silence` above, and the text rules; every trip is a degenerate turn | the turn is cancelled and retried once in a fresh session, then on another model, then a continuation on an escalated rung |
+| PLANNING, RECONCILING, RECOVERING (coordinator turns) | 3 `NATIVE_COORDINATOR_CONTINUED` turns since the last `PLAN_ACCEPTED`, `VERIFICATION_*`, `REPLAN_REQUEST_ACCEPTED`, owner answer, owner steering, `AUTOMATIC_RESUMED` or `OWNER_TASK_RESUMED`; 128 runtime steps in all (`native_progress_limit`) | `coordinator_no_progress_limit`: the first sighting repairs, the second moves the coordinator to another model (`reassign`), the third is the runtime's own owner question (`LOOP_BROKEN` `ask_owner`, answers Continue / close as is, no model call). `native_progress_limit` is an owner stop question |
+| EXECUTING (waiting for workers) | each worker turn is bounded as above; a lost process ends the turn at once (transport close), a live but silent one after 20 minutes of silence; a slot or scope wait has the scheduler's 30-minute `scheduler_capacity_timeout` (not while the holder is observed alive) | the node is replaced on the lost-worker path (`ASSIGNMENT_RETRIED`), then the strategy ladder |
+| REVIEWING | reviewers are workers: the same bounds; a fix and review round ends on unchanged files or repeated findings (`review_no_progress`) | continuation on the next rung; the loop guard asks the owner when every rung was used |
+| VERIFYING | the runtime's own commands run until they exit (no time limit by design); an environment failure is rerun then waited | the owner's Stop ends a command; a check that fails the same way repeatedly reaches the loop guard |
+| WAITING_USER | the owner's question (its card and notification are the visible state); no model call while it is open | the owner's answer, Continue, close as is, or Stop |
+| Obstacle holds (access, external outage) | an owner action card or the runtime's recheck at 1, 2, 5, 10 and then every 30 minutes, without model calls | resolved by the owner or the recheck; the owner can dismiss |
+| Provider route, capacity and quota holds | a recorded hold with its own expiry or probe; a waiting worker shows `waiting_for_engine_capacity` | the hold ends by itself or the owner changes the route |
+| Infrastructure interruptions | 3 identical interruptions pause with back-off; a sixth coordinator-turn series asks the owner | resume after 5, 15, 30, then 60 minutes; the owner's answer |
+| Sprint impact check, revision review | a coordinator turn (bounded as above) and a mandatory independent review | the owner's Apply or Reject in Hybrid and Manual sprints |
+
+What no runtime bound ends: a verification or worker command that is still
+running (a hung command is visible as a running command; the owner's Stop ends it)
+and an unanswered owner question (by design the task waits for the owner). The
+engine's token use during one turn is reported only when the prompt ends, so no
+per-turn token budget can be enforced; the call, repetition and silence bounds
+stand in for it.
 
 ### Service restarts
 

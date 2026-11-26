@@ -1,3 +1,4 @@
+import { LoadingStrip } from "./skeleton";
 import { createSignal, Match, onCleanup, Show, Switch, type JSX } from "solid-js";
 import { useWs } from "./ctx";
 import { bandHandlers, WindowControls } from "./frame";
@@ -58,11 +59,10 @@ export function StartupScreen(props: { logo?: JSX.Element; notice?: JSX.Element 
           <button class="btn btn-line" onClick={() => void ws.store.reload()}>Try again</button>
         </Match>
         <Match when={ws.store.modelsPending()}>
-          <span class="ws-loading"><I n="loader" s={12} class="spin" />{ws.t("modelsLoading")}</span>
-          <span class="l-startup-why">{ws.t("modelsLoadingNote")}</span>
+          <LoadingStrip label={`${ws.t("modelsLoading")} ${ws.t("modelsLoadingNote")}`} />
         </Match>
-        <Match when={waited() === "long"}><span class="ws-loading"><I n="loader" s={12} class="spin" />Still waiting for the service. The first start can take longer.</span></Match>
-        <Match when={waited() === "slow"}><span class="ws-loading"><I n="loader" s={12} class="spin" />Loading workspace…</span></Match>
+        <Match when={waited() === "long"}><LoadingStrip label="Still waiting for the service. The first start can take longer." /></Match>
+        <Match when={waited() === "slow"}><LoadingStrip label="Loading workspace…" /></Match>
       </Switch>
       <Show when={stalled()} fallback={<Show when={ws.chrome?.closeError?.()}>{why => <span>{why()}</span>}</Show>}>
         <div class="l-startup-notice">{props.notice}</div>

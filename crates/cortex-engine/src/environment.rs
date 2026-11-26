@@ -70,6 +70,14 @@ pub fn codex_thread_config() -> String {
         .collect();
     serde_json::json!({ "features": features }).to_string()
 }
+/// An `invalid_arguments` refusal naming the launch field and a static,
+/// secret-free reason (never a path or value).
+fn invalid(field: &str, reason: &'static str) -> Error {
+    Error::InvalidField {
+        field: field.to_owned(),
+        reason,
+    }
+}
 impl CodexLauncher {
     pub fn new(prepare: impl Fn() -> Result<PathBuf> + Send + Sync + 'static) -> Self {
         Self {
@@ -90,7 +98,7 @@ impl CodexLauncher {
             || path.as_os_str().as_encoded_bytes().contains(&0)
             || !path.is_file()
         {
-            return Err(Error::Invalid);
+            return Err(invalid("codex_launcher", "prepared_file_unusable"));
         }
         Ok(path)
     }
@@ -137,33 +145,33 @@ impl LaunchSpec {
         }
     }
     pub fn environment(&self) -> Result<BTreeMap<String, String>> {
-        for p in [
-            &self.executable,
-            &self.cwd,
-            &self.native_home,
-            &self.credential_directory,
-        ] {
+        let named = [
+            ("executable", &self.executable, true),
+            ("cwd", &self.cwd, false),
+            ("native_home", &self.native_home, false),
+            ("credential_directory", &self.credential_directory, false),
+        ];
+        for (field, p, _) in &named {
             if !p.is_absolute()
                 || p.to_str().is_none()
                 || p.as_os_str().as_encoded_bytes().contains(&0)
             {
-                return Err(Error::Invalid);
+                return Err(invalid(field, "not_absolute_text_path"));
             }
         }
-        if !self.executable.is_file()
-            || !self.cwd.is_dir()
-            || !self.native_home.is_dir()
-            || !self.credential_directory.is_dir()
-        {
-            return Err(Error::Invalid);
+        for (field, p, file) in &named {
+            if if *file { !p.is_file() } else { !p.is_dir() } {
+                return Err(invalid(field, "missing_or_wrong_type"));
+            }
         }
-        if self.args.iter().any(|v| v.contains('\0'))
-            || self.base_environment.values().any(|v| v.contains('\0'))
-        {
-            return Err(Error::Invalid);
+        if self.args.iter().any(|v| v.contains('\0')) {
+            return Err(invalid("args", "contains_nul"));
+        }
+        if self.base_environment.values().any(|v| v.contains('\0')) {
+            return Err(invalid("base_environment", "contains_nul"));
         }
         if self.codex_launcher.is_some() && self.engine != EngineKind::Codex {
-            return Err(Error::Invalid);
+            return Err(invalid("codex_launcher", "engine_not_codex"));
         }
         let mut env = BTreeMap::new();
         for key in [
@@ -230,5 +238,32 @@ impl LaunchSpec {
             }
         }
         Ok(env)
+    }
+}
+
+#[cfg(test)]
+mod launch_diagnostics {
+    use super::*;
+    #[test]
+    fn a_missing_executable_names_its_field_without_a_path() {
+        let dir = std::env::temp_dir();
+        let spec = LaunchSpec {
+            engine: EngineKind::Codex,
+            executable: dir.join("cortex-missing-engine-binary"),
+            args: vec![],
+            cwd: dir.clone(),
+            native_home: dir.clone(),
+            credential_directory: dir,
+            base_environment: BTreeMap::new(),
+            codex_launcher: None,
+            confinement: None,
+        };
+        match spec.environment() {
+            Err(Error::InvalidField { field, reason }) => {
+                assert_eq!((field.as_str(), reason), ("executable", "missing_or_wrong_type"));
+            }
+            other => panic!("unexpected {:?}", other.map(|_| ())),
+        }
+        assert_eq!(spec.environment().err().unwrap().to_string(), "invalid_arguments");
     }
 }

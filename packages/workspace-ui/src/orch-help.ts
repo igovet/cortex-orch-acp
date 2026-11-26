@@ -58,6 +58,7 @@ export const HELP = {
       ["Recommended", "a strong general model with thought_level high and mode agent; the coordinator plans and checks work, so do not save on it."],
     ],
   ),
+  coordinatorModels: "The models the coordinator (the agent you talk to) may use, written as coordinator_models in routing.json, apart from the worker tiers. Each model coordinates in the categories you tick (Frontier is the flagship tier), at any effort of their ranges. The coordinator pickers (Defaults, New task, sprint planning, the composer and an editor's agent menu) offer only these models and these efforts; a saved effort moves to the nearest allowed level the model offers, and one it does not offer is refused. Sprint planning assigns each task a model of the category its complexity names, by provider limits. A profile without this list keeps the older rule: any model with a worker tier, at the efforts of those tiers. Recommended: a strong model on Frontier for complex work and a cheaper one on Standard and Light.",
   language: "Language of replies, plans and reports. Automatic follows the language of your message. Recommended: Automatic, or Russian to always get Russian.",
   parameters: helpBlock(
     "Native engine parameters used together with Default route. Each row is a lowercase name and its value; only pairs the selected route advertises are accepted.",
@@ -102,6 +103,7 @@ export const HELP = {
       ["request_names", "Extra lowercase names (Russian stems allowed) that count as you naming this model in a request such as \"do it with …\". Recommended: the short name you actually type."],
     ],
   ),
+  tierEfforts: "For each tier the model is placed in, the lowest and highest effort it may run at there. Automatic routing starts at the tier's usual effort (light low, standard medium, deep and flagship high) and moves it into the range. These ranges are for workers: the coordinator uses Coordinator models (only a profile without that list lets the coordinator follow these tiers). No range keeps the effort floor and max effort for that tier. Removing a tier removes its range.",
   quotaWindows: helpBlock(
     "Ties the plan usage windows an engine reports (weekly, per-model weekly…) to exact models, so an exhausted window blocks only the models it covers. Without it every applicable window counts for every model of that engine (safe but may block too much).",
     [
@@ -154,7 +156,7 @@ export const HELP = {
   filterModels: "Shows only models whose name or id contains these words; Switch on/off all applies to the models shown.",
 
   // --- MCP ------------------------------------------------------------------
-  mcpIntro: "External MCP tool servers given to agents. Profiles store only the usage policy (enabled, roles, engines, tool and path grants); command, arguments and environment are shared by all profiles.",
+  mcpIntro: "External MCP tool servers given to agents. A project can switch machine servers on or off for itself and add servers only it has. Profiles store only the usage policy (enabled, roles, engines, tool and path grants); command, arguments and environment are shared by all profiles.",
   mcpServer: helpBlock(null, [
     ["Server name", "Unique name of the server."],
     ["Command / Arguments", "Executable that starts the server and its arguments."],
@@ -202,6 +204,7 @@ export const WORK_KIND_HELP: Record<string, HelpText> = {
   writing: "Documentation: project knowledge, feature docs, decision records.",
   planning: "Breaking a task into steps with dependencies, risks and checks.",
   analysis: "Bounded research or analysis when no specialist fits.",
+  consultation: "Senior consultant only: second opinions requested by the coordinator. Until a model lists it, the consultant uses the Design list.",
 };
 
 /** What each worker role does (keys are the runtime's role ids). */

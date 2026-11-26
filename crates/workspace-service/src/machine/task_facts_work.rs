@@ -187,6 +187,28 @@ fn own_writes_unchanged(
     }
     Ok(true)
 }
+/// Whether the files this task recorded writing still hold what it wrote, for the
+/// commit/finish staleness check of a project-folder task (other writers are ignored).
+pub(super) fn own_files_intact(
+    store: &cortex_core::Store,
+    project: &str,
+    task: &str,
+    root: &std::path::Path,
+) -> CoreResult<bool> {
+    store.read(|db| {
+        let runtime: Option<String> = db
+            .query_row(
+                "SELECT e.runtime_task_id FROM workspace_tasks t JOIN workspace_executions e ON e.execution_id=t.execution_id WHERE t.project_id=? AND t.task_id=?",
+                (project, task),
+                |r| r.get(0),
+            )
+            .ok();
+        match runtime {
+            Some(runtime) => own_writes_unchanged(db, &runtime, root, i64::MAX),
+            None => Ok(false),
+        }
+    })
+}
 fn count_open(counts: &mut [u64; 3], outcome: &str, manual: bool) {
     if !manual {
         if let Some(index) = ["failed", "not_run", "unverified"]

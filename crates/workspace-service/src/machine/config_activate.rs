@@ -2,7 +2,7 @@
 use super::*;
 #[path = "config_materialize.rs"]
 mod materialize;
-const KEYS: [&str; 10] = [
+const KEYS: [&str; 11] = [
     "model_policy_version",
     "pin",
     "deny",
@@ -13,6 +13,7 @@ const KEYS: [&str; 10] = [
     "engine_affinity",
     "models",
     "quota_windows",
+    "coordinator_models",
 ];
 fn candidates(
     doc: &O,

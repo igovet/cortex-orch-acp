@@ -16,11 +16,11 @@ pub(crate) const STALE: &str = "stale_sprint_selection";
 pub(crate) fn handles(p: &Value) -> bool {
     matches!(
         p["action"].as_str(),
-        Some("live_graph" | "set_dependency" | "move_priority")
+        Some("live_graph" | "set_dependency" | "move_priority" | "apply_revision" | "reject_revision")
     )
 }
 
-fn identity(id: &str) -> bool {
+pub(super) fn identity(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control)
 }
 
@@ -32,7 +32,7 @@ fn id_param<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
     Ok(id)
 }
 
-fn sprint_index(product: &Value, project: &str, id: &str) -> Result<usize> {
+pub(super) fn sprint_index(product: &Value, project: &str, id: &str) -> Result<usize> {
     let rows = product["sprints"].as_array().ok_or_else(invalid_members)?;
     let mut matches = rows.iter().enumerate().filter(|(_, s)| s["id"] == id);
     let (index, sprint) = matches
@@ -46,7 +46,7 @@ fn sprint_index(product: &Value, project: &str, id: &str) -> Result<usize> {
     Ok(index)
 }
 
-fn invalid_members() -> Refused {
+pub(super) fn invalid_members() -> Refused {
     refuse(
         "sprint_membership_invalid",
         "Saved sprint membership is ambiguous or unreadable.",
@@ -60,11 +60,11 @@ fn over_budget() -> Refused {
     )
 }
 
-fn open_sprint(sprint: &Value) -> bool {
+pub(super) fn open_sprint(sprint: &Value) -> bool {
     sprint["archivedAt"].is_null() && (sprint["deleting"].is_null() || sprint["deleting"] == false)
 }
 
-fn editable_sprint(sprint: &Value) -> bool {
+pub(super) fn editable_sprint(sprint: &Value) -> bool {
     open_sprint(sprint)
         && sprint["materializedVersion"]
             .as_u64()
@@ -82,11 +82,11 @@ fn deps(record: &Value) -> Option<Vec<String>> {
     }
 }
 
-struct Member {
-    id: String,
-    status: &'static str,
-    dependencies: Option<Vec<String>>,
-    draft: bool,
+pub(super) struct Member {
+    pub(super) id: String,
+    pub(super) status: &'static str,
+    pub(super) dependencies: Option<Vec<String>>,
+    pub(super) draft: bool,
     claim_order: Option<i64>,
     checkout: Option<String>,
 }
@@ -97,8 +97,10 @@ pub(crate) struct Snapshot {
     pub tasks: HashMap<String, Value>,
     pub roster: Vec<String>,
     pub priority: Vec<String>,
-    members: Vec<Member>,
-    graph_revision: String,
+    pub(super) members: Vec<Member>,
+    pub(super) graph_revision: String,
+    /// Revisions proposed by this sprint's tasks (`sprint_impact`), oldest first.
+    pub(super) revisions: Vec<Value>,
     pub queue_revision: String,
 }
 
@@ -121,7 +123,7 @@ fn hash(value: &Value) -> String {
     format!("{:x}", Sha256::digest(value.to_string()))
 }
 
-fn load(
+pub(super) fn load(
     store: &Store,
     product: &Value,
     project: &str,
@@ -300,6 +302,16 @@ fn load(
         }
         Ok(())
     }).map_err(context::core)?;
+    // A draft that a proposed sprint revision still holds back (`sprint_impact`)
+    // does not start; independent drafts continue.
+    let revisions = store
+        .read(|db| super::sprint_revision::sprint_revisions(db, id))
+        .map_err(context::core)?;
+    for held in revisions.iter().flat_map(|r| r["held"].as_array().into_iter().flatten()) {
+        if let Some(record) = held.as_str().and_then(|h| projected["tasks"].get_mut(h)).filter(|r| r.is_object()) {
+            record["revisionPending"] = json!(true);
+        }
+    }
 
     let sprint = projected["sprints"][0].take();
     let records = projected["tasks"].take();
@@ -329,6 +341,7 @@ fn load(
         members,
         graph_revision,
         queue_revision,
+        revisions,
     })
 }
 
@@ -388,7 +401,7 @@ pub(super) fn matches_queue(
     Ok(load(&store, product, project, index, false)?.queue_revision == revision)
 }
 
-fn dag_error(error: sprint_dag::Error<'_>, all: &Value) -> Refused {
+pub(super) fn dag_error(error: sprint_dag::Error<'_>, all: &Value) -> Refused {
     use sprint_dag::Error::*;
     match error {
         DuplicateId(_) => invalid_members(),
@@ -454,7 +467,7 @@ fn validate_candidate(
     Ok(())
 }
 
-fn predecessor_allowed(snapshot: &Snapshot, member: &Member) -> bool {
+pub(super) fn predecessor_allowed(snapshot: &Snapshot, member: &Member) -> bool {
     let record = &snapshot.records[&member.id];
     let fact = snapshot.tasks.get(&member.id);
     let (status, closed) = crate::native_driver::sprints::member_disposition(record, fact);
@@ -510,10 +523,11 @@ fn describe(snapshot: &Snapshot, project: &str) -> Value {
     })).collect();
     let order = crate::native_driver::sprints::live_execution_order(snapshot);
     json!({"contractVersion":1,"sprintId":sprint["id"],"graphRevision":snapshot.graph_revision,
-        "complete":complete,"members":members,"priority":snapshot.priority,"order":order})
+        "complete":complete,"members":members,"priority":snapshot.priority,"order":order,
+        "revisions":super::sprint_revision::owner_view(&snapshot.revisions)})
 }
 
-pub(super) fn owner_action(root: &Path, state: &Path, project: &str, p: &Value) -> Result<Value> {
+pub(super) fn owner_action(root: &Path, state: &Path, project: &str, p: &Value, routes: super::sprint_revision::Routes<'_>) -> Result<Value> {
     let id = id_param(p, "sprintId")?;
     let reading = p["action"] == "live_graph";
     let _lock = settings::Lock::new(state, "machine.lock")?;
@@ -532,6 +546,10 @@ pub(super) fn owner_action(root: &Path, state: &Path, project: &str, p: &Value) 
     if reading {
         drop(_lock);
         return Ok(describe(&snapshot, project));
+    }
+    if matches!(p["action"].as_str(), Some("apply_revision" | "reject_revision")) {
+        drop(store);
+        return super::sprint_revision::owner_decision(root, state, project, &mut product, index, &snapshot, p, routes);
     }
     if !editable_sprint(&snapshot.sprint) {
         return Err(refuse(
