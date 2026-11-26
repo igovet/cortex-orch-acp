@@ -293,6 +293,41 @@ mod tests {
     }
 
     #[test]
+    fn worktree_sprints_default_to_one_shared_worktree_and_per_task_ones_run_manual_only() {
+        use std::os::unix::fs::DirBuilderExt;
+        let state = std::env::temp_dir().join(format!("cw-sprint-wt-{}", settings::unique()));
+        std::fs::DirBuilder::new().mode(0o700).create(&state).unwrap();
+        let make = |checkout: Value, mode: &str| {
+            sprint(&state, "p", &json!({"action":"create","description":"S","runMode":mode,"checkout":checkout}), None).unwrap();
+            let saved = product(&state, "p").unwrap();
+            saved["sprints"].as_array().unwrap().last().unwrap().clone()
+        };
+        // Shared is the default and allows every mode.
+        let shared = make(json!({"kind":"worktree"}), "hybrid");
+        assert_eq!(shared["checkout"], json!({"kind":"worktree","shared":true}));
+        assert_eq!(shared["runMode"], "hybrid");
+        // Separate worktrees are normalized to Manual.
+        let separate = make(json!({"kind":"worktree","shared":false}), "hybrid");
+        assert_eq!(separate["checkout"], json!({"kind":"worktree","shared":false}));
+        assert_eq!(separate["runMode"], "manual");
+        assert_eq!(make(json!({"kind":"main"}), "automatic")["runMode"], "automatic");
+        // Patching a separate sprint into another mode is refused; switching to separate selects Manual.
+        let id = separate["id"].clone();
+        let refused = sprint(&state, "p", &json!({"action":"patch","sprintId":id,"patch":{"runMode":"hybrid"}}), None);
+        assert_eq!(refused.unwrap_err().code, "invalid_sprint");
+        let id = shared["id"].clone();
+        sprint(&state, "p", &json!({"action":"patch","sprintId":id,"patch":{"checkout":{"kind":"worktree","shared":false}}}), None).unwrap();
+        let after = product(&state, "p").unwrap();
+        let saved = after["sprints"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap();
+        assert_eq!((saved["runMode"].as_str(), saved["checkout"]["shared"].as_bool()), (Some("manual"), Some(false)));
+        for bad in [json!({"kind":"worktree","shared":"yes"}), json!({"kind":"worktree","path":"/x"})] {
+            let result = sprint(&state, "p", &json!({"action":"create","description":"S","checkout":bad}), None);
+            assert_eq!(result.unwrap_err().code, "invalid_checkout");
+        }
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
     fn only_oldest_sent_bytes_give_way_and_pending_bytes_stay() {
         let file = json!({"name":"a","data":"x".repeat(200),"mimeType":"text/plain"});
         let mut p = json!({"messages":[
@@ -592,6 +627,38 @@ pub fn settle_taken(
     }
     persist(state, project, &mut product, &before)
 }
+/// A saved or requested sprint checkout: `{"kind":"main"}` or
+/// `{"kind":"worktree","shared":bool}`. A new worktree sprint defaults to one
+/// worktree for the whole sprint; stored sprints without `shared` keep their
+/// separate per-task worktrees.
+fn sprint_checkout(checkout: &Value) -> Result<Value> {
+    let invalid = || {
+        refuse(
+            "invalid_checkout",
+            "Choose Project folder, One worktree for the whole sprint or Separate worktree per task.",
+        )
+    };
+    let fields = checkout.as_object().ok_or_else(invalid)?;
+    match checkout["kind"].as_str() {
+        Some("main") if fields.len() == 1 => Ok(json!({"kind":"main"})),
+        Some("worktree") if fields.keys().all(|k| k == "kind" || k == "shared") => {
+            let shared = match fields.get("shared") {
+                None => true,
+                Some(Value::Bool(b)) => *b,
+                Some(_) => return Err(invalid()),
+            };
+            Ok(json!({"kind":"worktree","shared":shared}))
+        }
+        _ => Err(invalid()),
+    }
+}
+
+/// A worktree sprint whose tasks each get their own worktree (including every
+/// sprint saved before the shared option existed).
+pub(super) fn separate_worktrees(sprint: &Value) -> bool {
+    sprint["checkout"]["kind"] == "worktree" && sprint["checkout"]["shared"] != true
+}
+
 fn sprint_run_mode(value: &Value) -> Result<&str> {
     match value.as_str() {
         Some(mode @ ("manual" | "hybrid" | "automatic")) => Ok(mode),
@@ -1142,16 +1209,11 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
             "history":[],"materializedVersion":null,"taskIds":[],"queueState":"idle","pauseReason":null,
             "attachments":p.get("attachments").cloned().unwrap_or_else(||json!([]))});
         if let Some(checkout) = p.get("checkout") {
-            if !checkout.as_object().is_some_and(|m| {
-                m.len() == 1
-                    && ["main", "worktree"].contains(&checkout["kind"].as_str().unwrap_or(""))
-            }) {
-                return Err(refuse(
-                    "invalid_checkout",
-                    "Choose Project folder or Separate worktree for the sprint.",
-                ));
+            sprint["checkout"] = sprint_checkout(checkout)?;
+            // Separate worktrees per task run only in Manual mode.
+            if separate_worktrees(&sprint) {
+                sprint["runMode"] = json!("manual");
             }
-            sprint["checkout"] = checkout.clone();
         }
         // Whether the tasks created from the plan use the sprint's model (the owner
         // picked it) or each its automatic route by complexity (the default).
@@ -1238,6 +1300,7 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
                 "planningTaskId",
                 "planningRun",
                 "taskRoute",
+                "checkout",
             ]
             .contains(&k.as_str())
         }) {
@@ -1246,8 +1309,31 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
                 "That sprint change is not supported.",
             ));
         }
+        if let Some(checkout) = patch.get("checkout") {
+            let next = sprint_checkout(checkout)?;
+            if sprint["checkout"] != next {
+                if sprint["taskIds"].as_array().is_some_and(|t| !t.is_empty()) {
+                    return Err(refuse(
+                        "invalid_sprint",
+                        "The checkout cannot change after the sprint has tasks.",
+                    ));
+                }
+                sprint["checkout"] = next;
+            }
+            // Switching to separate worktrees switches the sprint to Manual.
+            if separate_worktrees(sprint) && sprint["runMode"] != "manual" {
+                sprint["runMode"] = json!("manual");
+                sprint.as_object_mut().unwrap().remove("automaticQueue");
+            }
+        }
         if let Some(mode) = patch.get("runMode") {
             sprint_run_mode(mode)?;
+            if separate_worktrees(sprint) && mode != "manual" {
+                return Err(refuse(
+                    "invalid_sprint",
+                    "Separate worktrees per task run in Manual mode only. Use one worktree for the whole sprint for Hybrid or Automatic.",
+                ));
+            }
             // A mode switch re-evaluates every waiting result of the project.
             super::task_review::forget_refusals(state, project);
             if sprint["runMode"] != *mode {
@@ -1293,6 +1379,9 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
             }
         }
         for (key, value) in patch {
+            if key == "checkout" {
+                continue; // already normalized above
+            }
             sprint[key] = value.clone();
         }
         // A title the owner typed is never replaced by a generated one.

@@ -156,7 +156,7 @@ mod stop_continuation_tests {
     use super::*;
     use crate::{native_runtime::NativeRoutes, native_sessions::SessionRoute};
     use cortex_engine::environment::{EngineKind, LaunchSpec};
-    use std::{collections::BTreeMap, path::Path, time::Duration};
+    use std::{collections::BTreeMap, path::{Path, PathBuf}, time::Duration};
 
     /// A real process that exits before initialize: a no-paid start failure.
     struct FailingStart;
@@ -302,6 +302,74 @@ mod stop_continuation_tests {
             .unwrap()
             .unwrap();
         assert_eq!(questions, 0);
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An engine executable that appears 2 s after the start (a package upgrade finishing)
+    /// is waited for: no launch failure is recorded, the engine then runs and fails normally.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_launch_waits_for_an_engine_file_that_appears_shortly() {
+        struct Late(PathBuf);
+        impl NativeRoutes for Late {
+            fn route(&self, root: &Path, role: &str) -> CoreResult<SessionRoute> {
+                let mut route = FailingStart.route(root, role)?;
+                route.launch.executable = self.0.clone();
+                Ok(route)
+            }
+        }
+        let root = std::env::temp_dir().join(format!("late-engine-{}", crate::identity().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        let late = root.join("late-engine");
+        let target = late.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(2));
+            std::fs::copy("/bin/false", &target).unwrap();
+        });
+        let path = root.clone();
+        let routes = Arc::new(Late(late));
+        let runtime = Arc::new(
+            tokio::task::spawn_blocking(move || Runtime::open(&path, "project", routes))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        let draft = runtime
+            .command(
+                "project".into(),
+                json!({"protocol":{"major":1,"minor":8},"requestId":"draft","projectId":"project",
+                    "actorId":actor(),"operation":"tasks.create","target":"project","expectedVersion":"0",
+                    "ownerEpoch":null,"payload":{"description":"Late engine fixture","checkout":{"kind":"main"}}}),
+            )
+            .await
+            .unwrap();
+        runtime
+            .command(
+                "project".into(),
+                json!({"protocol":{"major":1,"minor":8},"requestId":"start","projectId":"project",
+                    "actorId":actor(),"operation":"tasks.start","target":draft["target"],
+                    "expectedVersion":draft["entityVersion"],"ownerEpoch":null,"payload":{}}),
+            )
+            .await
+            .unwrap();
+        until(&runtime, |(_, failures, _, _)| *failures >= 1).await;
+        let launch_failures = runtime
+            .host
+            .executor
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT count(*) FROM runtime_events WHERE type IN ('NATIVE_SESSION_START_FAILED','NATIVE_SESSION_START_RETRIED')
+                     AND json_extract(payload_json,'$.phase')='launch'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(launch_failures, 0, "a missing engine file was recorded as a launch failure");
         runtime.shutdown().await;
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
@@ -1755,11 +1823,7 @@ impl Runtime {
                     .map_err(|_| rework::error("native_host_closed"))?
                     .map_err(|e| rework::error(e.code()))?;
                 let root = &runtime.host.root;
-                let route = match &saved {
-                    Some(settings) => runtime.routes.task_route(root, settings),
-                    None => runtime.routes.route(root, "orchestrator"),
-                }.map_err(|e| rework::error(e.code()))?;
-                let pin = runtime.routes.coordinator_pin(root, saved.as_ref().unwrap_or(&json!({})))
+                let (route, pin) = crate::native_runtime::start_coordinator(&*runtime.routes, root, saved.as_ref())
                     .map_err(|e| rework::error(e.code()))?;
                 (route, pin)
             };
@@ -2340,8 +2404,63 @@ impl Runtime {
     }
     /// The coordinator route of a task: its explicit choice, else the route
     /// pinned when it started, else the owner default. An explicit or pinned
-    /// route never needs a resolvable owner default.
+    /// route never needs a resolvable owner default. A stored choice that is no
+    /// longer allowed (model removed from the coordinator list, unknown route,
+    /// effort outside the model's range that cannot be clamped) never stops the
+    /// task: it runs on the configured default coordinator and a quiet
+    /// `NATIVE_ROUTE_FALLBACK` event records the substitution.
     pub(super) async fn coordinator_route(
+        &self,
+        task: &str,
+        fallback: Option<crate::native_sessions::SessionRoute>,
+    ) -> CoreResult<crate::native_sessions::SessionRoute> {
+        let stored = self.stored_coordinator_route(task, fallback).await;
+        let error = match stored {
+            Ok(route) => return Ok(route),
+            Err(e) if e.code() == "native_task_route_unavailable"
+                || e.code() == "unsupported_dependent_setting" => e,
+            Err(e) => return Err(e),
+        };
+        // The nearest allowed choice: the same model with its effort moved into
+        // the allowed range when it is still listed, else the default coordinator.
+        let mut stored = self.task_settings(task).await.unwrap_or(Value::Null);
+        if stored["model"].as_str().is_none_or(str::is_empty) {
+            if let Some(id) = self.coordinator_pin(task).await.ok().flatten()
+                .and_then(|p| p["route_id"].as_str().map(str::to_owned))
+            {
+                stored = json!({"model":id});
+            }
+        }
+        let Ok(route) = self.routes.fallback_coordinator(&self.host.root, &stored) else {
+            return Err(error);
+        };
+        let record = json!({"reason":error.code(),
+            "from":{"model":stored["model"],"effort":stored["effort"]},
+            "to":{"connection":route.connection,"model":route.model,"parameters":route.parameters}});
+        let t = task.to_owned();
+        self.host
+            .executor
+            .write(move |db| {
+                let last: Option<String> = db
+                    .query_row(
+                        "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='NATIVE_ROUTE_FALLBACK' ORDER BY id DESC LIMIT 1",
+                        [&t],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let same = last
+                    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                    .is_some_and(|v| v == record);
+                if !same {
+                    lifecycle::event_tx(db, &t, "NATIVE_ROUTE_FALLBACK", record)?;
+                }
+                Ok(())
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        Ok(route)
+    }
+    async fn stored_coordinator_route(
         &self,
         task: &str,
         fallback: Option<crate::native_sessions::SessionRoute>,

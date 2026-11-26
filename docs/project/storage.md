@@ -83,10 +83,50 @@ a failed link does not erase the draft.
 Task state is durable before recovery decisions. In-memory state may accelerate
 reads but cannot be the only record of a mutation or background-task failure.
 
+## Commit durability
+
+The writer groups commits. Ordinary write bodies (`StoreExecutor::write`) that are
+already queued run together in one `BEGIN IMMEDIATE` … `COMMIT`: at most 64 bodies,
+and no further body is taken once the group has run for 2 ms. The writer never waits
+for companions, so a lone write commits at once. Each body runs inside its own
+savepoint. A body that fails is rolled back alone and gets its own error. The other
+bodies of the group still commit. Every reply, success or failure, is sent only
+after the shared COMMIT returns, in submission order. A caller therefore never sees
+success for a write that is not durable, exactly as with one commit per write. If
+SQLite rolls back the whole transaction (for example a full disk or an I/O error),
+nothing in the group committed and every body that had succeeded gets that error.
+Jobs that manage their own transactions (publications and owner jobs) are never
+grouped: they end the group and run alone, in FIFO order. The owner reserve and the
+order of deferred display writes are unchanged.
+
+Read-only document tools (`read_report`, `read_draft`, `list_reports`,
+`tools_discover`) run on the reader pool, against a WAL snapshot, and never queue
+behind the writer or its fsync. A reader-pool store refuses every write with
+`storage_read_lane`. A read that needs a crash reconciliation write is then repeated
+whole on the writer. The `REPORT_PAGE_READ` receipt of a report page is submitted to
+the writer without waiting for it, so the reply does not wait for its commit. It is
+an ordinary grouped write with `synchronous=FULL`, ordered before every later write
+of the same process, including the review result that relies on it. If that write
+fails, the review gate still finds the report unread and asks for it again. An
+oversized reply still uses the writer to store its deferred body.
+
+Every commit uses `synchronous=FULL`, with one exception. A batch of deferred display
+writes (`StoreExecutor::write_deferred`, such as streamed worker message chunks) that
+commits on its own uses `synchronous=NORMAL`. That covers a batch committed when its
+window ends, when it is full, before a publication or owner job, or at shutdown. In
+WAL mode that commit does not wait for an fsync of the log. The connection is back
+at FULL before the next write, and a later FULL commit makes every earlier relaxed
+commit durable together with its own. The risk is limited to a power failure or an
+operating-system crash, never a process crash. It can lose the newest display rows
+committed since the last FULL commit. The database stays consistent. State
+transitions, results, receipts, owner actions and every other write commit FULL,
+and so do deferred rows that commit in the same group as such a write.
+
 ## Rust Core storage domain
 
 The additive `crates/cortex-core` library preserves SQLite application ID
-1129467218 and format 12, WAL, foreign keys and synchronous=FULL. It is the
+1129467218 and format 12, WAL, foreign keys and synchronous=FULL (NORMAL only for
+deferred display batches, see [Commit durability](#commit-durability)). It is the
 store of the Rust runtime. Project/channel resolution selects only
 `.cortex` or `.cortex-dev`; disposable tests never migrate the owner's store.
 
@@ -103,6 +143,13 @@ supply already authenticated task/thread identities: the library is not a
 transport authorization boundary. Reads in writable modes reconcile the selected
 task under a publication operation lock; immutable inspection never reconciles.
 A file/digest conflict is an error, not evidence of publication success.
+A published file whose digest was verified in its exact current state (inode, size, mtime and
+ctime) is not re-read for the next publication, catalogue or page; any change of that state forces a
+real hash. A publication keeps the previous pipeline by a hard link instead of a second copy, and
+recovery drops that link if an install was interrupted before the replacing rename. Initializing
+opens write the header pragmas only when they differ, and a process skips the per-table column
+check for a schema cookie it already validated. Recovery capsule sections read only the newest rows
+that can fit their budget; an inexact total carries `total_is_lower_bound`.
 
 Initialize never opens an existing database file with a plain descriptor:
 closing it would drop the process's POSIX locks, including those of live SQLite
@@ -164,7 +211,7 @@ runs below.
 
 ## Runtime indexes and offloaded worker activity
 
-The runtime adds `runtime_events_type` on `runtime_events(type, task_id, id)` and `capacity_by_attempt` on `capacity_reservations(attempt_id)`. The initializing schema also adds `task_events_by_activity_ref` on `task_events(task_id, json_extract(payload_json,'$.activity_ref'), id)` and `runtime_requests_by_operation` on `runtime_requests(task_id, actor, operation)`, and `host_updates_by_call` on `host_updates(session_id, json_extract(update_json,'$.toolCallId'), seq)` for updates whose `update_json` is valid JSON. The conversation history and coordinator pages find a tool call's earlier updates through `host_updates_by_call`; their lookups name the same `json_valid(update_json)` condition so SQLite can use the partial index. A malformed update is still stored and is never evaluated by it. Worker split-tool lookups use unary `+` on assignment and ordering expressions so SQLite chooses the activity index without `ANALYZE`. These are `CREATE INDEX IF NOT EXISTS` statements in the initializing schema. A writable `OpenMode::Initialize` open therefore installs them on an existing format-12 database, without a format change. Inspection and non-initializing opens never install them. The install runs inside that open's exclusive `.access.lock` and its `BEGIN IMMEDIATE` schema transaction, so a missing index is built once, the first time the runtime writer opens the project. Store validation checks the header, table groups and columns, never indexes. A store without one of these indexes is therefore still accepted, and its lookups are only slower. A store that has them is accepted by a binary whose schema predates them. The same install adds `host_transcript_by_message` on `host_transcript(session_id, kind, message_id)` once the `message_id` column exists, so it is also built when a format-11 store is upgraded. A worker page reads that worker's narration (agent messages whose identity starts with `{attempt}:`) as the range [`{attempt}:`, `{attempt};`) through it, instead of walking every message of the session once per worker. After the install, every initializing open runs SQLite's `PRAGMA optimize=0x10002` with `analysis_limit=1000`: it writes planner statistics (`sqlite_stat1`) for a table never analyzed or grown many times over since, sampling a bounded number of rows, so its cost does not grow with the store. It runs under the same exclusive `.access.lock` in SQLite's own transaction. Read-only and inspection opens neither build the indexes nor write statistics; they accept a store with or without them. On a private copy of a 191 MB release store, the first initializing open built the index and the statistics in 116 ms and 41 ms. No `VACUUM` runs on open: it would rewrite the whole file under the exclusive lock while every read waits, and that store had no free pages to reclaim. Task retention keeps its own `VACUUM`.
+The runtime adds `runtime_events_type` on `runtime_events(type, task_id, id)` and `capacity_by_attempt` on `capacity_reservations(attempt_id)`. It also adds `runtime_events_by_tool_call_ref` on `runtime_events(task_id, json_extract(payload_json,'$.tool_call_ref'), type, id)` and the partial `runtime_events_finished_ref` on `runtime_events(task_id, json_extract(payload_json,'$.receipt.tool_call_ref'), id) WHERE type='NATIVE_COMMAND_FINISHED'`, so a tool-call or command-receipt lookup in one task no longer parses every `TOOL_COMPLETED`, `TOOL_AUTHORIZED`, `COMMAND_*` or `NATIVE_COMMAND_*` payload of that task (the first writable open builds them under the exclusive access lock; a lookup that can end on a missing reference took seconds on a large store before). The saved-engine-retry notice read in the board projection names `assignment_ref IS NULL`, so it uses `task_events_by_assignment` instead of parsing every worker-activity `progress` payload. The initializing schema also adds `task_events_by_activity_ref` on `task_events(task_id, json_extract(payload_json,'$.activity_ref'), id)` and `runtime_requests_by_operation` on `runtime_requests(task_id, actor, operation)`, and `host_updates_by_call` on `host_updates(session_id, json_extract(update_json,'$.toolCallId'), seq)` for updates whose `update_json` is valid JSON. The conversation history and coordinator pages find a tool call's earlier updates through `host_updates_by_call`; their lookups name the same `json_valid(update_json)` condition so SQLite can use the partial index. A malformed update is still stored and is never evaluated by it. Worker split-tool lookups use unary `+` on assignment and ordering expressions so SQLite chooses the activity index without `ANALYZE`. These are `CREATE INDEX IF NOT EXISTS` statements in the initializing schema. A writable `OpenMode::Initialize` open therefore installs them on an existing format-12 database, without a format change. Inspection and non-initializing opens never install them. The install runs inside that open's exclusive `.access.lock` and its `BEGIN IMMEDIATE` schema transaction, so a missing index is built once, the first time the runtime writer opens the project. Store validation checks the header, table groups and columns, never indexes. A store without one of these indexes is therefore still accepted, and its lookups are only slower. A store that has them is accepted by a binary whose schema predates them. The same install adds `host_transcript_by_message` on `host_transcript(session_id, kind, message_id)` once the `message_id` column exists, so it is also built when a format-11 store is upgraded. A worker page reads that worker's narration (agent messages whose identity starts with `{attempt}:`) as the range [`{attempt}:`, `{attempt};`) through it, instead of walking every message of the session once per worker. After the install, every initializing open runs SQLite's `PRAGMA optimize=0x10002` with `analysis_limit=1000`: it writes planner statistics (`sqlite_stat1`) for a table never analyzed or grown many times over since, sampling a bounded number of rows, so its cost does not grow with the store. It runs under the same exclusive `.access.lock` in SQLite's own transaction. Read-only and inspection opens neither build the indexes nor write statistics; they accept a store with or without them. On a private copy of a 191 MB release store, the first initializing open built the index and the statistics in 116 ms and 41 ms. No `VACUUM` runs on open: it would rewrite the whole file under the exclusive lock while every read waits, and that store had no free pages to reclaim. Task retention keeps its own `VACUUM`.
 
 A read that an owner is waiting on never fails because Cortex itself holds the exclusive access lock. A project's migration or initialization (index install, `PRAGMA optimize`, format upgrade) can hold `.access.lock` for tens of seconds on a slow disk. Owner reads therefore open the store with `Store::open_waiting` (the Workspace service's `LiveReadOnly` opens in `machine/context.rs`, the native projection reader in `core_host.rs`, and the executor's read lanes), and a store opened that way keeps the same wait on every later `read`. The wait polls the shared lock with a growing back-off (10 ms up to 250 ms) in the calling thread, so it adds no threads beyond the existing read lanes, and it ends after `READ_ACCESS_WAIT` (10 minutes). Only a holder that outlasts that still yields `busy`; Workspace clients treat `busy` (and the "project store is busy" diagnostic) on a read as a waiting state, keeping the skeleton or last confirmed view and reading again, never as an error. Ordinary `Store::open` keeps the two-second wait, and mutations, retention and every writable open still refuse `busy` at once rather than queue.
 
@@ -175,6 +222,17 @@ Worker-panel activity envelopes are redacted before they are persisted. An envel
 The Workspace service (`crates/workspace-service/src/storage_retention.rs`) runs one maintenance pass when a local project is activated and then every 60 minutes. It archives Done tasks after `autoArchiveDays` (default 7), purges archives older than `retentionDays` (default 30, counted from archive time; a Done task newly archived by sprint closure counts from its completion time plus `autoArchiveDays` instead, and an unknown completion time permits no age purge, see [closing sprints](../cortex-workspace/local-task-execution.md#editing-saved-tasks-and-closing-sprints)) while `automaticArchivePurge` is true (the default), and removes unreferenced attachment files after `unreferencedAttachmentRetentionDays` (default 1). The attachment sweep reads committed answer references from every retained project store, including projects that are removed from the active list and can be added again; if any such store cannot be read, the sweep deletes nothing. Settings and ranges: [configuration](../configuration.md#workspace-storage-retention).
 
 Deletion goes through the same exclusive-lock, journaled core path as manual cleanup (`crates/cortex-core/src/store/retention.rs`) and rechecks closure, age and identity there. Only a closed task with a verified linked execution in COMPLETED, FAILED or CANCELLED state qualifies; open questions, unsettled attempts, running nodes, unreleased reservations, possibly live processes, loaded sessions and busy stores protect a task. A scheduled pass never forces. Dirty worktrees are retained, unmerged work needs the existing discard authorization, and only a clean Workspace-created task worktree is removed, without force. Migration backups and qualification evidence are never expired. A scheduled purge frees pages for reuse but does not run a whole-database `VACUUM`, so the database file may not shrink immediately; manual cleanup still reports reclamation.
+
+## Closed-task activity compaction
+
+A worker streams thousands of `progress` events (`kind=worker_activity`) per attempt: thought chunks, usage updates and every intermediate state of a tool call. On a measured 4.2 GB store they were 788,000 rows and 1.2 GB of payload, about 36% of the database. The Workspace service's hourly retention pass (see [automatic Workspace retention](#automatic-workspace-retention)) therefore compacts them for closed tasks (`Store::compact_closed_task_activity`, `crates/cortex-core/src/store/compaction.rs`).
+
+- **Which tasks.** `runtime_tasks.state` COMPLETED, FAILED or CANCELLED with `updated_at` older than 7 days, no unreleased reservation, no running node and no live process (the same `quiet` check that guards deletion), re-checked inside every write transaction. Open, waiting, paused and recovering tasks, and anything newer, are never touched.
+- **What is removed.** Only `progress` rows of `worker_activity` whose `tool_kind` the worker panel never displays (thought chunks, usage updates, mode/config/command/session updates, turn markers, wait notifications), and rows in `pending` or `in_progress` state whose `activity_ref` has a later `completed` or `failed` row. The newest 200 `progress` events of the task stay.
+- **What stays.** Every other event type (delegation, assignment, worker result and question, user message, decisions), every other `progress` kind, all terminal tool states, an unfinished tool call's only state, and all rows of other tables (receipts, results, reports, state events, transcripts).
+- **Summary.** One `progress` event per task, `dedup_key` `activity_compaction`, `kind` `activity_compacted`, keeps the removed row and payload-byte counts, the policy version and the newest event id covered. A task whose marker already covers its newest event is skipped without scanning.
+- **How it runs.** Batches of 2,000 rows, each its own `BEGIN IMMEDIATE` transaction under the shared access lock (a busy store skips the pass, nothing waits), 100 ms apart, at most 200 batches or 20 s per pass, and no pass when the one-minute load average per CPU is above 0.5. It resumes at the next hourly pass. It publishes no Workspace invalidation: nothing a client shows changes for a closed task. No schema or format change; it needs no migration.
+- **Space.** Deleted pages go to the SQLite free list and are reused by later writes, so the file stops growing but does not shrink by itself: databases created so far have `auto_vacuum=NONE`. If a store was created with `auto_vacuum=INCREMENTAL`, the pass runs `PRAGMA incremental_vacuum(4000)` after deleting. Returning the space of an existing store requires a one-off `VACUUM` (offline or by the manual cleanup), and switching it to incremental vacuum requires `PRAGMA auto_vacuum=INCREMENTAL` followed by a `VACUUM`; both rewrite the whole file under the exclusive lock and are not run automatically. On a private copy of the 4.2 GB store the pass removed 439,073 of 788,224 progress rows (255 MB of payload, 589 MB of free pages with their indexes) and a following `VACUUM` brought the file to 3.49 GB.
 
 ## Explicit task retention
 

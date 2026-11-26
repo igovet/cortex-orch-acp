@@ -681,6 +681,23 @@ fn recorded_changes(
     }
     Ok((paths, complete))
 }
+/// Whether review must assume the work changed the checkout. Use task-attributed
+/// effects, not the shared checkout delta (which can belong to another writer).
+pub(crate) fn has_checkout_changes(db: &Connection, task: &str) -> CoreResult<bool> {
+    let written: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND
+         type IN ('NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED',
+                  'VERIFICATION_REVISION_CHANGED','RUNTIME_UNCERTAINTY_RECORDED'))",
+        [task],
+        |r| r.get(0),
+    )?;
+    if written {
+        return Ok(true);
+    }
+    let (paths, complete) = recorded_changes(db, task, None)?;
+    Ok(!paths.is_empty() || complete.is_err())
+}
+
 /// `read_report` characters per page.
 const REPORT_PAGE_CHARS: i64 = 4000;
 /// What a reviewer is handed besides its objective: the files the work under review

@@ -537,7 +537,6 @@ mod tests {
                     db,
                     "runtime",
                     "assignment",
-                    None,
                 )?;
                 assert!(items
                     .iter()
@@ -569,6 +568,23 @@ mod tests {
     }
 
     #[test]
+    fn unowned_runtime_commands_are_never_a_workers_activity() {
+        let f = Fixture::new("command_run");
+        f.settle(Some(b"x"), false);
+        f.store.write(|db| {
+            lifecycle::event_tx(db, "runtime", "NATIVE_COMMAND_STARTED", json!({"ref":"host:1","argv":["cargo","test"]}))?;
+            Ok(())
+        }).unwrap();
+        f.store.read(|db| {
+            for w in ["assignment", "another-assignment"] {
+                let items = crate::native_owner_controls::worker_commands(db, "runtime", w)?;
+                assert!(items.iter().all(|r| r["toolCallRef"] != "host:1"), "{w}");
+            }
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
     fn command_output_worker_feed_links_only_its_brokered_receipt() {
         for operation in ["command_run", "outside_command", "project_git"] {
             let f = Fixture::new(operation);
@@ -579,7 +595,6 @@ mod tests {
                         db,
                         "runtime",
                         "assignment",
-                        None,
                     )?;
                     assert_eq!(items.len(), 1);
                     let row = &items[0];
@@ -596,15 +611,13 @@ mod tests {
                     assert!(crate::native_owner_controls::worker_commands(
                         db,
                         "runtime",
-                        "another-assignment",
-                        Some("another-assignment")
+                        "another-assignment"
                     )?
                     .is_empty());
                     assert!(crate::native_owner_controls::worker_commands(
                         db,
                         "other",
-                        "assignment",
-                        None
+                        "assignment"
                     )?
                     .is_empty());
                     Ok(())

@@ -121,6 +121,13 @@ pub(crate) fn call_key(name: &str, arguments: &Value) -> u64 {
     hash(&(name, arguments.to_string()))
 }
 
+/// Whether a `command_status` result reports a live command (running or settling).
+fn still_running(value: &Value) -> bool {
+    let state = value.get("structuredContent").unwrap_or(value);
+    state["settled"] != true
+        && matches!(state["state"].as_str(), Some("running" | "settling"))
+}
+
 /// Marks a call in flight until dropped, also when the call's future is cancelled.
 pub(crate) struct InFlight<'a>(&'a TurnGuard);
 impl Drop for InFlight<'_> {
@@ -200,6 +207,12 @@ impl TurnGuard {
                 }
             }
             Outcome::Result(value) => {
+                // Polling a command that is still running (or settling) is waiting, not a
+                // loop: it is neither counted nor treated as progress. A finished command
+                // re-polled with the same settled result still counts.
+                if name == "command_status" && still_running(value) {
+                    return;
+                }
                 // A call new to this turn is progress of a kind (a new read, an edit,
                 // a submission): the identical-result counts start over.
                 if new {
@@ -318,6 +331,32 @@ mod tests {
         assert!(g.take_trip().is_none());
         for _ in 0..REPEATED_RESULT_LIMIT {
             read(&g, json!({}));
+        }
+        assert_eq!(g.take_trip().unwrap().rule, "tool_loop");
+    }
+
+    fn status(g: &TurnGuard, value: &Value) {
+        let args = json!({"tool_call_ref":"native-command:x"});
+        let Ok(_call) = g.enter("command_status") else { return };
+        g.finish("command_status", call_key("command_status", &args), Outcome::Result(value));
+    }
+
+    #[test]
+    fn polling_a_running_command_is_waiting_not_a_loop() {
+        let g = guard(true);
+        let running = json!({"structuredContent":{"state":"running","tool_call_ref":"native-command:x","complete":false,"settled":false},"isError":false});
+        for _ in 0..50 {
+            status(&g, &running);
+        }
+        assert!(g.take_trip().is_none());
+    }
+
+    #[test]
+    fn a_finished_command_polled_again_and_again_ends_the_turn() {
+        let g = guard(true);
+        let done = json!({"structuredContent":{"state":"finished","tool_call_ref":"native-command:x","complete":true,"settled":true,"exit_code":0},"isError":false});
+        for _ in 0..REPEATED_RESULT_LIMIT {
+            status(&g, &done);
         }
         assert_eq!(g.take_trip().unwrap().rule, "tool_loop");
     }

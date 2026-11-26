@@ -7,12 +7,13 @@ this is not a recommendation to copy logins, move the database or enable new rou
 
 - **Task and short text:** the engine starts directly as the owner. Verified
   binary selection and ACP mode checks are not an OS filesystem jail.
-- **Catalogue:** the separate verified launch uses Bubblewrap with user, PID and
-  IPC namespaces, a read-only host-root bind and writable native state mounts.
-  That includes the existing OpenCode data directory, not just the database.
-- **Version check:** a separate network-disabled Bubblewrap probe uses a
-  throwaway HOME and a read-only host-root bind. It does not need a native
-  database grant.
+- **Catalogue:** the separate verified launch runs on the host under Landlock:
+  writes only to its private scratch, the OpenCode data directory (not `bin`)
+  and the owner's tool directories; the owner's keys and credential stores stay
+  unreadable (OpenCode's own sign-in excepted). Its configuration comes from
+  Cortex's import (`XDG_CONFIG_HOME` points at the scratch), not the owner's files.
+- **Version check:** a separate Landlock probe uses a throwaway HOME and writes
+  only its scratch. It does not need a native database grant.
 
 The catalogue and version implementations are in
 `crates/workspace-service/src/machine/config_opencode.rs`; the session launch is in
@@ -189,9 +190,8 @@ In the tested 2.0.19 build, a session's MCP servers are **not** separate model t
 
 Each `opencode acp` starts a private `opencode serve` child on `127.0.0.1` and keeps its Basic-auth password in its environment. The OpenCode jail runs in its own user, PID and IPC namespaces (`engine_jail(isolate_processes=True)`).
 
-- Every other bubblewrap sandbox — other engine jails, `command_run` — lives in a sibling user namespace. The kernel refuses it `/proc/<pid>/environ` of the OpenCode processes: reading it needs `CAP_SYS_PTRACE` in the target's user namespace. This was checked on this host for a plain and an isolated target, and in the qualification test for the real `serve` child.
+- The Rust catalogue launch runs in its own Landlock domain. Another confined process (`command_run`, a contained MCP server, another catalogue read) is in a sibling domain, and Landlock refuses it ptrace-mode access to the OpenCode processes, including `/proc/<pid>/environ`. (The bullets above about the jail's namespaces describe the former Python engine jail.)
 - Processes in the parent user namespace can still read it. That means the Cortex runtime itself and your own shell, both already inside your trust boundary.
-- This relies on unprivileged bubblewrap giving every sandbox its own user namespace. A setuid `bwrap` is refused (`opencode_process_isolation_unavailable`).
 - Cortex never reads, uses or relays the password.
 - Inside its own jail, the model's shell could reach its own control server, but that grants nothing its shell cannot already do in that jail.
 

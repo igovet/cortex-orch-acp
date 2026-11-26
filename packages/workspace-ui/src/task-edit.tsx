@@ -32,7 +32,7 @@ export function EditTask(props: { taskId: string; onClose: () => void }) {
     : saving() ? "Saving…" : undefined;
   const worktreeOff = () => current()?.project.hasGit === false ? ws.t("worktreeNeedsGit")
     : !ws.can(FEATURES.taskWorktrees) ? ws.t("noTaskWorktrees")
-    : ws.store.state().sprints.some(s => s.id === initial.sprintId && s.runMode === "automatic") ? ws.t("worktreeNeedsManualOrHybrid") : undefined;
+    : ws.store.state().sprints.some(s => s.id === initial.sprintId && s.runMode === "automatic" && s.checkout?.shared !== true) ? ws.t("worktreeNeedsManualOrHybrid") : undefined;
   const why = () => off() ?? (checkout() === "worktree" ? worktreeOff() : undefined) ?? (!version && ws.store.mode === "real" ? "Refresh this task before editing." : !title().trim() || !text().trim() ? "Write a title and description first." : undefined);
   const save = async () => {
     if (why() || files.busy()) return;

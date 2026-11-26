@@ -229,3 +229,8 @@ export function queueStall(index: WorkspaceIndex, sprint: Sprint): { reason: str
   return dep ? { reason: `${first.task.title} waits for ${dep.task.title} to reach ${readyStep(dep.task, dep.target, dep.project.hasGit)}`, taskId: dep.id } : { reason: `${first.task.title} waits for a task that is not loaded`, taskId: null };
 }
 export const SPRINT_CLOSE_NOTE = "The sprint and its tasks move to the Archive, including tasks that haven’t started. The automatic queue stops. Nothing is discarded: worktrees, branches and unmerged work are kept.";
+
+/** A worktree sprint whose tasks each get their own worktree: every sprint saved before the shared option, and a new one that chose it. Only Manual runs these. */
+export const separateWorktrees = (sprint: Pick<Sprint, "checkout">) => sprint.checkout?.kind === "worktree" && sprint.checkout.shared !== true;
+/** The checkout line of a sprint, as shown on its page and settings. */
+export const sprintCheckoutLabel = (checkout: NonNullable<Sprint["checkout"]>) => checkout.kind !== "worktree" ? "Project folder" : checkout.shared === true ? "One worktree for the whole sprint" : "Separate worktree per task";

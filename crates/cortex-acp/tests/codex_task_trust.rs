@@ -209,28 +209,16 @@ async fn task_session_leaves_owner_codex_config_byte_identical() {
         "{starts}"
     );
     if !workers {
-        println!("namespace-restricted host: coordinator sessions asserted; the worker session requires real namespaces");
+        println!("Landlock-less host: coordinator sessions asserted; the worker session requires Landlock");
     }
 }
 fn namespaces_available() -> bool {
-    let available = std::process::Command::new("/usr/bin/bwrap")
-        .args([
-            "--die-with-parent",
-            "--unshare-pid",
-            "--ro-bind",
-            "/",
-            "/",
-            "--proc",
-            "/proc",
-            "--",
-            "/bin/true",
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .is_ok_and(|o| o.status.success());
+    // Worker commands run under Landlock; the kernel lists it among active LSMs.
+    let available = std::fs::read_to_string("/sys/kernel/security/lsm")
+        .is_ok_and(|l| l.split(',').any(|m| m.trim() == "landlock"));
     assert!(
         available || std::env::var_os("CORTEX_REQUIRE_NAMESPACE_FIXTURES").is_none(),
-        "the worker journey requires real namespaces"
+        "the worker journey requires Landlock"
     );
     available
 }

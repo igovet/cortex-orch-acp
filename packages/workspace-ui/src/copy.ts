@@ -66,6 +66,7 @@ export const COPY = {
   noTaskWorktrees: "This service does not support separate task worktrees.",
   worktreeNeedsGit: "A separate worktree needs a Git repository.",
   worktreeNeedsManualOrHybrid: "Automatic uses the project folder. Choose Manual or Hybrid for a separate worktree.",
+  separateWorktreesManualOnly: "Separate worktrees per task run in Manual mode only. Use one worktree for the whole sprint for Hybrid.",
   worktreeUnavailable: "The task’s worktree is unavailable. Restore the original checkout and refresh, or use task history.",
   deleteWorktreeFolder: "Delete worktree folder",
   closeDeleteWorktreeFolder: "Close and delete worktree folder",

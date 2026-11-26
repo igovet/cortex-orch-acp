@@ -311,7 +311,7 @@ async fn run_verifier(
     };
     Ok(
         json!({"tool_call_ref":format!("native-command:{}",identity()?),
-        "argv":argv,"cwd":root,"profile":"native-readonly-bubblewrap","observation":receipt}),
+        "argv":argv,"cwd":root,"profile":"native-readonly-landlock","observation":receipt}),
     )
 }
 async fn git(root: &Path, args: &[&str]) -> CoreResult<Vec<u8>> {
@@ -425,7 +425,7 @@ pub(super) async fn checkout_preflight(
                 loop {
                     match child.try_wait()? {
                         Some(status) if status.success() => break,
-                        // Bubblewrap itself can exit 1. Only our probe's
+                        // The sandboxed shell itself can exit 1. Only our probe's
                         // distinct code establishes a missing executable.
                         Some(status) if status.code() == Some(42) => return Err(CoreError::Refused("verification_executable_unavailable")),
                         Some(_) => return Err(CoreError::Refused("native_verification_sandbox_unavailable")),
@@ -541,7 +541,7 @@ async fn verification_program_available(
 }
 fn clean_verifier_receipt(receipt: &Value, stdout: &str) -> bool {
     let observed = &receipt["observation"];
-    receipt["profile"] == "native-readonly-bubblewrap"
+    receipt["profile"] == "native-readonly-landlock"
         && observed["complete"] == true
         && observed["output_truncated"] == false
         && observed.get("failure") == Some(&Value::Null)
@@ -551,7 +551,7 @@ fn clean_verifier_receipt(receipt: &Value, stdout: &str) -> bool {
 }
 
 /// Both the host control and extracted Dev startup use the real planning and
-/// verification paths, including the service's native environment and Bubblewrap.
+/// verification paths, including the service's native environment and Landlock.
 pub(crate) async fn qualification_verifier(root: PathBuf) -> CoreResult<String> {
     const DEADLINE: Duration = Duration::from_secs(10);
     let argv = ["/usr/bin/cat".to_owned(), "file".to_owned()];
@@ -1944,7 +1944,7 @@ mod tests {
     #[test]
     fn qualification_verifier_refuses_incomplete_or_different_receipts() {
         let valid = json!({
-            "profile":"native-readonly-bubblewrap",
+            "profile":"native-readonly-landlock",
             "observation":{"complete":true,"output_truncated":false,"failure":null,
                 "exit_code":0,"stdout":"confirmed","stderr":""}
         });
@@ -2054,11 +2054,11 @@ mod tests {
             r#"
                 test "$(cat "$1")" = 'benign host input'
                 if touch "$HOME/unapproved" 2>/dev/null; then exit 86; fi
-                if test -r .cortex/private || test -r .cortex-dev/private; then exit 87; fi
+                if cat .cortex/private 2>/dev/null || cat .cortex-dev/private 2>/dev/null; then exit 87; fi
                 cc main.c -o "$TMPDIR/compiler-probe"
                 "$TMPDIR/compiler-probe"
                 printf 'retained\n' > outputs/marker
-                printf 'discarded\n' > "$2"
+                if (printf 'refused\n' > "$2") 2>/dev/null; then exit 88; fi
                 printf '%s\n' "$TMPDIR"
             "#.into(),
             "verifier-fixture".into(),
@@ -2365,7 +2365,7 @@ mod tests {
         assert_eq!(observed["complete"], true, "{receipt}");
         assert_eq!(observed["output_truncated"], false);
         assert_eq!(observed["failure"], Value::Null);
-        assert_eq!(receipt["profile"], "native-readonly-bubblewrap");
+        assert_eq!(receipt["profile"], "native-readonly-landlock");
         assert_eq!(receipt["argv"], json!(argv));
         assert_eq!(receipt["cwd"], json!(root));
 
@@ -2410,7 +2410,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let f = Fixture::new();
         if !sandbox_available(&f.0).await {
-            eprintln!("skipped: bubblewrap cannot create user namespaces on this host");
+            eprintln!("skipped: Landlock is unavailable on this host");
             return;
         }
         let s = crate::tool_path::tests::Scratch::new("admission");

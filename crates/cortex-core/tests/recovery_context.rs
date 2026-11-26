@@ -694,3 +694,48 @@ test result: FAILED. 2 passed; 1 failed\nStep 2: exit=101, 122.47s\nStep 3: exit
     .unwrap();
     assert!(capsule(&s)["verification_failure"].is_null());
 }
+
+#[test]
+fn bounded_reads_keep_the_newest_rows_and_mark_a_lower_bound_total() {
+    let p = Project::new();
+    let s = p.open();
+    TaskMachine::new(&s)
+        .create("t", "Bounded goal", "owner")
+        .unwrap();
+    s.write(|db| {
+        for n in 0..40 {
+            lifecycle::event_tx(db, "t", "WORKER_COMPLETED", json!({"assignment_ref":format!("a{n}"),"attempt_id":"x","result":{"report_ref":"r"}}))?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let find = |v: &serde_json::Value| {
+        v["clipping"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["section"] == "retained_decisions")
+            .cloned()
+    };
+    // Few rows: everything that fits is shown and no notice appears or is inexact.
+    let v = s.read(|db| snapshot(db, "t")).unwrap();
+    assert!(find(&v).map_or(true, |n| n.get("total_is_lower_bound").is_none()));
+    // Many rows: the newest are shown, the total is marked as a lower bound.
+    s.write(|db| {
+        for n in 40..2000 {
+            lifecycle::event_tx(db, "t", "WORKER_COMPLETED", json!({"assignment_ref":format!("a{n}"),"attempt_id":"x","result":{"report_ref":"r"}}))?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let v = s.read(|db| snapshot(db, "t")).unwrap();
+    let text = v.to_string();
+    assert!(text.contains("\"a1999\""), "newest decision is kept");
+    let notice = find(&v).unwrap();
+    assert_eq!(notice["total_is_lower_bound"], true);
+    assert_eq!(
+        notice["total"].as_i64().unwrap(),
+        notice["included"].as_i64().unwrap() + notice["omitted"].as_i64().unwrap()
+    );
+    assert!(notice["omitted"].as_i64().unwrap() > 0);
+}

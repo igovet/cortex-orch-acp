@@ -1,5 +1,5 @@
 //! Durable command identities, private full output and owner-only running handles.
-//! Brokered execution uses bubblewrap; host routing requires the outside-command policy.
+//! Brokered execution runs under Landlock (native_command_live); host routing requires the outside-command policy.
 use crate::{
     native_project::{digest, safe, writable},
     native_sessions::ClientPermissions,
@@ -18,8 +18,8 @@ use serde_json::{json, Value};
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    os::unix::fs::OpenOptionsExt,
-    path::PathBuf,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
     time::Duration,
@@ -109,6 +109,8 @@ pub(super) fn settle_unrecorded_tx(
     ] {
         object.insert(field.to_owned(), entry);
     }
+    // A not-started receipt always names why: the caller's cause, else the settlement evidence.
+    let cause = cause.or((!started).then_some(evidence).filter(|e| !e.is_empty()));
     if let Some(cause) = cause {
         // Why the payload never left preparation: a fixed reason code.
         object.insert("cause".to_owned(), json!(cause));
@@ -197,10 +199,10 @@ pub(super) async fn check_digest(root: PathBuf, argv: &[String]) -> Option<Strin
     if cortex_core::lifecycle::completion::trivial_command(argv) {
         return None;
     }
-    crate::native_effects::observe(root)
-        .await
-        .ok()
-        .and_then(|e| e.project_digest)
+    // The project digest alone: the same value `observe` returns, without listing
+    // or visiting Git-ignored files (a dependency or media folder can hold most of a
+    // project's entries).
+    crate::native_effects::observe_digest(root).await.ok()
 }
 pub(super) fn supports(n: &str) -> bool {
     matches!(n, "command_run" | "project_git")
@@ -348,8 +350,29 @@ pub(super) fn read_output(
         "integrity_verified":native,"next_offset":if offset+(b.len() as u64)<count as u64{json!(offset+b.len() as u64)}else{Value::Null},"complete":offset==0&&b.len() as i64==count}),
     ))
 }
+/// A private scratch directory removed when the host command ends.
+struct ScratchDir(PathBuf);
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 /// Called only after native_access commits consent for the exact request.
 #[allow(clippy::too_many_arguments)]
+/// The only remaining guard on a host command: deleting or overwriting a live Cortex store
+/// file (`.cortex/*.sqlite3*`, `.cortex-dev/*.sqlite3*`) named in the argv.
+fn seals_live_store(argv: &[String]) -> bool {
+    let names_store = |t: &str| {
+        t.contains("cortex.sqlite3") && (t.contains(".cortex/") || t.contains(".cortex-dev/") || t.starts_with("cortex.sqlite3"))
+    };
+    let destructive = |t: &str| {
+        let base = t.rsplit('/').next().unwrap_or(t);
+        matches!(base, "rm" | "unlink" | "shred" | "truncate" | "dd" | "mv" | "tee" | "rsync" | "install" | "ln")
+    };
+    argv.iter().any(|t| names_store(t))
+        && (argv.iter().any(|t| destructive(t) || t.contains(" rm ") || t.contains(">") || t.starts_with("rm "))
+            || deletion(argv))
+}
 pub(super) async fn outside_capture(
     executor: Arc<StoreExecutor>,
     credential: Credential,
@@ -359,11 +382,15 @@ pub(super) async fn outside_capture(
     confirmed_mode: &str,
     mut cancel: watch::Receiver<bool>,
     rerouted: Option<Value>,
+    read_only: bool,
 ) -> CoreResult<Value> {
+    let confirmed_mode_auto = confirmed_mode == "auto";
     let c = credential.clone();
     let (task, dir, project_root, worker, goal) = recv(executor.publication(move |store| {
         let i = store.read(|db| channels::authenticate(db, &c.channel_id, c.secret(), true))?;
-        store.write(|db| writable(db, &i, None))?;
+        if !read_only && confirmed_mode_auto == false {
+            store.write(|db| writable(db, &i, None))?;
+        }
         let goal: Option<String> = store.read(|db| {
             Ok(db
                 .query_row(
@@ -381,6 +408,9 @@ pub(super) async fn outside_capture(
     })?)
     .await?;
     let argv: Vec<String> = serde_json::from_value(args["argv"].clone())?;
+    if seals_live_store(&argv) {
+        return Err(CoreError::Refused("cortex_live_store"));
+    }
     let reference = format!(
         "native-command:{}",
         &crate::native_effects::identity()?[..24]
@@ -416,10 +446,17 @@ pub(super) async fn outside_capture(
         Ok(())
     })?)
     .await?;
-    let (started_digest, listed) = tokio::join!(
-        check_digest(project_root.clone(), &argv),
-        crate::native_change_set::snapshot(project_root.clone())
-    );
+    // The "before" digest and listing run beside the launch, never ahead of it.
+    let launch = crate::native_change_set::Launch::default();
+    let before = {
+        let (r, a) = (project_root.clone(), argv.clone());
+        crate::native_change_set::Before::start(
+            launch.clone(),
+            project_root.clone(),
+            async move { check_digest(r, &a).await },
+            true,
+        )
+    };
     let (stop, mut stopped) = watch::channel(false);
     let (done, finished) = watch::channel(false);
     running.lock().await.insert(
@@ -446,12 +483,43 @@ pub(super) async fn outside_capture(
         Some(_) => crate::native_askpass::with_askpass(&argv),
         None => argv.clone(),
     };
-    let mut cmd = Command::new(&launched[0]);
+    let mut c = Command::new(&launched[0]);
+    c.args(&launched[1..]);
+    // Reads only: the real host readable at its real paths under Landlock, writes only
+    // to a private scratch (TMPDIR) and devices, the live Cortex stores hidden.
+    let scratch = if read_only {
+        let scratch = std::env::temp_dir().join(format!("cortex-outside-{}", crate::native_effects::identity()?));
+        std::fs::DirBuilder::new().mode(0o700).create(&scratch)?;
+        let mut writes = crate::native_sandbox::devices();
+        writes.push(scratch.clone());
+        let rules = crate::native_sandbox::Sandbox::host(&crate::native_sandbox::HostPolicy {
+            writes,
+            hidden: crate::native_sandbox::live_stores(&project_root),
+            ..Default::default()
+        })
+        .map_err(|_| CoreError::Refused("native_command_sandbox_unavailable"))?;
+        let rules = Arc::new(rules);
+        unsafe {
+            c.pre_exec(move || rules.enter());
+        }
+        for key in ["TMPDIR", "TMP", "TEMP"] {
+            c.env(key, &scratch);
+        }
+        Some(scratch)
+    } else {
+        None
+    };
+    let _scratch = scratch.map(ScratchDir);
+    let mut cmd = c;
     if let Some(channel) = &askpass {
         cmd.envs(channel.env());
     }
-    cmd.args(&launched[1..])
-        .current_dir(&root)
+    // Host-first: ssh/git use the owner's own agent. A service started without the login
+    // session's variables still finds the agent socket the host exposes.
+    if let Some(socket) = host_ssh_agent() {
+        cmd.env("SSH_AUTH_SOCK", socket);
+    }
+    cmd.current_dir(&root)
         .env_remove("CORTEX_CHANNEL_SECRET")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -474,6 +542,7 @@ pub(super) async fn outside_capture(
         if *stopped.borrow() {
             return Ok((None, Some("owner_stopped")));
         }
+        launch.released();
         let mut child=cmd.spawn()?;let pid=child.id().unwrap();let mut group=Group(Some(pid));
         retain_process(&executor,&task,&reference,pid).await?;
         let mut out=tokio::spawn(drain(child.stdout.take().unwrap(),output.clone()));
@@ -496,12 +565,15 @@ pub(super) async fn outside_capture(
         let mut prefix=Vec::new();file.take(65536).read_to_end(&mut prefix)?;
         // The owner-confirmed host command may write anywhere: its change record
         // comes from dirty-path listings before launch and after exit.
+        let observed = before.finish().await;
         let (ended_digest, after) = tokio::join!(
             check_digest(project_root.clone(), &argv),
             crate::native_change_set::snapshot(project_root.clone())
         );
-        let changes = crate::native_change_set::record(&listed, &after);
-        let revision_digest = if started_digest == ended_digest { ended_digest } else { None };
+        let listed = observed.listing.unwrap_or(Err("listing_failed"));
+        let mut changes = crate::native_change_set::record_with(&listed, &after, observed.touched.as_ref());
+        crate::native_change_set::add(&mut changes, &observed.meta);
+        let revision_digest = if observed.digest == ended_digest { ended_digest } else { None };
         let mut value=json!({"revision_digest":revision_digest,"tool_call_ref":reference,"argv":argv,"cwd":root,"profile":"outside_confirmed","exit_code":code,"complete":failure.is_none()&&code.is_some(),
             "settled":true,"failure":failure,"output":String::from_utf8_lossy(&prefix),"output_truncated":size>65536,"byte_count":size,"large_output_id":id});
         // Why the runtime ran a command_run here, and how each sudo password prompt
@@ -706,7 +778,7 @@ pub(super) fn denials(db: &rusqlite::Connection, task: &str) -> CoreResult<Vec<S
     }
     Ok(paths)
 }
-fn deletion(argv: &[String]) -> bool {
+pub(super) fn deletion(argv: &[String]) -> bool {
     if regex::Regex::new(r"\b(rm|unlink|rmdir|shred)\b|--delete|-delete|\bgit\b.*\b(clean|rm)\b")
         .unwrap()
         .is_match(&argv.join(" "))
@@ -918,6 +990,8 @@ pub(super) async fn execute(
     scoped: bool,
     worktree: Option<String>,
 ) -> CoreResult<Value> {
+    // Read-only Git context is the same host-side observation for every engine and role.
+    let scoped = scoped && name != "project_git";
     let name = name.to_owned();
     let linked = worktree.is_some();
     let c = credential.clone();
@@ -929,9 +1003,6 @@ pub(super) async fn execute(
     let worktree_for_auth = worktree.clone();
     let (i,mode,scopes,saved,output_dir,checkout)=recv(executor.publication(move|store|{
         let i=store.read(|db|channels::authenticate(db,&c.channel_id,c.secret(),true))?;
-        if scoped && n == "project_git" {
-            return Err(CoreError::Refused("managed_codex_git_refused"));
-        }
         let checkout = if linked {
             crate::native_project::checkout_binding(store, &i)?
         } else { None };
@@ -997,29 +1068,7 @@ pub(super) async fn execute(
             i.stage.as_deref().unwrap_or(""),
         );
     let mut argv: Vec<String> = if name == "project_git" {
-        if args["kind"] == "status" {
-            vec![
-                "/usr/bin/git".into(),
-                "-c".into(),
-                "core.fsmonitor=false".into(),
-                "status".into(),
-                "--short".into(),
-                "--ignore-submodules=dirty".into(),
-            ]
-        } else {
-            vec![
-                "/usr/bin/git".into(),
-                "-c".into(),
-                "core.fsmonitor=false".into(),
-                "diff".into(),
-                "--no-ext-diff".into(),
-                "--no-textconv".into(),
-                "--ignore-submodules=dirty".into(),
-                "--submodule=short".into(),
-                "HEAD".into(),
-                "--".into(),
-            ]
-        }
+        project_git_argv(&args)?
     } else {
         serde_json::from_value(args["argv"].clone())?
     };
@@ -1092,7 +1141,7 @@ pub(super) async fn execute(
         if cwd != root {
             safe(relative.to_str().ok_or(CoreError::Refused("invalid_cwd"))?)?;
         }
-    } else if linked || scoped {
+    } else if (linked && mode != "auto") || scoped {
         return Err(CoreError::Refused(if linked { "worktree_command_cwd_refused" } else { "scoped_command_cwd_refused" }));
     } else if mode == "guarded"
         || crate::native_access::protected(&cwd)
@@ -1140,10 +1189,10 @@ pub(super) async fn execute(
         cwd.clone(),
     );
     let is_delete = name == "command_run" && deletion(&argv);
-    if is_delete && readonly {
+    if is_delete && readonly && mode != "auto" {
         return Err(CoreError::Refused("readonly_delete_refused"));
     }
-    if is_delete && mode != "auto" {
+    if is_delete {
         let c = credential.clone();
         let task = i.task.clone();
         let (session, ru) = recv(executor.read(move |db| {
@@ -1154,7 +1203,7 @@ pub(super) async fn execute(
         let title = if ru { "Удалить данные проекта" } else { "Delete project data" };
         let request = json!({"toolCall":{"toolCallId":args["request_key"],"title":title,"kind":"execute","rawInput":args},
             "options":cortex_engine::permission::one_shot_options(ru)});
-        let allowed = match (permissions, session) {
+        let allowed = match (permissions.clone(), session) {
             (Some(p), Some(s)) => {
                 matches!(p.decide(&s,&request).await,Ok(PermissionDecision::Selected(id)) if id=="allow")
             }
@@ -1168,6 +1217,20 @@ pub(super) async fn execute(
                 db.execute("INSERT INTO runtime_requests VALUES (?,?,?,?,?,?)",(&i.task,a["request_key"].as_str(),&c.channel_id,n,h,json!({"complete":false,"settled":true,"exit_code":null,"failure":"deletion_not_confirmed"}).to_string()))?;Ok(())})?).await?;
             return Err(CoreError::Refused("deletion_not_confirmed"));
         }
+    }
+    // Auto (deletions were confirmed by the owner above): no sandbox for any role or stage. The command runs directly on the host as
+    // the owner through the outside_command route (Auto answers its consent itself).
+    if name == "command_run" && mode == "auto" && !scoped {
+        let (outside, note) = reroute_request(&args, &argv, &cwd, "auto_host", None)?;
+        return reroute(
+            executor, credential, root, permissions, protected_roots, running, outside, note,
+        )
+        .await;
+    }
+    // Landlock leaves a writer's whole checkout writable, including the live store
+    // files beside it: the same argv seal as the host route applies.
+    if name == "command_run" && seals_live_store(&argv) {
+        return Err(CoreError::Refused("cortex_live_store"));
     }
     let reference = format!(
         "native-command:{}",
@@ -1267,10 +1330,19 @@ pub(super) async fn execute(
         let (args_copy, argv_copy) = (args.clone(), argv.clone());
         // The work set's digest before launch (`native_work_set`); its end is observed
         // once the process ended and the receipt settled.
-        let start = match &work_set {
-            Some(set) => crate::native_work_set::observe(root.clone(), set.clone()).await,
-            None => None,
-        };
+        // It runs beside the launch: one that ended after the payload was released
+        // holds only when the checkout was untouched since (`native_change_set::Launch`).
+        let launch = crate::native_change_set::Launch::default();
+        let start = work_set.clone().map(|set| {
+            let (launch, root) = (launch.clone(), root.clone());
+            tokio::spawn(async move {
+                let start = crate::native_work_set::observe(root.clone(), set).await?;
+                match launch.touched(root).await {
+                    Some(touched) if !touched.quiet() => None,
+                    _ => Some(start),
+                }
+            })
+        });
         let observer = (executor.clone(), running.clone(), i.clone(), root.clone());
         let mut protected = output_dir
             .parent()
@@ -1278,7 +1350,10 @@ pub(super) async fn execute(
             .map(PathBuf::from)
             .into_iter()
             .collect::<Vec<_>>();
-        protected.extend(protected_roots);
+        // Inside the checkout only the owner's explicit write denials narrow a
+        // writer's Landlock grant (see native_sandbox); other protected roots there
+        // keep the gateway's checks.
+        protected.extend(protected_roots.into_iter().filter(|p| !p.starts_with(&root)));
         protected.extend(denied.iter().map(|p| root.join(p)));
         let reply = crate::native_command_handles::execute(
             executor,
@@ -1302,8 +1377,13 @@ pub(super) async fn execute(
             command_authority,
             name.clone(),
             checkout.clone(),
+            launch,
         )
         .await;
+        let start = match start {
+            Some(observing) => observing.await.ok().flatten(),
+            None => None,
+        };
         if let (Ok(_), Some(set), Some(start)) = (&reply, work_set, start) {
             let (executor, running, i, root) = observer;
             if let Some(assignment) = i.assignment {
@@ -1401,7 +1481,7 @@ pub(super) async fn execute(
                 status=child.wait()=>break status?.code(),
                 _=&mut deadline=>{failure=Some("timeout");break None;},
                 _=cancelled.changed()=>{if *cancelled.borrow(){failure=Some("owner_stopped");break None;}},
-                _=tokio::time::sleep(Duration::from_millis(50))=>{
+                _=tokio::time::sleep(Duration::from_millis(250))=>{
                     let c=credential.clone();let expected=mode.clone();let denied=denied.clone();let valid=recv(executor.write(move|db|{
                         let i=channels::authenticate(db,&c.channel_id,c.secret(),true)?;
                         // A new denial stops a running writer; a lifted one (fewer denials) does not.
@@ -1522,4 +1602,160 @@ mod reroute_tests {
         assert_eq!(note["reason"], "privilege");
         assert_eq!(note["request_key"], "k1");
     }
+}
+
+/// Read-only Git argv for `project_git`: the same kinds for every role and engine.
+/// Revisions never start with `-` and paths follow `--`, so no argument is an option.
+fn project_git_argv(args: &Value) -> CoreResult<Vec<String>> {
+    let bad = || CoreError::Refused("invalid_arguments");
+    let text = |key: &str| -> CoreResult<Option<String>> {
+        match args.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) => Ok(Some(s.clone())),
+            _ => Err(bad()),
+        }
+    };
+    let rev = text("rev")?;
+    if let Some(r) = &rev {
+        if r.is_empty()
+            || r.len() > 256
+            || r.starts_with('-')
+            || r.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(bad());
+        }
+    }
+    let path = text("path")?;
+    if let Some(p) = &path {
+        safe(p).map_err(|_| bad())?;
+    }
+    let max_count = match args.get("max_count") {
+        None | Some(Value::Null) => 50,
+        Some(v) => v.as_u64().filter(|n| (1..=500).contains(n)).ok_or_else(bad)?,
+    };
+    let mut argv: Vec<String> = ["/usr/bin/git", "-c", "core.fsmonitor=false"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let mut push = |items: &[&str]| argv.extend(items.iter().map(|s| (*s).to_owned()));
+    match args["kind"].as_str() {
+        Some("status") => push(&["status", "--short", "--ignore-submodules=dirty"]),
+        Some("diff") => push(&[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=dirty",
+            "--submodule=short",
+            "HEAD",
+            "--",
+        ]),
+        Some("log") => {
+            push(&[
+                "log",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--date=iso-strict",
+                "--format=%H %an %ad%n    %s",
+                &format!("--max-count={max_count}"),
+            ]);
+            push(&[rev.as_deref().unwrap_or("HEAD"), "--"]);
+            if let Some(p) = &path {
+                push(&[p]);
+            }
+        }
+        Some("show") => {
+            push(&["show", "--no-ext-diff", "--no-textconv", "--no-color", "--stat", "--patch"]);
+            push(&[rev.as_deref().unwrap_or("HEAD"), "--"]);
+            if let Some(p) = &path {
+                push(&[p]);
+            }
+        }
+        Some("cat_file") => {
+            let (r, p) = rev.as_deref().zip(path.as_deref()).ok_or_else(bad)?;
+            push(&["cat-file", "-p", &format!("{r}:{p}")]);
+        }
+        Some("blame") => {
+            let p = path.as_deref().ok_or_else(bad)?;
+            push(&["blame", "--no-progress"]);
+            if let Some(r) = &rev {
+                push(&[r]);
+            }
+            push(&["--", p]);
+        }
+        Some("ls_files") => {
+            push(&["ls-files", "--"]);
+            if let Some(p) = &path {
+                push(&[p]);
+            }
+        }
+        _ => return Err(bad()),
+    }
+    Ok(argv)
+}
+
+#[cfg(test)]
+mod project_git_tests {
+    use super::project_git_argv;
+    use serde_json::json;
+
+    #[test]
+    fn every_kind_is_read_only_option_free_and_engine_independent() {
+        for (args, word) in [
+            (json!({"kind":"status"}), "status"),
+            (json!({"kind":"diff"}), "diff"),
+            (json!({"kind":"log","rev":"main..HEAD","path":"src/a.rs","max_count":3}), "log"),
+            (json!({"kind":"show"}), "show"),
+            (json!({"kind":"cat_file","rev":"HEAD~1","path":"src/a.rs"}), "cat-file"),
+            (json!({"kind":"blame","path":"src/a.rs"}), "blame"),
+            (json!({"kind":"ls_files"}), "ls-files"),
+        ] {
+            let argv = project_git_argv(&args).unwrap();
+            assert_eq!(argv[0], "/usr/bin/git");
+            assert!(argv.iter().any(|a| a == word), "{argv:?}");
+            for banned in ["commit", "push", "checkout", "reset", "--output", "-o"] {
+                assert!(!argv.iter().any(|a| a == banned || a.starts_with("--output")), "{argv:?}");
+            }
+        }
+        let log = project_git_argv(&json!({"kind":"log","rev":"main..HEAD","path":"x/y","max_count":3})).unwrap();
+        assert_eq!(&log[log.len() - 3..], ["main..HEAD", "--", "x/y"]);
+        assert!(log.contains(&"--max-count=3".to_owned()));
+    }
+
+    #[test]
+    fn hostile_arguments_are_refused() {
+        for args in [
+            json!({"kind":"log","rev":"--output=/tmp/x"}),
+            json!({"kind":"log","rev":"a b"}),
+            json!({"kind":"show","path":"../x"}),
+            json!({"kind":"show","path":"/etc/passwd"}),
+            json!({"kind":"show","path":".git/config"}),
+            json!({"kind":"cat_file","rev":"HEAD"}),
+            json!({"kind":"blame"}),
+            json!({"kind":"log","max_count":0}),
+            json!({"kind":"push"}),
+        ] {
+            assert!(project_git_argv(&args).is_err(), "{args}");
+        }
+    }
+}
+
+/// The owner's ssh-agent socket: the inherited `SSH_AUTH_SOCK` when it is a live socket,
+/// otherwise the first well-known user-session location that is one.
+fn host_ssh_agent() -> Option<PathBuf> {
+    use std::os::unix::fs::FileTypeExt;
+    let is_socket = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.file_type().is_socket());
+    if let Some(p) = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from) {
+        if is_socket(&p) {
+            return Some(p);
+        }
+    }
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).or_else(|| {
+        // SAFETY: getuid has no preconditions.
+        Some(PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })))
+    })?;
+    ["ssh-agent.socket", "openssh_agent", "keyring/ssh", "gcr/ssh", "gnupg/S.gpg-agent.ssh"]
+        .iter()
+        .map(|n| runtime.join(n))
+        .find(|p| is_socket(p))
 }

@@ -167,3 +167,17 @@ fn catalogues_describe_only_what_they_serve() {
         }
     }
 }
+
+#[test]
+fn project_write_offers_binary_content_as_base64() {
+    let schema: Value = serde_json::from_str(include_str!("../schema/tools.json")).unwrap();
+    let write = schema["tools"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|t| t["name"] == "project_write")
+        .expect("project_write");
+    let description = write["description"].as_str().unwrap();
+    assert!(description.contains("base64"), "{description}");
+    assert_eq!(write["inputSchema"]["properties"]["encoding"]["enum"], serde_json::json!(["utf8","base64"]));
+}

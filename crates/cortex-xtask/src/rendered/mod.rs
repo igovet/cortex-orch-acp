@@ -87,7 +87,7 @@ pub fn image(tag: &str) -> Res<()> {
          FROM {BASE}\nENV DEBIAN_FRONTEND=noninteractive\nCOPY shim.deb /shim.deb\n\
          RUN dpkg -i /shim.deb && printf 'Package: python3 python3-minimal python3-gi python3.* libpython3*\\nPin: release *\\nPin-Priority: -1\\n' > /etc/apt/preferences.d/no-python\n\
          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libwebkit2gtk-4.1-0 libgtk-3-0t64 libayatana-appindicator3-1 librsvg2-2 libssl3t64 libxdo3 fontconfig fonts-dejavu-core \\\n \
-         xvfb xdotool x11-utils openbox dbus dbus-x11 at-spi2-core bubblewrap xdg-dbus-proxy mutter git pulseaudio pulseaudio-utils bzip2 sqlite3 xclip wl-clipboard && rm -rf /var/lib/apt/lists/*\n\
+         xvfb xdotool x11-utils openbox dbus dbus-x11 at-spi2-core xdg-dbus-proxy mutter git pulseaudio pulseaudio-utils bzip2 sqlite3 xclip wl-clipboard && rm -rf /var/lib/apt/lists/*\n\
          COPY --from=compile /usr/local/bin/node /usr/local/bin/node\nCOPY --from=compile /out/ /opt/cortex-render/\nENTRYPOINT []\n"
     );
     write(&context.join("Dockerfile"), &dockerfile)?;

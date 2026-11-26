@@ -19,6 +19,7 @@ import { same } from "./stable";
 import { SprintActions, SprintCrumb } from "./sprint";
 import { BranchChip, TaskActions, TaskInspector, TaskTitle, taskTitle, taskWhyId } from "./task-chrome";
 import { BandActions } from "./git-actions";
+import { Skeleton, unreachable } from "./skeleton";
 
 const tile = (name: string, n: number) => ({ letter: name[0]?.toUpperCase() ?? "?", cls: `t${(n % 6) + 1}` });
 const project = (machine: string, id: string): Route => ({ name: "project", machine, project: id, view: "board", scope: { kind: "all" } });
@@ -325,6 +326,7 @@ function Sidebar() {
   const work = createMemo(() => topWorkRows(index(), m(), ws.unseen?.keep));
   const firstLive = createMemo(() => projects().find(s => sideRows(index(), s, ws.unseen?.keep).length > 0)?.project.id);
   const pinned = createMemo(() => ws.panels.pins().flatMap(id => { const v = index().byId.get(id); return v && v.machine.id === m() ? [v] : []; }));
+  const settled = createMemo(() => ws.store.mode !== "real" || unreachable(ws) || (ws.store.ready() && projectsOn(index(), m()).every(s => ws.store.projectSettled(s.project))));
   let dragging = false;
   const onMove = (e: PointerEvent) => { if (dragging) ws.panels.setSidebarWidth(e.clientX); };
   return <nav class="sidebar" aria-label="Workspace">
@@ -337,6 +339,8 @@ function Sidebar() {
       <A class="nav" to={{ name: "archive", machine: m() }} aria-current={route().name === "archive" ? "page" : undefined}><I n="archive" />Archive<Show when={index().archive.length > 0}><span class="count" data-tooltip={`${index().archive.length} archived tasks`}>{index().archive.length}</span></Show></A>
     </div>
     <div class="sb-scroll">
+      {/* Until every project's board and facts have been read, no part of the list shows: rows appearing project by project reshuffled. */}
+      <Show when={settled()} fallback={<div class="ws-skel-pane" aria-busy="true"><Skeleton kind="list" label="Loading projects and tasks…" /></div>}>
       <Show when={work().length}>
         <section class="sb-work" aria-label="Active work">
           <h2 class="sb-h">Active work</h2>
@@ -359,6 +363,7 @@ function Sidebar() {
       <div class="sb-h"><span>Projects</span><button data-tooltip="" class="ib" style={{ width: "22px", height: "22px" }} popovertarget="m-sort" aria-label="Sort projects"><I n="chevrons-v" s={14} /></button></div>
       <Show when={projects().length > 0} fallback={<p class="cap faint ws-side-empty">{ws.store.ready() ? "No projects on this machine." : "Not loaded yet."}</p>}>
         <Keyed each={projects()} by={s => s.project.id}>{(s, i) => <ProjectRow summary={s()} n={i()} openByDefault={s().project.id === firstLive()} />}</Keyed>
+      </Show>
       </Show>
     </div>
     <SidebarUsage />

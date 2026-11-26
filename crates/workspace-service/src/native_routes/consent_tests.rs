@@ -196,3 +196,54 @@ fn legacy_consent_case_matrix() {
     );
     assert_eq!(fixture["cases"].as_array().unwrap().len(), 898);
 }
+
+fn opus_resolver() -> RouteResolver {
+    RouteResolver {
+        environment: RouteEnvironment {
+            home: "/".into(),
+            config: "/".into(),
+            state: "/".into(),
+            routing_override: None,
+        },
+        rules: json!({"models":{"claude-agent-acp":{"tiers":{"opus":"deep"},"policy":{"opus":{"request_names":["opus"]}}},
+            "codex-acp":{"tiers":{"gpt-6.2-sol":"deep"},"policy":{"gpt-6.2-sol":{"request_names":["sol"]}}}},
+            "enabled":{"claude-agent-acp":["opus"],"codex-acp":["gpt-6.2-sol"]}}),
+        defaults: json!({}),
+        candidates: vec![],
+    }
+}
+
+/// An owner's task-wide "only this model" statement applies to every stage,
+/// the independent review and audit included, and a hint is never needed.
+#[test]
+fn a_task_wide_only_model_statement_covers_every_role_including_review() {
+    for goal in [
+        "Эту работу должен делать ТОЛЬКО opus.",
+        "This work must be done only by opus.",
+    ] {
+        for role in [
+            "worker-frontend-dev",
+            "worker-qa-engineer",
+            "worker-code-reviewer",
+            "worker-security-auditor",
+            "worker-senior-consultant",
+        ] {
+            let mut evidence = Evidence::default();
+            evidence.inputs.push(UserInput {
+                text: goal.into(),
+                source_ref: "goal".into(),
+                question: None,
+                selected_option: false,
+                option_with_comment: None,
+            });
+            for hint in ["auto", "claude-agent-acp/opus"] {
+                let (grant, _, _) = opus_resolver().consent(role, "review", hint, &evidence);
+                assert_eq!(
+                    grant.as_ref().map(|g| g["family"].clone()),
+                    Some(json!("claude-agent-acp/opus")),
+                    "{goal} / {role} / {hint}"
+                );
+            }
+        }
+    }
+}

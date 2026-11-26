@@ -1209,6 +1209,9 @@ impl Runtime {
                     product["tasks"][&draft]["spend"]=crate::notifier::progress::read(db,&task,crate::notifier::progress::now_ms())?.json();
                     let (elapsed, running_since, tokens) = crate::machine::coordinator_metrics(db, &task, &usage)?;
                     product["tasks"][&draft]["coordinatorMetrics"] = json!({"elapsedMs":elapsed,"runningSince":running_since,"usage":tokens});
+                    // The runtime's own verification commands belong to no worker; the Runtime verification page lists them.
+                    let unowned=present_worker_commands(&worker_command_rows(db,&task)?,None);
+                    if !unowned.is_empty() {product["tasks"][&draft]["verificationCommands"]=json!(unowned);}
                 }
                 let nodes=db.prepare(&format!("SELECT n.assignment_ref,n.role,n.objective,n.status,p.status,n.scope_json,n.result_json,n.revision,p.attempt_id,n.node_id,{},{} FROM runtime_nodes n
                     JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
@@ -1227,7 +1230,6 @@ impl Runtime {
                     .collect::<Result<Vec<_>,_>>()?.into_iter()
                     .map(|raw|serde_json::from_str::<Value>(&raw).map_err(|_|rusqlite::Error::InvalidQuery))
                     .collect::<Result<Vec<_>,_>>()?;
-                let host_worker=nodes.iter().rev().find(|n|n.3=="completed").map(|n|n.0.clone());
                 // A worker of an earlier version (the plan revision moved on, or the task was
                 // reopened after it) is history: its checks are not the current version's.
                 let (current_revision,reopened):(i64,Option<i64>)=db.query_row("SELECT revision,(SELECT max(json_extract(payload_json,'$.revision')) FROM runtime_events WHERE task_id=runtime_tasks.task_id AND type='TASK_REOPENED') FROM runtime_tasks WHERE task_id=?",
@@ -1276,7 +1278,7 @@ impl Runtime {
                         command_rows=Some(worker_command_rows(db, &task)?);
                     }
                     let mut activity=present_worker_commands(
-                        command_rows.as_deref().unwrap_or_default(), &id, host_worker.as_deref());
+                        command_rows.as_deref().unwrap_or_default(), Some(&id));
                     // Project writes the worker's own channel recorded (the host verifier never edits).
                     let mut edits=Vec::<(String,u64,u64)>::new();
                     // The n-th write of one content to one path by one channel is that
@@ -1685,13 +1687,13 @@ fn worker_command_rows(db: &rusqlite::Connection, task: &str) -> CoreResult<Vec<
 
 #[cfg(test)]
 pub(crate) fn worker_commands(
-    db: &rusqlite::Connection, task: &str, worker: &str, host_worker: Option<&str>,
+    db: &rusqlite::Connection, task: &str, worker: &str,
 ) -> CoreResult<Vec<Value>> {
-    Ok(present_worker_commands(&worker_command_rows(db, task)?, worker, host_worker))
+    Ok(present_worker_commands(&worker_command_rows(db, task)?, Some(worker)))
 }
 
 fn present_worker_commands(
-    rows: &[WorkerCommandRow], worker: &str, host_worker: Option<&str>,
+    rows: &[WorkerCommandRow], worker: Option<&str>,
 ) -> Vec<Value> {
     let mut result = Vec::new();
     let mut started = std::collections::HashMap::new();
@@ -1706,8 +1708,9 @@ fn present_worker_commands(
             .unwrap_or((None, false, stamp, None));
         // Coordinator calls are not worker activity. Unowned host verification
         // retains its existing worker and never gets a broker-output reference.
-        let own = owner == Some(worker);
-        if !own && (on_channel || owner.is_some() || host_worker != Some(worker)) {
+        let own = worker.is_some() && owner == worker;
+        // A worker shows only its own attempts' commands; `None` lists the runtime's unowned verification commands.
+        if !own && (worker.is_some() || on_channel || owner.is_some()) {
             continue;
         }
         if !running {
@@ -1721,7 +1724,13 @@ fn present_worker_commands(
                 .map(|t| crate::machine::redact_display_text(&t))
                 .unwrap_or_else(|| "Command".into())
         } else {
-            "Host verification".into()
+            {
+            let argv = if running { &v["argv"] } else { &v["receipt"]["argv"] };
+            argv.as_array().filter(|a| !a.is_empty() && a.iter().all(Value::is_string))
+                .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ").chars().take(2000).collect::<String>())
+                .map(|t| crate::machine::redact_display_text(&t))
+                .unwrap_or_else(|| "Host verification".into())
+        }
         };
         let observation = &v["receipt"]["observation"];
         let state = if running {"running"} else if observation["complete"] == true && observation["exit_code"] == 0 {

@@ -13,6 +13,7 @@ pub mod completion;
 pub mod domain;
 pub mod loop_guard;
 pub mod obstacles;
+pub mod pinned_checks;
 pub mod plan;
 mod probe_correction;
 pub mod progress;

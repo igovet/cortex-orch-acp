@@ -1921,6 +1921,7 @@ pub fn verification_preflight_tx(
     if active {
         return refuse("workers_still_live_or_unknown");
     }
+    super::pinned_checks::retire_superseded_tx(db, task)?;
     Ok(())
 }
 /// Runtime CommandExecutor returns this observation; no model JSON is accepted.
@@ -1964,7 +1965,7 @@ pub fn retain_check_tx(
     let cause = &raw["observation"];
     if let Some(binding) = raw.get("checkout") {
         if raw["task"] != task || raw["owner_epoch"] != owner.epoch || raw["argv"] != json!(argv)
-            || raw["revision_digest"] != reviewed || raw["profile"] != "native-readonly-bubblewrap"
+            || raw["revision_digest"] != reviewed || raw["profile"] != "native-readonly-landlock"
             || cause["complete"] != observed.complete || cause["exit_code"] != json!(observed.exit_code) {
             return refuse("verification_checkout_mismatch");
         }
@@ -2856,6 +2857,9 @@ fn outstanding_commands(
                 }
             }
             "VERIFICATION_REVISED" => {
+                for s in v["superseded"].as_array().into_iter().flatten() {
+                    outstanding.remove(&s["argv"].to_string());
+                }
                 for argv in v["dropped_failed"].as_array().into_iter().flatten() {
                     outstanding.insert(argv.to_string(), (argv.clone(), Some(id)));
                 }

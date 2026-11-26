@@ -161,8 +161,8 @@ busybox mount -t devtmpfs devtmpfs /dev
 busybox ip link set lo up
 busybox chmod 1777 /tmp /var/tmp
 busybox mount -t tmpfs -o mode=755 tmpfs /cortex-fixture
-# This sysctl is changed only in the fresh guest. The service's existing bwrap
-# version verification and catalogue launcher still have to execute there.
+# This sysctl is changed only in the fresh guest, for the engines' own sandboxes
+# (Codex runs bubblewrap itself); Cortex's own launches use Landlock.
 if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
     echo 0 > /proc/sys/kernel/apparmor_restrict_unprivileged_userns
 fi

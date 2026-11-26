@@ -2548,13 +2548,18 @@ async fn positive_owner_control(action: &str) {
         }
         "command_stop" => {
             let reference:String=store.read(|db|Ok(db.query_row("SELECT json_extract(payload_json,'$.ref') FROM runtime_events WHERE type='NATIVE_COMMAND_STARTED' AND json_extract(payload_json,'$.argv[0]')='/usr/bin/cmp' ORDER BY id DESC LIMIT 1",[],|r|r.get(0))?)).unwrap();
-            // The exact owned gateway ref is visible as a stoppable command, not native activity.
+            // The exact gateway ref is visible as a stoppable command, not native activity:
+            // under its worker, or on the Runtime verification page when no worker owns it.
+            let running = |a: &Value| a["toolCallRef"] == reference && a["command"]["state"] == "running";
             assert!(before["workers"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .flat_map(|w| w["activity"].as_array().unwrap())
-                .any(|a| a["toolCallRef"] == reference && a["command"]["state"] == "running"));
+                .any(running)
+                || before["product"]["tasks"].as_object().is_some_and(|t| t.values()
+                    .filter_map(|t| t["verificationCommands"].as_array()).flatten().any(running)),
+                "{before}");
             json!({"toolCallRef":reference,"reason":"Stop the bounded verifier"})
         }
         "rerun_check" => {
@@ -2727,12 +2732,15 @@ async fn positive_owner_control(action: &str) {
                 rerun_receipt["effect"]["observation"]["failure"],
                 "owner_stopped"
             );
+            let stopped = |a: &Value| a["command"]["state"] == "stopped";
             assert!(f["workers"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .flat_map(|w| w["activity"].as_array().unwrap())
-                .any(|a| a["command"]["state"] == "stopped"));
+                .any(stopped)
+                || f["product"]["tasks"].as_object().is_some_and(|t| t.values()
+                    .filter_map(|t| t["verificationCommands"].as_array()).flatten().any(stopped)));
             assert_eq!(
                 store
                     .read(|db| Ok(db.query_row(
@@ -4983,6 +4991,18 @@ async fn bound_worktree_journey() {
             wrong = check.clone();
             wrong["checkout"]["owner_epoch"] = json!(owner.epoch + 1);
             assert!(!receipt_matches(db, &task, &wrong, true)?);
+            // An outside_command receipt names no checkout; its cwd inside the task
+            // checkout binds it, a cwd elsewhere never does.
+            let mut outside = check.clone();
+            outside.as_object_mut().unwrap().remove("checkout");
+            outside["cwd"] = json!(w.path.join("sub"));
+            cortex_core::workspace::worktrees::bind_outside_receipt(db, &task, &mut outside)?;
+            assert!(receipt_matches(db, &task, &outside, false)?);
+            let mut elsewhere = outside.clone();
+            elsewhere.as_object_mut().unwrap().remove("checkout");
+            elsewhere["cwd"] = json!(root);
+            cortex_core::workspace::worktrees::bind_outside_receipt(db, &task, &mut elsewhere)?;
+            assert!(elsewhere["checkout"].is_null());
             Ok(())
         }).unwrap();
         {

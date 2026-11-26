@@ -330,7 +330,7 @@ pub(super) fn writable_target(
     scoped: bool,
 ) -> CoreResult<()> {
     writable(db, i, Some(path))?;
-    if crate::native_engine_policy::project_private(&root.join(path)) && !admitted(path) {
+    if crate::native_engine_policy::project_private(Path::new(path)) && !admitted(path) {
         return Err(CoreError::Refused("private_or_invalid_path"));
     }
     if scoped {
@@ -481,7 +481,9 @@ fn bytes(folder: &File, name: &str) -> CoreResult<Option<(Vec<u8>, u32)>> {
         Err(e) => return Err(e),
     };
     let m = file.metadata()?;
-    if !m.is_file() || m.nlink() != 1 {
+    // A hard-linked regular file is readable: the descriptor is the project entry.
+    // Writes replace the directory entry atomically and never touch the inode.
+    if !m.is_file() {
         return Err(CoreError::Refused("regular_unlinked_file_required"));
     }
     let mut b = Vec::new();
@@ -490,9 +492,9 @@ fn bytes(folder: &File, name: &str) -> CoreResult<Option<(Vec<u8>, u32)>> {
     Ok(Some((b, m.mode() & 0o777)))
 }
 /// SHA-256 of a project file's current bytes, read the same way `project_read`
-/// reads them (descriptor traversal, no symlinks, a regular unlinked file only).
+/// reads them (descriptor traversal, no symlinks, a regular file; hard links are fine to read).
 /// `None` when there are no such bytes to read: missing, a symlink, a directory,
-/// a hard-linked or unreadable entry.
+/// or an unreadable entry.
 pub(super) fn current_sha256(root: &Path, path: &str) -> Option<String> {
     let (folder, name) = parent(root, path).ok()?;
     let (b, _) = bytes(&folder, &name).ok()??;
@@ -513,7 +515,7 @@ fn coverage(
         .filter(|v| v["sha256"] == hash)
         .unwrap_or(json!({"sha256":hash,"lines":[],"complete":false})))
 }
-fn read_state(
+pub(super) fn read_state(
     store: &Store,
     i: &Identity,
     c: &Credential,
@@ -716,7 +718,19 @@ fn read_at(
     let lines = text.split_inclusive('\n').collect::<Vec<_>>();
     // `column` continues the line at `offset` from that 1-based character, so a
     // line longer than one segment is returned whole across consecutive pages.
-    let column = args["column"].as_u64().unwrap_or(1) as usize;
+    // A caller that follows only `next_offset` (a script, a retry) repeats the page that
+    // ended inside a long line forever. Without an explicit `column`, a line already
+    // returned in part on this channel continues after the characters returned, so the
+    // same call advances instead of repeating its result.
+    let resumed = if args["column"].is_null() {
+        coverage(store, i, c, path, &hash, binding)?["partial_lines"][start.to_string()]
+            .as_u64()
+            .filter(|prefix| *prefix > 0)
+            .map(|prefix| prefix as usize + 1)
+    } else {
+        None
+    };
+    let column = resumed.unwrap_or_else(|| args["column"].as_u64().unwrap_or(1) as usize);
     if column > 1
         && lines
             .get(start - 1)
@@ -735,7 +749,14 @@ fn read_at(
         .cloned()
         .unwrap_or_default();
     let prior_complete = covered["complete"] == true;
-    let budget = 8000;
+    // A batched page must fit the batch's inline item bound with its metadata, or the
+    // batch defers it and it records no read coverage (review loops on
+    // `review_file_coverage_required`); a direct page keeps the larger bound.
+    let budget = if batched {
+        crate::native_batch::ITEM_BYTES.saturating_sub(1200 + 2 * path.len())
+    } else {
+        8000
+    };
     let mut end = start - 1;
     let mut next_column = Value::Null;
     for (idx, line) in lines.iter().enumerate().skip(start - 1).take(limit) {
@@ -1210,6 +1231,27 @@ mod long_line_tests {
             ]
         );
     }
+    /// Reviewers 2026-11-26 (two stores) were ended as `tool_loop` after 12 identical
+    /// `project_read` results: a script followed only `next_offset`, which stays on a line
+    /// longer than one page, so the same call returned the same page. Without `column`
+    /// the call now continues that line.
+    #[test]
+    fn following_only_next_offset_advances_through_a_long_line() {
+        let (f, store, i, c) = reviewer();
+        let line = (0..9000).map(|n| char::from(b'a' + (n % 26) as u8)).collect::<String>();
+        fs::write(f.0.join("min.json"), format!("{line}\nend\n")).unwrap();
+        let mut offset = json!(1);
+        let (mut text, mut pages) = (String::new(), 0);
+        while !offset.is_null() {
+            let v = page(&store, &i, &c, json!({"path":"min.json","offset":offset,"line_numbers":false}));
+            text.push_str(v["content"].as_str().unwrap());
+            offset = v["next_offset"].clone();
+            pages += 1;
+            assert!(pages < 20, "reads must advance");
+        }
+        assert_eq!(text, format!("{line}\nend\n"));
+        assert!(pages > 2);
+    }
     /// Owner store 2026-11: a packet named `review_lines` [242,254] for a 253-line
     /// file (a final newline counted as a phantom line 254), and no read could cover
     /// it. Ranges now end at the last line project_read reports.
@@ -1288,23 +1330,24 @@ mod long_line_tests {
             .iter()
             .any(|b| b["type"] == "image"));
         assert_eq!(state("logo.png").unwrap()["content"], "image");
-        // A batched page past the inline item bound (which the batch defers) records
-        // nothing and claims only the coverage recorded before it.
+        // A batched page is cut to fit the inline item bound (the batch defers a
+        // larger one, which would record nothing), so even an oversized request
+        // (limit 300, default 2000) is delivered and recorded; the rest is the
+        // next page. Review coverage through read_batch never silently drops.
         let r = read(&store, &i, &c, &json!({"path":"code.rs","limit":300}), true).unwrap();
         let v = &r["structuredContent"];
-        assert!(serde_json::to_vec(v).unwrap().len() > crate::native_batch::ITEM_BYTES);
-        assert_eq!(v["coverage_recorded"], false);
-        assert_eq!(v["read_coverage_complete"], false);
-        assert!(v["full_content_sha256"].is_null());
-        assert!(state("code.rs").is_none());
-        // Pages within the bound are recorded as usual.
+        assert!(serde_json::to_vec(v).unwrap().len() <= crate::native_batch::ITEM_BYTES);
+        assert!(v["coverage_recorded"].is_null());
+        assert!(v["next_offset"].is_number());
+        assert!(!state("code.rs").unwrap()["lines"].as_array().unwrap().is_empty());
+        // Following next_offset page by page completes the coverage.
         let mut offset = json!(1);
         loop {
             let r = read(
                 &store,
                 &i,
                 &c,
-                &json!({"path":"code.rs","offset":offset,"limit":40}),
+                &json!({"path":"code.rs","offset":offset,"limit":300}),
                 true,
             )
             .unwrap();
@@ -1559,6 +1602,55 @@ pub(super) fn recover_files(store: &Store) -> CoreResult<()> {
     }
     Ok(())
 }
+/// Read-only read of an absolute host path (outside the project checkout too).
+/// It is plain paging: no read coverage is recorded, so it never authorizes a write.
+/// Cortex live store files stay sealed.
+fn host_read(args: &Value) -> CoreResult<Value> {
+    let path = Path::new(text(args, "path")?);
+    if path.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir)) {
+        return Err(CoreError::Refused("private_or_invalid_path"));
+    }
+    let real = path.canonicalize().map_err(|_| CoreError::Refused("file_missing"))?;
+    if crate::native_engine_policy::live_store_file(&real) || crate::native_engine_policy::live_store_file(path) {
+        return Err(CoreError::Refused("cortex_live_store"));
+    }
+    let start = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
+    let limit = args["limit"].as_u64().unwrap_or(2000).clamp(1, 2000) as usize;
+    if real.is_dir() {
+        let mut entries = fs::read_dir(&real)?
+            .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.sort();
+        let total = entries.len();
+        let mut selected = Vec::new();
+        for entry in entries.into_iter().skip(start - 1).take(limit) {
+            selected.push(entry);
+            if serde_json::to_vec(&selected)?.len() > 8000 { selected.pop(); break; }
+        }
+        let next = if start - 1 + selected.len() < total { json!(start + selected.len()) } else { Value::Null };
+        return Ok(crate::native_sources::reply(json!({"path":path,"host":true,"entries":selected,"total_entries":total,"next_offset":next})));
+    }
+    let mut data = Vec::new();
+    File::open(&real)?.take(64 * 1024 * 1024).read_to_end(&mut data)?;
+    let Ok(text_data) = String::from_utf8(data.clone()) else {
+        return Ok(crate::native_sources::reply(json!({"path":path,"host":true,"binary":true,"size_bytes":data.len(),"sha256":digest(&data)})));
+    };
+    let numbered = args["line_numbers"].as_bool().unwrap_or(true);
+    let lines: Vec<&str> = text_data.lines().collect();
+    let total = lines.len();
+    let mut out = String::new();
+    let mut shown = 0;
+    for (n, line) in lines.iter().enumerate().skip(start - 1).take(limit) {
+        let line: String = line.chars().take(2000).collect();
+        let row = if numbered { format!("{}\t{}\n", n + 1, line) } else { format!("{line}\n") };
+        if out.len() + row.len() > 20000 { break; }
+        out.push_str(&row);
+        shown += 1;
+    }
+    let next = if start - 1 + shown < total { json!(start + shown) } else { Value::Null };
+    Ok(crate::native_sources::reply(json!({"path":path,"host":true,"content":out,"total_lines":total,
+        "complete":next.is_null() && start == 1,"next_offset":next})))
+}
 #[allow(clippy::too_many_arguments)]
 pub(super) fn execute(
     store: &Store,
@@ -1578,6 +1670,9 @@ pub(super) fn execute(
         Some(value)
     } else { None };
     if name == "project_read" {
+        if args["path"].as_str().is_some_and(|p| p.starts_with('/')) {
+            return host_read(args);
+        }
         if scoped {
             return read_at(store, i, c, args, batched, root, binding.as_ref());
         }
@@ -1585,9 +1680,31 @@ pub(super) fn execute(
     }
     let mut failed_field: Option<String> = None;
     let result = execute_inner(store, i, c, name, args, &mut failed_field, root, scoped, binding.as_ref());
-    let error_reply = |code| match &failed_field {
-        Some(field) => crate::native_tool_errors::reply_at(code, field),
-        None => file_error(code),
+    // A failed match returns the current page and sha inline; delivering it is a
+    // read of the current bytes, so the next edit needs no separate project_read.
+    let page = match (&result, name, args["path"].as_str()) {
+        (Err(e), "project_edit", Some(path))
+            if matches!(e.code(), "gateway_edit_not_found" | "gateway_edit_not_unique") =>
+        {
+            let page_root = if scoped { root } else { store.key().root() };
+            read_at(store, i, c, &json!({"path":path}), false, page_root, binding.as_ref()).ok()
+        }
+        _ => None,
+    };
+    let error_reply = |code| {
+        let mut reply = match &failed_field {
+            Some(field) => crate::native_tool_errors::reply_at(code, field),
+            None => file_error(code),
+        };
+        if let Some(page) = &page {
+            if let Some(detail) = reply.get_mut("structuredContent").filter(|d| d.is_object()) {
+                detail["current_read"] = page["structuredContent"].clone();
+            }
+            if let (Some(items), Some(extra)) = (reply["content"].as_array_mut(), page["content"].as_array()) {
+                items.extend(extra.iter().cloned());
+            }
+        }
+        reply
     };
     if let (Err(e), Some(key)) = (&result, args["request_key"].as_str()) {
         if matches!(name, "project_write" | "project_edit") {
@@ -1747,15 +1864,48 @@ fn execute_inner(
         if old.is_none() {
             return Err(CoreError::Refused("file_missing"));
         }
-        require_read(read_state(store, i, c, path, binding)?.as_ref(), &old_hash, false)?;
+        // A missing or stale read does not block an edit: it applies when each
+        // old_string still matches the current bytes as required; otherwise the
+        // caller returns the current page as a read.
     }
-    let previous = old
+    let encoding = args["encoding"].as_str().unwrap_or("utf8");
+    if !matches!(encoding, "utf8" | "base64") || (name != "project_write" && args.get("encoding").is_some_and(|v| !v.is_null())) {
+        *failed_field = Some("encoding".to_owned());
+        return Err(CoreError::Refused("invalid_arguments"));
+    }
+    let binary_write = name == "project_write" && encoding == "base64";
+    let previous_text: Option<String> = old
         .as_ref()
-        .map(|(b, _)| std::str::from_utf8(b).map(str::to_owned))
-        .transpose()
-        .map_err(|_| CoreError::Refused("binary_file"))?
-        .unwrap_or_default();
-    let mut next = if name == "project_write" {
+        .and_then(|(b, _)| std::str::from_utf8(b).ok())
+        .filter(|t| !t.contains('\0'))
+        .map(str::to_owned);
+    if name == "project_edit" && old.is_some() && previous_text.is_none() {
+        return Err(CoreError::Refused("binary_file"));
+    }
+    let previous = previous_text.clone().unwrap_or_default();
+    let previous_len = old.as_ref().map_or(0, |(b, _)| b.len());
+    let mut next_bytes: Vec<u8> = Vec::new();
+    let mut next = if binary_write {
+        use base64::Engine as _;
+        let raw: String = text(args, "content")?
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect();
+        next_bytes = base64::engine::general_purpose::STANDARD
+            .decode(raw.as_bytes())
+            .map_err(|_| {
+                *failed_field = Some("content".to_owned());
+                CoreError::Refused("invalid_arguments")
+            })?;
+        if next_bytes.len() > 750_000 {
+            *failed_field = Some("content".to_owned());
+            return Err(CoreError::Refused("invalid_arguments"));
+        }
+        String::from_utf8(next_bytes.clone())
+            .ok()
+            .filter(|t| !t.contains('\0'))
+            .unwrap_or_default()
+    } else if name == "project_write" {
         text(args, "content")?.to_owned()
     } else {
         let mut next = previous.clone();
@@ -1774,13 +1924,13 @@ fn execute_inner(
                 .char_indices()
                 .filter(|(offset, _)| next[*offset..].starts_with(old))
                 .count();
-            if old == new {
-                *failed_field = Some(format!("edits[{index}].new_string"));
-                return Err(CoreError::Refused("gateway_edit_no_change"));
-            }
             if count == 0 {
                 *failed_field = Some(format!("edits[{index}].old_string"));
                 return Err(CoreError::Refused("gateway_edit_not_found"));
+            }
+            if old == new {
+                // Already in the requested state: an idempotent success, not an error.
+                continue;
             }
             if count > 1 && edit["replace_all"] != true {
                 *failed_field = Some(format!("edits[{index}].old_string"));
@@ -1794,10 +1944,13 @@ fn execute_inner(
         }
         next
     };
-    if next.contains('\0') {
+    if !binary_write && next.contains('\0') {
         return Err(CoreError::Refused("binary_file"));
     }
     if path == ".gitignore" {
+        if binary_write && next_bytes.len() != next.len() {
+            return Err(CoreError::Refused("binary_file"));
+        }
         let rule = format!(
             "/{}/",
             store
@@ -1814,7 +1967,18 @@ fn execute_inner(
             next.push_str(&format!("{rule}\n"));
         }
     }
-    let new_hash = digest(next.as_bytes());
+    if !binary_write {
+        next_bytes = next.as_bytes().to_vec();
+    } else if path == ".gitignore" {
+        next_bytes = next.as_bytes().to_vec();
+    }
+    if name == "project_edit" && next_bytes == old.as_ref().map(|(b, _)| b.as_slice()).unwrap_or_default() {
+        // Every edit was already applied: nothing to write, nothing to re-read.
+        return Ok(crate::native_sources::reply(
+            json!({"path":path,"outcome":"unchanged","sha256":old_hash,"size_bytes":previous_len,"byte_count":previous_len,"edits_applied":0,"read_coverage_complete":covered["complete"] == true}),
+        ));
+    }
+    let new_hash = digest(&next_bytes);
     let (added, removed) = line_delta(&previous, &next);
     let complete = path != ".gitignore"
         && (old.is_none() || covered["complete"] == true || name == "project_write");
@@ -1830,9 +1994,9 @@ fn execute_inner(
     );
     let bounded = diff.chars().take(4000).collect::<String>();
     let v = crate::native_sources::reply(
-        json!({"diff":bounded,"diff_truncated":bounded.len()<diff.len(),"path":path,"outcome":"written","sha256":new_hash,"full_content_sha256":if complete{json!(new_hash)}else{Value::Null},
-        "previous_size_bytes":previous.len(),"size_bytes":next.len(),"byte_count":next.len(),"edits_applied":if name=="project_edit"{args["edits"].as_array().map(Vec::len)}else{None},"previous_lines":previous.lines().count(),"new_lines":next.lines().count(),
-        "drastic_shrink":next.len()*2<previous.len(),"read_coverage_complete":complete}),
+        json!({"diff":bounded,"diff_truncated":bounded.len()<diff.len(),"path":path,"outcome":"written","encoding":encoding,"sha256":new_hash,"full_content_sha256":if complete{json!(new_hash)}else{Value::Null},
+        "previous_size_bytes":previous_len,"size_bytes":next_bytes.len(),"byte_count":next_bytes.len(),"edits_applied":if name=="project_edit"{args["edits"].as_array().map(Vec::len)}else{None},"previous_lines":previous.lines().count(),"new_lines":next.lines().count(),
+        "drastic_shrink":next_bytes.len()*2<previous_len,"read_coverage_complete":complete}),
     );
     // Bind both hashes and the acknowledgement before replacement. Recovery
     // observes bytes only; it never re-executes the edit or grants read coverage.
@@ -1882,7 +2046,7 @@ fn execute_inner(
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
         )?;
         let effect = (|| -> CoreResult<()> {
-            f.write_all(next.as_bytes())?;
+            f.write_all(&next_bytes)?;
             f.set_permissions(fs::Permissions::from_mode(
                 old.as_ref().map_or(0o644, |(_, m)| *m),
             ))?;
@@ -1947,7 +2111,7 @@ fn execute_inner(
         binding,
     )?;
     let mut settled = json!({"complete":true,"reply":v});
-    let mut event = json!({"channel_id":c.channel_id,"path":path,"sha256":new_hash,"add":added,"del":removed});
+    let mut event = json!({"channel_id":c.channel_id,"path":path,"sha256":new_hash,"encoding":encoding,"add":added,"del":removed});
     if let Some(binding) = binding {
         settled["checkout"] = binding.clone();
         event["checkout"] = binding.clone();

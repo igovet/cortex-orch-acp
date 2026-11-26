@@ -352,7 +352,9 @@ pub(crate) fn read_snapshot(
     sprint: &str,
 ) -> Result<Snapshot> {
     let _lock = settings::Lock::new(state, "machine.lock")?;
-    let product = product(state, project)?;
+    let mut product = product(state, project)?;
+    // Files given to the sprint reach members created without them; best effort.
+    let _ = super::sprint_files::backfill(store, state, project, &mut product, sprint);
     load(
         store,
         &product,

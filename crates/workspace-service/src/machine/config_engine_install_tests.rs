@@ -382,24 +382,9 @@ done
 
 #[test]
 fn opencode_is_discovered_onboarded_and_observed_natively_without_the_owners_binary() {
-    let probe = crate::machine::config_action::opencode_engine::isolating_bwrap(Some(
-        &"/usr/bin:/bin".into(),
-    ))
-    .is_some_and(|b| {
-        std::process::Command::new(b)
-            .args([
-                "--unshare-user",
-                "--unshare-pid",
-                "--ro-bind",
-                "/",
-                "/",
-                "/bin/true",
-            ])
-            .status()
-            .is_ok_and(|s| s.success())
-    });
+    let probe = crate::native_sandbox::abi() >= 1;
     if !probe {
-        eprintln!("bubblewrap with user namespaces is unavailable: OpenCode onboarding not run");
+        eprintln!("Landlock is unavailable: OpenCode onboarding not run");
         return;
     }
     let base = PathBuf::from(format!("/tmp/cw-inst-oc-{}", std::process::id()));

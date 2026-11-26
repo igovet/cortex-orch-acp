@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { emptyWorkspace, LOCAL_MACHINE_ID, type Project, type Task, type WorkspaceState } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { createRealPort, unavailableTransport } from "../src/port/real";
-import { capabilitiesWire, draftTask, flush, projection, scriptedPort, scriptedTransport, snapshot, wireTask } from "./support";
+import { capabilitiesWire, draftTask, flush, projection, scriptedPort, scriptedTransport, snapshot, stoppedMerge, wireTask } from "./support";
 
 let dispose: (() => void) | undefined;
 beforeEach(() => { localStorage.clear(); sessionStorage.clear(); history.replaceState(null, "", "/"); document.documentElement.removeAttribute("data-theme"); });
@@ -31,6 +31,15 @@ const withDraft = (patch: Partial<Task> = {}): WorkspaceState => {
   state.tasks.push({ ...draftTask(), ...patch });
   return state;
 };
+
+it("shows a single ellipsis on the automatic merge resolution button", async () => {
+  const scripted = scriptedPort({ mode: "demo" });
+  await mount(scripted.port, `/m/${LOCAL_MACHINE_ID}/t/t/changes/conflict`);
+  scripted.emit(projection("1", withDraft({ status: "review", conflict: "conflict", merge: stoppedMerge() })));
+  await flush(); await flush();
+  const actions = all('section[aria-label="Merge conflict"] button').map(button => button.textContent);
+  expect(actions).toContain("Resolve automatically…");
+});
 
 describe("native window frame", () => {
   const chrome = (maximized = false) => ({ maximized: () => maximized, minimize: vi.fn(), toggleMaximize: vi.fn(), close: vi.fn(), startDragging: vi.fn(), guardClose: vi.fn(), closeNow: vi.fn() });

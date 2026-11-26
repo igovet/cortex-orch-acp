@@ -1555,3 +1555,44 @@ fn a_partly_done_objective_needs_a_dead_end_and_is_not_a_success() {
     })
     .unwrap();
 }
+
+/// A superseded plan review (an earlier revision of the plan) never decides
+/// completion: only the newest plan review's checks count.
+#[test]
+fn only_the_newest_plan_review_decides_worker_check_completion() {
+    for newest_fails in [false, true] {
+        let (_p, s, o) = setup();
+        let mut e = evidence('a');
+        finish_execution(&s, &mut e);
+        let failing = json!({"name":"Read-only source search","outcome":"failed"});
+        s.write(|db| {
+            // An older plan review (superseded by a revision) with a failed check,
+            // then the newest one: approved, bound to the checked-out project.
+            for (node, checks) in [
+                ("_plan_review_1", json!([failing])),
+                ("_plan_review_2", if newest_fails { json!([failing]) } else { json!([]) }),
+            ] {
+                db.execute(
+                    "INSERT INTO runtime_nodes VALUES ('t',1,?,'worker-code-reviewer','Review','[]','[]','review','completed',NULL,?)",
+                    (node, json!({"verdict":"APPROVE","report_ref":"r","report_digest":"f".repeat(64),
+                        "project_digest":"a".repeat(64),"checks":checks}).to_string()),
+                )?;
+            }
+            cortex_core::lifecycle::event_tx(db, "t", "WORKER_COMPLETED",
+                json!({"node":"_plan_review_2","result":{"report_ref":"r"}}))?;
+            db.execute("UPDATE runtime_tasks SET state='VERIFYING' WHERE task_id='t'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        verified(&s, &o, &e);
+        e.workers
+            .insert("xa".into(), ProcessObservation::ConfirmedExited);
+        let result = s.write(|db| complete_tx(db, "t", &e));
+        if newest_fails {
+            assert_eq!(result.unwrap_err().code(), "completion_unresolved_worker_check");
+        } else {
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(state(&s), "COMPLETED");
+        }
+    }
+}

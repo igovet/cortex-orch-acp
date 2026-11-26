@@ -3,7 +3,7 @@
   "description": "Description",
   "title": null,
   "titleAvailability": "not_connected",
-  "version": "3",
+  "version": "2",
   "executionId": "execution",
   "phase": "recovery",
   "runtimeState": "RECOVERING",

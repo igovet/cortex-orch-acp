@@ -16,8 +16,32 @@ pub fn tables(db: &Connection) -> CoreResult<BTreeSet<String>> {
         .query_map([], |r| r.get(0))?
         .collect::<Result<_, _>>()?)
 }
+/// Stores whose table groups and columns this process already validated, by file identity and
+/// SQLite schema cookie (which every schema change increments). A reopen of an unchanged schema
+/// skips the per-table column checks; any change of the cookie or of the file runs them again.
+static SHAPE_VALIDATED: std::sync::Mutex<BTreeSet<(String, u64, u64, i64)>> =
+    std::sync::Mutex::new(BTreeSet::new());
+
 pub fn validate_groups(db: &Connection) -> CoreResult<()> {
-    validate_shape(db, false)
+    use std::os::unix::fs::MetadataExt;
+    let fingerprint = db.path().filter(|p| !p.is_empty()).and_then(|path| {
+        let meta = std::fs::metadata(path).ok()?;
+        let cookie = db.pragma_query_value(None, "schema_version", |r| r.get::<_, i64>(0)).ok()?;
+        Some((path.to_owned(), meta.dev(), meta.ino(), cookie))
+    });
+    if let Some(known) = &fingerprint {
+        if SHAPE_VALIDATED.lock().is_ok_and(|set| set.contains(known)) {
+            return Ok(());
+        }
+    }
+    validate_shape(db, false)?;
+    if let (Some(known), Ok(mut set)) = (fingerprint, SHAPE_VALIDATED.lock()) {
+        if set.len() >= 256 {
+            set.clear();
+        }
+        set.insert(known);
+    }
+    Ok(())
 }
 
 /// Unlike inspection, an upgrade has just installed every known group.
@@ -210,8 +234,15 @@ pub fn install(db: &Connection) -> CoreResult<()> {
         (SELECT attempt_id FROM attempt_process_registry WHERE terminated_at IS NOT NULL AND termination_reason IS NOT 'timeout_alive')))",[])?;
     legacy_requirements(db)?;
     db.execute_batch(READ_INDEXES)?;
-    db.pragma_update(None, "application_id", APPLICATION_ID)?;
-    db.pragma_update(None, "user_version", FORMAT)?;
+    // Setting a pragma rewrites the database header even to the same value, which turns every
+    // initializing open of an installed store into a synced write transaction: write only a change.
+    let current = |name: &str| db.pragma_query_value(None, name, |r| r.get::<_, i64>(0));
+    if current("application_id")? != APPLICATION_ID {
+        db.pragma_update(None, "application_id", APPLICATION_ID)?;
+    }
+    if current("user_version")? != FORMAT {
+        db.pragma_update(None, "user_version", FORMAT)?;
+    }
     Ok(())
 }
 fn legacy_requirements(db: &Connection) -> CoreResult<()> {

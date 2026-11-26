@@ -841,7 +841,6 @@ pub fn diagnostics(state: &Path, projects: &Value) -> Result<Value> {
         ("git", false),
         ("node", false),
         ("npm", false),
-        ("bwrap", false),
         ("docker", true),
         ("python3", true),
     ] {

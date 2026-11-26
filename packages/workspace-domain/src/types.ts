@@ -247,7 +247,9 @@ export type Sprint = {
   automaticQueue?: AutomaticQueue;
   id: string; projectId: string; description: string; attachments?: AttachmentInput[]; title?: string | null; runMode: SprintRunMode;
   /** Chosen once for all new sprint tasks. Absent on older sprints. */
-  checkout?: { kind: CheckoutChoice["kind"] };
+  checkout?: { kind: CheckoutChoice["kind"]; /** Worktree sprints only: one worktree and branch for every task (the default for new sprints). Absent on older sprints, which keep a worktree per task. */ shared?: boolean };
+  /** A shared-worktree sprint: its branch merged into the target once (set by the service). */
+  merge?: { state: "merged"; target: string; branch: string; commit: string | null; at: number };
   archivedAt?: number;
   /** A deletion the service started and has not finished: how many tasks it set out to delete and the ones still left. Such
    *  a sprint is archived but stays on view, so its unfinished deletion can be seen and retried. */
@@ -445,6 +447,8 @@ export type TaskSession = {
   context: { used: number; window: number } | null; tokens: number | null;
   planUsage: { percent: number; observedAt: number } | null;
   coordinator: { note: string; elapsedMs: number | null; runningSince?: number | null; usage: number | null };
+  /** Commands the runtime itself ran to verify the task (owned by no worker). */
+  verificationCommands?: Activity[];
   verification: string[]; changes: { files: number; add: number; del: number } | null; mock?: true;
 };
 export type GitStatus = "M" | "A" | "D" | "U";
@@ -590,6 +594,8 @@ export type WorkspaceCommand =
   | { type: "cancel_planning" | "resume_planning"; sprintId: string }
   | { type: "rename_sprint"; sprintId: string; title: string }
   | { type: "close_sprint"; sprintId: string; confirmed: boolean }
+  /** Merges the shared sprint worktree branch into the sprint target once, then removes that worktree. */
+  | { type: "merge_sprint"; sprintId: string; confirmed: boolean }
   | { type: "delete_sprint"; projectId: string; sprintId: string; confirmed: boolean }
   | { type: "set_sprint_settings"; sprintId: string; settings: Partial<TaskSettings> }
   | { type: "run_sprint" | "pause_sprint"; sprintId: string; now?: number }

@@ -111,7 +111,7 @@ mod tests {
         assert_eq!(
             preflight(
                 &offered,
-                &json!({"calls":[{"id":"g","tool":"project_git","arguments":{"kind":"log","request_key":"k"}}]})
+                &json!({"calls":[{"id":"g","tool":"project_git","arguments":{"kind":"push","request_key":"k"}}]})
             ),
             Err(("invalid_arguments", "calls[0].arguments".to_owned()))
         );

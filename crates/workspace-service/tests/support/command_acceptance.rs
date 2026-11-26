@@ -17,22 +17,23 @@ const SENTINEL: &str = "synthetic-private-input";
 const CHECK_BODY: &str = r#"
                 socket=$1
                 shift
-                test ! -e "$socket"
+                # The owner's agent socket stays at its real path, as on the host.
+                test -S "$socket"
                 test "$(cat src/.env.example)" = ordinary
                 for secret do
-                    # The live views can substitute an empty mask such as /dev/null.
-                    # Neither that placeholder nor an open failure contains private bytes.
+                    # Landlock refuses the read; an open failure contains no private bytes.
                     test -z "$(cat "$secret" 2>/dev/null || :)" || exit 31
                 done
-                # Read-only commands may write to a discarded project overlay.
-                (: > checkout-output) 2>/dev/null || :
+                # Read-only commands cannot write the checkout.
+                if (: > checkout-output) 2>/dev/null; then exit 32; fi
                 case "$TMPDIR" in /*) ;; *) exit 33;; esac
                 cc src/main.c -o "$TMPDIR/fixture"
                 "$TMPDIR/fixture"
             "#;
 pub(super) const OUTPUT: &str = "contained-compiler-ran\n";
-// The live profile masks Cortex control storage, not arbitrary project inputs.
-const PRIVATE: &[&str] = &[".cortex/fixture-private", ".cortex-dev/fixture-private"];
+// Landlock hides Cortex control storage and the project's secret files, not
+// arbitrary project or host inputs.
+const PRIVATE: &[&str] = &[".cortex/fixture-private", ".cortex-dev/fixture-private", ".env"];
 
 pub(super) struct Inputs {
     outside: Project,
@@ -42,7 +43,6 @@ pub(super) struct Inputs {
 impl Inputs {
     // Called before the harness creates any threads.
     pub(super) fn new() -> Self {
-        // Read-only commands share /tmp but see private scratch at /var/tmp.
         // Use a short path independent of the test runner's TMPDIR for the socket.
         let outside = Project::new_at(Path::new("/var/tmp"), "cw-command-inputs");
         fs::write(outside.0.join("secret"), SENTINEL).unwrap();
@@ -88,12 +88,6 @@ impl Inputs {
             self.outside
                 .0
                 .join("agent")
-                .into_os_string()
-                .into_string()
-                .unwrap(),
-            self.outside
-                .0
-                .join("secret")
                 .into_os_string()
                 .into_string()
                 .unwrap(),
@@ -150,8 +144,8 @@ impl VerifierInputs {
             r#"#!/bin/sh -e
 test "$(cat "$1")" = benign-host-input
 test -z "$(cat .cortex-dev/fixture-private 2>/dev/null || :)"
-# A non-ignored write may be refused or land in a discarded overlay.
-(: > checkout-output) 2>/dev/null || :
+# A non-ignored write is refused by Landlock.
+if (: > checkout-output) 2>/dev/null; then exit 32; fi
 cc fixture.c -o target/fixture
 ./target/fixture
 "#,
@@ -295,7 +289,7 @@ pub(super) async fn contained(inputs: &Inputs, managed: bool) {
     assert_eq!(observed["profile"], "read_only", "{observed}");
     assert_eq!(observed["output"], OUTPUT, "{observed}");
     println!(
-        "{}: compiler executed in private output; denied files, SSH socket and outside cwd",
+        "{}: compiler executed in private output; hidden files and outside cwd",
         if managed {
             "managed Codex"
         } else {
@@ -315,7 +309,7 @@ pub(super) async fn role_mode_matrix(allow_live: bool) {
             ("auto", "worker-backend-dev", true),
             ("guarded", "worker-backend-dev", false),
             ("development", "worker-explorer", false),
-            ("auto", "worker-explorer", false),
+            ("auto", "worker-explorer", true),
             ("guarded", "worker-explorer", false),
         ] {
             if allowed != allow_live {
@@ -372,13 +366,18 @@ pub(super) async fn role_mode_matrix(allow_live: bool) {
             });
             let scenario = format!("{engine:?}/{mode}/{profile}");
             println!("command capability matrix: {scenario}");
-            // Outside cwd is mode-dependent; it does not grant a read-only role writes.
+            // Auto runs every role unsandboxed on the host as the owner (receipt of the host route).
+            let auto = mode == "auto";
+            let current = || -> Value {
+                if auto { receipt(&p, "live-checkout.host")["reply"]["structuredContent"].clone() } else { receipt(&p, "live-checkout") }
+            };
+            // Outside cwd is mode-dependent; it does not grant a read-only role writes outside Auto.
             if mode != "guarded" {
                 let prompt = call("command_run", args);
                 assert_eq!(d.prompt(&prompt).await.unwrap().stop_reason, "end_turn");
                 let row = tokio::time::timeout(std::time::Duration::from_secs(20), async {
                     loop {
-                        let row = receipt(&p, "live-checkout");
+                        let row = current();
                         if row["settled"] == true {
                             break row;
                         }
@@ -395,7 +394,7 @@ pub(super) async fn role_mode_matrix(allow_live: bool) {
                 )?)).unwrap();
                 assert_eq!(finished, 1, "{scenario}: no unique finished receipt");
                 assert_eq!(row["complete"], true, "{scenario}: {row}");
-                assert_eq!(row["profile"], if allowed { "development" } else { "read_only" });
+                assert_eq!(row["profile"], if auto { "outside_confirmed" } else if allowed { "development" } else { "read_only" });
                 assert_eq!(row["exit_code"], if allowed { 0 } else { 24 }, "{scenario}: {row}");
                 if allowed {
                     assert_eq!(fs::read_to_string(&output).unwrap(), SENTINEL, "{scenario}");
@@ -420,7 +419,7 @@ pub(super) async fn role_mode_matrix(allow_live: bool) {
                 let before_retry = preparations();
                 assert_eq!(d.prompt(&prompt).await.unwrap().stop_reason, "end_turn");
                 assert_eq!(preparations(), before_retry, "{scenario}: retry prepared a command");
-                assert_eq!(receipt(&p, "live-checkout"), row, "{scenario}: receipt changed");
+                assert_eq!(current(), row, "{scenario}: receipt changed");
                 if allowed {
                     assert_eq!(fs::read_to_string(&output).unwrap(), SENTINEL, "{scenario}");
                 } else {

@@ -1288,7 +1288,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
         ...(workspaceDigest !== undefined ? { workspaceDigest } : {}), ...(integrationFacts !== undefined ? { integrationFacts } : {}),
         // Timing is also read with task facts, not the saved board.
         ...(known.spend !== undefined ? { spend: known.spend } : {}),
-        ...(known.coordinatorMetrics !== undefined ? { coordinatorMetrics: known.coordinatorMetrics } : {}), ...saved }];
+        ...(known.coordinatorMetrics !== undefined ? { coordinatorMetrics: known.coordinatorMetrics } : {}), ...(known.verificationCommands !== undefined ? { verificationCommands: known.verificationCommands } : {}), ...saved }];
     }));
     return {...previous,projectId:project.projectId,openBranch:previous?.openBranch ?? "",defaultBranch:previous?.defaultBranch ?? "",
       repo:previous?.repo ?? null,workers:previous?.workers ?? [],reviews:previous?.reviews ?? [],
@@ -1709,7 +1709,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
         if (!command.sprintId) return null;
         const sprint = (await machine<Product>("product.read", command.projectId)).sprints.find(s => s.id === command.sprintId);
         if (!sprint || sprint.archivedAt || sprint.planning !== "created") throw new Refusal("sprint_unavailable", "Choose an open sprint with created tasks.");
-        const made = await send({...envelope,payload:{...command,checkout:sprint.checkout ?? command.checkout}});
+        const made = await send({...envelope,payload:{...command,checkout:{kind:(sprint.checkout ?? command.checkout).kind}}});
         if (!made.ok || !made.entityId) return made;
         try { await taskCall(command.projectId, {action:"sprint",taskId:made.entityId,sprintId:command.sprintId,dependencies:[]}); }
         catch { return {...made,ok:false,outcome:"partial_effect",message:"The task was saved outside the sprint, but joining the sprint was not confirmed. Refresh the project; do not create it again."}; }
@@ -1726,6 +1726,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
             : (reply.reason ?? "Deletion is incomplete. Retry Delete sprint.") + (reply.keptPaths?.length ? " Kept worktrees: " + reply.keptPaths.join(", ") : ""),
           deletedTaskIds:reply.taskIds,keptPaths:reply.keptPaths};
       }
+      case "merge_sprint": { const reply = await machine<{merged?:boolean;ownerIntegration?:boolean;reason?:string}>("product.integrate", await projectOfSprint(command.sprintId), {method:"sprint_merge",sprintId:command.sprintId,confirmed:command.confirmed}); if (!reply.merged) throw new Refusal("sprint_merge_declined", reply.reason ?? "The sprint branch was not merged."); return ok(); }
       case "close_sprint": await machine("product.sprint", await projectOfSprint(command.sprintId), {action:"close",sprintId:command.sprintId,confirmed:command.confirmed}); return ok();
       case "rename_task": {
         const reply = await machine<{version?:string}>("product.task", task(command.taskId), {action:"rename",taskId:command.taskId,title:command.title});
@@ -2110,6 +2111,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
 
   return {
     mode: "real",
+    get readsFacts() { return machineOn; },
     query<O extends QueryOperation>(operation: O, parameters: QueryParameters[O]): Promise<QueryResults[O]> {
       if (operation === "capabilities.get") return capabilitiesGet() as Promise<QueryResults[O]>;
       if (operation === "machine.facts") return (machineOn ? machineFacts().then(f => [f]) : Promise.resolve([])) as Promise<QueryResults[O]>;

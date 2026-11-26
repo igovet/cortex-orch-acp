@@ -340,6 +340,59 @@ fn finish(store: &Store, i: &Identity, name: &str, mut value: Value) -> CoreResu
     }
     Ok(value)
 }
+/// The document tools that only read: run on the reader pool (see [`read_tool`]).
+pub(super) fn read_only(name: &str) -> bool {
+    matches!(
+        name,
+        "read_report" | "read_draft" | "list_reports" | "tools_discover"
+    )
+}
+/// The observable, channel-bound receipt of one successful report page. Review
+/// completion uses these receipts to prove that the reviewer actually consumed every
+/// predecessor report through its final page; prose in the result is not evidence.
+pub(super) struct PageReceipt {
+    task: String,
+    payload: Value,
+}
+impl PageReceipt {
+    pub(super) fn record(&self, db: &rusqlite::Transaction<'_>) -> CoreResult<()> {
+        cortex_core::lifecycle::event_tx(db, &self.task, "REPORT_PAGE_READ", self.payload.clone())?;
+        Ok(())
+    }
+}
+/// An authenticated, schema-checked read tool, with no write of its own: the reply
+/// before any oversized-output deferral, and the page receipt the caller records
+/// (`read_report`). On a reader-pool store, an operation that needs a write (a crash
+/// reconciliation of a publication) refuses `storage_read_lane` and is repeated on
+/// the writer, where repeating it is harmless.
+pub(super) fn read_tool(
+    store: &Store,
+    c: &Credential,
+    i: &Identity,
+    name: &str,
+    args: &Value,
+) -> CoreResult<(Value, Option<PageReceipt>)> {
+    authenticate(store, c, i)?;
+    validate(i, name, args)?;
+    let value = read(store, i, name, args)?;
+    authenticate(store, c, i)?;
+    let value = finish(store, i, name, value)?;
+    let report_id = value["report_id"].as_str().unwrap_or_default();
+    let receipt = (name == "read_report" && !report_id.is_empty()).then(|| PageReceipt {
+        task: i.task.clone(),
+        payload: json!({
+            "channel_id": c.channel_id,
+            "assignment_ref": i.assignment,
+            "attempt": i.attempt,
+            "report_id": report_id,
+            "cursor": args["cursor"],
+            "next_cursor": value["next_cursor"],
+            "sha256": value["sha256"],
+            "total_characters": value["total_characters"]
+        }),
+    });
+    Ok((value, receipt))
+}
 /// Authenticated, schema-checked operation; no filesystem effect crosses a SQL transaction.
 pub(super) fn execute(
     store: &Store,
@@ -348,44 +401,15 @@ pub(super) fn execute(
     name: &str,
     args: &Value,
 ) -> CoreResult<Value> {
-    authenticate(store, c, i)?;
-    validate(i, name, args)?;
-    if matches!(
-        name,
-        "read_report" | "read_draft" | "list_reports" | "tools_discover"
-    ) {
-        let value = read(store, i, name, args)?;
-        authenticate(store, c, i)?;
-        let value = finish(store, i, name, value)?;
-        // Keep an observable, channel-bound receipt for every successful report
-        // page. Review completion uses these receipts to prove that the reviewer
-        // actually consumed every predecessor report through its final page;
-        // prose in the result is not evidence of a read.
-        if name == "read_report" {
-            let report_id = value["report_id"].as_str().unwrap_or_default();
-            if !report_id.is_empty() {
-                store.write(|db| {
-                    cortex_core::lifecycle::event_tx(
-                        db,
-                        &i.task,
-                        "REPORT_PAGE_READ",
-                        json!({
-                            "channel_id": c.channel_id,
-                            "assignment_ref": i.assignment,
-                            "attempt": i.attempt,
-                            "report_id": report_id,
-                            "cursor": args["cursor"],
-                            "next_cursor": value["next_cursor"],
-                            "sha256": value["sha256"],
-                            "total_characters": value["total_characters"]
-                        }),
-                    )?;
-                    Ok(())
-                })?;
-            }
+    if read_only(name) {
+        let (value, receipt) = read_tool(store, c, i, name, args)?;
+        if let Some(receipt) = receipt {
+            store.write(|db| receipt.record(db))?;
         }
         return crate::native_commands::defer_json(store, i, value);
     }
+    authenticate(store, c, i)?;
+    validate(i, name, args)?;
     let generated = crate::identity()?;
     let key = args["request_key"].as_str().unwrap_or(&generated);
     let mut fresh = false;

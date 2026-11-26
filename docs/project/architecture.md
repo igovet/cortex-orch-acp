@@ -20,7 +20,7 @@ The product contains no Python. The Python runtime (`src/`), its tests, `.venv` 
 
 Ordinary worker commands use host-visible, mode-specific mounts. The automatic
 verifier uses the same host-visible read-only profile as read-only workers,
-with networking disabled. Neither is a general jail for native engine processes.
+with the host network (shared with every command view). Neither is a general jail for native engine processes.
 A writing worker can request a host command directly. The runtime can also route an eligible
 privilege request before sandbox launch, or reroute once when the command
 supervisor proves the payload never started. Both routes use `outside_command`

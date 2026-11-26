@@ -10,8 +10,16 @@ use serde_json::{json, Value};
 /// is clipped (newest rows kept, explicit notice added) so ordinary tasks never
 /// reach it; only a single retained item larger than the ceiling is refused.
 pub const MAX_CHARACTERS: usize = 120_000;
-/// Rows read per section. The true total is counted separately and reported.
-const FETCH_LIMIT: usize = 3000;
+/// No retained row serialises shorter than this, so a section whose budget is B keeps
+/// fewer than B/MIN_ROW_CHARS rows. A section reads that many newest rows plus one
+/// sentinel: the sentinel proves older rows exist and the total is then a lower bound
+/// (`total_is_lower_bound`) instead of an exact `count(*)` over the whole history.
+const MIN_ROW_CHARS: usize = 24;
+const fn rows_for(budget: usize) -> usize {
+    budget / MIN_ROW_CHARS + 1
+}
+/// The constraints section also lists omitted ids (`CONSTRAINT_INDEX_BUDGET`).
+const CONSTRAINT_ROWS: usize = 1500;
 const NODE_BUDGET: usize = 34_000;
 const DECISION_BUDGET: usize = 6_000;
 const MESSAGE_BUDGET: usize = 6_000;
@@ -50,17 +58,23 @@ const REPORT_TOOLS: &str =
 struct Fetched {
     newest_first: Vec<Value>,
     total: i64,
+    /// More rows exist than were read: `total` is then a lower bound.
+    truncated: bool,
 }
-fn fetch(db: &Connection, sql: &str, count_sql: &str, task: &str) -> CoreResult<Fetched> {
-    let newest_first = db
-        .prepare(sql)?
+/// Read the newest `limit` rows of `sql` (already newest-first ordered), plus one sentinel.
+fn fetch(db: &Connection, sql: &str, task: &str, limit: usize) -> CoreResult<Fetched> {
+    let mut newest_first = db
+        .prepare(&format!("{sql} LIMIT {}", limit + 1))?
         .query_map([task], |r| r.get::<_, String>(0))?
         .map(|r| Ok(serde_json::from_str(&r?)?))
-        .collect::<CoreResult<Vec<_>>>()?;
-    let total = db.query_row(count_sql, [task], |r| r.get(0))?;
+        .collect::<CoreResult<Vec<Value>>>()?;
+    let truncated = newest_first.len() > limit;
+    newest_first.truncate(limit);
+    let total = newest_first.len() as i64 + i64::from(truncated);
     Ok(Fetched {
         newest_first,
         total,
+        truncated,
     })
 }
 fn size(v: &Value) -> usize {
@@ -88,10 +102,12 @@ fn clip(
     }
     let omitted = f.total - kept.len() as i64;
     if omitted > 0 {
-        notices.push(
-            json!({"section":name,"total":f.total,"included":kept.len(),"omitted":omitted,
-            "omitted_which":"oldest","how_to_read":how_to_read}),
-        );
+        let mut notice = json!({"section":name,"total":f.total,"included":kept.len(),"omitted":omitted,
+            "omitted_which":"oldest","how_to_read":how_to_read});
+        if f.truncated {
+            notice["total_is_lower_bound"] = json!(true);
+        }
+        notices.push(notice);
     }
     kept.reverse();
     kept
@@ -293,6 +309,7 @@ the full objective of the recipient's own assignment is always included; every s
                 Fetched {
                     newest_first,
                     total: total as i64,
+                    truncated: false,
                 },
                 budget,
                 REPORT_TOOLS,
@@ -467,8 +484,7 @@ pub fn snapshot_for(
         AND abs(julianday(h2.created_at)-julianday(h.created_at))*86400<1.0))";
     let mut messages_f = fetch(db,
         &format!("SELECT json_object('session',h.session_id,'sequence',h.seq,'message_id',h.message_id,'text',h.text) {messages_from}
-        ORDER BY h.created_at DESC,h.id DESC LIMIT {FETCH_LIMIT}"),
-        &format!("SELECT count(*) {messages_from}"), task)?;
+        ORDER BY h.created_at DESC,h.id DESC"), task, rows_for(MESSAGE_BUDGET))?;
     for row in &mut messages_f.newest_first {
         if let Some(t) = row["text"].as_str().map(str::to_owned) {
             row["text"] = bounded_text(&t, &goal);
@@ -478,8 +494,7 @@ pub fn snapshot_for(
         "owner steering is also retained in constraints; the original goal is exact; a clipped text has size_chars and sha256", n);
     let decision_where = format!("FROM runtime_events WHERE task_id=? AND type NOT IN {NOISE}");
     let mut decisions_f = fetch(db,
-        &format!("SELECT json_object('id',id,'type',type,'payload',json(payload_json)) {decision_where} ORDER BY id DESC LIMIT {FETCH_LIMIT}"),
-        &format!("SELECT count(*) {decision_where}"), task)?;
+        &format!("SELECT json_object('id',id,'type',type,'payload',json(payload_json)) {decision_where} ORDER BY id DESC"), task, rows_for(DECISION_BUDGET))?;
     decisions_f.newest_first = decisions_f.newest_first.into_iter().map(decision).collect();
     let decisions = clip("retained_decisions", decisions_f, DECISION_BUDGET,
         "state, plan, nodes, questions and constraints in this capsule are current; older event rows are not restated", n);
@@ -494,9 +509,9 @@ pub fn snapshot_for(
         'delivery',json_extract(payload_json,'$.delivery')),'recorded_at',created_at),created_at,id FROM runtime_events WHERE task_id=?1 AND type='USER_STEERING')";
     let mut constraints_f = fetch(
         db,
-        &format!("SELECT item {cf} ORDER BY at DESC,n DESC LIMIT {FETCH_LIMIT}"),
-        &format!("SELECT count(*) {cf}"),
+        &format!("SELECT item {cf} ORDER BY at DESC,n DESC"),
         task,
+        CONSTRAINT_ROWS,
     )?;
     for row in &mut constraints_f.newest_first {
         row["payload"] = bounded_payload(&row["payload"].clone(), &goal);
@@ -528,7 +543,7 @@ pub fn snapshot_for(
         }
         notice["index_complete"] = json!(
             listed.len() == omitted.len()
-                && constraint_ids.len() as i64 == notice["total"].as_i64().unwrap_or(-1)
+                && notice.get("total_is_lower_bound").is_none()
         );
         notice["omitted_event_ids"] = json!(listed);
     }
@@ -540,30 +555,26 @@ pub fn snapshot_for(
     let qf = "FROM pending_questions WHERE task_id=?";
     let questions = clip("questions", fetch(db,
         &format!("SELECT json_object('id',id,'question',text,'options',json(options_json),'status',status,'answer',answer_text,
-        'answer_source',answer_source) {qf} ORDER BY created_at DESC,id DESC LIMIT {FETCH_LIMIT}"),
-        &format!("SELECT count(*) {qf}"), task)?, QUESTION_BUDGET, "older answered questions: read_source with <question_id>:answer", n);
+        'answer_source',answer_source) {qf} ORDER BY created_at DESC,id DESC"), task, rows_for(QUESTION_BUDGET))?, QUESTION_BUDGET, "older answered questions: read_source with <question_id>:answer", n);
     let nodes = nodes(db, task, own_assignment, n)?;
     let sf =
         "FROM source_blocks b JOIN source_revisions r ON r.report_id=b.report_id WHERE b.task_id=?";
     let sources = clip("sources", fetch(db,
         &format!("SELECT json_object('report',b.report_id,'revision',r.revision,'block',b.block_index,'kind',b.kind,'name',substr(b.name,1,200),'uri',substr(b.uri,1,300),'mime',substr(b.mime,1,100),
         'availability',b.availability,'sha256',b.sha256,'size_bytes',b.size_bytes,'trust_label',b.trust_label)
-        {sf} ORDER BY r.revision DESC,b.block_index DESC LIMIT {FETCH_LIMIT}"),
-        &format!("SELECT count(*) {sf}"), task)?, SOURCE_BUDGET, "list_sources / read_source", n);
+        {sf} ORDER BY r.revision DESC,b.block_index DESC"), task, rows_for(SOURCE_BUDGET))?, SOURCE_BUDGET, "list_sources / read_source", n);
     let af = "FROM delegation_provisioning WHERE task_id=?";
     let attempts = clip("attempts", fetch(db,
         &format!("SELECT json_object('attempt',attempt_id,'role',role_id,'assignment',idempotency_key,
         'channel',channel_id,'engine_session',engine_session_ref,'step',step,'status',status,'owner_epoch',owner_epoch)
-        {af} ORDER BY rowid DESC LIMIT {FETCH_LIMIT}"),
-        &format!("SELECT count(*) {af}"), task)?, ATTEMPT_BUDGET, "current_nodes carries each node's assignment and status", n);
+        {af} ORDER BY rowid DESC"), task, rows_for(ATTEMPT_BUDGET))?, ATTEMPT_BUDGET, "current_nodes carries each node's assignment and status", n);
     // Capacity reservations are runtime scheduling state no coordinator decision uses;
     // only a worker capsule carries them.
     let rf = "FROM capacity_reservations WHERE task_id=?";
     let reservations = if own_assignment.is_some() {
         Some(clip("capacity", fetch(db,
         &format!("SELECT json_object('id',reservation_id,'attempt',attempt_id,'kind',kind,'state',state)
-        {rf} ORDER BY rowid DESC LIMIT {FETCH_LIMIT}"),
-        &format!("SELECT count(*) {rf}"), task)?, RESERVATION_BUDGET, "released reservations are history only", n))
+        {rf} ORDER BY rowid DESC"), task, rows_for(RESERVATION_BUDGET))?, RESERVATION_BUDGET, "released reservations are history only", n))
     } else {
         None
     };
@@ -573,8 +584,7 @@ pub fn snapshot_for(
         AND f.id>s.id AND coalesce(json_extract(f.payload_json,'$.receipt.tool_call_ref'),json_extract(f.payload_json,'$.ref'))=json_extract(s.payload_json,'$.ref'))";
     let mut unresolved = fetch(db,
         &format!("SELECT json_object('id',s.id,'ref',json_extract(s.payload_json,'$.ref'),'argv',json(json_extract(s.payload_json,'$.argv'))) {uf}
-        ORDER BY s.id DESC LIMIT {FETCH_LIMIT}"),
-        &format!("SELECT count(*) {uf}"), task)?;
+        ORDER BY s.id DESC"), task, rows_for(COMMAND_BUDGET))?;
     for row in &mut unresolved.newest_first {
         row["argv"] = clipped_value(&row["argv"].clone(), 300);
         row["outcome"] = json!("unresolved; do not replay");
@@ -614,7 +624,9 @@ pub fn snapshot_for(
     // Default protections of the project's own agent/rule files (a fixed, short list).
     let rule_files = json!({"paths":crate::lifecycle::steering::rule_file_protections(db, task)?,
         "note":RULE_FILE_NOTE});
+    let owner_answers = owner_answers_so_far(db, task)?;
     let mut context = json!({"task":task,"owner_epoch":owner,"state":state,"revision":revision,"original_goal":goal,
+        "owner_decisions_so_far":owner_answers,
         "retained_user_messages":messages,"retained_decisions":decisions,"constraints":constraints,"questions":questions,
         "owner_write_denials":denials,"rule_file_protection":rule_files,"environment":environment(db, task)?,"verification_failure":verification_failure(db, task)?,"investigation_only":investigation_only_note(db, task)?,"obstacles":crate::lifecycle::obstacles::capsule(db, task)?,
         "plan_summary":plan_summary(db, task, plan.as_deref())?,"current_nodes":nodes,"sources":sources,"attempts":attempts,
@@ -851,4 +863,24 @@ pub fn record_delivery_tx(
         )?;
     }
     Ok(())
+}
+
+/// The owner's answers on this task, newest first and bounded: what the owner
+/// already decided, so a coordinator proceeds from it instead of asking again.
+fn owner_answers_so_far(db: &Connection, task: &str) -> CoreResult<Value> {
+    let clip = |s: &str, n: usize| s.chars().take(n).collect::<String>();
+    let rows = db
+        .prepare(
+            "SELECT text,coalesce(answer_text,''),CAST(coalesce(answered_at,'') AS TEXT) FROM pending_questions
+             WHERE task_id=? AND status='answered' AND answer_text IS NOT NULL
+             AND dedup_key NOT LIKE 'native_permission:%'
+             ORDER BY rowid DESC LIMIT 8",
+        )?
+        .query_map([task], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({
+        "note":"The owner already decided these (newest first). Proceed from them; never ask the same or a near-identical question again.",
+        "answers":rows.iter().map(|(q,a,t)|json!({"question":clip(q,300),"answer":clip(a,400),"answered_at":t})).collect::<Vec<_>>()}))
 }

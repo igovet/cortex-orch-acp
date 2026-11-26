@@ -3,7 +3,7 @@
 //! Mirrors store.py:227-280,946-989,1116-1123,1202-1242,1250-1321,1512-1598.
 use super::{
     locks::{self, AccessLock},
-    publication::PublicationIntent,
+    publication::{self, file_digest, Identity, PublicationIntent},
     OpenMode, Store,
 };
 use crate::{error::refuse, CoreError, CoreResult};
@@ -107,21 +107,6 @@ fn bytes(path: &Path) -> CoreResult<Vec<u8>> {
     let mut data = Vec::new();
     f.read_to_end(&mut data)?;
     Ok(data)
-}
-fn file_digest(path: &Path) -> CoreResult<String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-    let mut f = locks::open_private(path, false, true)?;
-    let mut hash = Sha256::new();
-    let mut chunk = [0u8; 65536];
-    loop {
-        let n = f.read(&mut chunk)?;
-        if n == 0 {
-            break;
-        }
-        hash.update(&chunk[..n]);
-    }
-    Ok(format!("{:x}", hash.finalize()))
 }
 fn text_file(path: &Path) -> CoreResult<String> {
     String::from_utf8(bytes(path)?).map_err(|_| CoreError::Refused("invalid_utf8"))
@@ -844,6 +829,14 @@ fn page(
     use std::io::Read;
     let mut file = locks::open_private(path, false, true)?;
     let identity = file.metadata()?;
+    let fast = if committed.is_some() {
+        cached_page(path, &mut file, &identity, committed, start, count)?
+    } else {
+        None
+    };
+    let (markdown, total, digest) = match fast {
+        Some(v) => v,
+        None => {
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 65536];
     let mut tail = Vec::new();
@@ -889,6 +882,12 @@ fn page(
         return refuse("file_conflict");
     }
     let digest = format!("{:x}", hash.finalize());
+    if committed == Some(digest.as_str()) {
+        publication::remember(path, Identity::of(&identity), digest.clone(), Some(total), false);
+    }
+    (markdown, total, digest)
+        }
+    };
     if committed.is_some_and(|d| d != digest) {
         return refuse("file_conflict");
     }
@@ -917,4 +916,61 @@ fn page(
         total_characters: total,
         next_cursor,
     })
+}
+/// The page of a published document whose digest and length were verified in exactly its
+/// current state (`publication::verified`): only the requested characters are read.
+/// `None` when the file is not known to be in such a state.
+fn cached_page(
+    path: &Path,
+    file: &mut fs::File,
+    identity: &fs::Metadata,
+    committed: Option<&str>,
+    start: usize,
+    count: usize,
+) -> CoreResult<Option<(String, usize, String)>> {
+    use std::io::Read;
+    let state = Identity::of(identity);
+    let Some((digest, Some(total))) = publication::verified(path, &state) else {
+        return Ok(None);
+    };
+    if committed.is_some_and(|d| d != digest) || start > total {
+        return Ok(None);
+    }
+    let (mut skipped, mut chosen, mut inside) = (0usize, 0usize, false);
+    let mut page = Vec::new();
+    let mut buffer = [0u8; 65536];
+    'read: loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        let chunk = &buffer[..n];
+        let starts = chunk.iter().filter(|b| (**b & 0xC0) != 0x80).count();
+        if page.is_empty() && !inside && skipped + starts <= start {
+            skipped += starts;
+            continue;
+        }
+        for &b in chunk {
+            if (b & 0xC0) != 0x80 {
+                if skipped < start {
+                    skipped += 1;
+                    continue;
+                }
+                if chosen == count {
+                    break 'read;
+                }
+                chosen += 1;
+                inside = true;
+            }
+            if inside {
+                page.push(b);
+            }
+        }
+    }
+    let after = file.metadata()?;
+    if Identity::of(&after) != state || Identity::of(&path.symlink_metadata()?) != state {
+        return Ok(None);
+    }
+    let markdown = String::from_utf8(page).map_err(|_| CoreError::Refused("invalid_utf8"))?;
+    Ok(Some((markdown, total, digest)))
 }

@@ -1,5 +1,6 @@
 //! Owner-only external MCP registry and per-channel attachment. A server is
-//! contained (Landlock and seccomp) unless the owner explicitly sets
+//! contained (Landlock: the real filesystem readable except the owner's secrets
+//! and Cortex stores, writes only to its grants) unless the owner explicitly sets
 //! `"containment": "none"` on it or as the registry default.
 //! Configuration and environment values stay in memory, never task reports.
 use crate::{native_routes::RouteEnvironment, native_sandbox::Sandbox};
@@ -83,6 +84,8 @@ struct Server {
     reads: Vec<PathBuf>,
     writes: Vec<PathBuf>,
     runtime_env: Vec<String>,
+    /// Accepted for compatibility; every server shares the host network.
+    #[allow(dead_code)]
     network: bool,
     roles: Option<Vec<String>>,
     engines: Option<Vec<String>>,
@@ -90,7 +93,7 @@ struct Server {
 }
 /// How an external server runs. `Uncontained` is an explicit owner opt-out: the
 /// server runs with the owner's full user authority and its path grants and
-/// network flag are not enforced. Tool grants and the relay still apply.
+/// network flag are not enforced (every server shares the host network). Tool grants and the relay still apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
     Contained,
@@ -126,6 +129,9 @@ pub struct Registry {
     home: PathBuf,
     /// The Cortex process's own XDG_RUNTIME_DIR, passed only to uncontained servers.
     owner_runtime: Option<PathBuf>,
+    /// Where this registry was loaded from, so each session start re-reads the owner files
+    /// (a Settings save or file edit applies to the next session without a service restart).
+    source: Option<(RouteEnvironment, PathBuf)>,
 }
 impl Registry {
     /// No project-local file and no writes or seeding. Explicit environment supports
@@ -147,7 +153,9 @@ impl Registry {
         let registry = Self::load(env)?;
         let path = project_registry_path(&env.config.join("cortex"), root)?;
         let raw = crate::native_routes::read(&path, true)?;
-        registry.with_project(raw.as_ref())
+        let mut registry = registry.with_project(raw.as_ref())?;
+        registry.source = Some((env.clone(), root.to_path_buf()));
+        Ok(registry)
     }
     /// Effective servers for one project: every global server, adjusted by the project
     /// file. A project entry in `servers` replaces the machine entry of that name as a
@@ -195,6 +203,13 @@ impl Registry {
         servers.extend(own.servers);
         self.servers = servers;
         Ok(self)
+    }
+    /// The registry as the owner files read now; `None` for one not loaded from files.
+    pub(crate) fn reloaded(&self) -> CoreResult<Option<Self>> {
+        self.source
+            .as_ref()
+            .map(|(env, root)| Self::load_for_project(env, root))
+            .transpose()
     }
     fn parse(raw: Option<&Value>, home: PathBuf) -> CoreResult<Self> {
         let mut servers = vec![];
@@ -331,6 +346,7 @@ impl Registry {
             dormant,
             home,
             owner_runtime: None,
+            source: None,
         })
     }
     /// Client duplicates cannot replace the owner's executable, secrets or grants.
@@ -383,7 +399,26 @@ impl Registry {
         ) {
             return Ok(());
         }
-        for server in &self.servers {
+        // Re-read the owner registry now: a host opened before the owner switched a server on
+        // (or off) for this project must not keep serving its start-up snapshot. An unreadable
+        // file attaches nothing and says so; it never falls back to the old snapshot.
+        let current;
+        let this = match self.reloaded() {
+            Ok(Some(fresh)) => {
+                current = fresh;
+                &current
+            }
+            Ok(None) => self,
+            Err(_) => {
+                    withheld.push(Withheld {
+                        server: "(mcp registry)".into(),
+                        reason: "invalid_mcp_registry",
+                        detail: None,
+                    });
+                    return Ok(());
+                }
+        };
+        for server in &this.servers {
             if server
                 .roles
                 .as_ref()
@@ -411,7 +446,7 @@ impl Registry {
                 continue;
             }
             let before = result.len();
-            let launched = self
+            let launched = this
                 .attach_one(
                     server,
                     grants,
@@ -457,12 +492,9 @@ impl Registry {
         core: Arc<dyn ExternalCore>,
         result: &mut Vec<Attachment>,
     ) -> Result<(), &'static str> {
+        // As the owner's terminal finds it, contained or not.
         let executable = resolve(&server.command)
-            .or_else(|e| match server.containment {
-                // As the owner's terminal finds it; a contained server keeps the system list.
-                Mode::Uncontained => owner_resolve(&server.command).ok_or(e),
-                Mode::Contained => Err(e),
-            })
+            .or_else(|e| owner_resolve(&server.command).ok_or(e))
             .map_err(|_| "executable_unavailable")?;
         let runtime = parent.join(format!(
             "external-runtime-{}",
@@ -477,6 +509,7 @@ impl Registry {
             proxy: None,
             runtime,
             entry: None,
+            tools: grants.allowed_tools.len(),
         });
         let attachment = result.last_mut().unwrap();
         let (launch, sandbox) = self.prepare(
@@ -517,7 +550,7 @@ impl Registry {
         Ok(())
     }
     /// The launch specification and, for a contained server, its prepared
-    /// sandbox. An uncontained server gets no Landlock/seccomp policy, so its
+    /// sandbox. An uncontained server gets no Landlock policy, so its
     /// path grants, worker scopes and the per-file project walk are skipped.
     fn prepare(
         &self,
@@ -543,10 +576,8 @@ impl Registry {
                 None
             }
             Mode::Contained => {
-                // A script launcher (`#!/usr/bin/env node`, as npx under NVM) finds its
-                // interpreter beside itself: the executable's own directory leads the
-                // system path. It is readable only when the owner granted it in `read_paths`.
-                environment.insert("PATH".into(), contained_path(&executable));
+                // The owner's tool search path: the real host tools stay visible.
+                environment.insert("PATH".into(), owner_path(&executable, &self.home));
                 environment.insert("TMPDIR".into(), runtime.to_string_lossy().into());
                 for k in std::iter::once("XDG_RUNTIME_DIR")
                     .chain(server.runtime_env.iter().map(String::as_str))
@@ -620,7 +651,9 @@ impl Registry {
         for p in reads.iter().chain(&writes) {
             self.guard(p).map_err(|_| "protected_path_refused")?;
         }
-        Sandbox::external(root, runtime, &reads, &writes, server.network)
+        // Read grants are validated like write grants; every non-secret path is readable.
+        let _ = reads;
+        Sandbox::external(root, &self.home, runtime, &writes)
             .map_err(|_| "containment_unavailable")
     }
 }
@@ -874,16 +907,6 @@ fn guard_grant(p: &Path, home: &Path) -> Result<(), Error> {
 /// PATH for an uncontained server: the registry executable's own directory
 /// (for example a Node install's `bin`), the owner's user bin directories and
 /// the system ones. Built, never inherited from the Cortex process.
-/// The contained server's search path: its executable's directory, then the
-/// system directories.
-fn contained_path(executable: &Path) -> String {
-    match executable.parent().and_then(Path::to_str) {
-        Some(d) if !d.is_empty() && !d.contains(':') && d != "/usr/bin" && d != "/bin" => {
-            format!("{d}:/usr/bin:/bin")
-        }
-        _ => "/usr/bin:/bin".into(),
-    }
-}
 pub(crate) fn owner_path(executable: &Path, home: &Path) -> String {
     let mut dirs: Vec<PathBuf> = vec![];
     dirs.extend(executable.parent().map(Path::to_path_buf));
@@ -933,6 +956,40 @@ pub(crate) struct Attachment {
     proxy: Option<Arc<ExternalProxy>>,
     runtime: PathBuf,
     entry: Option<RelayEntry>,
+    /// How many tools the owner's grants allow this session on the server.
+    tools: usize,
+}
+impl Attachment {
+    /// Secret-free record of what this session is offered: the name and allowed-tool count.
+    pub(crate) fn offered(&self) -> Option<Value> {
+        Some(serde_json::json!({"server": self.name()?, "tools": self.tools}))
+    }
+}
+/// Durable `NATIVE_EXTERNAL_MCP_OFFERED` event: the servers a session actually runs with, by
+/// name and tool count only (never environment, arguments or paths). Nothing when none.
+pub(crate) async fn record_offered(
+    executor: &Arc<cortex_core::store::executor::StoreExecutor>,
+    credential: &cortex_core::channels::Credential,
+    attachments: &[Attachment],
+) -> CoreResult<()> {
+    let servers: Vec<Value> = attachments.iter().filter_map(Attachment::offered).collect();
+    if servers.is_empty() {
+        return Ok(());
+    }
+    let c = credential.clone();
+    executor
+        .write(move |db| {
+            let i = cortex_core::channels::authenticate(db, &c.channel_id, c.secret(), false)?;
+            cortex_core::lifecycle::event_tx(
+                db,
+                &i.task,
+                "NATIVE_EXTERNAL_MCP_OFFERED",
+                serde_json::json!({"channel_id":c.channel_id,"servers":servers}),
+            )?;
+            Ok(())
+        })?
+        .await
+        .map_err(|_| CoreError::Refused("session_host_closed"))?
 }
 impl Attachment {
     pub fn entry(&self) -> RelayEntry {
@@ -1233,6 +1290,50 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
     #[test]
+    fn a_registry_loaded_for_a_project_sees_a_later_override_without_a_restart() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = scratch("project-reload");
+        let private = |p: &Path| {
+            std::fs::create_dir_all(p).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        let root = base.join("p");
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let config = base.join("config");
+        private(&config);
+        private(&config.join("cortex"));
+        private(&config.join("cortex/projects"));
+        let write = |path: &Path, body: Value| {
+            private(path.parent().unwrap());
+            std::fs::write(path, serde_json::to_vec(&body).unwrap()).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        write(
+            &config.join("cortex/mcp-servers.json"),
+            json!({"version":1,"servers":{"kling":{"command":"/bin/kling","enabled":false,
+                "containment":"none","allowed_tools":["read"]}}}),
+        );
+        let env = RouteEnvironment {
+            home: base.clone(),
+            config: config.clone(),
+            state: base.join("state"),
+            routing_override: None,
+        };
+        let list = |r: &Registry| names(r).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        let host = Registry::load_for_project(&env, &root).unwrap();
+        assert!(list(&host).is_empty());
+        let file = project_registry_path(&config.join("cortex"), &root).unwrap();
+        write(&file, json!({"version":1,"servers":{},"overrides":{"kling":true}}));
+        // The host's start-up snapshot is stale; the session start re-reads the files.
+        assert!(list(&host).is_empty());
+        assert_eq!(list(&host.reloaded().unwrap().unwrap()), ["kling"]);
+        write(&file, json!({"servers":[]}));
+        assert!(host.reloaded().is_err());
+        assert!(Registry::default().reloaded().unwrap().is_none());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+    #[test]
     fn containment_is_explicit_with_a_contained_default() {
         let server = json!({"command":"/bin/true","allowed_tools":["read"]});
         let parse = |raw: Value| Registry::parse(Some(&raw), "/nonexistent".into());
@@ -1319,14 +1420,6 @@ mod tests {
         base
     }
     #[test]
-    fn contained_path_leads_with_the_executable_directory() {
-        assert_eq!(
-            contained_path(Path::new("/home/o/.nvm/v/bin/npx")),
-            "/home/o/.nvm/v/bin:/usr/bin:/bin"
-        );
-        assert_eq!(contained_path(Path::new("/usr/bin/true")), "/usr/bin:/bin");
-    }
-    #[test]
     fn uncontained_launch_skips_the_walk_and_uses_the_owner_environment() {
         let base = scratch("uncontained");
         let (root, runtime) = (base.join("project"), base.join("runtime"));
@@ -1390,7 +1483,11 @@ mod tests {
         match prepared {
             Ok((launch, sandbox)) => {
                 assert!(sandbox.is_some());
-                assert_eq!(launch.environment["PATH"], "/usr/bin:/bin");
+                // The owner's tool search path, as an uncontained server has it.
+                assert_eq!(
+                    launch.environment["PATH"],
+                    owner_path(Path::new("/usr/bin/true"), &base.join("home"))
+                );
                 assert_eq!(launch.environment["TMPDIR"], runtime.to_str().unwrap());
                 assert_eq!(
                     launch.environment["XDG_RUNTIME_DIR"],

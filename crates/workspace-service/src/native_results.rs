@@ -86,7 +86,27 @@ fn validate_result_with(
                 })
         });
     }
-    let relevant = worker_checks::relevant_references(submitted, &runs);
+    // A failed run that an earlier submission of this attempt cited and this one omits is
+    // carried over by the runtime as a failed check (closed by an exact passing rerun when
+    // one exists); it never refuses the submission.
+    let presented: Vec<String> = store.read(|db| Ok(db.prepare("SELECT json_extract(payload_json,'$.ref') FROM runtime_events WHERE task_id=? AND type='CHECK_FAILURE_PRESENTED' AND json_extract(payload_json,'$.attempt')=?")?
+        .query_map((&i.task, &i.attempt), |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?))?;
+    let mut all: Vec<Value> = submitted.to_vec();
+    let first_carried = all.len();
+    for r in &presented {
+        let cited = submitted.iter().any(|c| {
+            matches!(c["outcome"].as_str(), Some("passed" | "failed")) && c["tool_call_ref"] == *r
+        });
+        let Some(run) = runs.iter().find(|run| run.receipt["tool_call_ref"] == *r) else { continue };
+        if cited || all[first_carried..].iter().any(|c| c["tool_call_ref"] == *r) {
+            continue;
+        }
+        let program = run.receipt["argv"][0].as_str().unwrap_or("command");
+        let program: String = program.rsplit('/').next().unwrap_or(program).chars().take(40).collect();
+        all.push(json!({"name": format!("{program} (carried from an earlier submission)"),
+            "outcome": "failed", "tool_call_ref": r}));
+    }
+    let relevant = worker_checks::relevant_references(&all, &runs);
     for run in &mut runs {
         if !run.receipt["tool_call_ref"]
             .as_str()
@@ -162,27 +182,17 @@ fn validate_result_with(
         Ok(())
     })?;
     }
-    let checks = worker_checks::evaluate(submitted, &runs, evidence.project_digest.as_deref())?;
-    let presented:Vec<String>=store.read(|db|Ok(db.prepare("SELECT json_extract(payload_json,'$.ref') FROM runtime_events WHERE task_id=? AND type='CHECK_FAILURE_PRESENTED' AND json_extract(payload_json,'$.attempt')=?")?
-        .query_map((&i.task,&i.attempt),|r|r.get(0))?.collect::<Result<Vec<_>,_>>()?))?;
-    let omitted: Vec<String> = presented
-        .iter()
-        .filter_map(|r| {
-            let run = runs
-                .iter()
-                .find(|run| run.receipt["tool_call_ref"] == *r && run.verified_failure())?;
-            let cited = submitted.iter().any(|c| {
-                matches!(c["outcome"].as_str(), Some("passed" | "failed"))
-                    && c["tool_call_ref"] == *r
-            });
-            let program = run.receipt["argv"][0].as_str().unwrap_or("command");
-            let program: String = program.rsplit('/').next().unwrap_or(program).chars().take(40).collect();
-            (!cited).then(|| format!("[{r}] ({program}, exit {}): an earlier submission cited this failed run; cite it again as a failed check (a verified exact passing rerun, cited as passed under the same name, closes it)", run.receipt["exit_code"]))
-        })
-        .collect();
-    if !omitted.is_empty() {
-        refusal_details(&c.channel_id, "omitted_failed_check", omitted);
-        return Err(CoreError::Refused("omitted_failed_check"));
+    // Only a verified failure is carried; anything else never enters the result.
+    let mut index = 0;
+    all.retain(|c| {
+        let keep = index < first_carried
+            || runs.iter().any(|run| run.receipt["tool_call_ref"] == c["tool_call_ref"] && run.verified_failure());
+        index += 1;
+        keep
+    });
+    let mut checks = worker_checks::evaluate(&all, &runs, evidence.project_digest.as_deref())?;
+    if let Some(assignment) = i.assignment.as_deref() {
+        store.read(|db| worker_checks::attribute_foreign(db, &i.task, assignment, &mut checks, &runs))?;
     }
     // A reviewer that does not approve (REQUEST_CHANGES, BLOCK or INCOMPLETE) may cite
     // an open failed check as evidence for its verdict; only APPROVE cannot.
@@ -871,17 +881,13 @@ mod evidence_tests {
             .unwrap();
         let mut success_args = args.clone();
         success_args["checks"][0]["tool_call_ref"] = json!("native-command:rerun");
-        assert_eq!(
-            validate_result(&store, &c, &i, &success_args, &evidence)
-                .unwrap_err()
-                .code(),
-            "omitted_failed_check"
-        );
-        let items = refusal_missing(&store, &c, &i, &success_args, "omitted_failed_check").unwrap();
-        assert!(
-            items[0].starts_with("[native-command:failed] (cargo, exit 1)"),
-            "{items:?}"
-        );
+        // The omitted earlier-cited failure is carried over by the runtime and closed by
+        // the exact passing rerun (whatever the passed check is named), never refused.
+        let carried = validate_result(&store, &c, &i, &success_args, &evidence).unwrap();
+        assert_eq!(carried.len(), 2);
+        assert_eq!(carried[1]["tool_call_ref"], "native-command:failed");
+        assert_eq!(carried[1]["outcome"], "failed");
+        assert_eq!(carried[1]["closed_by"], "native-command:rerun");
         failed_args["checks"]
             .as_array_mut()
             .unwrap()
@@ -1151,9 +1157,9 @@ pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Va
         "review_project_revision_changed" => "The project changed while you reviewed it; the review is now bound to the current state. Re-read what changed, then submit with a fresh request_key.",
         "review_project_revision_unstable" => "The project kept changing during the review, so nothing was recorded and the review stays bound to an earlier state. Submit again with a fresh request_key once the other writers have stopped: a submission that finds the project unchanged since this refusal re-binds the review to that state and is refused review_project_revision_changed; then re-read what changed and submit once more. If it never settles, submit INCOMPLETE naming the instability.",
         "review_resubmit_required" => "This request_key belongs to a refused submission of this review. Submit again with a fresh request_key.",
-        "review_predecessor_reports_required" => "Read each required predecessor report listed in missing (your review packet's predecessor_reports; optional_reports are not required) through its final page with read_report. A report the runtime cannot read is not required and is retained on your result instead. This review stays active in this session; then submit again.",
+        "review_predecessor_reports_required" => "The refusal's inline_reads holds the current pages of the required reports the runtime read for you; they count as read, so submit again. Any report still listed in missing and not in inline_reads: read each required predecessor report listed in missing (your review packet's predecessor_reports; optional_reports are not required) through its final page with read_report. A report the runtime cannot read is not required and is retained on your result instead. This review stays active in this session; then submit again.",
         "review_coverage_unfinished" => "The not_covered parts listed in missing name no dead end, so you can still cover them. Review each one now in this session, then submit again; keep in not_covered only parts you cannot reach yourself, each with its blocker.",
-        "review_file_coverage_required" => "The changed files listed in missing were not read completely in their current state. Read them with project_read in this session, up to 8 files per read_batch call as inline project_read items, and submit again (for a file with review_lines in the review packet, reading those line ranges of its current bytes is enough); a part you genuinely cannot reach goes in not_covered with its blocker under verdict INCOMPLETE. After repeated refusals the result is recorded with every file still unread disclosed as unverified.",
+        "review_file_coverage_required" => "The refusal's inline_reads holds the current pages of the changed files listed in missing that the runtime read for you on this channel; they count as read, so submit the same review again. For a file still listed in missing and not fully delivered (its entry has next_offset), or not delivered at all, read it yourself: the changed files listed in missing were not read completely in their current state. Read them with project_read in this session, up to 8 files per read_batch call as inline project_read items, and submit again (for a file with review_lines in the review packet, reading those line ranges of its current bytes is enough); a part you genuinely cannot reach goes in not_covered with its blocker under verdict INCOMPLETE. After repeated refusals the result is recorded with every file still unread disclosed as unverified.",
         "review_block_findings_required" => "A BLOCK must name each confirmed problem in findings. Name them, or finish the review and choose the verdict your evidence supports.",
         "review_not_covered_required" => "not_covered goes with verdict INCOMPLETE only, and INCOMPLETE needs at least one not_covered part with its blocker.",
         "assignment_blocker_required" => "A failed assignment needs blocker: the dead end (kind and concrete detail) you cannot clear within your role and permissions. If you can still finish the work, finish it and submit the completed result instead.",
@@ -1166,7 +1172,7 @@ pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Va
         "native_inline_report_required" => "The report must be the complete Markdown report, or the exact report_id of a report published by this attempt.",
         "native_summary_required" => "The summary must not be empty.",
         "invalid_publication" => "The report title must be 1 to 200 characters.",
-        "invalid_check_retraction" | "invalid_check_supersession" => "The cited correction is not eligible; cite the failed check without it, or, at a genuine dead end, submit assignment_outcome \"failed\" with its blocker.",
+        "invalid_check_retraction" | "invalid_check_supersession" => "The cited correction is not eligible. It applies only to a failed check whose run is a mistaken invocation of your own (a standalone python/python3 -c probe for invocation_error, or a mistyped command line for command_correction), when corrected_by is the tool_call_ref of a passed check with exactly the same name, cited by no other correction, whose run is the same operation, cwd and profile, came later in this attempt and whose argv is a recognised correction of the failed one, with no other later unresolved or failed run of the failed command. A genuine nonzero observation (for example a git check-ignore that reports a path as not ignored) is a real failed check: cite it as failed without a correction, rerun the identical command to close it, or at a genuine dead end submit assignment_outcome \"failed\" with its blocker.",| "invalid_check_supersession" => "The cited correction is not eligible; cite the failed check without it, or, at a genuine dead end, submit assignment_outcome \"failed\" with its blocker.",
         "result_report_not_owned" => "The report_id must name a report this attempt published.",
         "request_key_reused" => "Use a new request_key.",
         "invalid_arguments" => "The arguments do not match the advertised result_submit schema.",

@@ -24,20 +24,8 @@ impl Drop for Temp {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-fn bwrap_usable() -> bool {
-    isolating_bwrap(std::env::var_os("PATH").as_ref()).is_some_and(|b| {
-        Command::new(b)
-            .args([
-                "--unshare-user",
-                "--unshare-pid",
-                "--ro-bind",
-                "/",
-                "/",
-                "/bin/true",
-            ])
-            .status()
-            .is_ok_and(|s| s.success())
-    })
+fn landlock_usable() -> bool {
+    crate::native_sandbox::abi() >= 1
 }
 
 #[test]
@@ -174,8 +162,8 @@ fn owner_providers_are_carried_without_serializing_credentials() {
 
 #[test]
 fn discovery_reads_the_version_inside_the_sandbox_and_skips_untrusted_candidates() {
-    if !bwrap_usable() {
-        eprintln!("bubblewrap with user namespaces is unavailable: probe not run");
+    if !landlock_usable() {
+        eprintln!("Landlock is unavailable: probe not run");
         return;
     }
     let t = Temp::new();
@@ -214,12 +202,3 @@ fn discovery_reads_the_version_inside_the_sandbox_and_skips_untrusted_candidates
     assert!(discover(&home, Some(&path), None).is_none());
 }
 
-#[test]
-fn a_setuid_or_missing_bubblewrap_is_refused() {
-    let t = Temp::new();
-    let path = std::ffi::OsString::from(t.0.as_os_str());
-    assert!(isolating_bwrap(Some(&path)).is_none());
-    let fake = t.binary("bwrap", "#!/bin/sh\n", 0o4755);
-    assert!(fake.exists());
-    assert!(isolating_bwrap(Some(&path)).is_none());
-}

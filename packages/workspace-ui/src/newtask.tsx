@@ -37,10 +37,14 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   // A folder without Git has no branches: the task works in the folder itself, and nothing offers a branch choice.
   const noGit = () => summary()?.project.hasGit === false;
   const noWorktree = () => noGit() ? ws.t("worktreeNeedsGit") : !ws.can(FEATURES.taskWorktrees) ? ws.t("noTaskWorktrees")
-    : (kind() === "sprint" ? runMode() : pickedSprint()?.runMode) === "automatic" ? ws.t("worktreeNeedsManualOrHybrid") : undefined;
+    : kind() !== "sprint" && pickedSprint()?.runMode === "automatic" && pickedSprint()?.checkout?.shared !== true ? ws.t("worktreeNeedsManualOrHybrid") : undefined;
   const separate = () => !noWorktree();
   const checkout = () => pickedSprint()?.checkout?.kind ?? (separate() ? chosen() : "main");
   const [runMode, setRunMode] = createSignal<SprintRunMode>("manual");
+  // A worktree sprint shares one worktree by default; the owner can ask for one per task, which runs in Manual only.
+  const [scope, setScope] = createSignal<"sprint" | "task">("sprint");
+  const perTask = () => kind() === "sprint" && checkout() === "worktree" && scope() === "task";
+  createEffect(() => { if (perTask() && runMode() !== "manual") setRunMode("manual"); });
   const [chosenRoute, setSettings] = createSignal<TaskSettings>(defaults.settings);
   let routePicked = false;
   // With no choice per task, this is the machine's own, which may arrive after the page opens.
@@ -112,7 +116,7 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
     setSaving(true);
     try {
     if (kind() === "sprint") {
-      const receipt = await request.run({ type: "create_sprint", projectId: s.project.id, description: text(), attachments: files.files(), runMode: runMode(), checkout: { kind: checkout() }, settings: settings(), targetBranch: target(), taskRoute: routePicked ? "sprint" : "automatic" });
+      const receipt = await request.run({ type: "create_sprint", projectId: s.project.id, description: text(), attachments: files.files(), runMode: runMode(), checkout: checkout() === "worktree" ? { kind: "worktree", shared: scope() === "sprint" } : { kind: "main" }, settings: settings(), targetBranch: target(), taskRoute: routePicked ? "sprint" : "automatic" });
       if (!receipt.ok || !receipt.entityId) return;
       // Route and target are recorded before the planning start.
       ws.go({ name: "sprint", machine: s.machine.id, project: s.project.id, sprint: receipt.entityId, tab: "planning" });
@@ -157,9 +161,13 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   const Checkout = () => <div class="fld">
     <span class="lab">Where it works</span>
     <div class="two">
-      <label class={`rc${separate() ? "" : " ws-rc-off"}`}><input type="radio" name="checkout" disabled={!separate()} checked={checkout() === "worktree"} onChange={() => chooseCheckout("worktree")} /><span><span class="t">Separate worktree</span><span class="d"><Show when={separate()} fallback={noWorktree()}>{kind() === "sprint" ? "Each task gets its own branch and worktree" : "New task branch"}<Show when={kind() === "task"}> <span class="mono">{ws.demo ? branch() : "cw/…"}</span></Show> from the currently open branch <span class="mono">{openBranch()}</span>. Your open checkout is not touched.</Show></span></span></label>
+      <label class={`rc${separate() ? "" : " ws-rc-off"}`}><input type="radio" name="checkout" disabled={!separate()} checked={checkout() === "worktree"} onChange={() => chooseCheckout("worktree")} /><span><span class="t">{kind() === "sprint" ? "Worktree" : "Separate worktree"}</span><span class="d"><Show when={separate()} fallback={noWorktree()}>{kind() === "sprint" ? "One branch named after the sprint" : "New task branch"}<Show when={kind() === "task"}> <span class="mono">{ws.demo ? branch() : "cw/…"}</span></Show> from the currently open branch <span class="mono">{openBranch()}</span>. Your open checkout is not touched.</Show></span></span></label>
       <label class="rc"><input type="radio" name="checkout" checked={checkout() === "main"} onChange={() => chooseCheckout("main")} /><span><span class="t">Project folder</span><span class="d">{kind() === "sprint" ? "All tasks work" : "Works"} in <span class="mono">{summary()?.project.repository ?? "the project"}</span><Show when={openBranch() && !noGit()}> on the open branch <span class="mono">{openBranch()}</span></Show>.</span></span></label>
     </div>
+    <Show when={kind() === "sprint" && checkout() === "worktree" && !pickedSprint()}><div class="two" role="radiogroup" aria-label="Worktree scope">
+      <label class="rc"><input type="radio" name="worktree-scope" checked={scope() === "sprint"} onChange={() => setScope("sprint")} /><span><span class="t">One worktree for the whole sprint</span><span class="d">Every task works in the same worktree and branch. Finishing a task commits its own files there.</span></span></label>
+      <label class="rc"><input type="radio" name="worktree-scope" checked={scope() === "task"} onChange={() => setScope("task")} /><span><span class="t">Separate worktree per task</span><span class="d">Each task gets its own branch and worktree. Runs in Manual mode only.</span></span></label>
+    </div></Show>
     <Show when={checkout() === "main"}><div class="note-box"><I n="alert" s={14} class="st-warn" /><span>{kind() === "sprint" ? "All tasks edit" : "The task edits"} the same files you have open, and your uncommitted changes count as part of the work. Rules for two tasks writing here at once are not settled yet.</span></div></Show>
   </div>;
 
@@ -209,8 +217,8 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
         <span class="lab">How tasks run after planning <span class="faint">You can switch this later</span></span>
         <div class="two">
           <label class="rc"><input type="radio" name="sprint-run" checked={runMode() === "manual"} onChange={() => setRunMode("manual")} /><span><span class="t">Manual</span><span class="d">{sprintModeDescription.manual}</span></span></label>
-          <label class="rc"><input type="radio" name="sprint-run" checked={runMode() === "hybrid"} onChange={() => setRunMode("hybrid")} /><span><span class="t">Hybrid</span><span class="d">{sprintModeDescription.hybrid}</span></span></label>
-          <label class="rc"><input type="radio" name="sprint-run" checked={runMode() === "automatic"} onChange={() => setRunMode("automatic")} /><span><span class="t">Automatic</span><span class="d">{sprintModeDescription.automatic}</span></span></label>
+          <label class={`rc${perTask() ? " ws-rc-off" : ""}`} data-why={perTask() ? ws.t("separateWorktreesManualOnly") : undefined}><input type="radio" name="sprint-run" disabled={perTask()} checked={runMode() === "hybrid"} onChange={() => setRunMode("hybrid")} /><span><span class="t">Hybrid</span><span class="d">{sprintModeDescription.hybrid}</span></span></label>
+          <label class={`rc${perTask() ? " ws-rc-off" : ""}`} data-why={perTask() ? ws.t("separateWorktreesManualOnly") : undefined}><input type="radio" name="sprint-run" disabled={perTask()} checked={runMode() === "automatic"} onChange={() => setRunMode("automatic")} /><span><span class="t">Automatic</span><span class="d">{sprintModeDescription.automatic}</span></span></label>
         </div>
       </div>
       <Checkout />

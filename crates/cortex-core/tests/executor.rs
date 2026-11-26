@@ -324,3 +324,366 @@ async fn owner_write_commits_within_a_bound_while_a_command_monitor_is_active() 
     monitor.await.unwrap();
     command.await.unwrap();
 }
+
+/// Group commit: write bodies queued together share one transaction, each in its own
+/// savepoint. A failing body is rolled back alone; no reply (success or failure) is sent
+/// before the shared COMMIT; and reads on the reader pool never wait for that transaction.
+#[tokio::test]
+async fn grouped_writes_fail_alone_reply_after_commit_and_never_block_reads() {
+    use std::time::{Duration, Instant};
+    let p = Project::new();
+    let executor = StoreExecutor::open(p.key()).unwrap();
+    executor
+        .write(|db| {
+            db.execute_batch("CREATE TABLE group_rows(value TEXT NOT NULL)")?;
+            Ok(())
+        })
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let blocker = executor
+        .publication(move |_| {
+            entered.send(()).unwrap();
+            gate.recv_timeout(Duration::from_secs(10)).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    observed.await.unwrap();
+    let insert = |value: &'static str| {
+        executor
+            .write(move |db| {
+                db.execute("INSERT INTO group_rows VALUES (?)", [value])?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    let mut one = insert("one");
+    let mut failing = executor
+        .write(|db| -> cortex_core::CoreResult<()> {
+            db.execute("INSERT INTO group_rows VALUES ('rolled back')", [])?;
+            Err(cortex_core::CoreError::Refused("fixture_failure"))
+        })
+        .unwrap();
+    let (inside, inside_seen) = std::sync::mpsc::channel::<()>();
+    let (finish, finish_gate) = std::sync::mpsc::channel::<()>();
+    let mut slow = executor
+        .write(move |db| {
+            db.execute("INSERT INTO group_rows VALUES ('slow')", [])?;
+            inside.send(()).unwrap();
+            finish_gate.recv_timeout(Duration::from_secs(10)).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let after = insert("after");
+    release.send(()).unwrap();
+    blocker.await.unwrap().unwrap();
+    inside_seen.recv_timeout(Duration::from_secs(10)).unwrap();
+    // The group is open: 'one' and the failing body already ran in it, yet neither has
+    // a reply, and a reader sees nothing of the uncommitted transaction, at once.
+    let started = Instant::now();
+    let visible: i64 = executor
+        .read(|db| Ok(db.query_row("SELECT count(*) FROM group_rows", [], |r| r.get(0))?))
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(visible, 0);
+    assert!(started.elapsed() < Duration::from_millis(500), "read waited {:?}", started.elapsed());
+    let read_store = executor
+        .read_store(|store| {
+            store.write(|db| {
+                db.execute("INSERT INTO group_rows VALUES ('reader')", [])?;
+                Ok(())
+            })
+        })
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(read_store.unwrap_err().code(), "storage_read_lane");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(one.try_recv().is_err(), "a reply came before the commit");
+    assert!(failing.try_recv().is_err(), "a failure reply came before the commit");
+    assert!(slow.try_recv().is_err());
+    finish.send(()).unwrap();
+    one.await.unwrap().unwrap();
+    assert_eq!(failing.await.unwrap().unwrap_err().code(), "fixture_failure");
+    slow.await.unwrap().unwrap();
+    after.await.unwrap().unwrap();
+    let rows = executor
+        .read(|db| {
+            let rows = db
+                .prepare("SELECT value FROM group_rows ORDER BY rowid")?
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rows, ["one", "slow", "after"]);
+}
+
+/// Display/progress rows committed on their own use `synchronous=NORMAL`; every other
+/// write, and deferred rows committed together with one, uses FULL, and the connection
+/// is back at FULL after a relaxed commit.
+#[tokio::test]
+async fn deferred_rows_alone_commit_relaxed_and_everything_else_full() {
+    use std::time::Duration;
+    let p = Project::new();
+    let executor = StoreExecutor::open(p.key()).unwrap();
+    let level = |db: &rusqlite::Transaction<'_>| -> cortex_core::CoreResult<i64> {
+        Ok(db.query_row("PRAGMA synchronous", [], |r| r.get(0))?)
+    };
+    executor
+        .write(|db| {
+            db.execute_batch("CREATE TABLE durability(kind TEXT, level INTEGER)")?;
+            Ok(())
+        })
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    executor
+        .write_deferred(move |db| {
+            db.execute("INSERT INTO durability VALUES ('deferred alone', ?)", [level(db)?])?;
+            Ok(())
+        })
+        .unwrap();
+    tokio::time::sleep(cortex_core::store::executor::DEFER_WINDOW + Duration::from_millis(250)).await;
+    executor
+        .write_deferred(move |db| {
+            db.execute("INSERT INTO durability VALUES ('deferred before a write', ?)", [level(db)?])?;
+            Ok(())
+        })
+        .unwrap();
+    executor
+        .write(move |db| {
+            db.execute("INSERT INTO durability VALUES ('write', ?)", [level(db)?])?;
+            Ok(())
+        })
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    executor
+        .publication(move |store| {
+            store.write(|db| {
+                db.execute("INSERT INTO durability VALUES ('publication', ?)", [level(db)?])?;
+                Ok(())
+            })
+        })
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = executor
+        .read(|db| {
+            let rows = db
+                .prepare("SELECT kind, level FROM durability ORDER BY rowid")?
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    let rows: Vec<(&str, i64)> = rows.iter().map(|(k, l)| (k.as_str(), *l)).collect();
+    // 1 = NORMAL, 2 = FULL.
+    assert_eq!(
+        rows,
+        [
+            ("deferred alone", 1),
+            ("deferred before a write", 2),
+            ("write", 2),
+            ("publication", 2)
+        ]
+    );
+}
+
+/// Synthetic write/read latency figures for the writer lane. Not a check: run with
+/// `--ignored --nocapture`. `CORTEX_BENCH_ROOT` names a disposable project whose store
+/// (a copy, never an owner store) is used instead of a fresh empty one.
+#[tokio::test]
+#[ignore]
+async fn bench_writer_lane() {
+    use std::time::{Duration, Instant};
+    let fresh = Project::new();
+    let key = match std::env::var_os("CORTEX_BENCH_ROOT").filter(|r| !r.is_empty()) {
+        Some(root) => cortex_core::ProjectKey::new(root, cortex_core::StoreChannel::Dev).unwrap(),
+        None => fresh.key(),
+    };
+    let executor = std::sync::Arc::new(StoreExecutor::open(key).unwrap());
+    executor
+        .write(|db| {
+            db.execute_batch(
+                "CREATE TABLE IF NOT EXISTS bench_rows(id INTEGER PRIMARY KEY, task TEXT, payload TEXT)",
+            )?;
+            Ok(())
+        })
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    let payload = "x".repeat(300);
+    // Concurrent producers: up to 120 jobs in flight, as many tool calls and
+    // activity rows arriving at once.
+    let rows = 3000;
+    let started = Instant::now();
+    let mut flight: std::collections::VecDeque<tokio::sync::oneshot::Receiver<cortex_core::CoreResult<()>>> =
+        std::collections::VecDeque::new();
+    for n in 0..rows {
+        if flight.len() >= 120 {
+            let rx = flight.pop_front().unwrap();
+            rx.await.unwrap().unwrap();
+        }
+        let payload = payload.clone();
+        flight.push_back(
+            executor
+                .write(move |db| {
+                    db.execute(
+                        "INSERT INTO bench_rows(task,payload) VALUES (?,?)",
+                        (format!("t{}", n % 7), payload),
+                    )?;
+                    Ok(())
+                })
+                .unwrap(),
+        );
+    }
+    for rx in flight {
+        rx.await.unwrap().unwrap();
+    }
+    let concurrent = started.elapsed();
+    // One awaited write at a time: the latency of a single commit.
+    let sequential_rows = 200;
+    let started = Instant::now();
+    for _ in 0..sequential_rows {
+        let payload = payload.clone();
+        executor
+            .write(move |db| {
+                db.execute("INSERT INTO bench_rows(task,payload) VALUES ('s',?)", [payload])?;
+                Ok(())
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let sequential = started.elapsed();
+    // Display-only rows committed later in batches, alone (no ordinary job after them).
+    let started = Instant::now();
+    for _ in 0..rows {
+        let payload = payload.clone();
+        executor
+            .write_deferred(move |db| {
+                db.execute("INSERT INTO bench_rows(task,payload) VALUES ('d',?)", [payload])?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    let deferred_submit = started.elapsed();
+    loop {
+        let done: i64 = executor
+            .read(|db| Ok(db.query_row("SELECT count(*) FROM bench_rows WHERE task='d'", [], |r| r.get(0))?))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        if done as usize >= rows {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let deferred = started.elapsed();
+    // A read while 100 writes are queued: on the reader pool, and queued on the writer.
+    let queue = |n: usize| -> Vec<_> {
+        (0..n)
+            .map(|_| {
+                let payload = payload.clone();
+                executor
+                    .write(move |db| {
+                        db.execute("INSERT INTO bench_rows(task,payload) VALUES ('q',?)", [payload])?;
+                        Ok(())
+                    })
+                    .unwrap()
+            })
+            .collect()
+    };
+    let pending = queue(100);
+    let started = Instant::now();
+    executor
+        .read(|db| Ok(db.query_row("SELECT count(*) FROM bench_rows", [], |r| r.get::<_, i64>(0))?))
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    let reader = started.elapsed();
+    for rx in pending {
+        rx.await.unwrap().unwrap();
+    }
+    let pending = queue(100);
+    let started = Instant::now();
+    executor
+        .publication(|store| store.read(|db| Ok(db.query_row("SELECT count(*) FROM bench_rows", [], |r| r.get::<_, i64>(0))?)))
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    let behind_writer = started.elapsed();
+    for rx in pending {
+        rx.await.unwrap().unwrap();
+    }
+    let commits = |relaxed: bool| {
+        let payload = payload.clone();
+        executor
+            .publication(move |store| {
+                let started = Instant::now();
+                for _ in 0..200 {
+                    let body = |db: &rusqlite::Transaction<'_>| -> cortex_core::CoreResult<()> {
+                        db.execute("INSERT INTO bench_rows(task,payload) VALUES ('c',?)", [&payload])?;
+                        Ok(())
+                    };
+                    if relaxed {
+                        store.write_relaxed(body)?
+                    } else {
+                        store.write(body)?
+                    }
+                }
+                Ok(started.elapsed())
+            })
+            .unwrap()
+    };
+    let full_commits = commits(false).await.unwrap().unwrap();
+    let relaxed_commits = commits(true).await.unwrap().unwrap();
+    let per = |d: Duration, n: usize| d.as_secs_f64() * 1e6 / n as f64;
+    println!(
+        "bench single-row commits: FULL {:.1} us, NORMAL {:.1} us",
+        per(full_commits, 200),
+        per(relaxed_commits, 200)
+    );
+    executor
+        .write(|db| {
+            db.execute_batch("DROP TABLE bench_rows")?;
+            Ok(())
+        })
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    println!(
+        "bench concurrent: {rows} rows in {concurrent:?} = {:.1} us/row",
+        per(concurrent, rows)
+    );
+    println!(
+        "bench sequential: {sequential_rows} rows in {sequential:?} = {:.1} us/row",
+        per(sequential, sequential_rows)
+    );
+    println!(
+        "bench deferred: submit {deferred_submit:?}, committed {rows} rows in {deferred:?}"
+    );
+    println!("bench read behind 100 queued writes: reader {reader:?}, writer-queued {behind_writer:?}");
+}

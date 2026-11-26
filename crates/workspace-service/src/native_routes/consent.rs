@@ -326,7 +326,23 @@ impl RouteResolver {
                     let mut absolute = m.clone();
                     absolute.start += offset;
                     absolute.end += offset;
-                    let asks = if selected {
+                    // An unscoped "only this model" statement is the owner's pin for the
+                    // whole task: every stage, the independent review and audits included.
+                    let task_wide = !selected
+                        && local.len() == 1
+                        && !g::refused(sentence, m, false)
+                        && !sentence.trim_end().ends_with('?')
+                        && {
+                            let before = &sentence[..m.start];
+                            let words: Vec<_> = g::words(before).into_iter().rev().take(3).collect();
+                            let mut work = sentence.to_string();
+                            work.replace_range(m.start..m.end, " ");
+                            words.iter().any(|w| {
+                                re(r"(?i)^(?:only|solely|exclusively|только|исключительно)$")
+                                    .is_match(w)
+                            }) && !g::names_work(&work)
+                        };
+                    let asks = task_wide || if selected {
                         g::selected(
                             &text,
                             &absolute,
@@ -365,6 +381,7 @@ impl RouteResolver {
                                     .as_ref()
                                     .is_some_and(|s| covers(role, s)))
                     };
+                    let own = own || task_wide;
                     if !own && hint != n.label {
                         continue;
                     }

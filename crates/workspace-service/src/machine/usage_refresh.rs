@@ -237,14 +237,17 @@ pub(crate) fn codex(
     cwd: &Path,
     view: Option<&cortex_engine::filesystem_view::Confinement>,
 ) -> Option<Value> {
-    let mut command = command(binary, home, cwd, view)?;
+    codex_exchange(command(binary, home, cwd, view)?, home, directory)
+}
+
+fn codex_exchange(mut command: Command, _home: &Path, directory: &Path) -> Option<Value> {
     command
         .args(crate::native_codex_runtime::BASE)
         .arg("app-server")
         .env("CODEX_HOME", directory)
         .stdin(Stdio::piped());
     #[cfg(test)]
-    crate::native_account_fixture::on_exec(&mut command, "usage", home).ok()?;
+    crate::native_account_fixture::on_exec(&mut command, "usage", _home).ok()?;
     let deadline = Instant::now() + RUN_BUDGET;
     let mut child = command.spawn().ok()?;
     let stdout = child.stdout.take()?;
@@ -409,7 +412,7 @@ mod tests {
     /// Cortex-launched App Server carries. A fake binary records its argv; no engine runs.
     #[test]
     fn the_codex_limits_read_starts_the_app_server_without_plugin_sync() {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use std::os::unix::fs::DirBuilderExt;
         let root = std::env::temp_dir().join(format!("cw-usage-argv-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::DirBuilder::new()
@@ -417,17 +420,24 @@ mod tests {
             .create(&root)
             .unwrap();
         let root = root.canonicalize().unwrap();
-        let fake = root.join("codex");
-        std::fs::write(
-            &fake,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}/argv'\nwhile read -r line; do case \"$line\" in *'\"id\":2'*) echo '{{\"id\":2,\"result\":{{}}}}'; exit 0;; esac; done\n",
-                root.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let response = codex(&fake, &root, &root, &root, None).expect("the fake answered");
+        let fake = root.join("codex.sh");
+        // Interpret the fixture as data: a concurrent fork can inherit an open
+        // writer and make direct exec of a freshly written script fail with ETXTBSY.
+        // Keep the writer open here so the test exercises that case every time.
+        let mut writer = std::fs::File::create(&fake).unwrap();
+        writer
+            .write_all(
+                br#"printf '%s\n' "$@" > argv
+while IFS= read -r line; do
+    case "$line" in *'"id":2'*) printf '%s\n' '{"id":2,"result":{}}'; exit 0;; esac
+done
+"#,
+            )
+            .unwrap();
+        let mut command = command(Path::new("/bin/sh"), &root, &root, None).unwrap();
+        command.arg(&fake);
+        let response = codex_exchange(command, &root, &root).expect("the fake answered");
+        drop(writer);
         assert_eq!(response["id"], 2);
         let argv: Vec<String> = std::fs::read_to_string(root.join("argv"))
             .unwrap()

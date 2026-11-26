@@ -149,6 +149,10 @@ export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
       return <div class="rcard"><div class="rcard-h"><I n="merge" s={14} class="st-merge" />Merged into <span class="mono">{i().targetBranch}</span><span class="r">Squash merge</span></div>
         <div class="rcard-b"><ResultText text={t().result?.summary} /></div><ActionBar place="card" class="rv-card-f"><A class="btn btn-line btn-sm" to={at("diff")}>Review the diff</A></ActionBar></div>;
     })()}</Show>
+    <Show when={t().status === "ready_to_merge" && !same() && nothingToCommit(t()) && t().integrationFacts?.alreadyInTarget === true}>
+      <div class="rcard" data-no-file-changes><div class="rcard-h"><I n="check" s={14} />No file changes — the result is the report</div>
+        <ActionBar place="card" class="rv-card-f"><A class="btn btn-line btn-sm" to={{ name: "task", machine: props.route.machine, task: props.route.task }}>Open the report</A><CloseAsIs /></ActionBar></div>
+    </Show>
     <Show when={!same()}>
     <Show when={ws.store.mode === "real" && (t().conflict !== "none" || !!merge()?.freshChecks)}><RealMergeStatus task={t()} route={props.route} summary /></Show>
     <Show when={ws.store.mode !== "real" && ((cx() === "none" && t().conflict === "conflict") || cx() === "failed")}>

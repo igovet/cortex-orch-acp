@@ -181,7 +181,8 @@ than starting a competing scheduler. It is not the installed ACP entry point:
 initial image/resource snapshots, worker question batches and read-only legacy
 history loading and owner-configured stdio MCP worker attachment are supported.
 External tool grants are filtered per role; consultants receive none. External
-servers run in a Landlock/seccomp sandbox unless the owner explicitly sets
+servers run under Landlock (real filesystem readable except secrets and Cortex
+stores, writes only to their grants, shared network) unless the owner explicitly sets
 `"containment": "none"` per server or as the registry default, which runs them
 with the owner's full user authority (see [configuration](docs/configuration.md)
 and [SECURITY.md](SECURITY.md)). Native
@@ -214,13 +215,17 @@ final result reports every goal outcome of the plan done; an approved stage that
 misses the goal returns to planning without verification, and an INCOMPLETE review
 reaches verification only on the owner's close-as-is decision. Native source,
 project-file and Git tools now retain channel-local read coverage and full command
-output. Brokered worker commands and runtime verification now launch bubblewrap
-from Rust: private read-only process views, private literal /var/tmp scratch and
-read-only metadata protection use mounts, not Landlock alone. Protected children
-remain overlaid after writable parent grants. Writing roles receive project-wide
-command grants independently of reservations; Development/Auto permit outside cwd.
-Verification can write existing Git-ignored directories and discard other project
-writes through a probed disk overlay. Review baselines record the current Git
+output. Auto runs every command on the host as the owner. In Guarded and Development,
+for read-only roles and for runtime verification, brokered worker commands run on
+the host at their real paths, with the owner's tools, PATH, HOME and network,
+under a Landlock ruleset: writes only to the writer's checkout, a private scratch
+(TMPDIR) and the owner's tool caches (Development also `/tmp` and `/var/tmp`),
+and no reads of the owner's keys and credential stores, the project's `.env`
+files or the live Cortex stores outside a writer's checkout; no namespace, mount
+or snapshot copy, and no bubblewrap. Writing roles receive project-wide command
+grants independently of reservations; Development permits outside cwd.
+Verification can write existing Git-ignored directories; other project writes
+are refused. Review baselines record the current Git
 commit when one exists. Ignored build outputs have a separate metadata check;
 if it cannot finish, review still runs and can use a complete list of changed
 project files. Whole-project writers can update Git data
@@ -513,7 +518,7 @@ the 0.14.0 SDK's derived message and reasoning IDs are supported by the replay g
 For local desktop Debian builds, run `./scripts/build-dev-deb.sh` or
 `./scripts/build-prod-deb.sh`; archives stay under git-ignored `.workspace-build/`.
 Run the prod wrapper explicitly for a non-official production-channel build in a disposable environment; its Debian version ends in `.local` and is rejected by the GitHub publisher. Dev remains the default, with a separate store.
-To smoke-test a Dev archive in your real environment (real HOME, keyring and logins, private Dev XDG roots, a private Xvfb or your display), run `bash scripts/qualify-dev-deb.sh smoke --archive newest` (or `smoke` to build one first). Smoke sends no task: it reads settings, the observed light route and its matching coordinator default over the private socket, and records the GitHub CLI login exit code for the active github.com account as a fact. For an explicitly approved desktop scenario, first run `bash scripts/qualify-dev-deb.sh smoke --xvfb --archive newest`. Set `SMOKE_DIR` to the evidence directory printed by that successful smoke, then run `bash scripts/qualify-dev-deb.sh drive --archive newest --smoke-evidence "$SMOKE_DIR" -- /absolute/path/to/foreground-scenario-driver`. Drive requires the same archive digest and a private authenticated Xvfb. Drive records the same scoped fact; neither action invokes the broad host probe. Smoke and drive require a complete Bubblewrap verifier receipt from the running candidate service and a native View PR capture probe before desktop input. The extracted desktop records View PR addresses as SHA-256 digests; it does not open the browser for these actions. Missing displays, tools or logins are not passes; drive does not start its scenario while prerequisites are unobserved. `bash scripts/qualify-dev-deb.sh probe` prints the host facts only. See the [desktop procedure](docs/project/verification.md#standalone-cortex-workspace-desktop). Every successful package build keeps only the newest two builds and caches per channel; `scripts/cortex-xtask.sh clean-builds --dry-run` previews the same cleanup ([build hygiene](docs/project/packaging.md#build-output-hygiene)).
+To smoke-test a Dev archive in your real environment (real HOME, keyring and logins, private Dev XDG roots, a private Xvfb or your display), run `bash scripts/qualify-dev-deb.sh smoke --archive newest` (or `smoke` to build one first). Smoke sends no task: it reads settings, the observed light route and its matching coordinator default over the private socket, and records the GitHub CLI login exit code for the active github.com account as a fact. For an explicitly approved desktop scenario, first run `bash scripts/qualify-dev-deb.sh smoke --xvfb --archive newest`. Set `SMOKE_DIR` to the evidence directory printed by that successful smoke, then run `bash scripts/qualify-dev-deb.sh drive --archive newest --smoke-evidence "$SMOKE_DIR" -- /absolute/path/to/foreground-scenario-driver`. Drive requires the same archive digest and a private authenticated Xvfb. Drive records the same scoped fact; neither action invokes the broad host probe. Smoke and drive require a complete Landlock verifier receipt from the running candidate service and a native View PR capture probe before desktop input. The extracted desktop records View PR addresses as SHA-256 digests; it does not open the browser for these actions. Missing displays, tools or logins are not passes; drive does not start its scenario while prerequisites are unobserved. `bash scripts/qualify-dev-deb.sh probe` prints the host facts only. See the [desktop procedure](docs/project/verification.md#standalone-cortex-workspace-desktop). Every successful package build keeps only the newest two builds and caches per channel; `scripts/cortex-xtask.sh clean-builds --dry-run` previews the same cleanup ([build hygiene](docs/project/packaging.md#build-output-hygiene)).
 Workspace can also be reached from an Android phone. Remote access is off by default; when the owner turns
 it on in Settings, Remote access, the desktop service pairs a phone with a single-use link (QR code, 5
 minutes, explicit Allow on the computer) and then serves it only through a closed allowlist of requests.
@@ -824,7 +829,7 @@ See [service-owned work](docs/cortex-workspace/local-task-execution.md#archive-a
 
 Routing marks stored references to disabled models as inactive without deleting them; its enabled-model picker excludes denied models. Routing settings use each exact model's observed effort levels, including ordered effort ladders. Unknown levels are marked; saved unsupported values remain visible and unchanged. See [configuration](docs/configuration.md#manage-settings-in-paseo).
 
-Workspace queues writers during independent review and verification of the same checkout. A review requires and binds only the task's own changes: files its tools wrote and paths that changed while its commands or writing-engine turns ran. Other uncommitted files in the checkout are listed as context and never refused, re-bound or invalidated; an edit of one of the task's files, by anyone, still makes Cortex schedule fresh review within its review-cycle limit. When a command's or turn's changes cannot be recorded completely, the review still requires only the task's recorded changes; the packet tells the reviewer that unattributed files are context. A worker that ends its turn with a pending command can receive the final receipt in the same session. Reopened reviews include the task’s recorded writes from earlier plans and identify paths whose contents have since changed. Changes to git-ignored files (build outputs, dependencies, caches) do not make a review's change list incomplete; when the list still cannot be enumerated, the reviewer approves what it read and the result carries a "Check manually" limitation instead of a refusal. Local desktop builds reuse Cargo artifacts and npm downloads across invocations. See [desktop packaging](docs/project/packaging.md).
+Workspace reserves a stable checkout for independent review of project changes and for host verification. Reviews of sprint plans and sprint revisions, and reviews with no project changes to certify, neither wait for writers nor take a new checkout reservation. A sprint revision review preserves the task's existing reservation after the current revision passes host verification. A review of project changes requires and binds only the task's own changes: files its tools wrote and paths that changed while its commands or writing-engine turns ran. Other uncommitted files in the checkout are listed as context and never refused, re-bound or invalidated; an edit of one of the task's files, by anyone, still makes Cortex schedule fresh review within its review-cycle limit. When a command's or turn's changes cannot be recorded completely, the review still requires only the task's recorded changes; the packet tells the reviewer that unattributed files are context. A worker that ends its turn with a pending command can receive the final receipt in the same session. Reopened reviews include the task’s recorded writes from earlier plans and identify paths whose contents have since changed. Changes to git-ignored files (build outputs, dependencies, caches) do not make a review's change list incomplete; when the list still cannot be enumerated, the reviewer approves what it read and the result carries a "Check manually" limitation instead of a refusal. Local desktop builds reuse Cargo artifacts and npm downloads across invocations. See [desktop packaging](docs/project/packaging.md).
 
 ## Table of contents
 

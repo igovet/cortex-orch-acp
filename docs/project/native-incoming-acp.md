@@ -1182,7 +1182,7 @@ models receive no stop tool. Brokered command_run launches use an independent
 Rust supervisor in the same shipped binary. Its private inherited pipe requires
 current authority for preparation mutations and final launch; boot ID, PID, start
 ticks, output identity and the exact request are committed before launch is granted.
-The supervisor owns bubblewrap, pipe draining, deadline, Git guards and scratch
+The supervisor owns the Landlock ruleset, pipe draining, deadline and scratch
 cleanup independently of the service. A service restart attaches to the same
 private status/output files and restores the owner-stop registry. Stops use a
 launch-specific marker consumed by that supervisor, not a recovered PID signal.
@@ -1194,17 +1194,18 @@ or corrupt handles remain unknown and fenced; legacy, outside-command and runtim
 verification handles still use conservative unknown recovery. Such a receipt is then
 settled (`complete: false`, `outcome: "unknown"`, never a success) once its process is
 provably gone: an earlier boot, a lost supervisor whose recorded payload process group
-is empty or whose read-only PID namespace ended with it, or an unsupervised process
+is empty, or an unsupervised process
 and its group gone. A launch whose payload was never released settles as
 `command_not_started`. See [recovery and replacement](../features/recovery-and-replacement/index.md).
 No branch relaunches a payload. Engine sessions and detached unsandboxed descendants are not adopted.
 Read-only Git disables hooks, fsmonitor, external
 diff/text conversion and configured clean/smudge/process filters.
 
-Ordinary worker commands use the [Bubblewrap backend](#brokered-command-namespace-backend).
-Read-only and Guarded are host-visible profiles with limited writes; Guarded
-writers can write the live checkout. Eligible Development/Auto writers can
-write the checkout and use a non-private canonical host cwd. Private targets,
+Ordinary worker commands use the [Landlock backend](#brokered-command-namespace-backend)
+outside Auto, where they run on the host as the owner. Read-only and Guarded are
+host profiles with limited writes; Guarded writers can write the live checkout.
+Eligible Development writers can write the checkout and use a non-private
+canonical host cwd. Private targets,
 role checks and owner write denials still apply. Eligible writers can use
 `outside_command` directly; recognized privilege requests and supervisor-proven
 pre-launch failures also use that route. Auto decides automatically, while
@@ -1338,50 +1339,38 @@ do not qualify live accounts, installed clients or a complete release.
 
 ## Brokered command namespace backend
 
-Ordinary worker commands and runtime verification use `native_command_live.rs`,
-the host-visible Linux Bubblewrap launcher. It probes the exact view with
-`/bin/true` before admitting a payload and refuses unavailable setup; there is
-no unsandboxed or Landlock-only fallback. Availability is not cached across
-launches or restart. The scoped snapshot has a separate backend in
-`native_command_sandbox.rs`.
+<a id="brokered-command-landlock-backend"></a>
 
-Read-only commands receive a private PID namespace/procfs and read-only host
-mounts. Where the installed bubblewrap and filesystem support it, project writes
-go to a private disk-backed overlay discarded at command end; otherwise they
-remain read-only. Read-only/Guarded commands bind private scratch over literal
-`/var/tmp`; host `/tmp` remains writable. Development/Auto makes the host writable
-but remounts the project read-only before grants. Mount sources use retained
-no-follow descriptors. Private/control-plane descendants and expanded owner
-denials follow grants, including whole-project grants.
+Ordinary worker commands in Guarded and Development, read-only roles and runtime
+verification use `native_command_live.rs` with the Landlock rules of
+`native_sandbox.rs`: the payload is the real program at its real working
+directory with the owner's tools, PATH, HOME and shared network, and it enters
+the prepared ruleset between fork and exec. No namespace, mount, overlay, snapshot
+or bubblewrap is used. The supervisor probes the exact ruleset with `/bin/true`
+before admitting a payload and refuses unavailable setup
+(`landlock_unavailable`, `landlock_probe_failed`); there is no unsandboxed
+fallback except the consent-backed host route. Managed Codex and linked-worktree
+commands use the read-only profile at the real checkout with their cwd confined to it.
 
-Whole-project writer grants reopen Git data (objects, refs, index, logs and
-state), including the current linked worktree. Config, hooks and pointer files
-remain read-only. Development also guards info and module/worktree containers,
-reopens existing submodule data and disables hooks/fsmonitor through inherited
-Git configuration. The supervisor sweeps watched Git controls that were absent
-at launch, periodically and at settlement. Removals add a generic notice without changing the payload status; the sweep is neither
-atomic nor persistent. Narrow live grants never reopen Git data and default
-LFS storage to disposable scratch.
+Read-only commands write only a private scratch (TMPDIR), explicit write grants
+(verification's ignored directories) and package/build caches; Guarded writers
+also write their checkout and the owner's non-sensitive HOME tool directories;
+Development adds `/tmp` and `/var/tmp`. Read-only roles and Guarded cannot read
+the owner's keys and credential stores or the project's secret files; every
+profile hides the live Cortex stores outside a writer's checkout. Control paths
+and owner write denials stay read-only. A writer's checkout is an open write tree
+(see [the Landlock command boundary](../../SECURITY.md#landlock-command-boundary)):
+the live store files there are sealed by the argv check instead.
 
 Main-checkout `project_git` instead runs fixed read-only status, diff and history observations with
 global/system configuration, optional locks, hooks and fsmonitor disabled.
 Diff disables external diff and textconv. The broker probes for repository
-filter keys and disables discovered drivers; it does not use the live-command
-LFS redirect. See the [Git path and command boundary](../features/permissions-and-containment/index.md#git-and-tool-state).
+filter keys and disables discovered drivers. See the [Git path and command boundary](../features/permissions-and-containment/index.md#git-and-tool-state).
 
-Guarded HOME exposes existing non-sensitive tool-state directories, creating
-`.cache` and `.npm` where absent. Read-only HOME exposes only explicit caches;
-relocated environment caches cannot overlap sensitive/control-plane paths,
-HOME ancestors or the project. Development retains its host-writable HOME.
-External writable hardlinks are atomically detached only for Development/Auto;
-internal writable aliases remain usable, and denied/private aliases are not
-detached. Preparation is bounded and rechecks authority before launch.
-
-Runtime verification and program preflight use the live read-only profile with
-the host network shared, the owner's tool path and baseline writable grants for
-eligible existing ignored checkout directories and allowed caches. Private
-scratch and masks still apply; this is not a host-read policy or an engine
-boundary. Output capture and cancellation remain separate from containment. See
+Runtime verification and program preflight use the read-only profile with the
+shared network, the owner's tool path and writable grants for eligible existing
+ignored checkout directories and allowed caches. Output capture and cancellation
+remain separate from containment. See
 [namespace checks](verification.md#native-command-namespace-checks).
 
 ## External MCP boundary
@@ -1402,9 +1391,10 @@ name and its `overrides` switch machine servers on or off for that project; a
 malformed file refuses. Configuration is snapshotted when a native
 project host opens; a new host is needed to apply changed grants.
 
-The native host uses mandatory Linux Landlock ABI 3+ and seccomp, not
-the bubblewrap launcher. Project reads exclude private control directories; writing
-workers additionally receive existing, non-root scoped paths. A scope path that
+The native host uses mandatory Linux Landlock: the real filesystem stays readable
+except the owner's keys and credential stores, the project's secret files and the
+Cortex stores; writes go only to administrator write grants, the private runtime
+directory and, for writing workers, existing non-root scoped paths. A scope path that
 does not exist yet (a file the worker is about to create, or a pattern) is not
 granted to the server: it is neither created nor widened to its parent.
 Administrator grants must exist, contain no protected paths/symlink ancestry,
@@ -1428,9 +1418,8 @@ is reported by the engine itself, not by this event. There is no uncontained
 fallback: a contained server is never relaunched without containment. The
 session start still fails if a launched server's exit cannot be
 confirmed during cleanup.
-Each contained child has private writable scratch/runtime storage. Socket creation is denied
-unless `network: true` is explicitly configured (including local socket-based server
-features); this is narrower than namespace-isolated Unix-socket support.
+Each contained child has private writable scratch/runtime storage. The network is
+shared; the `network` flag is accepted but not enforced.
 This is not hostile-code isolation or full external-server compatibility qualification.
 
 An owner can instead choose, explicitly, to run a server uncontained:
@@ -1438,7 +1427,7 @@ An owner can instead choose, explicitly, to run a server uncontained:
 (`"containment": "none"` beside `servers`), which an entry's own
 `"containment": "contained"` overrides. Absent everywhere, a server is contained;
 any other value makes the registry invalid (`invalid_mcp_registry`). An
-uncontained server gets no Landlock policy, no seccomp filter and no
+uncontained server gets no Landlock policy and no
 `no_new_privs`, so it runs with the owner's full user authority. Its
 administrator path grants, `network`, `runtime_dir_env` and worker scopes are not
 evaluated, the missing-grant-path filter does not apply, and the per-file

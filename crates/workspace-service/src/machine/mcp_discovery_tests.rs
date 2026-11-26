@@ -300,7 +300,7 @@ sleep 30
     }
 }
 #[tokio::test]
-async fn discovery_limits_files_and_enforces_explicit_grants_without_tool_calls() {
+async fn discovery_limits_files_and_enforces_write_grants_without_tool_calls() {
     let base = Scratch::new().unwrap();
     let config = config(&base.0);
     let denied = base.0.join("ungranted");
@@ -309,14 +309,14 @@ async fn discovery_limits_files_and_enforces_explicit_grants_without_tool_calls(
     fs::write(&allowed, b"readable").unwrap();
     let output = base.0.join("output");
     fs::create_dir(&output).unwrap();
-    // $1 ungranted file, $2 read-only grant, $3 writable grant. Every denial is the sandbox's.
+    // $1 ungranted file, $2 read-only grant, $3 writable grant. The real host stays
+    // readable (Landlock hides only secrets); every write denial is the sandbox's.
     let peer = r#"
-if cat "$1" >/dev/null 2>&1; then exit 11; fi
+[ "$(cat "$1")" = fixture-private ] || exit 11
+if (: > "$1") 2>/dev/null; then exit 15; fi
 [ "$(cat "$2")" = readable ] || exit 12
 if (: > "$2") 2>/dev/null; then exit 13; fi
-network=$( { exec 3<>/dev/tcp/127.0.0.1/9; } 2>&1 )
-case "$network" in *"not permitted"*|*"Permission denied"*) ;; *) exit 14 ;; esac
-if setsid -w true 2>/dev/null; then exit 15; fi
+command -v git >/dev/null || exit 14
 printf granted > "$3/marker"
 while IFS= read -r line; do
     case "$line" in *'"id"'*) ;; *) continue ;; esac
@@ -343,7 +343,7 @@ done
     );
 }
 /// `"containment": "none"` (the editor's value, else the saved entry's, else the
-/// saved registry default) lists tools with no Landlock/seccomp, the owner's HOME
+/// saved registry default) lists tools with no Landlock, the owner's HOME
 /// and the owner PATH; an explicit "contained" still applies the sandbox.
 #[tokio::test]
 async fn uncontained_discovery_runs_without_the_sandbox_only_when_chosen() {

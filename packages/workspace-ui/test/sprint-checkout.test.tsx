@@ -24,24 +24,23 @@ async function mount(path: string, hasGit = true, worktrees = true) {
   return { p, world };
 }
 const choose = async (kind: "main" | "worktree") => {
-  const labels = [...document.querySelectorAll<HTMLLabelElement>("label.rc")];
-  const input = labels.find(l => l.textContent?.includes(kind === "main" ? "Project folder" : "Separate worktree"))!.querySelector<HTMLInputElement>("input")!;
+  const input = document.querySelectorAll<HTMLInputElement>('input[name="checkout"]')[kind === "main" ? 1 : 0];
   input.click(); await settle();
 };
 
 it.each(["main", "worktree"] as const)("saves %s for a new sprint using the same composer and checkout controls as a task", async kind => {
   const { p } = await mount("new?kind=sprint&project=p");
-  expect(document.querySelector('input[name="checkout"]:checked')?.closest("label")?.textContent).toContain("Separate worktree");
+  expect(document.querySelector('input[name="checkout"]:checked')?.closest("label")?.textContent).toContain("Worktree");
   await choose(kind);
   expect(named("Attach files")).toBeDefined();
   expect(named("Voice input")).toBeDefined();
   const area = document.querySelector<HTMLTextAreaElement>(".mc textarea")!;
   area.value = "Make these two changes"; area.dispatchEvent(new Event("input", { bubbles: true })); await settle();
   named("Start planning").click(); await settle();
-  expect(p.commands.map(c => c.payload)).toContainEqual(expect.objectContaining({ type: "create_sprint", checkout: { kind }, description: "Make these two changes" }));
+  expect(p.commands.map(c => c.payload)).toContainEqual(expect.objectContaining({ type: "create_sprint", checkout: kind === "main" ? { kind } : { kind, shared: true }, description: "Make these two changes" }));
   p.receipt(false); await settle();
   expect(area.value).toBe("Make these two changes");
-  expect(document.querySelector('input[name="checkout"]:checked')?.closest("label")?.textContent).toContain(kind === "main" ? "Project folder" : "Separate worktree");
+  expect(document.querySelector('input[name="checkout"]:checked')?.closest("label")?.textContent).toContain(kind === "main" ? "Project folder" : "Worktree");
   expect(p.commands.some(c => (c.payload as WorkspaceCommand).type === "start_task")).toBe(false);
 });
 
@@ -130,17 +129,35 @@ it("disables the worktree choice on a non-Git project even on a supporting servi
   expect(input.closest("label")?.textContent).toContain("needs a Git repository");
 });
 
-it("disables worktrees while Automatic is selected, but allows Hybrid", async () => {
+it("offers one worktree for the whole sprint by default and per-task worktrees as Manual only", async () => {
+  const { p } = await mount("new?kind=sprint&project=p");
+  const scope = () => [...document.querySelectorAll<HTMLInputElement>('input[name="worktree-scope"]')];
+  const mode = (value: string) => [...document.querySelectorAll<HTMLInputElement>('input[name="sprint-run"]')].find(input => input.closest("label")?.querySelector(".t")?.textContent === value)!;
+  expect(scope().map(i => i.closest("label")?.querySelector(".t")?.textContent)).toEqual(["One worktree for the whole sprint", "Separate worktree per task"]);
+  expect(scope()[0].checked).toBe(true);
+  mode("Hybrid").click(); await settle();
+  expect(mode("Hybrid").checked).toBe(true);
+  scope()[1].click(); await settle();
+  expect(mode("Manual").checked).toBe(true);
+  expect(mode("Hybrid").disabled).toBe(true);
+  expect(mode("Automatic").disabled).toBe(true);
+  expect(mode("Hybrid").closest("label")?.getAttribute("data-why")).toMatch(/Manual mode only/);
+  const area = document.querySelector<HTMLTextAreaElement>(".mc textarea")!;
+  area.value = "Per task"; area.dispatchEvent(new Event("input", { bubbles: true })); await settle();
+  named("Start planning").click(); await settle();
+  expect(p.commands.map(c => c.payload)).toContainEqual(expect.objectContaining({ type: "create_sprint", runMode: "manual", checkout: { kind: "worktree", shared: false } }));
+});
+
+it("keeps the sprint worktree available with Automatic and Hybrid", async () => {
   await mount("new?kind=sprint&project=p");
   const mode = (value: string) => [...document.querySelectorAll<HTMLInputElement>('input[name="sprint-run"]')].find(input => input.closest("label")?.querySelector(".t")?.textContent === value)!;
   const inputs = () => [...document.querySelectorAll<HTMLInputElement>('input[name="checkout"]')];
-  mode("Automatic").click(); await settle();
-  expect(inputs()[0].disabled).toBe(true);
-  expect(inputs()[0].closest("label")?.textContent).toContain("Choose Manual or Hybrid");
-  expect(inputs()[1].checked).toBe(true);
-  mode("Hybrid").click(); await settle();
-  expect(inputs()[0].disabled).toBe(false);
-  expect(inputs()[0].checked).toBe(true);
+  for (const value of ["Automatic", "Hybrid"]) {
+    mode(value).click(); await settle();
+    expect(inputs()[0].disabled).toBe(false);
+    expect(inputs()[0].checked).toBe(true);
+    expect(mode(value).checked).toBe(true);
+  }
 });
 
 it.each([false, true])("selects Project folder when worktrees are unsupported (Git: %s)", async hasGit => {
@@ -161,4 +178,35 @@ it.each(["planning", "summary"] as const)("shows the saved choice on the sprint 
   delete legacy.sprints[0].checkout;
   p.emit(projection("3", legacy)); await settle();
   expect(document.querySelector('[aria-label="Sprint checkout"]')).toBeNull();
+});
+
+it("shows the sprint checkout and limits a per-task worktree sprint to Manual", async () => {
+  const { p, world } = await mount("p/p/s/sp/plan");
+  const buttons = () => [...document.querySelectorAll<HTMLButtonElement>('[aria-label="Sprint run mode"] button')];
+  expect(document.querySelector('[aria-label="Sprint checkout"]')?.textContent).toContain("Separate worktree per task");
+  expect(buttons().filter(b => b.getAttribute("aria-disabled") === "true").map(b => b.textContent)).toEqual(["Hybrid", "Automatic"]);
+  const shared = structuredClone(world);
+  shared.sprints[0].checkout = { kind: "worktree", shared: true };
+  p.emit(projection("3", shared)); await settle();
+  expect(document.querySelector('[aria-label="Sprint checkout"]')?.textContent).toContain("One worktree for the whole sprint");
+  expect(buttons().some(b => b.getAttribute("aria-disabled") === "true" && b.dataset.why)).toBe(false);
+});
+
+it("offers the one sprint branch merge once every task of a shared worktree sprint is done", async () => {
+  const { p, world } = await mount("p/p/s/sp/plan");
+  const merge = () => [...document.querySelectorAll("button")].find(b => b.textContent === "Merge sprint branch…");
+  const state = structuredClone(world);
+  state.sprints[0].checkout = { kind: "worktree", shared: true };
+  state.sprints[0].planning = "created";
+  state.sprints[0].taskIds = ["c-draft", "c-work"];
+  const members = state.tasks.filter(t => t.id === "c-draft" || t.id === "c-work");
+  members.forEach(t => { t.sprintId = "sp"; });
+  expect(members.length).toBeGreaterThan(0);
+  members.forEach(t => { t.status = "done"; });
+  p.emit(projection("4", state)); await settle();
+  expect(merge()).toBeDefined();
+  state.sprints[0].merge = { state: "merged", target: "main", branch: "cw/x", commit: null, at: 1 };
+  p.emit(projection("5", state)); await settle();
+  expect(merge()).toBeUndefined();
+  expect(document.body.textContent).toContain("Merged into main");
 });

@@ -141,8 +141,8 @@ fn concurrent_connections_keep_transactional_outbox_sequences_unique() {
 fn metadata_retention_keeps_counter_and_never_reuses_sequences() {
     let (_p, s) = bound();
     s.write(|db| {
-        for _ in 0..5002 {
-            db.execute("UPDATE runtime_tasks SET goal='updated'", [])?;
+        for v in 2..=10_005 {
+            cortex_core::store::append_public_tx(db, "p", "task", "task", v)?;
         }
         Ok(())
     })
@@ -169,6 +169,105 @@ fn metadata_retention_keeps_counter_and_never_reuses_sequences() {
             )?,
             4
         );
+        Ok(())
+    })
+    .unwrap();
+}
+fn insert_rows(s: &Store, task: &str, tag: &str, n: usize, per_write: usize) -> std::time::Duration {
+    let started = std::time::Instant::now();
+    let mut done = 0;
+    while done < n {
+        s.write(|db| {
+            for i in done..(done + per_write).min(n) {
+                db.execute("INSERT INTO task_events(task_id,event_type,dedup_key,payload_json,origin,created_at) VALUES (?,'progress',?,'{}','runtime','now')", (task, format!("{tag}-{i}")))?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        done += per_write;
+    }
+    started.elapsed()
+}
+/// Cost of the Workspace invalidation hooks per written row (run with `--ignored --nocapture`).
+#[test]
+#[ignore]
+fn bench_hook_write_cost() {
+    let (_p, s) = bound();
+    TaskMachine::new(&s).create("unbound", "goal", "owner").unwrap();
+    for per_write in [1usize, 50] {
+        let bound_time = insert_rows(&s, "runtime", &format!("b{per_write}"), 2000, per_write);
+        let free_time = insert_rows(&s, "unbound", &format!("u{per_write}"), 2000, per_write);
+        println!("rows_per_write={per_write} bound={bound_time:?} unbound={free_time:?} ratio={:.2}",
+            bound_time.as_secs_f64() / free_time.as_secs_f64());
+    }
+    println!("outbox rows={} version={}", count(&s, "workspace_outbox"),
+        s.read(|db| Ok(db.query_row("SELECT version FROM workspace_tasks", [], |r| r.get::<_, i64>(0))?)).unwrap());
+}
+fn versions(s: &Store) -> (i64, i64, i64) {
+    s.read(|db| {
+        Ok((
+            db.query_row("SELECT version FROM workspace_tasks", [], |r| r.get(0))?,
+            db.query_row("SELECT version FROM workspace_executions", [], |r| r.get(0))?,
+            db.query_row("SELECT count(*) FROM workspace_outbox", [], |r| r.get(0))?,
+        ))
+    })
+    .unwrap()
+}
+#[test]
+fn many_rows_in_one_transaction_publish_one_invalidation_per_entity() {
+    let (_p, s) = bound();
+    assert_eq!(versions(&s), (1, 1, 0));
+    s.write(|db| {
+        for _ in 0..50 {
+            db.execute("UPDATE runtime_tasks SET goal='again'", [])?;
+        }
+        for i in 0..50 {
+            db.execute("INSERT INTO task_events(task_id,event_type,dedup_key,payload_json,origin,created_at) VALUES ('runtime','progress',?,'{}','runtime','now')", [format!("k{i}")])?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    // One task and one execution event for the whole transaction, versions advanced once.
+    assert_eq!(versions(&s), (2, 2, 2));
+    // The next transaction is observed again: a consumer polling the watermark sees every commit.
+    s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET goal='next'", [])?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(versions(&s), (3, 3, 4));
+    s.read(|db| {
+        let ordered: Vec<(i64, String, i64)> = db
+            .prepare("SELECT sequence,kind,entity_version FROM workspace_outbox ORDER BY sequence")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<_, _>>()?;
+        assert_eq!(
+            ordered.iter().map(|r| (r.0, r.2)).collect::<Vec<_>>(),
+            vec![(1, 2), (2, 2), (3, 3), (4, 3)]
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+#[test]
+fn rolled_back_statement_or_transaction_does_not_hide_a_later_invalidation() {
+    let (_p, s) = bound();
+    // A whole transaction rolled back leaves no trace and the next one still publishes.
+    let _ = s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET goal='gone'", [])?;
+        cortex_core::store::append_public_tx(db, "p", "task", "bad-kind", 0)
+    });
+    assert_eq!(versions(&s), (1, 1, 0));
+    // A savepoint rolled back inside one transaction forgets its mark with it.
+    s.write(|db| {
+        db.execute_batch("SAVEPOINT inner; UPDATE runtime_tasks SET goal='undone'; ROLLBACK TO inner; RELEASE inner;")?;
+        db.execute("UPDATE runtime_tasks SET goal='kept'", [])?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(versions(&s), (2, 2, 2));
+    s.read(|db| {
+        assert_eq!(db.query_row("SELECT goal FROM runtime_tasks", [], |r| r.get::<_, String>(0))?, "kept");
         Ok(())
     })
     .unwrap();

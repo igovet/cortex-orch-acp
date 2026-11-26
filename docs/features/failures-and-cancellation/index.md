@@ -241,6 +241,14 @@ The infrastructure classes are `engine_failure`, `transport_failure`,
 `runtime_restart`, `sandbox_unavailable` and `verifier_environment`. An attempt
 with an accepted result records nothing.
 
+A store error inside a runtime transition (`storage_unavailable`) is none of
+these. The driver retries the transition from the unchanged state after 1, 3
+and 10 seconds. If it still fails, the task keeps its state (for example
+VERIFYING after an approved review) with the blocker
+`runtime_storage_transition_failed` and a `TASK_TRANSITION_HELD` event. Nothing
+is classified, no continuation is recorded and the task does not go back to
+planning.
+
 ### Repeated refusals inside one attempt
 
 A worker may correct a refused `result_submit` and submit again in the same

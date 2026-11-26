@@ -4,7 +4,7 @@ Workspace task menus and the command palette expose the same existing controls. 
 
 Coordinator effort defaults are resolved against the levels advertised for the selected route. Removing the legacy effort sentinel does not change model eligibility, ceilings or provider authorization; explicitly unsupported concrete choices are still refused.
 
-Workspace reserves a shared checkout for independent review and final verification. Review requires and binds the task's own changes (gateway write receipts, and paths that changed while one of its commands or writing-engine turns ran); an edit of those files, by anyone, invalidates the reviewed digest, while other actors' uncommitted files are listed as context and neither required nor bound. Incomplete attribution falls back to requiring every changed file and binding the whole checkout. See "Review of the task's own changes" below. A worker continuation after a pending command reply or premature result submission requires a settled receipt for each named command on its own channel. Review packets identify earlier writes by task, revision and recorded event. Where available, the last write hash is compared with a fresh full-file content hash. Git-ignored files are not deliverable: their changes never make a review packet's change set incomplete. When the host cannot enumerate the change set, an approval still requires complete current reads of every listed changed file and carries a disclosed `unverified` runtime check for the unlisted part; it is never recorded as reviewed. A listed file whose current bytes have no reviewable text (binary, an image the reviewer did not read directly, or opaque encoded/minified text) is likewise never recorded as reviewed: an approval carries a disclosed `unverified` runtime check naming it. Past three rebinds, a review whose project keeps changing is refused until two submissions see the same state; it is then re-bound to that state and must be resubmitted, so it never certifies a state it did not bind. Missing receipts preserve the unknown-outcome barrier.
+Workspace reserves a shared checkout for independent change review and host verification. Sprint plan and sprint revision reviews judge proposals, not checkout bytes, and neither wait for writers nor take a new reservation. A sprint revision review preserves the task's existing reservation after the current revision passes host verification. Other reviews run without that reservation only when there are no attributed project effects or unresolved change observations. Review of project changes requires and binds the task's own changes (gateway write receipts, and paths that changed while one of its commands or writing-engine turns ran); an edit of those files, by anyone, invalidates the reviewed digest, while other actors' uncommitted files are listed as context and neither required nor bound. Incomplete attribution retains the scheduling reservation without making unrelated files required reading. See "Review of the task's own changes" below. A worker continuation after a pending command reply or premature result submission requires a settled receipt for each named command on its own channel. Review packets identify earlier writes by task, revision and recorded event. Where available, the last write hash is compared with a fresh full-file content hash. Git-ignored files are not deliverable: their changes never make a review packet's change set incomplete. When the host cannot enumerate the change set, an approval still requires complete current reads of every listed changed file and carries a disclosed `unverified` runtime check for the unlisted part; it is never recorded as reviewed. A listed file whose current bytes have no reviewable text (binary, an image the reviewer did not read directly, or opaque encoded/minified text) is likewise never recorded as reviewed: an approval carries a disclosed `unverified` runtime check naming it. Past three rebinds, a review whose project keeps changing is refused until two submissions see the same state; it is then re-bound to that state and must be resubmitted, so it never certifies a state it did not bind. Missing receipts preserve the unknown-outcome barrier.
 
 Execution baselines record the project checkout’s resolved Git HEAD, or null for an unborn branch or a plain folder. Ignored-file evidence is a separate metadata comparison, not a content check. If its bounded listing or metadata pass cannot finish, the ignored digest is absent and cannot support a review waiver; a complete deliverable manifest is still usable. An incomplete deliverable observation does not become complete as a result.
 
@@ -145,8 +145,12 @@ whose engine can change files without a receipt (codex-acp and OpenCode always;
 Claude Code only when the runtime allowed a non-gateway, non-read request in that
 turn). The host lists the checkout's dirty deliverable paths (Git status with
 untracked files, plus size, mtime, ctime, mode and inode; never Git-ignored files;
-a plain folder is walked) before and after each such run and records the paths
-whose entry changed on its finish record. Attribution is conservative: a path that
+a plain folder is walked) beside the launch of each such run (never delaying it;
+an observation still running at the payload's release is kept only if an inode
+change-time sweep from that instant shows the checkout untouched, and otherwise
+attributes conservatively, as described in
+[permissions and containment](docs/features/permissions-and-containment/index.md))
+and after it, and records the paths whose entry changed on its finish record. Attribution is conservative: a path that
 changed during the window is attributed even when another actor changed it at the
 same time. Every other changed file stays in the packet as context
 (`required: false`) and is never a coverage refusal. The review, its re-bindings,
@@ -259,21 +263,20 @@ Missing/mismatched supervisors, incomplete artifacts and legacy lost handles sta
 unknown and non-replayable; once their process is provably gone (an earlier boot,
 an empty recorded payload process group, an ended read-only PID namespace, or a
 payload never released) the receipt is settled with an unknown or not-started
-outcome, never a success, and is still never rerun. A lost worker's node is retried only when each of its receipts is complete or settled with an observed end (a final supervisor status, an owner stop, a launch that never started, or an ended read-only PID namespace); a receipt settled with an unknown outcome still sends the work to its coordinator or owner. A command start of an earlier host with no recorded exit is settled only from its own complete or settled receipt (same task, channel and call reference) or from a later runtime event of another boot, and its exit is recorded as recovered with that evidence, never as a success the receipt does not show. Engine sessions left open by a service that died are
+outcome, never a success, and is still never rerun. A lost worker's node is retried only when each of its receipts is complete or settled with an observed end (a final supervisor status, an owner stop, a launch that never started, ); a receipt settled with an unknown outcome still sends the work to its coordinator or owner. A command start of an earlier host with no recorded exit is settled only from its own complete or settled receipt (same task, channel and call reference) or from a later runtime event of another boot, and its exit is recorded as recovered with that evidence, never as a success the receipt does not show. Engine sessions left open by a service that died are
 settled at the next start only when the process table shows no engine adapter,
 Codex App Server or session relay of this user working in the project (an
 unreadable entry counts as one); the task is then held for the owner, never
 relaunched by itself. This is not detached unsandboxed descendant settlement
-or engine-session recovery. Brokered worker commands and runtime
-verification now use Rust-launched bubblewrap mount views. Read-only commands have
-a private PID namespace and read-only host/project mounts (including metadata);
-Guarded commands reopen granted project paths, and Development/Auto commands make
-the host writable while overlaying protected children after project grants.
-Read-only/Guarded literal /var/tmp is private writable scratch; Development/Auto
-keeps the host /var/tmp writable, as in the retained profile. Writable scratch and
-explicit cache mounts still permit chmod. Read-only project writes use a probed,
-discarded disk overlay where supported, otherwise remaining read-only. Unavailable
-namespaces/mounts fail closed; there is no Landlock-only or unsandboxed fallback.
+or engine-session recovery. Auto runs every role's command directly on the host as the owner (deletions wait
+for the owner's permission card; an argv that deletes or overwrites a live store
+file is refused). Brokered worker commands in Guarded and Development, read-only
+roles and runtime verification run on the host at their real paths, with the
+owner's tools, PATH, HOME and the shared network, under a Landlock ruleset the
+per-command supervisor enters just before exec; no namespace, mount, overlay or
+snapshot copy is created (see [Landlock command boundary](#landlock-command-boundary)).
+A ruleset that cannot be prepared fails closed; there is no unsandboxed fallback
+except the consent-backed host route.
 A settled `command_run` receipt whose output shows a refused nested namespace sandbox
 carries an advisory `nested_sandbox` hint naming whether the consent-backed
 `outside_command` is offered to that profile; it changes no outcome, reruns nothing and
@@ -793,7 +796,7 @@ per-command child deadline and at most 1 MiB retained per output stream. The
 launch budget accommodates a single bounded build or test step; it does not
 cover an entire multi-step suite. Raw runtime receipts distinguish timeout,
 cancellation, a signalled child and unavailable or truncated output. Incomplete,
-signalled, nonzero or truncated output cannot pass. Bubblewrap namespace/mount preparation is
+signalled, nonzero or truncated output cannot pass. Landlock preparation is
 mandatory and failure reports `native_verification_sandbox_unavailable`; plan
 preflight preserves that reason rather than claiming the executable is missing.
 Plan preflight checks for executable files in the same live read-only command
@@ -1039,8 +1042,8 @@ inode checks, nonblocking file classification and post-read/scan checks reject
 observed races; file/time limits return no partial digest. The exact regular
 engine lock and dependency/store exclusions are preserved, as is metadata-only
 identification above the legacy content/total-byte budgets. No source cache is
-used. Git file selection runs only fixed installed Git in a no-owner-home,
-no-network bubblewrap view with read-only project/metadata mounts, disabled
+used. Git file selection runs only fixed installed Git with a private HOME under a
+Landlock ruleset (writes only to its scratch, excluded entries hidden), disabled
 fsmonitor/hooks and no inherited Git configuration. Linked worktree metadata is
 bound explicitly. An unavailable command uses the legacy whole-tree fallback;
 a successful but oversized/non-UTF-8/malformed list retains the provider, never
@@ -1548,9 +1551,12 @@ such as an HTTP or SSE server, a reserved name or a repeated name) are accepted
 and ignored; their URLs, headers and environment are not stored or forwarded.
 Engines receive secret-free relay entries while the
 host owns the contained process and private per-launch runtime directory.
-Mandatory Landlock ABI 3+ and seccomp enforce native project/path grants and
-default-denied socket creation; no bubblewrap namespace or hostile-code isolation
-is claimed. Local socket-dependent servers require explicit network permission.
+Mandatory Landlock confines a contained server: it sees the real filesystem
+(the owner's tools on the owner's search path), cannot read the owner's keys and
+credential stores, the project's secret files or the live Cortex stores, and
+writes only to its write grants, worker scopes and private runtime directory. The
+network is shared (the `network` flag is accepted but not enforced); no namespace
+or hostile-code isolation is claimed.
 Writing workers' existing, non-root scopes are granted to the server; a scope
 the worker has not created yet is not granted (never widened to a parent
 directory, never created). Administrator paths must exist and must not overlap
@@ -1572,8 +1578,8 @@ Uncontained external servers are an explicit owner opt-out. The owner sets
 `"containment": "none"` on one entry or as the registry-wide default in the
 owner-only `mcp-servers.json` (an entry's own `"contained"` overrides that
 default; absent everywhere means contained, and any other value refuses the
-registry). Such a server runs with the owner's full user authority: no Landlock,
-no seccomp, no network restriction and no `no_new_privs`. Its `read_paths`,
+registry). Such a server runs with the owner's full user authority: no Landlock
+and no `no_new_privs`. Its `read_paths`,
 `write_paths`, `network`, `runtime_dir_env` and worker scopes are not enforced or
 applied, and the per-file project walk that builds the Landlock policy is
 skipped. What still holds: it launches only the registry's own absolute (or
@@ -1919,7 +1925,7 @@ because its license could not be established. See
 
 
 Ordinary read-only worker commands use `read_only` in every mode. Automatic
-verification uses the same host-visible profile with networking disabled.
+verification uses the same host-visible profile with the host network (shared with every command view).
 The profile restricts writes and uses a private PID namespace and private
 `/var/tmp`. Host `/tmp`, allowed tool caches and the verifier's existing
 writable ignored-directory grants are not private outputs. Neither route is
@@ -2469,8 +2475,12 @@ bytes yields `full_content_sha256`, and `project_write` of an existing file requ
 (`gateway_complete_read_required` otherwise). A stale read, a hand-supplied hash and `absent` for an
 existing file are refused before anything changes. A large shrink is flagged in the receipt
 (`drastic_shrink`) rather than refused, but it still needs complete coverage. `project_edit` applies
-ordered exact replacements atomically after any prior text read of the current bytes; a missing or
-ambiguous match refuses the whole edit. Coverage is per channel and per digest and stores no file bodies.
+ordered exact replacements atomically against the current bytes (no prior read is required); a missing or
+ambiguous match refuses the whole edit and returns the current page as a read, while an edit already in the
+requested state succeeds as `unchanged`. `project_write` accepts `encoding: "base64"` for binary content under the
+same path policy, hashes and receipts. A hard-linked project file may be read, and a write replaces only the directory
+entry (rename of a temporary file), so the shared inode, including a link outside the project, is never modified;
+command `changed_paths` are attributed project writes. Coverage is per channel and per digest and stores no file bodies.
 A successful `project_write` or `project_edit` replaces the path's coverage with the digest of the bytes
 that channel just produced: complete after a full write or an edit of a completely read file (never for
 `.gitignore`, where the runtime adds protected lines), otherwise partial. A later change by anyone else
@@ -2614,7 +2624,7 @@ The Cortex Workspace desktop slice has a user-level machine service that owns th
 - Workspace invalidation hooks are connection-local to supported Store writers, not a security boundary on arbitrary SQLite clients. Independent/older writers do not need Workspace tables or callbacks; their writes are not guaranteed to publish notifications. Normal writable initialization retires legacy persistent outbox hooks; inspection leaves the durable schema untouched.
 - Both channels ship a root-owned runtime under `/usr/lib/<package>/runtime`. Units ignore legacy `service.env` files and use fixed absolute launch paths. Login-start symlinks and minimal best-effort maintainer scripts start/restart/stop only the matching user unit; they never access Paseo or delete user data. The native service-start path runs absolute `/usr/bin/systemctl --user` with fixed reload/start arguments, not webview-supplied commands. The separate editor action accepts only a registered project identity and fixed VS Code arguments. Dev XDG isolation and unchanged native account references remain in force.
 - [Standalone desktop qualification](docs/project/verification.md#standalone-cortex-workspace-desktop) runs a trusted, locally built Dev archive extracted without installation (`dpkg-deb -x`, no maintainer scripts) as the owner, in the owner's real environment: real HOME, session bus/keyring, native Codex/Claude and GitHub CLI logins (`GH_CONFIG_DIR` points at the owner's existing gh configuration; nothing is copied). Its five XDG roots and service socket are private to the run, so the persistent release and Dev installations, their settings, registrations and stores, production `~/.paseo` and the owner's projects are not used; the extracted app cannot fall back to either installed unit, and the launcher unsets inherited `CORTEX_ROUTING`. There is no nested namespace lab: this is the product's own channel separation, not a boundary for hostile same-user code. Smoke may use the owner's display. Drive requires a private, authenticated Xvfb (per-run X authority cookie, own Xvfb process) and refuses missing private display tools before archive handling. Before any program from the archive is extracted or run with the owner's HOME, gh configuration and session bus, the launcher requires the build's own manifest to be a regular, non-symlink, user-owned, not group/world-writable file whose package identity and SHA-256 match the archive; an absent, symlinked, unreadable or mismatching manifest refuses nonzero before extraction or launch. `drive` is bound to the exact archive digest recorded by a successful private-Xvfb smoke and refuses any other archive. A screenshot counts only when capture exits 0 and the file is a complete, decodable PNG; a failed or partial capture is refused and no digest is retained. Smoke checks logins by exit status, retains sanitized route/default readback and never account output or settings bodies; environment gaps (no display, missing tool, missing login) are recorded as unobserved steps and never count as a pass. Optional installation passes the verified private Dev archive snapshot to apt via sudo, not the mutable build path. Cleanup refuses an unlisted Debian archive anywhere under either named build directory. Paid use still requires explicit authorization for this surface and mode.
-- The package depends on Bubblewrap but does not weaken AppArmor or kernel policy. A namespace refusal blocks the affected sandboxed route, not necessarily other engine launches. See [platforms](docs/cortex-workspace/platforms.md).
+- The package does not depend on Bubblewrap and does not weaken AppArmor or kernel policy. Confined commands and contained MCP servers need a kernel with Landlock enabled (an active LSM); without it they fail closed while engine launches and the Auto host route are unaffected. See [platforms](docs/cortex-workspace/platforms.md).
 - `history.page` exposes bounded display text, plans, tool titles/status and each call's selected target (path, command, query, skill or report reference) and non-private edit text, not raw tool arguments/results or private report bodies. An untitled update is judged private or not by the title retained for its call, and stays private when none was retained. A refused call keeps only a credential-redacted reason of at most 1,000 characters: the runtime refusal's `message`, or a Cortex tool's error text; engine tool output and report/draft refusals are not kept. A worker's edit lines come from the runtime's own record of that write (unclipped records only), credential-redacted and bounded per edit and per read. Its cursor binds the project, task, session, page size and frozen high-water mark. Owner queue and review drafts live in private service state, separate from immutable captured source history.
 - The service-only `_cortex/workspace_control` method resolves the registered execution and live session/current owner epoch before accepting prompts, worker guidance, worker cancellation or a command-stop request. Stop/Close alone may cancel the exact bound launch before its runtime row exists even when retries have advanced the coordinator epoch; prompts and other controls retain current-epoch checks. It is not a model MCP tool. Worker guidance targets one live channel and is marked delivered when appended to a successful Cortex tool response, not when read or acted on. It grants no authority. The exact gateway command reference and a reason remain required for stopping a command; native engine actions cannot be stopped through this control.
 - Task options are session-local, and verified linked worktrees share the logical project store. Worktree cleanup never forces dirty removal. Owner-confirmed integration checks current runtime evidence and checkout observation, refuses a dirty or incompatible target, and never hides a push. PR attempts use the installed GitHub CLI and retain ambiguous outcomes without copying credentials. Archive purge uses the existing exclusive-lock/journaled runtime cleanup, active-execution protection and explicit space-reclamation outcome. Project removal keeps files and history; the native editor action resolves only a registered project, never a webview-supplied command. See [task execution](docs/cortex-workspace/local-task-execution.md).
@@ -2908,6 +2918,23 @@ locks on those files and commits every state transition through the database and
 its WAL, so a write from another process can corrupt the running store or drop
 its locks, and no owner answer can make such a write safe. Reads of them follow
 the private-state row.
+**Auto is full, unsandboxed host access (owner decision 2026-11-26).** In Auto every
+role and stage, the coordinator, consultant, reviewers, explorers, read-only and
+worktree assignments included, runs `command_run` and `outside_command` directly on
+the host as the owner: the owner's real HOME, PATH, environment, devices, network,
+ssh-agent and docker, with no Landlock ruleset, sparse view or snapshot
+copy; `sudo`, `pkexec` and `doas` go through the owner-password route. A read-only
+role gets no read-only capture and no "writing worker required" refusal, and a
+read-only task is never told that SSH or host commands are forbidden. The command's
+working directory is its own checkout or worktree. Two guards remain in Auto: a
+command whose argv deletes or overwrites a live Cortex store file
+(`.cortex/*.sqlite3*`) is refused (`cortex_live_store`), and a deletion (the
+recognizer for `rm`, `unlink`, `rmdir`, `shred`, `find -delete`, `git clean`/`rm`,
+`rsync --delete`, also through wrappers and `sh -c`, and `project_delete`) always
+waits for the owner's answer on a permission card and is never answered by Auto; a
+denial is a normal refusal. Guarded and Development keep the behaviour described
+below. Managed Codex scoped channels are unchanged.
+
 Shell commands follow the same decision where a command can: in Auto, `command_run`
 sees the real `.cortex`/`.cortex-dev` read-write, with every live store file that
 exists at launch (`live_store_file`) bound read-only over it, so it cannot be
@@ -3181,12 +3208,12 @@ unmounted. The full `/etc` tree and user home are never added by that grant. A
 read grant cannot overlay the project or unmask its private store. Native account
 MCP entries are disabled. Server-initiated sampling/elicitation is refused.
 
-Cortex gateway file writes check assignment and role authority (writing workers hold the whole-project grant), use no-follow descriptors, require complete-read or expected-content hashes, and replace files atomically. Commands run under Linux
-`bwrap`: the project is read-only by default and launch-time grants make the
-whole project writable for a writing worker; that jail grant is broader than
-the worker's runtime-declared assignment scope. Additional access requests
-update only the declared-scope writer reservations after runtime validation,
-not the OS jail. Private `.cortex` paths are masked (in Auto the store directories are writable except the live store files), the project's `.codex` and
+Cortex gateway file writes check assignment and role authority (writing workers hold the whole-project grant), use no-follow descriptors, require complete-read or expected-content hashes, and replace files atomically. Commands run under
+Landlock: the project is read-only by default and launch-time grants make the
+whole project writable for a writing worker; that grant is broader than the
+worker's runtime-declared assignment scope. Additional access requests update
+only the declared-scope writer reservations after runtime validation, not the
+Landlock ruleset. Private `.cortex` paths are masked (in Auto the store directories are writable except the live store files), the project's `.codex` and
 `.claude` are ordinary project paths, and the project's `.git` is visible as described below. The restrictive command profile runs as the owner: their user and
 group names resolve, their real HOME is mounted read-only (so its dotfiles and
 credentials are readable by the command), the runtime's environment is passed on
@@ -3252,22 +3279,76 @@ the owner. See [retention maintenance](docs/project/packaging.md#retention-maint
 <a id="access-mode-guarded-and-auto"></a>
 ### Access mode (Development, Guarded and Auto)
 
-Fresh ACP sessions durably start **Development**. A writing worker's ordinary
-`command_run` uses host-writable mounts, real HOME, real /var/tmp, owner devices,
-groups and shared network through the channel-bound host broker. Docker/Compose,
-SDK/cache state and authorized outside-project cwd need no routine permission
-card merely for crossing the project boundary. The mode decides
-the host for writing workers: Development and Auto give them the host-writable profile (a
-`docker build` check can record its builder state in `~/.docker/buildx`), and Guarded keeps
-them restricted. Read-only roles and reviewers always get the
-read-only host-visible profile (`read_only`). Automatic verification uses that
-profile with networking disabled and the existing grants for eligible ignored
-directories, such as build outputs and dependency directories. Other checkout
-writes go to a discarded overlay where supported, or are refused. The verifier
-keeps the profile's private scratch and never retries on the host. A check whose project digest changes is
-incomplete. A mode switch
-does not stop a read-only command or a verification check. Only a host-writable (Development or
-Auto) writing-worker command is stopped by a mode switch or a denial change. Engine processes themselves are not sandboxed (see [Native engine tools](#native-engine-tools)).
+Fresh ACP sessions durably start **Development**. **Auto** runs every role's
+command on the host as the owner (see above). In **Development** and **Guarded**,
+read-only roles and automatic verification, a brokered command runs on the host at
+its real paths, with the owner's tools, PATH, HOME, devices, groups and shared
+network, under a Landlock ruleset; see [Landlock command boundary](#landlock-command-boundary).
+Docker/Compose, SDK/cache state and authorized outside-project cwd need no
+routine permission card merely for crossing the project boundary. Automatic
+verification uses the read-only profile with write grants for eligible ignored
+directories, such as build outputs and dependency directories; other checkout
+writes are refused. The verifier keeps the profile's private scratch and never
+retries on the host. A check whose project digest changes is incomplete. A mode
+switch does not stop a read-only command or a verification check. Only a writing
+worker's command is stopped by a mode switch or a denial change. Engine processes
+themselves are not sandboxed (see [Native engine tools](#native-engine-tools)).
+
+<a id="landlock-command-boundary"></a>
+
+#### Landlock command boundary
+
+The per-command supervisor prepares a Landlock ruleset (`native_sandbox`) and the
+payload enters it between fork and exec; no mount, PID, user or network namespace,
+overlay or snapshot copy is created, and a ruleset that cannot be prepared fails
+closed (`native_command_sandbox_unavailable`). Per profile:
+
+| Profile | Writes | Unreadable |
+|---|---|---|
+| Read-only roles, verification | private scratch (TMPDIR), verification's ignored-directory grants, package/build caches, `/dev` | owner keys and credential stores, project secret files (`.env*`, `.npmrc` ...), live Cortex stores |
+| Guarded writer | its checkout (or granted paths), scratch, the owner's non-sensitive HOME tool directories, `/dev` | the same set, except inside the writer's checkout |
+| Development writer | as Guarded plus `/tmp` and `/var/tmp` | the live Cortex stores outside the writer's checkout |
+
+Engine and Cortex configuration, the service executable and owner write denials
+stay read-only. The owner's keys and credential stores are SSH private keys (not
+`config`, `known_hosts` or `*.pub`), GnuPG private keys, cloud, Kubernetes and
+Docker credentials, password stores and keyrings, `.netrc`, `.git-credentials`,
+`.npmrc`, `.pypirc`, Cargo and GitHub CLI tokens, the engines' sign-in files,
+Cortex and Paseo state, and browser profiles.
+
+Landlock is allow-list only. A writer's checkout is an open write tree: an entry
+inside it (`.cortex`, `.env`) cannot be hidden without making every file created
+directly in the checkout unusable, so there the live store files are protected by
+the argv seal (`cortex_live_store`) and deletion consent instead. An explicit
+owner write denial inside the checkout is enforced; a directory that directly holds
+it then keeps only listing and creation rights, so a file a command creates there
+becomes usable from the next command on. Entry names below hidden directories stay
+listable. Landlock does not restrict chmod/chown or timestamps, already open
+descriptors, Unix-socket connections (the owner's ssh-agent and session bus stay
+reachable) or the network. It is a write and secret boundary for trusted local
+work, not hostile-code isolation.
+
+Preparing a command never walks the project. Project secret files are looked up
+only where they can be hidden (read-only roles, and Guarded commands without a
+whole-checkout grant), from the service's per-checkout index: the last finished
+walk plus a fresh read of the checkout's top level, with the walk refreshed in the
+background. Only a checkout's first such command in a service process waits for a
+walk. A secret file created below the top level after the last finished walk stays
+readable to the next such command and is hidden from the one after it.
+
+Devices and hardware are never a blocker for any command (Auto, Development,
+Guarded and read-only roles): commands use the host `/dev` and `/sys` at their
+real paths, and the owner's X11, Wayland, PipeWire/Pulse and session-bus sockets with
+`DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR`,
+`DBUS_SESSION_BUS_ADDRESS`, `NVIDIA_*`, `CUDA_*` and driver variables. These
+names are exempt from the credential-name filter; a device node grants hardware
+access, never file writes. Every command shares the host network. Host reads are never a blocker for a linked-worktree task: the read-only worktree profile also
+reads the main checkout (its `.cortex` and `.cortex-dev` stores hidden), `project_read`
+accepts an absolute host path for every role (plain read-only paging, no write coverage, live store files
+refused), and a writing worker's `outside_command` runs as in the main checkout under the same mode
+consent; only `outside_write` and privilege escalation are refused for a linked checkout. File-write rules are
+unchanged: read-only views stay read-only for files. The sparse views do not
+mount the Docker socket.
 
 This is **trusted local development, not hostile-code isolation**. Direct masks
 hide the bound task's private runtime storage and protect Git configuration,
@@ -3360,8 +3441,9 @@ Every engine process and every worker `command_run` receives the owner's
 `SSH_AUTH_SOCK` when it names a socket the owner owns
 (`orchestration.ssh_askpass.host_agent_env`). The value comes from the
 environment Cortex was started with. The rest of the credential filter still
-applies. With HOME read-only, the owner's `~/.ssh/config` and `known_hosts`
-apply unchanged, so ssh inside the sandbox behaves as in the owner's terminal.
+applies. The owner's `~/.ssh/config` and `known_hosts` stay readable at their
+real paths (private keys do not), so ssh inside the sandbox behaves as in the
+owner's terminal with keys from the agent.
 The agent never releases private keys, but any sandboxed process, and thus the
 model, can ask it to sign. That means it can authenticate to every host the
 unlocked keys open, within the task's network access. Lock or remove keys from
@@ -3370,8 +3452,8 @@ configured to confirm each use (`ssh-add -c`) still asks the owner on the
 desktop.
 
 Runtime verification uses the same host-visible read-only command profile with
-networking disabled, not a separate SSH input policy. An eligible explicit host
-command is not subject to the broker's command mounts.
+the host network shared, not a separate SSH input policy. An eligible explicit host
+command is not subject to the broker's Landlock ruleset.
 
 ### Optional ssh password dialog
 
@@ -3383,14 +3465,16 @@ point and worker commands on the existing host route additionally receive the ow
 `SSH_ASKPASS_REQUIRE=force`. ssh then shows its prompt in a `zenity` or
 `kdialog` dialog, and the typed answer is written to ssh only. It never reaches
 the model, a transcript, a log or the store. Cortex generates the dialog script
-and mounts it read-only, so a sandboxed process cannot replace it. The switch
+in the command's private scratch. The switch
 lives in the owner's config directory, which the sandbox cannot write. Git also
 uses `SSH_ASKPASS` for HTTPS credential prompts. Any process in the sandbox can
 also draw windows on the owner's display, including a fake of this prompt, so
 type a password only for a connection you expect. When no display session or
 dialog program is available, nothing is added. `sudo` never works inside the
-command sandbox: bubblewrap sets no_new_privs, which setuid programs refuse. A
+command sandbox: Landlock requires no_new_privs, which setuid programs refuse. A
 writing worker's command that needs root runs on the host instead (next section).
+
+Each supervised command also runs in its own transient systemd user scope (`systemd-run --user --scope`, bound to the service unit), a sibling of the service cgroup, with `MemoryHigh` at 60% and `MemoryMax` at 75% of RAM and `OOMPolicy=continue`. A runaway command is throttled or OOM-killed alone and cannot stall the service; the command settles as a normal failed command (`failure: out_of_memory`, with an "out of memory (N GB)" line in its output) and the task continues. The Landlock ruleset is unchanged. Without a usable `systemd-run` (no user bus) commands launch directly in the service cgroup as before.
 
 <a id="owner-password-for-sudo-askpass-and-host-rerouting"></a>
 
@@ -3539,7 +3623,7 @@ git shows that state and runs its todo list only when the owner continues it.
 Reviewers, read-only roles and automatic verification see `.git` read-only. `project_read`/`project_write`/`project_edit`/`project_delete` still refuse every
 path through `.git`, `.cortex` or `.cortex-dev`.
 
-Main-checkout `project_git` runs fixed status/diff commands with a cleared
+Main-checkout `project_git` runs fixed read-only status, diff and history commands (log, show, cat-file, blame, ls-files) with a cleared
 environment, global/system Git configuration disabled, optional locks off,
 hooks and fsmonitor disabled, and no external diff or text conversion.
 It probes repository filter keys and disables discovered drivers rather than
@@ -3624,7 +3708,7 @@ timings (numbers only) are kept on its runtime events, never in the tool reply.
 
 `command_run`/`outside_command` and automatic verification checks run under an
 explicit `umask 022`, set by the sandboxed process itself right before it execs
-the real command (`bwrap` has no `--umask` option). This is a deliberate choice,
+the real command. This is a deliberate choice,
 not an oversight: left alone, such a command would instead inherit whatever the
 Cortex runtime process itself set for its own private store (`umask 0077`,
 still used everywhere the runtime creates its own files/directories directly --
@@ -3782,7 +3866,7 @@ pins.
 - ACP is stdio. Session ordering and ownership are runtime-managed.
 - The model sees the user's project data and can attempt prompt injection.
 - A subagent cannot bypass the runtime permissions because subagents are disabled.
-- Sandboxing assumes Linux user/mount/PID/network namespaces and bubblewrap.
+- Command and MCP containment assumes a Linux kernel with Landlock enabled. Landlock restricts file access only: it does not restrict chmod/chown or timestamps, already open descriptors, Unix-socket connections, signals to processes outside the ruleset's own descendants, or the network.
 - **Known exposure: ordinary command reads and engine processes.** Ordinary
   worker commands retain host visibility and profile-specific writable mounts.
   Checkout scope and mask rules are not a general host-read policy. A command
@@ -3791,7 +3875,7 @@ pins.
   limit writes, not general host reads. Eligible Development/Auto writers can
   use a non-private canonical host working directory and write the live checkout.
 - **Runtime verification limits writes, not general reads.** It uses the live
-  read-only command profile with networking disabled, private scratch and
+  read-only command profile with the host network (shared with every command view), private scratch and
   private-store masks. Eligible existing ignored checkout directories and
   permitted host cache paths can still receive writes. A setup refusal is not
   a pass and never triggers a host rerun. This does not establish hostile-code

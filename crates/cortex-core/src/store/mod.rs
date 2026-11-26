@@ -5,10 +5,12 @@ pub mod documents;
 pub mod executor;
 pub mod locks;
 pub mod migration;
+mod compaction;
 mod outbox;
 pub mod owner_file_leases;
 pub mod publication;
 mod retention;
+pub use compaction::{CompactionBudget, CompactionReport};
 pub use retention::expired_closed_archive;
 pub(crate) use retention::quiet as require_quiet_workspace_task;
 pub mod schema;
@@ -62,6 +64,11 @@ pub struct Store {
     _connection_guard: Option<AccessLock>,
     identity: (u64, u64),
     access_wait: Duration,
+    /// True while the connection is at `synchronous=NORMAL` (see [`Store::write_relaxed`]).
+    /// Changed only while holding `connection`.
+    relaxed: std::sync::atomic::AtomicBool,
+    /// A reader-pool connection: every write is refused (`storage_read_lane`).
+    read_lane: bool,
 }
 impl Store {
     pub fn open(key: ProjectKey, mode: OpenMode) -> CoreResult<Self> {
@@ -277,7 +284,7 @@ impl Store {
         if read_only {
             db.pragma_update(None, "query_only", "ON")?;
         } else {
-            outbox::install(&db)?;
+            outbox::install(&mut db)?;
             if initialize {
                 locks::open_private(&key.directory().join(".publication.lock"), true, false)?;
                 ignore_in_git(&key.directory())?;
@@ -293,7 +300,14 @@ impl Store {
             connection: Mutex::new(db),
             inspection: if inspection { Some(lock) } else { None },
             _connection_guard: connection_guard,
+            relaxed: std::sync::atomic::AtomicBool::new(false),
+            read_lane: false,
         }))
+    }
+    /// Make this a reader-pool store: reads only; any write refuses `storage_read_lane`.
+    pub(crate) fn read_lane(mut self) -> Self {
+        self.read_lane = true;
+        self
     }
     pub fn key(&self) -> &ProjectKey {
         &self.key
@@ -352,21 +366,57 @@ impl Store {
     /// Never wait for a process, engine or user inside body. A bounded filesystem
     /// publish that participates in a final write fence may run here; rollback
     /// cannot undo it. The body is never replayed here.
+    /// Every such commit uses `synchronous=FULL`: it returns only once it is durable.
     pub fn write<T>(&self, body: impl FnOnce(&Transaction<'_>) -> CoreResult<T>) -> CoreResult<T> {
+        self.write_with(true, body)
+    }
+    /// [`Self::write`] committed with `synchronous=NORMAL`: in WAL mode the commit does
+    /// not wait for an fsync of the log. A power failure (never a process crash) may lose
+    /// the newest such commits; the database stays consistent, and the next FULL commit
+    /// makes every earlier one durable with its own. Only for display/progress rows that
+    /// no authority, lifecycle, result, receipt or owner action depends on (see
+    /// `docs/project/storage.md#commit-durability`).
+    pub fn write_relaxed<T>(
+        &self,
+        body: impl FnOnce(&Transaction<'_>) -> CoreResult<T>,
+    ) -> CoreResult<T> {
+        self.write_with(false, body)
+    }
+    fn write_with<T>(
+        &self,
+        durable: bool,
+        body: impl FnOnce(&Transaction<'_>) -> CoreResult<T>,
+    ) -> CoreResult<T> {
+        use std::sync::atomic::Ordering;
         if matches!(
             self.mode,
             OpenMode::InspectImmutable | OpenMode::LiveReadOnly
         ) {
             return refuse("inspection_read_only");
         }
+        if self.read_lane {
+            return refuse("storage_read_lane");
+        }
         let _lock = self.access()?;
         let mut db = self
             .connection
             .lock()
             .map_err(|_| CoreError::Refused("storage_unavailable"))?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let result = body(&tx)?;
-        tx.commit()?;
-        Ok(result)
+        // The level is a connection setting, changed outside any transaction. A FULL
+        // write never starts while the connection is still relaxed.
+        if self.relaxed.load(Ordering::SeqCst) == durable {
+            db.pragma_update(None, "synchronous", if durable { "FULL" } else { "NORMAL" })?;
+            self.relaxed.store(!durable, Ordering::SeqCst);
+        }
+        let result = (|| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let result = body(&tx)?;
+            tx.commit()?;
+            Ok(result)
+        })();
+        if !durable && db.pragma_update(None, "synchronous", "FULL").is_ok() {
+            self.relaxed.store(false, Ordering::SeqCst);
+        }
+        result
     }
 }

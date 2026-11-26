@@ -383,6 +383,19 @@ pub fn start_native_worktree(
     start_worktree(store, project, actor, command, machine_root, None)
 }
 
+/// As `start_native_worktree`, for an Automatic queue start (its execution policy is part
+/// of the committed receipt's digest, as for a project-folder start).
+pub fn start_native_worktree_with_policy(
+    store: &Store,
+    project: &str,
+    actor: &str,
+    command: &Value,
+    machine_root: &std::path::Path,
+    policy: Option<NativeExecutionPolicy>,
+) -> CoreResult<Value> {
+    start_worktree_with(store, project, actor, command, machine_root, None, policy)
+}
+
 fn start_worktree(
     store: &Store,
     project: &str,
@@ -390,6 +403,18 @@ fn start_worktree(
     command: &Value,
     machine_root: &std::path::Path,
     rework: Option<StartRework<'_>>,
+) -> CoreResult<Value> {
+    start_worktree_with(store, project, actor, command, machine_root, rework, None)
+}
+
+fn start_worktree_with(
+    store: &Store,
+    project: &str,
+    actor: &str,
+    command: &Value,
+    machine_root: &std::path::Path,
+    rework: Option<StartRework<'_>>,
+    policy: Option<NativeExecutionPolicy>,
 ) -> CoreResult<Value> {
     workspace_protocol::validate("Command", command)
         .map_err(|_| CoreError::Refused("invalid_workspace_request"))?;
@@ -402,7 +427,7 @@ fn start_worktree(
     let draft = command["target"].as_str().ok_or(CoreError::Refused("invalid_target"))?;
     let digest = match &rework {
         Some(r) => start_rework_digest(r.request)?,
-        None => start_digest(command, None, None, None)?,
+        None => start_digest(command, None, None, policy)?,
     };
     let reserve = worktrees::reserve(store, project, actor, request, draft, &digest, command)?;
     use worktrees::Reservation::*;
@@ -417,7 +442,30 @@ fn start_worktree(
             (plan, witness)
         }
         New(title) => {
-            let plan = match worktrees::plan(store.key().root(), machine_root, project, draft, &title) {
+            // Members of a sprint that shares one worktree reuse the first member's
+            // checkout; the first member provisions it, named after the sprint.
+            let shared = worktrees::shared_marker(store, project, draft)?;
+            if policy == Some(NativeExecutionPolicy::AutomaticContinuation) && shared.is_none() {
+                // Automatic runs only in the project folder or in a sprint's one shared worktree.
+                worktrees::mark(store, project, actor, request, "failed-known", "worktree_git_failed")?;
+                return refuse("native_worktree_unavailable");
+            }
+            if let Some((sprint, _)) = &shared {
+                if let Some((plan, witness)) = worktrees::shared_binding(store, project, sprint, draft)? {
+                    if plan.verify(store.key().root(), &witness).is_err() {
+                        worktrees::mark(store, project, actor, request, "failed-known", "worktree_unavailable")?;
+                        return refuse("worktree_unavailable");
+                    }
+                    worktrees::save_plan(store, project, actor, request, &plan)?;
+                    worktrees::save_witness(store, project, actor, request, &witness)?;
+                    return admit_native_start(store, project, actor, command, None, None, policy, Some((&plan, &witness)), rework);
+                }
+            }
+            let (plan_key, plan_title) = match &shared {
+                Some((sprint, title)) => (sprint.as_str(), title.as_str()),
+                None => (draft, title.as_str()),
+            };
+            let plan = match worktrees::plan(store.key().root(), machine_root, project, plan_key, plan_title) {
                 Ok(plan) => plan,
                 Err(error) => {
                     worktrees::mark(store, project, actor, request, "failed-known", error.code())?;
@@ -436,7 +484,7 @@ fn start_worktree(
             (plan, witness)
         }
     };
-    admit_native_start(store, project, actor, command, None, None, None, Some((&plan, &witness)), rework)
+    admit_native_start(store, project, actor, command, None, None, policy, Some((&plan, &witness)), rework)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -500,6 +548,9 @@ fn admit_native_start(
         match (options["checkout"]["kind"].as_str(), worktree) {
             (Some("worktree"), Some((plan, _))) => {
                 options["checkout"] = plan.projection();
+                if options.get("sprintWorktree").is_some() {
+                    options["checkout"]["shared"] = json!(true);
+                }
                 options["baseRevision"] = json!(plan.base_sha);
             }
             (None | Some("main"), None) => {
@@ -726,6 +777,8 @@ pub struct BatchDraft<'a> {
     pub task_id: &'a str,
     pub description: &'a str,
     pub options: &'a Value,
+    /// Files the draft starts with (`Attachments` wire form), kept in its options.
+    pub attachments: Option<&'a Value>,
 }
 
 /// Creates every draft of one owner action inside the caller's transaction, so the
@@ -761,10 +814,17 @@ pub fn create_drafts_tx(
             return refuse("invalid_workspace_request");
         }
         fields.insert("description".into(), json!(draft.description));
+        // The sprint worktree marker is a host-side option, not part of the wire payload.
+        if let Some(fields) = payload.as_object_mut() {
+            fields.remove("sprintWorktree");
+        }
         workspace_protocol::validate("CreatePayload", &payload)
             .map_err(|_| CoreError::Refused("invalid_workspace_request"))?;
         if draft.description.trim().is_empty() || draft.task_id.is_empty() {
             return refuse("description_required");
+        }
+        if let Some(files) = draft.attachments {
+            crate::input::capture_from_wire(files)?;
         }
     }
     let mut created = 0;
@@ -787,7 +847,13 @@ pub fn create_drafts_tx(
         )?;
         db.execute(
             "INSERT INTO workspace_task_options VALUES (?,?)",
-            (draft.task_id, serde_json::to_string(draft.options)?),
+            (draft.task_id, serde_json::to_string(&{
+                let mut stored = draft.options.clone();
+                if let Some(files) = draft.attachments.filter(|f| f.as_array().is_some_and(|a| !a.is_empty())) {
+                    stored["attachments"] = files.clone();
+                }
+                stored
+            })?),
         )?;
         append_public_tx(db, project, draft.task_id, "task", 1)?;
         created += 1;

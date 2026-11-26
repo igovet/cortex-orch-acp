@@ -359,7 +359,7 @@ fn access_conflict_wait_rechecks_once_per_deadline_and_resumes_same_attempt() {
 }
 // Mirrors tests/test_worker_access_requests.py::test_exhaustion_is_bounded_persisted_runtime_denial.
 #[test]
-fn conflict_retries_exhaust_after_one_two_four_seconds_and_survive_restart() {
+fn conflict_stays_queued_past_the_old_retry_limit_and_survives_restart() {
     let (p, s, _) = setup();
     s.write(|db| {
         node(db, "t", "first", "worker-backend-dev", &["one"], &[])?;
@@ -372,10 +372,11 @@ fn conflict_retries_exhaust_after_one_two_four_seconds_and_survive_restart() {
     .unwrap();
     drop(s);
     let s = p.open();
-    for i in 0..3 {
+    for i in 0..8 {
         s.write(|db| {
             let w = projection_tx(db, "t")?.pop().unwrap();
             assert_eq!(w["retry_attempt"], i);
+            assert_eq!(w["status"], "open");
             reconcile_access_tx(db, "t", w["retry_at"].as_str().unwrap())?;
             Ok(())
         })
@@ -384,9 +385,28 @@ fn conflict_retries_exhaust_after_one_two_four_seconds_and_survive_restart() {
     let w = s
         .write(|db| Ok(projection_tx(db, "t")?.pop().unwrap()))
         .unwrap();
-    assert_eq!(w["status"], "ready");
-    assert_eq!(w["access_decision"]["status"], "denied");
+    assert_eq!(w["status"], "open");
+    assert_eq!(w["retry_attempt"], 8);
     assert_eq!(count(&s, "pending_questions"), 0);
+    // Once the holder frees the path the same wait is granted, never refused.
+    s.write(|db| {
+        db.execute(
+            "UPDATE runtime_nodes SET status='completed' WHERE assignment_ref='b'",
+            [],
+        )?;
+        event_tx(
+            db,
+            "t",
+            "WORKER_RELEASED",
+            json!({"assignment_ref":"b","observed_session":"absent"}),
+        )?;
+        reconcile_access_tx(db, "t", "2099-01-01T00:00:00.000000+00:00")?;
+        let w = projection_tx(db, "t")?.pop().unwrap();
+        assert_eq!(w["status"], "ready");
+        assert_eq!(w["access_decision"]["status"], "granted");
+        Ok(())
+    })
+    .unwrap();
 }
 // Mirrors tests/test_worker_access_requests.py::test_pending_fifo_blocks_new_scheduler_overtakers.
 #[test]
@@ -776,6 +796,49 @@ fn finished_deleted_or_settled_work_holds_no_files_for_other_tasks() {
 }
 
 #[test]
+fn completed_work_without_attributed_changes_does_not_hold_or_wait_in_review() {
+    let (_p, s, o) = setup();
+    let writer = TaskMachine::new(&s).create("u", "other work", "owner").unwrap();
+    s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1", [])?;
+        node(db, "t", "done", "worker-backend-dev", &["one"], &[])?;
+        db.execute("UPDATE runtime_nodes SET status='completed' WHERE task_id='t'", [])?;
+        event_tx(db, "t", "NATIVE_WRITER_TURN_STARTED", json!({"turn":"observed-turn"}))?;
+        event_tx(db, "t", "NATIVE_WRITER_TURN_CHANGES", json!({
+            "turn":"observed-turn","changed_paths_complete":true,"changed_paths":[]
+        }))?;
+        node(db, "u", "active", "worker-backend-dev", &["one"], &[])
+    }).unwrap();
+    assert_eq!(names(&s, &claim_ready(&s, "u", &writer, "c", &Allow).unwrap()), ["active"]);
+    s.write(|db| {
+        assert!(write_conflict_tx(db, "t")?.is_none());
+        event_tx(db, "t", "NATIVE_WRITER_TURN_STARTED", json!({"turn":"unsettled-turn"}))?;
+        assert_eq!(write_conflict_tx(db, "t")?.unwrap()["holder_task"], "u");
+        event_tx(db, "t", "NATIVE_WRITER_TURN_CHANGES", json!({
+            "turn":"unsettled-turn","changed_paths_complete":true,"changed_paths":[]
+        }))?;
+        node(db, "t", "_review_1", "worker-code-reviewer", &["**"], &[])?;
+        db.execute(
+            "UPDATE runtime_nodes SET stage='review' WHERE task_id='t' AND node_id='_review_1'",
+            [],
+        )?;
+        db.execute("UPDATE runtime_tasks SET state='REVIEWING' WHERE task_id='t'", [])?;
+        assert!(review_writer_tx(db, "t")?.is_none());
+        let obstacles = claim_obstacles_tx(db, "t", NativePolicy::default().now_seconds)?;
+        assert_eq!(obstacles[0]["reason"], "claimable");
+        Ok(())
+    }).unwrap();
+    let claimed = claim_ready(&s, "t", &o, "c", &Allow).unwrap();
+    assert_eq!(names(&s, &claimed), ["_review_1"]);
+    s.write(|db| {
+        // A retained legacy binding explicitly covers the entire checkout.
+        event_tx(db, "t", "REVIEW_STARTED", json!({"assignment_ref":claimed[0]}))?;
+        assert_eq!(review_writer_tx(db, "t")?.unwrap()["holder_task"], "u");
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
 fn shared_checkout_review_waits_for_active_writers_and_queues_new_writers() {
     let (p, s, _) = setup();
     TaskMachine::new(&s)
@@ -788,9 +851,21 @@ fn shared_checkout_review_waits_for_active_writers_and_queues_new_writers() {
             "UPDATE runtime_nodes SET status='completed' WHERE task_id='t'",
             [],
         )?;
+        event_tx(db, "t", "NATIVE_PROJECT_WRITTEN", json!({"path":"one"}))?;
         node(db, "u", "active", "worker-backend-dev", &["two"], &[])?;
         bind(db, "u", "active", "a", "x", "c")?;
         assert_eq!(write_conflict_tx(db, "t")?.unwrap()["holder_task"], "u");
+        let policy = NativePolicy::default();
+        node(db, "t", "_review_1", "worker-code-reviewer", &["**"], &[])?;
+        db.execute(
+            "UPDATE runtime_nodes SET stage='review' WHERE task_id='t' AND node_id='_review_1'",
+            [],
+        )?;
+        db.execute("UPDATE runtime_tasks SET state='REVIEWING' WHERE task_id='t'", [])?;
+        assert!(!policy.may_claim(db, "t", "_review_1")?);
+        let obstacles = claim_obstacles_tx(db, "t", policy.now_seconds)?;
+        assert_eq!(obstacles[0]["reason"], "held");
+        assert_eq!(obstacles[0]["holder_task"], "u");
         db.execute(
             "UPDATE delegation_provisioning SET status='terminated' WHERE attempt_id='x'",
             [],
@@ -849,6 +924,84 @@ fn shared_checkout_review_waits_for_active_writers_and_queues_new_writers() {
             [p.0.join("other-worktree").to_str().unwrap()],
         )?;
         assert!(policy.may_claim(db, "u", "next")?);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn sprint_revision_review_preserves_the_verified_checkout_hold_without_waiting() {
+    let (_p, s, _) = setup();
+    TaskMachine::new(&s)
+        .create("u", "other work", "owner")
+        .unwrap();
+    s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1", [])?;
+        event_tx(db, "t", "NATIVE_PROJECT_WRITTEN", json!({"path": "one"}))?;
+        let review = "_sprint_revision_review_1";
+        node(db, "t", review, "worker-code-reviewer", &["**"], &[])?;
+        db.execute(
+            "UPDATE runtime_nodes SET stage='review' WHERE task_id='t' AND node_id=?",
+            [review],
+        )?;
+        db.execute("UPDATE runtime_tasks SET state='REVIEWING' WHERE task_id='t'", [])?;
+        node(db, "u", "next", "worker-backend-dev", &["two"], &[])?;
+        let policy = NativePolicy::default();
+
+        // A proposal review must not take a new hold, even after an older revision passed.
+        event_tx(db, "t", "VERIFICATION_PASSED", json!({"revision": 0}))?;
+        assert!(policy.may_claim(db, "u", "next")?);
+        assert!(write_conflict_tx(db, "u")?.is_none());
+
+        // The same proposal review now preserves the current revision's hold.
+        event_tx(db, "t", "VERIFICATION_PASSED", json!({"revision": 1}))?;
+        assert!(!policy.may_claim(db, "u", "next")?);
+        assert_eq!(write_conflict_tx(db, "u")?.unwrap()["holder_task"], "t");
+
+        // Seed an existing holding to distinguish entry from hold preservation.
+        node(db, "u", "active", "worker-backend-dev", &["three"], &[])?;
+        bind(db, "u", "active", "a", "x", "c")?;
+        assert!(review_writer_tx(db, "t")?.is_none());
+        assert!(policy.may_claim(db, "t", review)?);
+        assert!(write_conflict_tx(db, "t")?.is_none());
+        assert_eq!(
+            claim_obstacles_tx(db, "t", policy.now_seconds)?[0]["reason"],
+            "claimable"
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn runtime_verified_sprint_plan_review_does_not_hold_the_checkout() {
+    let (_p, s, _) = setup();
+    TaskMachine::new(&s)
+        .create("u", "other work", "owner")
+        .unwrap();
+    s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1", [])?;
+        event_tx(
+            db,
+            "t",
+            "SPRINT_PLANNING_BOUND",
+            json!({"policy": "sprint_planning_read_only"}),
+        )?;
+        event_tx(
+            db,
+            "t",
+            "VERIFICATION_PASSED",
+            json!({"revision": 1, "runtime": "sprint_plan"}),
+        )?;
+        node(db, "t", "_plan_review_2", "worker-code-reviewer", &["**"], &[])?;
+        db.execute(
+            "UPDATE runtime_nodes SET stage='review' WHERE task_id='t'",
+            [],
+        )?;
+        db.execute("UPDATE runtime_tasks SET state='REVIEWING' WHERE task_id='t'", [])?;
+        node(db, "u", "next", "worker-backend-dev", &["two"], &[])?;
+        assert!(NativePolicy::default().may_claim(db, "u", "next")?);
+        assert!(write_conflict_tx(db, "u")?.is_none());
         Ok(())
     })
     .unwrap();

@@ -21,7 +21,7 @@ const SHADOW_BLUR_MAX: f64 = 8.0;
 /// The interface face of the design (docs/cortex-workspace/DESIGN.md): bundled by `packages/workspace-ui` `fonts.css` and named first by its `--font` token.
 pub const DESIGN_FONT: &str = "Noto Sans Variable";
 // What a dying process leaves on stderr, counted by name. Message bodies are never retained.
-const STDERR_MARKERS: [&str; 16] = [
+const STDERR_MARKERS: [&str; 15] = [
     "panic",
     "Segmentation",
     "Aborted",
@@ -34,7 +34,6 @@ const STDERR_MARKERS: [&str; 16] = [
     "Broken pipe",
     "Lost connection",
     "Protocol error",
-    "bwrap",
     "Operation not permitted",
     "out of memory",
     "WebProcess",

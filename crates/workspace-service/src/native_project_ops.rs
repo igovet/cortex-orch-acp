@@ -168,7 +168,7 @@ fn parent_of(root: &PathBuf, path: &str) -> CoreResult<Option<(File, String)>> {
     }
     Ok(Some((dir, leaf)))
 }
-/// Current raw-byte SHA-256 of one regular, singly linked project file.
+/// Current raw-byte SHA-256 of one regular, project file (a hard link is fine: only the directory entry is acted on).
 fn file_digest(dir: &File, name: &str) -> CoreResult<String> {
     match entry(dir, name)? {
         Entry::File => {}
@@ -179,7 +179,7 @@ fn file_digest(dir: &File, name: &str) -> CoreResult<String> {
     }
     let mut file = openat(dir, name, libc::O_RDONLY)?;
     let m = file.metadata()?;
-    if !m.is_file() || std::os::unix::fs::MetadataExt::nlink(&m) != 1 {
+    if !m.is_file() {
         return refused("regular_unlinked_file_required");
     }
     let mut bytes = Vec::new();
@@ -629,7 +629,7 @@ pub(super) async fn execute(
     let outcome: CoreResult<Value> = async {
         let planned = plan(&root, &name, &args)?;
         let confirm = matches!(planned, Plan::Delete | Plan::Link { replace: Some(_) });
-        if confirm && mode != "auto" {
+        if confirm && (mode != "auto" || matches!(planned, Plan::Delete)) {
             let (title, kind) = match (name.as_str(), ru) {
                 ("project_delete", false) => (format!("Delete {path}"), "delete"),
                 ("project_delete", true) => (format!("Удалить {path}"), "delete"),

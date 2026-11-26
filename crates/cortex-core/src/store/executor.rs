@@ -17,6 +17,24 @@ use std::{
 /// The store, or the refusal that stopped this job from running (a shared
 /// writer that could not retake the scheduler lease).
 type Job = Box<dyn FnOnce(CoreResult<&Store>) + Send + 'static>;
+/// A caller's reply, given the outcome of the shared commit of its group.
+type Reply = Box<dyn FnOnce(CoreResult<()>) + Send + 'static>;
+/// One [`StoreExecutor::write`] body. Run inside a group transaction (or given the
+/// refusal that stopped the group), it returns whether its changes stand and the reply
+/// to send once the group's COMMIT outcome is known.
+type TxJob =
+    Box<dyn FnOnce(CoreResult<&rusqlite::Transaction<'_>>) -> (bool, Reply) + Send + 'static>;
+/// What a writer job needs: the whole store (publication-style jobs that manage their own
+/// transactions, run alone) or one transaction body (grouped with its neighbours).
+enum Work {
+    Store(Job),
+    Tx(TxJob),
+}
+/// At most this many queued write bodies share one transaction and one fsync.
+pub const GROUP_LIMIT: usize = 64;
+/// A group stops taking queued bodies once it has run this long, so the transaction
+/// (and the writer lock it holds) stays short.
+pub const GROUP_BUDGET: Duration = Duration::from_millis(2);
 /// How long an idle shared writer keeps the scheduler lease.
 const IDLE_RELEASE: Duration = Duration::from_millis(1000);
 /// How long opening a shared writer waits for another process's idle release.
@@ -72,7 +90,7 @@ struct Lane {
 /// What a lane receives: an ordinary job with its submission ticket, or a nudge to
 /// re-examine the deferred writes (a first deferral, or a full deferral batch).
 enum Item {
-    Job(u64, Job, tokio::sync::OwnedSemaphorePermit),
+    Job(u64, Work, tokio::sync::OwnedSemaphorePermit),
     Wake,
 }
 /// A display-only write committed later, together with others (see
@@ -125,22 +143,109 @@ impl Deferred {
         })
     }
 }
-/// One transaction for a batch of deferred writes. Each runs inside its own
-/// savepoint: one that fails is rolled back alone and the rest still commit.
+/// Close the savepoint around one body: keep its changes, or roll back only them. An
+/// error means the shared transaction itself is gone (SQLite rolled it back).
+fn end_savepoint(tx: &rusqlite::Transaction<'_>, kept: bool) -> CoreResult<()> {
+    Ok(tx.execute_batch(if kept {
+        "RELEASE cortex_group"
+    } else {
+        "ROLLBACK TO cortex_group; RELEASE cortex_group"
+    })?)
+}
+/// Run deferred display writes inside the current transaction, each in its own savepoint.
+fn run_deferred(tx: &rusqlite::Transaction<'_>, bodies: Vec<DeferredBody>) -> CoreResult<()> {
+    for body in bodies {
+        tx.execute_batch("SAVEPOINT cortex_group")?;
+        let kept = body(tx).is_ok();
+        end_savepoint(tx, kept)?;
+    }
+    Ok(())
+}
+/// One transaction for a batch of deferred writes alone. Each runs inside its own
+/// savepoint: one that fails is rolled back alone and the rest still commit. Nothing
+/// here is authority or lifecycle state, so the commit uses `synchronous=NORMAL`: it
+/// does not wait for an fsync, and the next FULL commit makes it durable with its own.
 fn commit_deferred(store: CoreResult<&Store>, bodies: Vec<DeferredBody>) {
     let Ok(store) = store else { return };
-    let _ = store.write(|tx| {
-        for body in bodies {
-            tx.execute_batch("SAVEPOINT cortex_deferred")?;
-            match body(tx) {
-                Ok(()) => tx.execute_batch("RELEASE cortex_deferred")?,
-                Err(_) => {
-                    tx.execute_batch("ROLLBACK TO cortex_deferred; RELEASE cortex_deferred")?
+    let _ = store.write_relaxed(|tx| run_deferred(tx, bodies));
+}
+/// Group commit: `first` and the write bodies queued right behind it (at most
+/// [`GROUP_LIMIT`], for at most [`GROUP_BUDGET`]) run in ONE `BEGIN IMMEDIATE` … `COMMIT`
+/// with `synchronous=FULL`, each inside its own savepoint, so a failing body is rolled
+/// back alone. Deferred writes submitted before a body run before it, in the same
+/// transaction. Every reply is sent only after the shared COMMIT, in submission order:
+/// a caller never sees success for a write that is not durable. A queued item that is
+/// not a write body (a publication-style job or a wake) ends the group and is returned.
+fn group(
+    store: &Store,
+    recv: &std::sync::mpsc::Receiver<Item>,
+    deferred: Option<&Arc<Deferred>>,
+    ticket: u64,
+    first: TxJob,
+) -> Option<Item> {
+    let started = Instant::now();
+    let mut first = Some((ticket, first));
+    let mut next = None;
+    let mut replies: Vec<Reply> = Vec::new();
+    let committed = store.write(|tx| {
+        loop {
+            let (ticket, job) = match first.take() {
+                Some(job) => job,
+                None => {
+                    if replies.len() >= GROUP_LIMIT || started.elapsed() >= GROUP_BUDGET {
+                        break;
+                    }
+                    match recv.try_recv() {
+                        Ok(Item::Job(ticket, Work::Tx(job), slot)) => {
+                            drop(slot);
+                            (ticket, job)
+                        }
+                        Ok(other) => {
+                            next = Some(other);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            };
+            // Never reorder: what was deferred before this body commits first.
+            if let Some(deferred) = deferred {
+                if let Err(error) = run_deferred(tx, deferred.take(Some(ticket))) {
+                    replies.push(job(Err(CoreError::Refused(error.code()))).1);
+                    return Err(error);
                 }
             }
+            if let Err(error) = tx.execute_batch("SAVEPOINT cortex_group") {
+                let error = CoreError::from(error);
+                replies.push(job(Err(CoreError::Refused(error.code()))).1);
+                return Err(error);
+            }
+            let (kept, reply) = job(Ok(tx));
+            replies.push(reply);
+            end_savepoint(tx, kept)?;
         }
         Ok(())
     });
+    match committed {
+        // The transaction never began: only the first body was taken, and it never ran.
+        Err(error) if replies.is_empty() => {
+            if let Some((_, job)) = first {
+                job(Err(error)).1(Ok(()));
+            }
+        }
+        Err(error) => {
+            // Nothing in the group committed. A body that failed on its own keeps its error.
+            for reply in replies {
+                reply(Err(CoreError::Refused(error.code())));
+            }
+        }
+        Ok(()) => {
+            for reply in replies {
+                reply(Ok(()));
+            }
+        }
+    }
+    next
 }
 impl Lane {
     fn start(
@@ -184,7 +289,8 @@ impl Lane {
                     let store = if owner {
                         Store::open(key.clone(), mode)?
                     } else {
-                        Store::open_waiting(key.clone(), mode)?
+                        // One writer: a reader connection never commits domain data.
+                        Store::open_waiting(key.clone(), mode)?.read_lane()
                     };
                     Ok((store, lease))
                 };
@@ -193,27 +299,25 @@ impl Lane {
                         if ready.send(Ok(())).is_err() {
                             return;
                         }
-                        let run = |job: Job, lease: &mut Option<Fences>| {
+                        let retake = |lease: &mut Option<Fences>| -> CoreResult<()> {
                             if shared && owner && lease.is_none() {
-                                match fences_waiting(&key) {
-                                    // A live process never releases the lease with an
-                                    // unfinished task, so an unfinished task found here was
-                                    // left by a process that is gone. Keep the lease and ask
-                                    // the runtime to recover it (never two schedulers).
-                                    Ok(taken) => {
-                                        if !idle(&store) {
-                                            orphaned.store(true, Ordering::SeqCst);
-                                        }
-                                        *lease = Some(taken)
-                                    }
-                                    Err(e) => {
-                                        job(Err(e));
-                                        return;
-                                    }
+                                // A live process never releases the lease with an
+                                // unfinished task, so an unfinished task found here was
+                                // left by a process that is gone. Keep the lease and ask
+                                // the runtime to recover it (never two schedulers).
+                                let taken = fences_waiting(&key)?;
+                                if !idle(&store) {
+                                    orphaned.store(true, Ordering::SeqCst);
                                 }
+                                *lease = Some(taken)
                             }
-                            job(Ok(&store));
+                            Ok(())
                         };
+                        let run = |job: Job, lease: &mut Option<Fences>| match retake(lease) {
+                            Ok(()) => job(Ok(&store)),
+                            Err(e) => job(Err(e)),
+                        };
+                        let mut carried: Option<Item> = None;
                         // Deferred writes submitted before `before` (all when `None`)
                         // commit first, as one transaction through the same lease path.
                         let flush = |before: Option<u64>, lease: &mut Option<Fences>| {
@@ -231,14 +335,17 @@ impl Lane {
                                 (None, true) => Some(IDLE_RELEASE),
                                 (None, false) => None,
                             };
-                            let received = match wait {
-                                Some(wait) => recv.recv_timeout(wait),
-                                None => recv.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                            let received = match (carried.take(), wait) {
+                                (Some(item), _) => Ok(item),
+                                (None, Some(wait)) => recv.recv_timeout(wait),
+                                (None, None) => {
+                                    recv.recv().map_err(|_| RecvTimeoutError::Disconnected)
+                                }
                             };
-                            let (ticket, job) = match received {
-                                Ok(Item::Job(ticket, job, slot)) => {
+                            let (ticket, work) = match received {
+                                Ok(Item::Job(ticket, work, slot)) => {
                                     drop(slot);
-                                    (ticket, job)
+                                    (ticket, work)
                                 }
                                 Ok(Item::Wake) => {
                                     if let Some(deferred) = &pending {
@@ -268,9 +375,21 @@ impl Lane {
                                     break;
                                 }
                             };
-                            // Never reorder: what was deferred before this job commits first.
-                            flush(Some(ticket), &mut lease);
-                            run(job, &mut lease);
+                            match work {
+                                Work::Store(job) => {
+                                    // Never reorder: what was deferred before this job
+                                    // commits first.
+                                    flush(Some(ticket), &mut lease);
+                                    run(job, &mut lease);
+                                }
+                                Work::Tx(job) => match retake(&mut lease) {
+                                    Err(e) => job(Err(e)).1(Ok(())),
+                                    Ok(()) => {
+                                        carried =
+                                            group(&store, &recv, pending.as_ref(), ticket, job)
+                                    }
+                                },
+                            }
                         }
                     }
                     Err(error) => {
@@ -296,7 +415,7 @@ impl Lane {
             }
         }
     }
-    fn submit(&self, job: Job, owner: bool) -> CoreResult<()> {
+    fn submit(&self, job: Work, owner: bool) -> CoreResult<()> {
         let space = if owner { &self.owner_space } else { &self.space };
         let slot = space.clone().try_acquire_owned().map_err(|_| {
             CoreError::Refused(if owner { "owner_queue_busy" } else { "busy" })
@@ -305,7 +424,7 @@ impl Lane {
     }
 
     /// Only admitted jobs get tickets. Both classes retain the same FIFO.
-    fn enqueue(&self, job: Job, slot: tokio::sync::OwnedSemaphorePermit) -> CoreResult<()> {
+    fn enqueue(&self, job: Work, slot: tokio::sync::OwnedSemaphorePermit) -> CoreResult<()> {
         let sender = self
             .sender
             .as_ref()
@@ -323,7 +442,7 @@ impl Lane {
         Ok(())
     }
 
-    async fn submit_wait(&self, job: Job) -> CoreResult<()> {
+    async fn submit_wait(&self, job: Work) -> CoreResult<()> {
         let slot = tokio::time::timeout(QUEUE_WAIT, self.space.clone().acquire_owned())
             .await
             .map_err(|_| CoreError::Refused("busy"))?
@@ -424,9 +543,9 @@ impl StoreExecutor {
         body: impl FnOnce(&Store) -> CoreResult<T> + Send + 'static,
     ) -> CoreResult<tokio::sync::oneshot::Receiver<CoreResult<T>>> {
         let (send, recv) = tokio::sync::oneshot::channel();
-        self.writer.submit(Box::new(move |store| {
+        self.writer.submit(Work::Store(Box::new(move |store| {
             let _ = send.send(store.and_then(body));
-        }), false)?;
+        })), false)?;
         Ok(recv)
     }
 
@@ -438,9 +557,9 @@ impl StoreExecutor {
         body: impl FnOnce(&Store) -> CoreResult<T> + Send + 'static,
     ) -> CoreResult<T> {
         let (send, recv) = tokio::sync::oneshot::channel();
-        self.writer.submit(Box::new(move |store| {
+        self.writer.submit(Work::Store(Box::new(move |store| {
             let _ = send.send(store.and_then(body));
-        }), true)?;
+        })), true)?;
         recv.await
             .map_err(|_| CoreError::Refused("storage_executor_closed"))?
     }
@@ -454,22 +573,35 @@ impl StoreExecutor {
     ) -> CoreResult<T> {
         let (send, recv) = tokio::sync::oneshot::channel();
         self.writer
-            .submit_wait(Box::new(move |store| {
+            .submit_wait(Work::Store(Box::new(move |store| {
                 let _ = send.send(store.and_then(body));
-            }))
+            })))
             .await?;
         recv.await
             .map_err(|_| CoreError::Refused("storage_executor_closed"))?
     }
 
+    /// One transaction body on the writer lane, committed with `synchronous=FULL`. It
+    /// may share its transaction with the bodies queued beside it (group commit, see
+    /// [`GROUP_LIMIT`]): it runs in its own savepoint, so its failure rolls back only
+    /// it, and its reply arrives only after the shared COMMIT.
     pub fn write<T: Send + 'static>(
         &self,
         body: impl FnOnce(&rusqlite::Transaction<'_>) -> CoreResult<T> + Send + 'static,
     ) -> CoreResult<tokio::sync::oneshot::Receiver<CoreResult<T>>> {
         let (send, recv) = tokio::sync::oneshot::channel();
-        self.writer.submit(Box::new(move |store| {
-            let _ = send.send(store.and_then(|store| store.write(body)));
-        }), false)?;
+        // Grouped with the write bodies queued beside it (see [`group`]); the reply
+        // waits for the shared COMMIT.
+        self.writer.submit(Work::Tx(Box::new(move |tx| -> (bool, Reply) {
+            match tx.and_then(body) {
+                Ok(value) => (true, Box::new(move |committed: CoreResult<()>| {
+                    let _ = send.send(committed.map(|()| value));
+                })),
+                Err(error) => (false, Box::new(move |_| {
+                    let _ = send.send(Err(error));
+                })),
+            }
+        })), false)?;
         Ok(recv)
     }
     /// Queue a display-only write on the writer lane without waiting for it. Writes
@@ -480,6 +612,8 @@ impl StoreExecutor {
     /// ordered first), and when the executor shuts down. The outcome is never reported.
     /// A process killed before the commit loses the pending writes, at most one window's
     /// worth: never use this for authority, lifecycle or any state another write relies on.
+    /// A batch committed on its own uses `synchronous=NORMAL` (see [`Store::write_relaxed`]);
+    /// one committed in a group with an ordinary write uses that group's FULL commit.
     /// Returns the write's ticket (see [`Self::submitted`]).
     pub fn write_deferred(
         &self,
@@ -498,9 +632,24 @@ impl StoreExecutor {
     ) -> CoreResult<tokio::sync::oneshot::Receiver<CoreResult<T>>> {
         let (send, recv) = tokio::sync::oneshot::channel();
         let index = self.next.fetch_add(1, Ordering::Relaxed) % self.readers.len();
-        self.readers[index].submit(Box::new(move |store| {
+        self.readers[index].submit(Work::Store(Box::new(move |store| {
             let _ = send.send(store.and_then(|store| store.read(body)));
-        }), false)?;
+        })), false)?;
+        Ok(recv)
+    }
+    /// Run a read-only domain operation on the reader pool: a WAL snapshot on a reader
+    /// connection, never queued behind the writer lane or its fsync. The store it gets
+    /// refuses every write with `storage_read_lane`; an operation that needs one (a
+    /// crash reconciliation, say) is then repeated whole through [`Self::publication`].
+    pub fn read_store<T: Send + 'static>(
+        &self,
+        body: impl FnOnce(&Store) -> CoreResult<T> + Send + 'static,
+    ) -> CoreResult<tokio::sync::oneshot::Receiver<CoreResult<T>>> {
+        let (send, recv) = tokio::sync::oneshot::channel();
+        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.readers.len();
+        self.readers[index].submit(Work::Store(Box::new(move |store| {
+            let _ = send.send(store.and_then(body));
+        })), false)?;
         Ok(recv)
     }
 }

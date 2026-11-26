@@ -251,54 +251,30 @@ fn an_answered_decision_in_a_new_revision_is_not_asked_again() {
         .unwrap()
     };
     fail(1, "export", "Keep the deprecated /v1/export endpoint for existing clients or remove it in this release?");
-    assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 1);
-    let question = latest(&s, &task, "USER_QUESTION_REQUESTED")["question_id"].as_str().unwrap().to_owned();
+    // The worker blocker goes to the coordinator; no runtime question is published.
+    assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 0);
+    assert_eq!(count(&s, &task, "USER_QUESTION_REQUESTED"), 0);
+    // The coordinator asks the owner itself and the owner answers.
     s.write(|db| {
-        answered(db, &task, "other-question", "Unrelated decision?", "Not relevant");
-        assert_eq!(obstacles::open_decisions(db, &task)?.len(), 1);
-        assert!(waits::answer_tx(db, &task, &question, "Remove it in this release", "text", None)?);
+        answered(db, &task, "coordinator-question", "Keep the deprecated /v1/export endpoint for existing clients or remove it in this release?", "Remove it in this release");
         Ok(())
     })
     .unwrap();
     // The next plan's worker words the same decision differently.
     fail(2, "export_cleanup", "Whether to keep the deprecated /v1/export endpoint for existing clients or remove it is the owner's choice.");
-    assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 1);
+    assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 0);
     let classified = latest(&s, &task, "FAILURE_CLASSIFIED");
     assert_eq!(
         (classified["class"].as_str(), classified["rule"].as_str()),
-        (Some("technical"), Some("owner_decision_answered"))
+        (Some("technical"), Some("blocker_owner_decision_to_coordinator"))
     );
-    assert!(classified["detail"]
-        .as_str()
-        .unwrap()
-        .contains("Remove it in this release"));
-    let checks = node_result(&s, &task, "asg-export_cleanup")["checks"].clone();
-    assert_eq!(checks[0]["outcome"], "unverified");
-    assert_eq!(checks[0]["source"], "runtime");
-    assert_eq!(latest(&s, &task, "LOOP_BROKEN")["kind"], "owner_decision");
+    assert_eq!(count(&s, &task, "USER_QUESTION_REQUESTED"), 0);
     // Not parked: the ordinary technical route applies, no owner stop.
     s.write(|db| {
         assert!(obstacles::unparked_failure(db, &task)?);
         Ok(())
     })
     .unwrap();
-
-    // The review route: every owner item of the stop was decided, so the stop is no
-    // `ask_owner` continuation either.
-    s.write(|db| {
-        db.execute("UPDATE runtime_tasks SET state='PLANNING',revision=3,blocker=NULL WHERE task_id=?", [&task])?;
-        lifecycle::event_tx(db, &task, "REVIEW_DEAD_END_ROUTED", json!({"review":"_review_1","revision":3,"verdict":"INCOMPLETE",
-            "blocked":[{"blocker":"owner_decision","item":"src/api/v1/export.rs",
-                "reason":format!("Owner answers {question} decided removal")},
-                {"blocker":"other_role_work","item":"docs/api.md","reason":"the writer must update it"}]}))?;
-        domain::stop_tx(db, &task, "review_incomplete")?;
-        Ok(())
-    })
-    .unwrap();
-    assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 1);
-    let cont = latest(&s, &task, "AUTOMATIC_CONTINUATION");
-    assert_ne!(cont["strategy"], "ask_owner");
-    assert_eq!(cont["class"], "technical");
 }
 
 /// A dismissed (or resolved but still failing) access action is opened at most
@@ -664,4 +640,26 @@ fn new_problems_still_allow_rounds_and_repeated_ones_stop() {
         ),
         (Some("review_cycle"), Some(2), Some(6))
     );
+}
+
+/// Life Is Broken t_282c3a4e: the Kling credits question was asked five times in other
+/// words after the owner answered. A near-duplicate returns the earlier answer; a
+/// different question is allowed; the capsule carries the owner's answers.
+#[test]
+fn a_near_duplicate_of_an_answered_question_returns_the_answer() {
+    let (_p, s, task) = started();
+    s.write(|db| {
+        answered(db, &task, "pq_kling1", "Kling credits are low. What price limit may I spend on generation?", "Limit is 5 credits per clip");
+        let opts = ["Close as is".to_owned(), "Read every file".to_owned()];
+        let near = waits::answered_question_tx(db, &task,
+            "What price limit may I spend on Kling generation, the credits are low?", &opts)?;
+        assert_eq!(near.map(|n| n.1).as_deref(), Some("Limit is 5 credits per clip"));
+        let other = waits::answered_question_tx(db, &task,
+            "Which branch should the release be cut from?", &["main".to_owned(), "dev".to_owned()])?;
+        assert!(other.is_none());
+        let ctx = cortex_core::recovery_context::snapshot(db, &task)?;
+        assert_eq!(ctx["owner_decisions_so_far"]["answers"][0]["answer"], "Limit is 5 credits per clip");
+        Ok(())
+    })
+    .unwrap();
 }

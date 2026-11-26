@@ -29,7 +29,7 @@ host-read boundary. Direct host requests and eligible command reroutes use
 See [host rerouting](../../SECURITY.md#owner-password-for-sudo-askpass-and-host-rerouting).
 
 The runtime verifier uses the host-visible read-only command profile with
-networking disabled. It has private scratch and can retain writes in existing
+the host network shared. It has private scratch and can retain writes in existing
 Git-ignored checkout directories and permitted tool caches. Other checkout
 writes are discarded or refused. Real disposable fixtures exercised compiler
 output and store protection; setup refusals alone do not qualify execution.

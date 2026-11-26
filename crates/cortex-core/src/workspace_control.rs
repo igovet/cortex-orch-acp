@@ -144,17 +144,22 @@ mod coordinator_card_tests {
             .unwrap();
         store
             .write(|db| {
-                for (answer, which) in [("Stop", "web"), ("stop", "worker"), ("finish now", "relay"), ("Стоп", "cache")] {
+                // Use distinct decisions so the repeat-question guard does not reuse an answer.
+                for (answer, question) in [
+                    ("Stop", "Stop the web daemon before deployment?"),
+                    ("stop", "Should the data import continue overnight?"),
+                    ("finish now", "When should we wrap up the audit?"),
+                    ("Стоп", "Продолжить очистку кеша?"),
+                ] {
                     let q = lifecycle::skill_proposals::request(
                         db,
                         &root,
                         "t",
                         "c",
                         &format!("ask-{answer}"),
-                        // A distinct question per answer: a repeat of an answered one is
-                        // refused (`question_already_answered`).
-                        &json!({"question":format!("Stop the {which} daemon first or keep it?"),"recommended":2,"options":["Stop","Keep"]}),
+                        &json!({"question":question,"recommended":2,"options":["Stop","Keep"]}),
                     )?;
+                    assert_eq!(q["state"], "WAITING_USER", "question for {answer} did not open: {q}");
                     assert!(waits::answer_tx(db, "t", q["question_id"].as_str().unwrap(), answer, "text", None)?);
                     assert_ne!(domain::task_tx(db, "t")?.0, TaskState::Cancelled, "{answer} cancelled the task");
                     let forced: i64 = db.query_row(

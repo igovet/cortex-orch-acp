@@ -5,7 +5,7 @@
 use super::SchedulingPolicy;
 use crate::{
     error::refuse,
-    lifecycle::{domain, event_tx, request_tx, waits},
+    lifecycle::{domain, event_tx, reconciliation, request_tx, sprint_planning, waits},
     store::owner_file_leases as leases,
     CoreError, CoreResult,
 };
@@ -201,10 +201,71 @@ fn holdings_tx(db: &Connection) -> CoreResult<Vec<Holding>> {
     }
     Ok(out)
 }
-/// A stable checkout is shared by independent readers through final verification.
+enum ReviewCheckout {
+    Entry,
+    Holder,
+}
+
+fn review_needs_checkout(
+    db: &Connection,
+    task: &str,
+    state: &str,
+    revision: i64,
+    purpose: ReviewCheckout,
+) -> CoreResult<bool> {
+    match state {
+        "REVIEWING" => {
+            let review: Option<(String, bool)> = db
+                .query_row(
+                    "SELECT n.node_id, coalesce((
+                        SELECT coalesce(json_extract(e.payload_json,'$.binding'),'checkout')='checkout'
+                        FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='REVIEW_STARTED'
+                        AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref
+                        ORDER BY e.id DESC LIMIT 1
+                     ),0) FROM runtime_nodes n
+                     WHERE n.task_id=? AND n.revision=? AND n.stage='review'
+                     ORDER BY n.rowid DESC LIMIT 1",
+                    (task, revision),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((node, checkout_bound)) = review {
+                if sprint_planning::is_plan_review(&node) {
+                    // A proposal review never waits for the checkout. It can
+                    // preserve the hold from host verification while the
+                    // verified revision is still on its way to completion.
+                    if matches!(purpose, ReviewCheckout::Entry) {
+                        return Ok(false);
+                    }
+                    let verified: bool = db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?
+                         AND type='VERIFICATION_PASSED' AND json_extract(payload_json,'$.revision')=?)",
+                        (task, revision),
+                        |r| r.get(0),
+                    )?;
+                    return Ok(verified && !sprint_planning::uses_runtime_verification(db, task)?);
+                }
+                // In-flight reviews from an older build can already bind the
+                // whole checkout even without a complete history of writes.
+                if checkout_bound {
+                    return Ok(true);
+                }
+            }
+        }
+        // Host check commands can read the live checkout even without write
+        // effects. Only verification of a plan without host checks is exempt.
+        "VERIFYING" | "RECONCILING" | "ANSWER_READY" => {
+            return Ok(!sprint_planning::uses_runtime_verification(db, task)?);
+        }
+        _ => {}
+    }
+    Ok(!sprint_planning::enabled(db, task)? && reconciliation::has_checkout_changes(db, task)?)
+}
+
+/// Change review and host verification hold a stable checkout through reconciliation.
 fn review_holder_tx(db: &Connection, task: &str) -> CoreResult<Option<String>> {
     let root = root_tx(db, task)?;
-    Ok(db.query_row("SELECT t.task_id FROM runtime_tasks t JOIN tasks b ON b.id=t.task_id
+    let mut query = db.prepare("SELECT t.task_id,t.state,t.revision FROM runtime_tasks t JOIN tasks b ON b.id=t.task_id
         LEFT JOIN task_workspaces w ON w.task_id=t.task_id
         WHERE t.task_id!=? AND coalesce(w.workspace_root,b.project_root)=?
         AND (t.state='VERIFYING' OR (t.state='REVIEWING' AND NOT EXISTS(
@@ -222,11 +283,29 @@ fn review_holder_tx(db: &Connection, task: &str) -> CoreResult<Option<String>> {
           AND EXISTS(SELECT 1 FROM runtime_nodes n WHERE n.task_id=t.task_id AND n.revision=t.revision)
           AND NOT EXISTS(SELECT 1 FROM runtime_nodes n WHERE n.task_id=t.task_id AND n.revision=t.revision AND n.status!='completed')))
         AND NOT EXISTS(SELECT 1 FROM pending_deletions d WHERE d.task_id=t.task_id)
-        ORDER BY t.task_id LIMIT 1", (task,root), |r|r.get(0)).optional()?)
+        ORDER BY t.task_id")?;
+    let rows = query.query_map((task, root), |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+    })?;
+    for row in rows {
+        let (candidate, state, revision) = row?;
+        if review_needs_checkout(db, &candidate, &state, revision, ReviewCheckout::Holder)? {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
 }
 
 /// Check before entering review, in the same transaction that reserves the checkout.
 pub fn review_writer_tx(db: &Connection, task: &str) -> CoreResult<Option<Value>> {
+    let (state, revision): (String, i64) = db.query_row(
+        "SELECT state,revision FROM runtime_tasks WHERE task_id=?",
+        [task],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if !review_needs_checkout(db, task, &state, revision, ReviewCheckout::Entry)? {
+        return Ok(None);
+    }
     let root = root_tx(db, task)?;
     for h in holdings_tx(db)? {
         if h.task != task && root_tx(db, &h.task)? == root {
@@ -284,6 +363,9 @@ impl SchedulingPolicy for NativePolicy {
             (task,node,self.now_seconds),|r|r.get(0))?;
         if held {
             return Ok(false);
+        }
+        if stage == "review" {
+            return Ok(review_writer_tx(db, task)?.is_none());
         }
         if read_only(&role, &stage) {
             return Ok(true);
@@ -471,6 +553,14 @@ pub fn claim_obstacles_tx(
         )?;
         let reason = if backoff {
             json!("retry_backoff")
+        } else if node_stage == "review" {
+            if let Some(wait) = review_writer_tx(db, task)? {
+                item["holder_task"] = wait["holder_task"].clone();
+                item["paths"] = wait["paths"].clone();
+                json!("held")
+            } else {
+                json!("claimable")
+            }
         } else if read_only(&role, &node_stage) {
             json!("claimable")
         } else if let Some(holder) = review_holder_tx(db, task)? {
@@ -781,12 +871,15 @@ pub fn poll_access_tx(
     }
     let reason = predicate_tx(db, wait, &strings(&wait["paths"])?)?;
     let attempt = wait["retry_attempt"].as_u64().unwrap_or(0);
-    if reason != Some("active_writer_conflict") || attempt >= 2 {
+    // A writer conflict never ends in a refusal: the reservation stays queued and
+    // is rechecked at the capped backoff until the path frees (or the task is
+    // cancelled, which ends the wait through authority loss).
+    if reason != Some("active_writer_conflict") {
         resolve_tx(db, wait, reason)?;
         return Ok(None);
     }
-    let next = attempt + 1;
-    let seconds = [1, 2, 4][next as usize];
+    let next = attempt.saturating_add(1);
+    let seconds = [1, 2, 4][(next as usize).min(2)];
     wait["retry_attempt"] = json!(next);
     wait["retry_at"] = json!((now + chrono::Duration::seconds(seconds))
         .to_rfc3339_opts(chrono::SecondsFormat::Micros, false));

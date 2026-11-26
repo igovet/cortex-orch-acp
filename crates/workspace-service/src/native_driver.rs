@@ -273,11 +273,16 @@ impl NativeHost {
                                     completion::start_review_tx(db,&t,&a,&e)?;
                                 }
                             } else if stage=="review" {
-                                // A sprint revision review reads a proposed graph, not the
-                                // task's changes: no change packet binds it.
+                                // A sprint revision judges an immutable proposal, not the
+                                // checkout. Its empty task-file binding tolerates unrelated edits.
                                 let bound:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED' AND json_extract(payload_json,'$.assignment_ref')=?)",
                                     (&t,&a),|r|r.get(0))?;
-                                if !bound { completion::start_review_tx(db,&t,&a,&e)?; }
+                                if !bound {
+                                    lifecycle::event_tx(db,&t,"REVIEW_PACKET",json!({"assignment_ref":a,"node":node,
+                                        "packet":{"changed_files":{"files":[],"complete":true,"attribution_complete":true}},
+                                        "binding":{"kind":"task_files","paths":[]}}))?;
+                                    completion::start_review_tx(db,&t,&a,&e)?;
+                                }
                             }
                             assignments.push(item);
                         }
@@ -512,13 +517,9 @@ impl NativeHost {
                 result => result?,
             }
             // A sprint planning task without commands: the runtime verifies its reviewed plan.
-            if lifecycle::sprint_planning::enabled(db,&t)? {
-                let p:Option<String>=db.query_row("SELECT plan_json FROM runtime_tasks WHERE task_id=?",[&t],|r|r.get(0))?;
-                let commands=match p { Some(p)=>serde_json::from_str::<Value>(&p)?["verification"].as_array().map_or(0,Vec::len), None=>0 };
-                if commands==0 {
-                    lifecycle::sprint_planning::verify_tx(db,&t)?;
-                    return Ok(None);
-                }
+            if lifecycle::sprint_planning::uses_runtime_verification(db,&t)? {
+                lifecycle::sprint_planning::verify_tx(db,&t)?;
+                return Ok(None);
             }
             let p:String=db.query_row("SELECT plan_json FROM runtime_tasks WHERE task_id=?",[&t],|r|r.get(0))?;
             let commands=plan::verification(&serde_json::from_str::<Value>(&p)?["verification"])?;
@@ -5482,9 +5483,17 @@ pub(crate) mod sprints {
 
         #[tokio::test]
         async fn automatic_sprint_refuses_both_sprint_and_native_draft_worktrees() {
-            for (sprint_checkout, task_checkout) in [("worktree", "main"), ("main", "worktree")] {
-                let (_scratch, root, service, runtime, project, id, tasks) =
-                    automatic_fixture("dev", sprint_checkout, task_checkout).await;
+            // A sprint saved with per-task worktrees (no `shared` marker) and a worktree draft in
+            // a project-folder sprint both stay refused; a shared sprint worktree is allowed.
+            for (legacy_sprint, task_checkout) in [(true, "main"), (false, "worktree")] {
+                let (scratch, root, service, runtime, project, id, tasks) =
+                    automatic_fixture("dev", "main", task_checkout).await;
+                if legacy_sprint {
+                    let path = crate::machine::native::product_path(&scratch.0.join("state"), &project).unwrap();
+                    let mut saved = crate::machine::settings::read_json(&path, json!({})).unwrap();
+                    saved["sprints"][0]["checkout"] = json!({"kind":"worktree"});
+                    crate::machine::settings::write_json(&path, &saved).unwrap();
+                }
                 service
                     .sprint_pass(&project, &runtime, &mut Jobs::default(), false)
                     .await
@@ -5514,6 +5523,43 @@ pub(crate) mod sprints {
                 );
                 service.stop().await.unwrap();
             }
+        }
+
+        /// Automatic is allowed in one worktree shared by the whole sprint: the first member starts
+        /// there (one linked worktree on the sprint branch, nothing in the project folder) and the
+        /// queue is neither paused nor refused; the dependent member waits for it.
+        #[tokio::test]
+        async fn automatic_runs_a_shared_sprint_worktree_and_starts_its_first_member_there() {
+            let (scratch, root, service, runtime, project, id, tasks) =
+                automatic_fixture("dev", "worktree", "worktree").await;
+            let reply = service.machine(serde_json::from_value(json!({
+                "op":"machine.update","params":{"patch":{"worktreeRoot":scratch.0.join("trees")}}
+            })).unwrap()).await.unwrap();
+            assert_eq!(reply["ok"], true, "{reply}");
+            let sprint_id = id.as_str().unwrap().to_owned();
+            assert_eq!(sprint(&service, &project, &id).await["checkout"], json!({"kind":"worktree","shared":true}));
+            // Materialization saves this marker on every member of a shared sprint.
+            for task in tasks.clone() {
+                let sprint_id = sprint_id.clone();
+                runtime.host.executor.write(move |db| {
+                    db.execute(
+                        "UPDATE workspace_task_options SET options_json=json_set(options_json,'$.sprintWorktree',json(?)) WHERE task_id=?",
+                        (json!({"sprintId":sprint_id,"title":"Shared"}).to_string(), &task),
+                    )?;
+                    Ok(())
+                }).unwrap().await.unwrap().unwrap();
+            }
+            service.sprint_pass(&project, &runtime, &mut Jobs::default(), false).await.unwrap();
+            let projected = sprint(&service, &project, &id).await;
+            assert_eq!(projected["queueState"], "running", "{projected}");
+            assert!(projected["automaticQueue"].is_null(), "{projected}");
+            let facts = service.native_tasks(&project).await.unwrap();
+            assert!(facts[&tasks[0]]["executionId"].is_string(), "{facts:?}");
+            assert!(facts[&tasks[1]]["executionId"].is_null());
+            let trees = git_fixture(&root, &["worktree", "list", "--porcelain"]);
+            assert_eq!(trees.lines().filter(|l| l.starts_with("worktree ")).count(), 2, "{trees}");
+            assert!(trees.contains("branch refs/heads/cw/shared-"), "{trees}");
+            service.stop().await.unwrap();
         }
 
         #[tokio::test]
@@ -7433,7 +7479,7 @@ pub(crate) mod sprints {
         let actions = &record["reviewActions"];
         code == "automatic_acceptance_blocked"
             && !unsure
-            && (sprint["runMode"] == "hybrid" || record["checkout"]["kind"] == "main")
+            && (sprint["runMode"] == "hybrid" || record["checkout"]["kind"] == "main" || record["checkout"]["shared"] == true)
             && record["conflict"].as_str().is_none_or(|c| c == "none")
             && record["integration"].is_null()
             && (actions["accept"] == true || actions["acknowledgeOpenChecks"] == true)
@@ -8048,7 +8094,10 @@ pub(crate) mod sprints {
     }
 
     fn automatic_checkout_unavailable(sprint: &Value) -> bool {
-        sprint["checkout"]["kind"].as_str().is_some_and(|kind| kind != "main")
+        // Automatic runs in the project folder or in one worktree shared by the whole sprint.
+        sprint["checkout"]["kind"].as_str().is_some_and(|kind| {
+            kind != "main" && !(kind == "worktree" && sprint["checkout"]["shared"] == true)
+        })
     }
 
     fn observed_step<'a>(snapshot: &'a Snapshot, disposition: &Disposition, hybrid: bool) -> QueueStep<'a> {
@@ -8156,7 +8205,7 @@ pub(crate) mod sprints {
             };
             let Some(id) = candidate else { break; };
             if !pending.contains(id) { break; }
-            if mode == "automatic" && snapshot.projection_member(id).is_some_and(|(_, _, _, checkout)| checkout == Some("worktree")) {
+            if mode == "automatic" && snapshot.sprint["checkout"]["shared"] != true && snapshot.projection_member(id).is_some_and(|(_, _, _, checkout)| checkout == Some("worktree")) {
                 unranked.insert(id, "native_worktree_unavailable");
                 pending.remove(id);
                 stop = Some("queue_blocked");
@@ -9822,6 +9871,26 @@ pub(crate) mod sprints {
         }
 
         async fn complete_queue(&self, project: &str, observed: &Snapshot) -> io::Result<()> {
+            let sprint = &observed.sprint;
+            // The sprint's shared worktree branch is merged once, when every member has finished
+            // onto it. Automatic merges by itself into the open branch; otherwise (and for a
+            // refused merge) the queue still completes and the owner is offered the merge.
+            if sprint["runMode"] == "automatic"
+                && sprint["checkout"]["kind"] == "worktree"
+                && sprint["checkout"]["shared"] == true
+                && sprint["merge"]["state"] != "merged"
+            {
+                let reply = self
+                    .automatic_sprint_action(
+                        project,
+                        "automatic.finish",
+                        json!({"sprintMerge":true,"sprintId":sprint["id"]}),
+                    )
+                    .await;
+                if matches!(&reply, Ok(r) if r["result"]["done"] == true) {
+                    return Ok(());
+                }
+            }
             self.queue_transition(project, observed, false).await
         }
 

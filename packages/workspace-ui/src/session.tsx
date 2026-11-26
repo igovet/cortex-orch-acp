@@ -769,7 +769,8 @@ export function Conversation(props: {
   return <section class="task-panel" classList={{ "sp-conv": !!props.sprintFeed }} aria-label="Conversation" hidden={props.hidden}>
     <div class="timeline" classList={{ "ws-history-end": partialTail() !== undefined }} ref={scroller} aria-busy={first.loading() ? "true" : undefined} onScroll={() => { follow.onScroll(); checkEarlier(true); }}>
       <div class="tl-in">
-        {props.sprintFeed?.brief}
+        {/* The sprint's brief and saved answers are part of the conversation: while its first reads are out, only the skeleton shows. */}
+        <Show when={!first.loading()}>{props.sprintFeed?.brief}</Show>
         <Show when={first.loading()}><Skeleton kind="conversation" label="Loading the conversation…" /></Show>
         <Show when={runtimeVisible()}>
         <Show when={!props.sprintFeed}><Brief m={m()} /></Show>
@@ -829,7 +830,7 @@ export function Conversation(props: {
           <div class="answered ws-prev-result" role="note"><I n="eye" s={14} /><span>Previous result v{m().view.task.result!.version}, read-only. {held()}.</span> <A class="lnk ws-ml4" to={changesAt()}>Open</A></div>
         </Show>
         </Show>
-        {saved?.tail}
+        <Show when={!first.loading()}>{saved?.tail}</Show>
         {/* The last line says what the task is doing now, as its header does: waiting for an answer is not working. */}
         <Show when={runtimeVisible() && m().mode === "live" && m().view.task.observedPhase !== "recovery"}>
           <Show when={workingNow(m())} fallback={<Show when={!stranded()}><WaitingIndicator /></Show>}><WorkingIndicator text={coordinatorLine(m())} /></Show>

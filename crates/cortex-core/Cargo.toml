@@ -8,7 +8,7 @@ publish.workspace = true
 [dependencies]
 tokio = { version = "=1.54.1", features = ["sync", "time"] }
 workspace-protocol = { path = "../workspace-protocol" }
-rusqlite = { version = "=0.42.0", default-features = false, features = ["libsqlite3-sys", "bundled", "backup", "functions"] }
+rusqlite = { version = "=0.42.0", default-features = false, features = ["libsqlite3-sys", "bundled", "backup", "functions", "hooks"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 rustpython-parser = { version = "=0.4.0", default-features = false, features = ["num-bigint"] }

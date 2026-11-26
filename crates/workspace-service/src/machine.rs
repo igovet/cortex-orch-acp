@@ -51,6 +51,7 @@ pub(crate) mod side_chat;
 pub(crate) mod sprint_graph;
 mod sprint_dag;
 pub(crate) mod sprint_live;
+pub(crate) mod sprint_files;
 pub(crate) mod sprint_revision;
 mod sprint_materialize;
 pub(crate) mod sprint_result;
@@ -95,6 +96,7 @@ pub(crate) fn start_worktree(
     actor: &str,
     request: &Value,
     queued: Option<&sprint_live::Expectation>,
+    policy: Option<cortex_core::workspace::NativeExecutionPolicy>,
 ) -> cortex_core::CoreResult<Value> {
     use cortex_core::CoreError;
     let root = store.key().root();
@@ -107,7 +109,7 @@ pub(crate) fn start_worktree(
     .map_err(|e| CoreError::Refused(e.code))?;
     let directory = worktree_directory(state)?;
     task_rework::with_plain_start_guard(state, project, request, queued.map(|expected| (store, expected)), || {
-        cortex_core::workspace::start_native_worktree(store, project, actor, request, &directory)
+        cortex_core::workspace::start_native_worktree_with_policy(store, project, actor, request, &directory, policy)
     })
 }
 

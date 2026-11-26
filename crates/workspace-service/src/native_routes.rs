@@ -13,9 +13,6 @@ mod presentation;
 pub(crate) use presentation::russian_note;
 mod quota;
 pub mod short_text;
-#[allow(dead_code)]
-#[path = "native_routes_view.rs"]
-pub(crate) mod view;
 use cortex_core::{CoreError, CoreResult};
 use cortex_engine::environment::{CodexLauncher, EngineKind, LaunchSpec};
 use serde_json::{json, Value};
@@ -486,11 +483,7 @@ pub(crate) fn fixture_session_launch(
     record: Value,
 ) -> CoreResult<LaunchSpec> {
     let entry = json!({"route":{"engine":record["engine"]}});
-    let confined = view::RouteConfiner::request(
-        &environment.state,
-        record["id"].as_str().ok_or(CoreError::Refused("invalid_route"))?,
-    );
-    let mut launch = SelectedRoute {
+    let launch = SelectedRoute {
         candidate: Candidate {
             connection: record,
             entry,
@@ -501,7 +494,6 @@ pub(crate) fn fixture_session_launch(
         environment,
     }
     .session_launch(root)?;
-    launch.confinement = Some(confined);
     Ok(launch)
 }
 

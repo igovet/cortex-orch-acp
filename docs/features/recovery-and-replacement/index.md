@@ -238,9 +238,7 @@ included, so a closed task can be deleted):
   on proof that nothing can still run it: the supervisor's `finished` status
   (its recorded receipt, or `outcome_not_recorded` with the exit code when the
   output cannot be verified), an earlier boot, a lost supervisor whose payload
-  process group (recorded in its status after launch) has no member, a lost
-  read-only supervisor (its bubblewrap runs with `--die-with-parent
-  --unshare-pid`, so the namespace ends with it), or, for an unsupervised
+  process group (recorded in its status after launch) has no member, or, for an unsupervised
   outside command, neither its exact process nor any member of its process
   group. An outside command receipt changes only once its channel can no
   longer act. Commands the service still runs or observes are never touched.

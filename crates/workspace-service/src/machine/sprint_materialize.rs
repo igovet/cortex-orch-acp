@@ -287,6 +287,10 @@ pub fn materialize_routed(
                 .map(|c| c["kind"].clone())
                 .unwrap_or_else(|| json!("main"));
             let mut options = json!({"checkout":{"kind":checkout}});
+            if checkout == "worktree" && sprint["checkout"]["shared"] == true {
+                options["sprintWorktree"] = json!({"sprintId":sprint_id,
+                    "title":sprint["title"].as_str().filter(|t| !t.trim().is_empty()).unwrap_or("sprint")});
+            }
             if let Some(route) = &route {
                 options["settings"] = route.clone();
             } else if let Some(assigned) = assigned {
@@ -301,6 +305,7 @@ pub fn materialize_routed(
             options
         })
         .collect();
+    let sprint_files = json!(super::sprint_files::wire(state, &super::sprint_files::references(&product, &sprint)));
     let drafts: Vec<core_workspace::BatchDraft> = order
         .iter()
         .zip(&options)
@@ -308,6 +313,7 @@ pub fn materialize_routed(
             task_id: &ids[item.key],
             description: item.description,
             options,
+            attachments: Some(&sprint_files),
         })
         .collect();
     // The records the board reads: membership, the plan's title, dependencies by

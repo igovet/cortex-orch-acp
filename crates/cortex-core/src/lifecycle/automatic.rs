@@ -13,6 +13,10 @@ use serde_json::{json, Value};
 pub const POLICY: &str = "automatic_continuation";
 const PENDING: &str = "automatic_continuation_pending";
 const PAUSED: &str = "automatic_continuation_paused";
+/// The stop reason of a store error inside a runtime transition (`CoreError::Sql` or
+/// `Io`), and the blocker the task keeps in its own state after the driver retried it.
+pub const STORAGE_HELD_REASON: &str = "storage_unavailable";
+pub const STORAGE_HELD_BLOCKER: &str = "runtime_storage_transition_failed";
 /// The strategy ladder. Each stop fingerprint (reason, classification detail,
 /// blocking items, failed checks; see `stop_tx`) takes the first rung it has not used
 /// yet since the owner last changed the situation, skipping a rung that would repeat
@@ -744,7 +748,6 @@ fn infrastructure_stop(
             "native_process_exit_settled"
                 | "native_service_interrupted"
                 | "native_recovery_failed"
-                | "storage_unavailable"
                 | "native_host_closed"
         )
     {
@@ -1094,6 +1097,23 @@ pub(super) fn stop_tx(db: &Transaction<'_>, task: &str, reason: &str) -> CoreRes
         // A real user/access decision is already pending. Preserve its exact wait.
         return Ok(state);
     }
+    if reason == STORAGE_HELD_REASON {
+        // A store error inside a runtime transition says nothing about the work and is
+        // not a restart: it never takes a rung, never rewinds the task (an approved
+        // plan or review stays) and never starts a continuation. The task keeps its
+        // state with a technical blocker; the driver already retried the transition.
+        db.execute(
+            "UPDATE runtime_tasks SET blocker=?,updated_at=? WHERE task_id=?",
+            (STORAGE_HELD_BLOCKER, crate::now(), task),
+        )?;
+        event_tx(
+            db,
+            task,
+            "TASK_TRANSITION_HELD",
+            json!({"state":state,"revision":revision,"reason":reason,"blocker":STORAGE_HELD_BLOCKER}),
+        )?;
+        return Ok(state);
+    }
     let mut details = evidence(db, task, revision, reason)?;
     let count = count(db, task)?;
     let unknown = reason.ends_with("outcome_unknown") || reason.ends_with("unconfirmed");
@@ -1203,6 +1223,16 @@ pub(super) fn stop_tx(db: &Transaction<'_>, task: &str, reason: &str) -> CoreRes
                 // rung, and the owner is asked after that (no further rungs).
                 let prefer = if silent_coordinator && !h.rungs_used.is_empty() {
                     Some("reassign")
+                } else {
+                    prefer
+                };
+                // A tripped limit first runs the senior consultation and continues
+                // with its advice; the owner is asked only after it was used too.
+                let prefer = if matches!(reason, "coordinator_no_progress_limit" | "review_cycle_limit")
+                    && !h.rungs_used.iter().any(|r| r == "consult")
+                    && !skip.contains(&"consult")
+                {
+                    Some("consult")
                 } else {
                     prefer
                 };

@@ -1842,3 +1842,30 @@ async fn a_foreign_change_to_the_tasks_own_file_after_acceptance_still_blocks_th
     );
     assert_eq!(git(&env.root, &["log", "-1", "--format=%s"]), "Base");
 }
+
+/// A member of a shared sprint worktree finishes onto the sprint branch (its record's
+/// target is that branch): only its own files are committed there; other members' files
+/// stay uncommitted and the project folder is untouched.
+#[tokio::test]
+async fn a_member_of_a_shared_worktree_commits_only_its_own_files_onto_the_sprint_branch() {
+    let env = Env::new("shared-wt");
+    git(&env.root, &["checkout", "-q", "main"]);
+    let wt = env.base.join("sprint-wt");
+    git(&env.root, &["worktree", "add", wt.to_str().unwrap(), "task"]);
+    fs::write(wt.join("a.txt"), "member change\n").unwrap();
+    fs::write(wt.join("other-member.txt"), "another member\n").unwrap();
+    let before = git(&env.root, &["rev-parse", "main"]);
+    let sha = format!("{:x}", Sha256::digest(b"member change\n"));
+    let digest = env.evidence(&[("a.txt", &sha)]).await;
+    let checkout = json!({"kind":"worktree","path":wt.to_str().unwrap(),"branch":"task","shared":true});
+    env.save(record(&env, &digest, json!({"checkout":checkout,"targetBranch":"task"})));
+    let mut params = squash(&digest);
+    params["method"] = json!("commit");
+    params["message"] = json!("Member change");
+    assert_eq!(env.run(params).await.unwrap(), json!({"done":true}));
+    assert_eq!(git(&wt, &["log", "-1", "--format=%s"]), "Member change");
+    assert_eq!(git(&wt, &["show", "--name-only", "--format=", "HEAD"]), "a.txt");
+    assert_eq!(git(&wt, &["status", "--porcelain"]), "?? other-member.txt");
+    assert_eq!(git(&env.root, &["rev-parse", "main"]), before, "the target branch is not touched until the sprint merge");
+    assert!(wt.exists());
+}

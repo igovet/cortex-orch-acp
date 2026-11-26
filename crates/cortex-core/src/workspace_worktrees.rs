@@ -500,6 +500,31 @@ pub fn receipt_binding(worktree: &Worktree, logical: &Path, epoch: i64) -> Value
     json!({"id":worktree.id,"root":worktree.path,"logical":logical,"owner_epoch":epoch})
 }
 
+/// An owner-confirmed host command (`outside_command`) runs with the task
+/// checkout as its cwd but its receipt carries no `checkout` binding. The request
+/// row is already bound to the task and channel, so a receipt that names no
+/// checkout and whose cwd is inside the task's checkout receives that checkout's
+/// binding. A receipt naming another checkout or a cwd elsewhere is left as is.
+pub fn bind_outside_receipt(db: &Connection, task: &str, receipt: &mut Value) -> CoreResult<()> {
+    if !receipt["checkout"].is_null() {
+        return Ok(());
+    }
+    let Some((worktree, _)) = rows(db, task)? else { return Ok(()); };
+    let inside = receipt["cwd"].as_str().map(Path::new).is_some_and(|cwd| {
+        cwd.strip_prefix(&worktree.path)
+            .is_ok_and(|tail| tail.components().all(|c| matches!(c, std::path::Component::Normal(_))))
+    });
+    if !inside {
+        return Ok(());
+    }
+    let (logical, epoch): (String, i64) = db.query_row(
+        "SELECT t.project_root,o.epoch FROM tasks t JOIN task_owners o ON o.task_id=t.id WHERE t.id=?",
+        [task], |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    receipt["checkout"] = receipt_binding(&worktree, Path::new(&logical), epoch);
+    Ok(())
+}
+
 /// Compare retained evidence to immutable authority. The caller separately binds
 /// the task via the request/event row and observes the live checkout.
 pub fn receipt_matches(
@@ -553,6 +578,9 @@ pub fn cleanup_preflight(store: &Store, project: &str, draft: &str) -> CoreResul
         let (plan, witness) = rows(db, &task)?.ok_or(CoreError::Refused("worktree_not_owned"))?;
         crate::store::require_quiet_workspace_task(db, &task)?;
         crate::lifecycle::automatic::require_settled_execution(db, &task)?;
+        if shared_in_use(db, project, draft, &plan.path)? {
+            return refuse("worktree_shared");
+        }
         plan.check_remove(store.key().root(), &witness)
     })
 }
@@ -686,10 +714,13 @@ pub fn finish_cleanup(
             && crate::lifecycle::automatic::require_settled_execution(db, &task).is_ok()),
         Cleanup::Purge => Ok(runtime(db, project, draft)?.is_none()),
     })?;
+    let shared = store.read(|db| shared_in_use(db, project, draft, &plan.path))?;
     let removed = if settled {
+        if shared { refuse("worktree_shared") } else {
         plan.remove_with_head(
             store.key().root(), &witness, matches!(kind, Cleanup::Close),
         )
+        }
     } else {
         refuse("worktree_occupied")
     };
@@ -758,4 +789,55 @@ pub fn resolve_on(
         logical: key.clone(),
         worktree: None,
     })
+}
+
+/// The sprint a draft shares one worktree with, and the title its branch is named
+/// after. Saved by the host at materialization; absent for per-task worktrees.
+pub(crate) fn shared_marker(store: &Store, project: &str, draft: &str) -> CoreResult<Option<(String, String)>> {
+    store.read(|db| Ok(db.query_row(
+        "SELECT json_extract(o.options_json,'$.sprintWorktree.sprintId'),
+                json_extract(o.options_json,'$.sprintWorktree.title')
+         FROM workspace_tasks t JOIN workspace_task_options o USING(task_id)
+         WHERE t.project_id=? AND t.task_id=?",
+        (project, draft), |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+    ).optional()?.and_then(|(id, title)| id.map(|id| (id, title.unwrap_or_else(|| "sprint".into()))))))
+}
+
+/// The still-used worktree an earlier member of the same sprint provisioned.
+pub(crate) fn shared_binding(
+    store: &Store,
+    project: &str,
+    sprint: &str,
+    draft: &str,
+) -> CoreResult<Option<(Worktree, Witness)>> {
+    store.read(|db| {
+        if !installed(db)? {
+            return Ok(None);
+        }
+        let row: Option<(String, String)> = db.query_row(
+            "SELECT s.plan_json,s.witness_json FROM native_worktree_starts s
+             JOIN workspace_task_options o ON o.task_id=s.draft_id
+             WHERE s.project_id=? AND s.state='bound' AND s.draft_id<>?
+              AND json_extract(o.options_json,'$.sprintWorktree.sprintId')=?
+              AND COALESCE(json_extract(s.close_cleanup,'$.status'),'')<>'removed'
+              AND COALESCE(json_extract(s.purge_cleanup,'$.status'),'')<>'removed'
+             ORDER BY s.rowid LIMIT 1",
+            (project, draft, sprint), |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        row.map(|(plan, witness)| Ok((serde_json::from_str(&plan)?, serde_json::from_str(&witness)?)))
+            .transpose()
+    })
+}
+
+/// Another bound member of the same shared worktree has not released it yet.
+fn shared_in_use(db: &Connection, project: &str, draft: &str, path: &Path) -> CoreResult<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_worktree_starts s
+         JOIN workspace_task_options o ON o.task_id=s.draft_id
+         WHERE s.project_id=? AND s.state='bound' AND s.draft_id<>?
+          AND json_extract(o.options_json,'$.sprintWorktree.sprintId') IS NOT NULL
+          AND json_extract(s.plan_json,'$.path')=?
+          AND s.close_cleanup IS NULL AND s.purge_cleanup IS NULL)",
+        (project, draft, path.to_str()), |r| r.get(0),
+    )?)
 }

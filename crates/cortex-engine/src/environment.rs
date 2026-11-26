@@ -116,13 +116,13 @@ pub struct LaunchSpec {
     pub base_environment: BTreeMap<String, String>,
     /// Codex only: the native Codex launcher prepared at launch.
     pub codex_launcher: Option<CodexLauncher>,
-    /// The filesystem view the engine and all its descendants start in. Service
-    /// routes always set it; a view that cannot be prepared refuses the launch.
+    /// An optional confinement the engine and all its descendants start in; one
+    /// that cannot be prepared refuses the launch. Native engines run without one
+    /// (owner decision: an engine reads what the owner can).
     pub confinement: Option<ConfinementRequest>,
 }
-/// The service policy that prepares a launch's view, and the session's private
-/// broker directories that view must show (read-only, at
-/// [`crate::broker::VIEW_DIRECTORY`]).
+/// The service policy that prepares a launch's confinement, and the session's
+/// private broker directories it must keep reachable.
 #[derive(Clone)]
 pub struct ConfinementRequest {
     pub confiner: Arc<dyn crate::filesystem_view::Confiner>,

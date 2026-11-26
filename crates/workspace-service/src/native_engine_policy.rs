@@ -314,7 +314,9 @@ pub(crate) fn credential_file(path: &str) -> bool {
 /// credential files); Git control files and engine/Cortex configuration (every
 /// other runtime-protected target); else ordinary.
 pub(crate) fn path_class(root: &Path, path: &Path) -> PathClass {
-    if project_private(path) {
+    // Only the part below the checkout root names project state: a checkout that
+    // itself lives under a `.cortex` directory (a task worktree) is not private.
+    if project_private(path.strip_prefix(root).unwrap_or(path)) {
         return if live_store_file(path) {
             PathClass::LiveStore
         } else {
@@ -514,6 +516,21 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn checkout_below_a_cortex_directory_is_not_private() {
+        let root = Path::new("/mnt/store/.cortex/worktrees/abc/project");
+        // (A missing checkout fails closed as Control; it must never be Private.)
+        assert_ne!(
+            path_class(root, &root.join("tmp/audit/snapshot.md")),
+            PathClass::Private
+        );
+        assert_eq!(
+            path_class(root, &root.join(".cortex/notes.md")),
+            PathClass::Private
+        );
+        assert!(!project_private(Path::new("tmp/audit/snapshot.md")));
     }
 
     #[test]

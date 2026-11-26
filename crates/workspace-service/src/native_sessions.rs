@@ -572,12 +572,9 @@ impl NativeHost {
             if engine_kind == cortex_engine::environment::EngineKind::OpenCode {
                 return Err(CoreError::Refused("worktree_engine_route_unavailable"));
             }
-            let state = self.workspace_state.as_deref()
-                .ok_or(CoreError::Refused("worktree_confinement_unavailable"))?;
+            // The engine starts in the worktree; like every native engine it runs
+            // unconfined (owner decision: an engine reads what the owner can).
             route.launch.cwd = root.clone();
-            route.launch.confinement = Some(crate::native_routes::view::RouteConfiner::worktree(
-                state, &route.connection, &self.root, &root,
-            )?);
         }
         let limit = route.connection_limit;
         let steering = matches!(who, SessionRole::ActiveSteering);
@@ -971,6 +968,8 @@ impl NativeHost {
         .flatten()
         .unwrap_or_default();
         let mut attempt: u32 = 0;
+        let launch_wait_began = tokio::time::Instant::now();
+        let mut launch_backoff = Duration::from_secs(1);
         let (session, engine, broker, external) = loop {
             attempt += 1;
             let mut broker = None;
@@ -1265,6 +1264,20 @@ impl NativeHost {
                         .collect()
                 },
             };
+            // A launch refused because an engine file or the launcher is missing or unusable is
+            // transient (a package upgrade replaces the files while this service still runs):
+            // wait with backoff and start again, recording nothing, for up to a minute.
+            if phase == "launch"
+                && transient_launch_refusal(&error)
+                && observation == ProcessObservation::ConfirmedExited
+                && broker_settled
+                && launch_wait_began.elapsed() < LAUNCH_RETRY_WINDOW
+            {
+                tokio::time::sleep(launch_backoff).await;
+                launch_backoff = (launch_backoff * 2).min(Duration::from_secs(16));
+                attempt -= 1;
+                continue;
+            }
             if retry {
                 record_start_failure(&self.executor, &credential, failure).await?;
                 continue;
@@ -3478,7 +3491,7 @@ impl CorePolicy {
             let c = self.credential.clone();
             let expected = channel.clone();
             let name = name.to_owned();
-            if self.worktree.is_some() && crate::native_access::supports(&name) {
+            if self.worktree.is_some() && name == "outside_write" {
                 return Err(Error::Refused("worktree_host_effect_unavailable"));
             }
             // Main keeps its existing policy. Linked checkouts require explicit
@@ -3659,10 +3672,63 @@ impl CorePolicy {
                     self.commands.clone(),
                     &name,
                     arguments,
-                    scoped,
+                    false,
                 )
                 .await
                 .map_err(tool_error);
+            }
+            if crate::native_documents::read_only(&name) {
+                // A read tool runs on the reader pool, never queued behind the writer
+                // lane or its fsync. Its page receipt is a write submitted without
+                // waiting: grouped with its neighbours, committed FULL, and ordered
+                // before every later write (the review result that relies on it included).
+                let (rc, rexpected, rname, rarguments) =
+                    (c.clone(), expected.clone(), name.clone(), arguments.clone());
+                let read = receive(
+                    self.executor
+                        .read_store(move |store| {
+                            let i = store.read(|db| {
+                                channels::authenticate(db, &rc.channel_id, rc.secret(), true)
+                            })?;
+                            if !same(&i, &rexpected) {
+                                return Err(CoreError::Refused("channel_identity_changed"));
+                            }
+                            crate::native_documents::read_tool(store, &rc, &i, &rname, &rarguments)
+                                .map(|(value, receipt)| (i, value, receipt))
+                        })
+                        .map_err(tool_error)?,
+                )
+                .await;
+                match read {
+                    // Repeated whole on the writer: a reconciliation needed a write.
+                    Err(e) if e.code() == "storage_read_lane" => {}
+                    Err(e) => return Err(tool_error(e)),
+                    Ok((i, value, receipt)) => {
+                        if let Some(receipt) = receipt {
+                            let _ = self
+                                .executor
+                                .write(move |db| receipt.record(db))
+                                .map_err(tool_error)?;
+                        }
+                        // The inline budget of `native_commands::defer_json`: only an
+                        // oversized reply needs the writer, to store its deferred body.
+                        let value = if serde_json::to_vec(&value).map_or(0, |b| b.len()) <= 32768 {
+                            value
+                        } else {
+                            receive(
+                                self.executor
+                                    .publication(move |store| {
+                                        crate::native_commands::defer_json(store, &i, value)
+                                    })
+                                    .map_err(tool_error)?,
+                            )
+                            .await
+                            .map_err(tool_error)?
+                        };
+                        return Ok(json!({"content":[{"type":"text","text":value.to_string()}],
+                            "structuredContent":value,"isError":false}));
+                    }
+                }
             }
             if crate::native_documents::supports(&name) {
                 let value = receive(
@@ -4582,4 +4648,15 @@ mod supersede_tests {
         assert!(!*foreign_cancel.borrow(), "another task untouched");
         assert!(*map.lock().await["native-command:stray"].done.borrow(), "waited for settlement");
     }
+}
+
+/// How long a launch refused for a missing or unusable engine file keeps retrying.
+const LAUNCH_RETRY_WINDOW: Duration = Duration::from_secs(60);
+
+/// A launch refusal caused by an engine executable or the Codex launcher being absent or
+/// unusable, which a finished package upgrade repairs without any change here.
+fn transient_launch_refusal(error: &Error) -> bool {
+    matches!(error, Error::InvalidField { field, reason }
+        if matches!(field.as_str(), "executable" | "codex_launcher")
+            && matches!(*reason, "missing_or_wrong_type" | "prepared_file_unusable" | "codex_launcher_unavailable"))
 }

@@ -5,7 +5,14 @@
 //! SQLite owns callback lifetime; Store serializes its connection on a blocking executor.
 use crate::{error::refuse, CoreResult};
 use rusqlite::{ffi, functions::FunctionFlags, Connection};
-use std::{ffi::CString, ptr};
+use std::{
+    ffi::CString,
+    ptr,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 const WRITERS: &[(&str, &str, &str)] = &[
     ("tasks", "runtime", "id"),
@@ -27,7 +34,7 @@ const WRITERS: &[(&str, &str, &str)] = &[
     ("host_transcript", "session", "session_id"),
     ("host_updates", "session", "session_id"),
 ];
-pub fn install(db: &Connection) -> CoreResult<()> {
+pub fn install(db: &mut Connection) -> CoreResult<()> {
     let tables = super::schema::tables(db)?;
     let required = [
         "workspace_projects",
@@ -41,9 +48,31 @@ pub fn install(db: &Connection) -> CoreResult<()> {
     if !required.iter().all(|s| tables.contains(*s)) {
         return Ok(());
     }
+    // Coalescing: one invalidation per (scope, identity) per transaction. `epoch` advances at every
+    // commit and rollback of this connection; a temp row stamped with the current epoch means this
+    // transaction already bumped the versions and appended the metadata for that identity. The row
+    // is written in the same transaction, so a statement or savepoint rollback also forgets it.
+    let epoch = Arc::new(AtomicU64::new(1));
+    let (on_commit, on_rollback) = (epoch.clone(), epoch.clone());
+    db.commit_hook(Some(move || {
+        on_commit.fetch_add(1, Ordering::AcqRel);
+        false
+    }))?;
+    db.rollback_hook(Some(move || {
+        on_rollback.fetch_add(1, Ordering::AcqRel);
+    }))?;
+    let current = epoch.clone();
+    db.create_scalar_function("cortex_workspace_epoch", 0, FunctionFlags::SQLITE_UTF8, move |_| {
+        Ok(current.load(Ordering::Acquire) as i64)
+    })?;
+    db.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS workspace_outbox_seen(scope TEXT NOT NULL, identity TEXT NOT NULL,
+         epoch INTEGER NOT NULL, PRIMARY KEY(scope,identity)) WITHOUT ROWID;",
+    )?;
     // SAFETY: handle stays valid until Connection destroys its registered UDF. The
     // closure is never called independently of SQLite, and owns no Connection ref.
     let handle = unsafe { db.handle() } as usize;
+    let stamp = epoch.clone();
     db.create_scalar_function(
         "cortex_workspace_invalidate",
         2,
@@ -52,7 +81,9 @@ pub fn install(db: &Connection) -> CoreResult<()> {
             let scope = ctx.get::<String>(0)?;
             let identity = ctx.get::<String>(1)?;
             // SAFETY: invoked synchronously by this exact live SQLite connection.
-            unsafe { invalidate(handle as *mut ffi::sqlite3, &scope, &identity) }.map_err(
+            unsafe {
+                invalidate(handle as *mut ffi::sqlite3, &scope, &identity, stamp.load(Ordering::Acquire))
+            }.map_err(
                 |_| {
                     rusqlite::Error::UserFunctionError(Box::new(std::io::Error::other(
                         "outbox_append_failed",
@@ -80,14 +111,14 @@ pub fn install(db: &Connection) -> CoreResult<()> {
             }
             let row = if action == "DELETE" { "OLD" } else { "NEW" };
             let old = if action == "UPDATE" {
-                format!("SELECT cortex_workspace_invalidate('{scope}',OLD.{column}) WHERE OLD.{column} IS NOT NEW.{column}
+                format!("SELECT cortex_workspace_invalidate('{scope}',OLD.{column}) WHERE NOT EXISTS (SELECT 1 FROM temp.workspace_outbox_seen WHERE scope='{scope}' AND identity=OLD.{column} AND epoch=cortex_workspace_epoch()) AND OLD.{column} IS NOT NEW.{column}
                     AND EXISTS (SELECT 1 FROM workspace_executions WHERE {binding}=OLD.{column});")
             } else {
                 String::new()
             };
             db.execute_batch(&format!(
                 "CREATE TEMP TRIGGER IF NOT EXISTS {name} AFTER {action} ON main.{table} BEGIN
-                SELECT cortex_workspace_invalidate('{scope}',{row}.{column}) WHERE EXISTS
+                SELECT cortex_workspace_invalidate('{scope}',{row}.{column}) WHERE NOT EXISTS (SELECT 1 FROM temp.workspace_outbox_seen WHERE scope='{scope}' AND identity={row}.{column} AND epoch=cortex_workspace_epoch()) AND EXISTS
                 (SELECT 1 FROM workspace_executions WHERE {binding}={row}.{column}); {old} END;"
             ))?;
         }
@@ -95,6 +126,23 @@ pub fn install(db: &Connection) -> CoreResult<()> {
     Ok(())
 }
 
+/// Marks `identity` as already invalidated for the current transaction, so maintenance that removes
+/// rows nobody can observe (closed-task activity compaction) publishes nothing. A connection without
+/// the Workspace hooks has no mark table and nothing to suppress.
+pub(crate) fn suppress_for_transaction(db: &Connection, scope: &str, identity: &str) -> CoreResult<()> {
+    let installed: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='workspace_outbox_seen')",
+        [],
+        |r| r.get(0),
+    )?;
+    if installed {
+        db.execute(
+            "INSERT OR REPLACE INTO temp.workspace_outbox_seen(scope,identity,epoch) VALUES (?,?,cortex_workspace_epoch())",
+            (scope, identity),
+        )?;
+    }
+    Ok(())
+}
 /// Raw statement owns exactly one sqlite3_stmt; column buffers are copied before step/finalize.
 struct Statement(*mut ffi::sqlite3_stmt);
 impl Drop for Statement {
@@ -154,7 +202,12 @@ unsafe fn scalar(db: *mut ffi::sqlite3, sql: &str, args: &[&str]) -> Result<i64,
     }
     Ok(ffi::sqlite3_column_int64(s.0, 0))
 }
-unsafe fn invalidate(db: *mut ffi::sqlite3, scope: &str, identity: &str) -> Result<(), ()> {
+unsafe fn invalidate(
+    db: *mut ffi::sqlite3,
+    scope: &str,
+    identity: &str,
+    epoch: u64,
+) -> Result<(), ()> {
     let binding = match scope {
         "runtime" => "runtime_task_id",
         "session" => "acp_session_id",
@@ -205,6 +258,11 @@ unsafe fn invalidate(db: *mut ffi::sqlite3, scope: &str, identity: &str) -> Resu
         append(db, &project, &task, "task", tv)?;
         append(db, &project, &execution, "execution", ev)?;
     }
+    exec(
+        db,
+        "INSERT OR REPLACE INTO temp.workspace_outbox_seen(scope,identity,epoch) VALUES (?,?,?)",
+        &[scope, identity, &epoch.to_string()],
+    )?;
     Ok(())
 }
 unsafe fn append(
@@ -291,10 +349,10 @@ pub fn append_tx(
 mod tests {
     use super::*;
     fn bound() -> Connection {
-        let db = Connection::open_in_memory().unwrap();
+        let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(super::super::schema::SQL).unwrap();
         db.pragma_update(None, "foreign_keys", "ON").unwrap();
-        install(&db).unwrap();
+        install(&mut db).unwrap();
         db.execute_batch("INSERT INTO tasks VALUES ('runtime','/fixture','now');
             INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES ('runtime','CREATED','goal','now','now');
             INSERT INTO workspace_projects VALUES ('p','/fixture','owner','now',1);

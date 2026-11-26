@@ -268,34 +268,20 @@ pub fn session(package: &str) -> Res<()> {
                 ),
             ],
         );
-        let probe = Command::new("/usr/bin/bwrap")
-            .args([
-                "--unshare-user",
-                "--ro-bind",
-                "/",
-                "/",
-                "--",
-                "/usr/bin/true",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|e| e.to_string())?;
-        let ok = probe.success();
+        // Worker commands and contained MCP servers run under Landlock.
+        let ok = std::fs::read_to_string("/sys/kernel/security/lsm")
+            .is_ok_and(|l| l.split(',').any(|m| m.trim() == "landlock"));
         outcome(
-            "unprivileged_sandbox",
+            "landlock_sandbox",
             if ok { "passed" } else { "unverified" },
-            vec![
-                ("exit_code", n(probe.code().unwrap_or(-1) as i64)),
-                (
-                    "reason",
-                    if ok {
-                        Value::Null
-                    } else {
-                        s("namespace denied by container/host policy; packaged engine execution not qualified")
-                    },
-                ),
-            ],
+            vec![(
+                "reason",
+                if ok {
+                    Value::Null
+                } else {
+                    s("Landlock is not an active LSM on this host; confined worker commands are not qualified")
+                },
+            )],
         );
         rpc(&socket_path, "service.stop", obj(vec![]))?;
         Ok(())

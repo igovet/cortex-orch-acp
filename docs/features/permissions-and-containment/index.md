@@ -197,9 +197,8 @@ terminate at once.
 
 The engine environment and each `command_run` receive the owner's own
 ssh-agent (`SSH_AUTH_SOCK`, only a socket the owner owns), so ssh uses the
-host's keys and `~/.ssh/config`. Root-owned ssh config includes that ssh
-trusts on the host are mounted as read-only, owner-owned copies, because the
-sandbox's user namespace shows root's files as `nobody`'s; see
+host's keys and `~/.ssh/config` at its real path (SSH private key files are
+unreadable for confined commands; the agent holds the keys); see
 [SECURITY.md](../../../SECURITY.md#owners-ssh-agent).
 
 With the owner's opt-in `ssh-askpass.json`, the
@@ -258,25 +257,25 @@ work, and whether a deletion waits for the user.
 | Behavior | Guarded | Development (fresh-session default) | Auto |
 | --- | --- | --- | --- |
 | Where a writing worker works | project writes; command cwd inside the task tree | host-visible session; eligible non-private host cwd | same as Development |
-| Writing-worker `command_run` | `restricted`, live project writes with protection masks | `development`, host-visible and live checkout writes with protection masks | same as Development |
+| Writing-worker `command_run` | `guarded`: host at real paths under Landlock; writes to the checkout, scratch and tool caches; secrets hidden | `development`: as Guarded plus `/tmp`, `/var/tmp` and an outside cwd; only Cortex stores hidden | on the host as the owner, no ruleset; deletions wait for the owner's card |
 | `outside_write` | action-specific owner consent | action-specific owner consent | runtime decides automatically |
 | `outside_command` (no command sandbox) | action-specific owner consent | action-specific owner consent | runtime decides automatically |
 | Eligible writer command requests recognized privilege or has a proven pre-launch sandbox failure | routes through `outside_command`; owner consents | same as Guarded | routes through `outside_command`; Auto decides |
 | `sudo` in a host command | owner password prompt on the desktop or a paired phone | same | same |
 | Declared deletion (`project_delete`, `command_delete`, native delete) | consent card | consent card | runtime answers the card itself |
 | Reads by ordinary brokered commands | owner-readable inputs exposed by the command profile, no per-read card | same | same |
-| Read-only/reviewer `command_run` | `read_only`; cwd inside the task tree | `read_only`; eligible non-private host cwd also allowed | same as Development |
-| Automatic runtime verification | host-visible `read_only`, network disabled, existing ignored-directory grants | same | same |
+| Read-only/reviewer `command_run` | `read_only` (Landlock: scratch and caches only, secrets hidden); cwd inside the task tree | `read_only`; eligible non-private host cwd also allowed | on the host as the owner |
+| Automatic runtime verification | `read_only` under Landlock, shared network, existing ignored-directory grants | same | same |
 | Engine session mode (see [Native engines](#native-engines)) | independent of access mode | independent of access mode | independent of access mode; no bypass or full access |
 | Channel, role, revocation, owner deny, review and completion gates | retained | retained | retained |
 
 Ordinary read-only worker and reviewer commands use `read_only` regardless
-of mode. This is a host-visible view with limited writes, private PID namespace
-and private `/var/tmp`; shared host `/tmp`, allowed caches and reachable host
-services are not private build outputs. Runtime verification and program preflight
-use that same host-visible read-only profile with networking disabled and the
-existing grants for eligible ignored checkout directories. Other checkout writes
-are discarded in a private overlay where supported, or refused. The owner tool
+of mode (outside Auto). It runs on the host at the real paths under a Landlock
+ruleset: writes only to a private scratch (TMPDIR), package/build caches and
+devices; the owner's keys and credential stores, the project's secret files and
+the live Cortex stores are unreadable. Runtime verification and program preflight
+use that same profile with the shared network and the existing grants for eligible
+ignored checkout directories. Other checkout writes are refused. The owner tool
 path, including NVM if present, is visible under the existing read-only rules.
 A setup failure does not retry on the host. See [the tool search path boundary](../../../SECURITY.md#host-effects-and-tool-search-path).
 
@@ -296,10 +295,12 @@ sandbox. Its working-directory check and action decision do not constrain
 the payload's filesystem effects; this is an owner-trust route, not containment.
 
 Development is trusted local development, **not a hostile-code sandbox**.
-`development_command` uses `--bind / /`, real HOME and /var/tmp,
-owner devices, groups and shared network. It retains task-private, Git and
-denied-path overlays and protects known existing runtime/configuration/native
-engine locations and the production Paseo home/profile. Parent protections precede
+A Development command runs at the real paths with real HOME, owner devices,
+groups and shared network under Landlock: it writes the writer's checkout, its
+scratch, `/tmp`, `/var/tmp` and the owner's non-sensitive HOME tool directories,
+honors owner write denials and keeps known runtime/configuration/native engine
+locations and the production Paseo home/profile read-only (see
+[the Landlock command boundary](../../../SECURITY.md#landlock-command-boundary)). Parent protections precede
 the bound task's grant, allowing host-created worktrees under those parents.
 Missing or invalid explicitly configured engine-state targets fail closed.
 Optional locations absent at preparation are not a promise about future files.
@@ -348,9 +349,9 @@ detached processes, containers, volumes or daemon builds. No incomplete command
 is automatically rerun. Earlier explicit Auto workers keep their confirmed
 engine mode until they end.
 
-Coverage: the `workspace-service` and `cortex-engine` Rust tests for access mode, development commands and gateway/permission/evidence, and the real-namespace cases. Test-only
+Coverage: the `workspace-service` and `cortex-engine` Rust tests for access mode, development commands and gateway/permission/evidence, and the Landlock cases. Test-only
 unjailed launch replacement establishes receipts/cancellation, not containment
-or real Docker operation. A namespace skip is an unverified containment result;
+or real Docker operation. A Landlock skip is an unverified containment result;
 no-paid smoke and source tests do not qualify a rendered client or paid engine.
 
 
@@ -529,7 +530,7 @@ explicit key retains the refusal with its structured code, field and hint; use a
 new explicit key for the corrected action. A declined or unavailable deletion
 confirmation (`deletion_not_confirmed`) is retained under either key, so an
 identical retry is refused again without asking twice. File operations use no-follow directory descriptors and
-reject symlinks, hardlinks and private components `.cortex` and `.git`. The
+reject symlinks and private components `.cortex` and `.git`. The
 project's `.claude` and `.codex` follow ordinary project file rules. A private path is refused before anything else, so a deletion there
 never asks the user first. `draft_write` accepts only the exact owned, unpublished
 draft ID and marker. Publication rechecks channel authority inside its
@@ -583,16 +584,17 @@ in the shared `.agents/skills` directory.
 
 Covered by the `workspace-service` Rust tests.
 
-`command_run` requires Linux bubblewrap and has no silent unsandboxed fallback.
-Its effective mounts depend on [access mode](#access-mode-development-guarded-and-auto).
-Writing workers' restricted commands (Guarded) use read-only real HOME with writable tool
-caches; in Development and Auto their commands use real writable host resources. Read-only
+`command_run` in Guarded and Development requires a kernel with Landlock and has
+no silent unsandboxed fallback; Auto runs it on the host. Its effective rules depend
+on [access mode](#access-mode-development-guarded-and-auto).
+Writing workers' Guarded commands use real HOME with writable tool caches; in
+Development they also write `/tmp` and `/var/tmp`. Read-only
 roles always use the read-only profile described in the access-mode table. Both filter Cortex/credential environment
 variables and retain validated owner SSH-agent access and shared network
-and mounts the project read-only except for writing workers, who receive the
+and keep the project read-only except for writing workers, who receive the
 whole project writable regardless of their narrower declared coordination work
 area; reviewers and read-only roles receive no writable project paths. `.cortex` is
-masked, including nested ones; `.codex` and `.claude` are ordinary project paths;
+hidden outside a writer's checkout (inside it, the live store files are sealed by the argv check); `.codex` and `.claude` are ordinary project paths;
 the project's `.git` is visible
 (see below). A command is bounded by an absolute (not output-idle) deadline of 1800
 seconds unless it sets `timeout_seconds`, and is killed when that deadline passes, on
@@ -600,8 +602,7 @@ an owner stop, or when authority is revoked. A started or uncertain payload is n
 replayed on the host.
 
 Sandbox preparation is bounded but tolerant of a busy host: the service waits up to 60
-seconds for each step reported by the per-command supervisor, the namespace and overlay
-probes up to 20 seconds and the git ignored-path query up to 30 seconds (each step is normally
+seconds for each step reported by the per-command supervisor, the Landlock probe up to 20 seconds and the git ignored-path query up to 30 seconds (each step is normally
 well under a second). Exceeding a bound still refuses before launch with
 `native_command_sandbox_unavailable`; the receipt is settled as never launched, and the
 tool's hint tells a read-only role that nothing ran and the identical command may be retried once.
@@ -611,18 +612,16 @@ status that leaves execution uncertain is not enough.
 Such a never-launched call does not keep an earlier failed check open (see
 [check history](../orchestration/index.md#check-history-and-current-outcome)).
 
-A program inside a command cannot create its own namespace sandbox: Ubuntu's
-`bwrap-userns-restrict` AppArmor profile confines everything bubblewrap starts so that it
-cannot create another user namespace, whatever the mounts. Nested bubblewrap, flatpak,
-`unshare`, rootless containers, Chromium/Electron sandboxes and a nested Cortex therefore
-fail inside `command_run`. When the retained output (its first 64 KiB or its last 64 KiB)
+A program inside a command may still find its own namespace sandbox refused by the
+host policy (for example a rootless container runtime or a Chromium/Electron sandbox
+under Ubuntu's user-namespace restrictions). When the retained output (its first 64 KiB or its last 64 KiB)
 shows one of these refusals, the settled receipt carries `nested_sandbox`
 (`code: nested_sandbox_denied`, the matched signature, and whether `outside_command` is
 offered to the command's profile). The sandboxed receipt's outcome, exit code and evidence
 are unchanged. The receipt carries only this advisory hint: nothing is rerun automatically
 on the host because of it.
 The worker decides whether to ask for a host run, and a read-only role reports the check as
-not run with that blocker. The signatures are bubblewrap's, `unshare`'s, a rootless
+not run with that blocker. The signatures are a nested bubblewrap's, `unshare`'s, a rootless
 container runtime's `cannot clone` and Chromium's `No usable sandbox!` messages. A nested
 Cortex reports its own `native_command_sandbox_unavailable` or
 `native_verification_sandbox_unavailable` code instead and is not matched. Signatures in the
@@ -669,7 +668,7 @@ card (`native_owner_actions.rs`); see
 [owner actions](../../../SECURITY.md#owner-actions-sign-ins-and-pasted-tokens).
 
 A settled receipt whose retained output shows a program that could not be found
-(bubblewrap's `execvp NAME: No such file or directory`, or exit 127 with a shell's
+(the supervisor's `cortex: execvp NAME: No such file or directory` with exit 127, or exit 127 with a shell's
 `not found`/`command not found` or `env`'s `No such file or directory`) carries
 `missing_program` (`code: program_not_found`, the program when it is a plain short name,
 the search path it was looked up on and what to do). It is advisory like
@@ -678,15 +677,15 @@ the search path it was looked up on and what to do). It is advisory like
 
 A launch that never released its payload (`failure: command_not_started`) names why
 in the receipt's `cause`: `sandbox_unavailable:<reason>` with the sandbox's own fixed
-reason (for example `setup_timeout`, `namespace_or_mount_setup_failed`,
+reason (for example `setup_timeout`, `landlock_unavailable`, `landlock_probe_failed`,
 `project_tree_limit`), `sandbox_preparation_timeout` when the supervisor did not answer
 within 60 seconds, `supervisor_exited`, `supervisor_spawn_failed`, `store_busy` or
 `store_unavailable` when the store refused the authorization or handle commit,
 `refused:<code>` for another refusal (for example `refused:access_changed`), or
 `call_ended_before_release`. Preparation stage durations (milliseconds) and the
 scanned entry count are numbers only: they are recorded on the `NATIVE_COMMAND_PROCESS`
-event of a launched command (`digest_ms`, `controls_ms`, `tree_walk_ms`,
-`tree_entries`, `hardlink_policy_ms`, `git_policy_ms`, `overlay_probe_ms`, `probe_ms`,
+event of a launched command (`controls_ms`, `secrets_ms`,
+`rules_ms`, `probe_ms`,
 `preparation_ms`, `authorize_commit_ms`, `bind_queued_ms`) and on the
 `NATIVE_COMMAND_FINISHED` event's observation of a command that did not start; a
 finished command's observation records `process_ms`. They are never part of the tool
@@ -758,140 +757,64 @@ A standalone submodule is not a supported logical project root; run its Git
 commands from the superproject. Narrow grants, read-only roles, reviewers,
 runtime verification and runtime-owned Git observations retain read-only metadata.
 
-The table describes whole-project writing grants. Development/Auto additionally
-protects `info/` (attributes, excludes and sparse-checkout affect later commands)
-and supplies `core.hooksPath=/dev/null` and `core.fsmonitor=false` through inherited
-Git command configuration. These are defaults, not protection against arbitrary
-owner code or an explicit command-line override. Engine/Guarded behavior is unchanged:
+The table describes whole-project writing grants. Commands get
+`core.hooksPath=/dev/null` and `core.fsmonitor=false` only where Cortex itself runs
+Git (`project_git`, runtime observations); these are defaults, not protection
+against arbitrary owner code. Under Landlock a writer's checkout is one open write
+tree, so Git control files inside it are not separately protected:
 
 | Path | `command_run` (writing worker) | `project_read` / `project_write` / `project_edit` / `project_delete` |
 | --- | --- | --- |
-| `.git` data: objects, refs, logs, index, HEAD, packed-refs, locks, merge/rebase/stash state | writable | denied |
-| `info/` | read-only in Development/Auto; writable in engine/Guarded writing grants | denied |
-| A linked worktree's own `<common>/worktrees/<name>/` and its common directory (even outside the project) | writable | denied |
-| `config`, `config.worktree`, `hooks/`, `commondir`, a worktree's `gitdir`, `remotes/`, `branches/` in those directories | read-only | denied |
-| `core.hooksPath` when it names a directory inside the project (e.g. husky) | read-only | ordinary project file rules |
-| Other linked worktrees' metadata; `modules/` containers | read-only; existing submodule data writable only in Development/Auto | denied |
+| The checkout's `.git` (data and control files) | writable | denied |
+| A linked worktree's common Git directory outside the checkout | read-only (linked-worktree commands are read-only) | denied |
 | The project's `.git` for reviewers and read-only roles | read-only | denied |
-| `.cortex`, `.cortex-dev` | read-only (empty view) in Guarded and Development; writable in Auto except the live store files (`cortex.sqlite3`, `-wal`, `-shm`, `-journal`, `.*.lock`), which stay read-only. A refused write reports a `cortex_store` hint pointing at `project_write`/`project_edit`, where the runtime asks the owner | allowed on request (Auto allows, others ask); live store files refused |
-| The Dev owner and workspace state files | hidden | denied |
-| The project's `.codex`, `.claude`, `.agents`, `.github` | writable subject to grants and masks | ordinary project file rules (see also [Project skill links](#project-skill-links)) |
-| Tool state in the project (`.venv`, `node_modules/.cache`, `.pytest_cache`, `__pycache__`, `.mypy_cache`, `target/`, `build/`, ...) | writable | allowed (ordinary project files) |
+| `.cortex`, `.cortex-dev` | hidden outside a writer's checkout; inside it the live store files (`cortex.sqlite3`, `-wal`, `-shm`, `-journal`, `.*.lock`) are sealed by the argv check (`cortex_live_store`) | allowed on request (Auto allows, others ask); live store files refused |
+| The Dev owner and workspace state files | hidden for read-only roles | denied |
+| The project's `.codex`, `.claude`, `.agents`, `.github` | writable subject to grants | ordinary project file rules (see also [Project skill links](#project-skill-links)) |
+| Tool state in the project (`.venv`, `node_modules/.cache`, `target/`, `build/`, ...) | writable | allowed (ordinary project files) |
 
-Existing protected Git entries are mounted read-only. For watched entries that
-are absent at launch, GitGuard attempts removal every 500 ms during the command
-and again at settlement. If it removes anything, the supervisor appends a
-generic notice to the output without changing the payload's exit status. The
-sweep is neither atomic nor persistent after the command, and is not proof that
-a watched entry never existed or that every attempt at removal succeeded.
-
-`project_git` is a status/diff observation, not a Git write route or a command
+`project_git` is a read-only Git observation (`status`, `diff`, and the history reads `log`, `show`, `cat_file`, `blame`, `ls_files`; revisions never start with `-`, paths follow `--`), offered identically to every role except the consultant and to every engine, not a Git write route or a command
 verification receipt. In the main checkout it clears inherited environment and
 disables global/system Git configuration, optional locks, hooks and fsmonitor;
 diff also disables external diff and text conversion. It probes repository
 filter keys and disables detected filter drivers, including Git LFS when
 detected. Expect no LFS pointer normalization from this view.
 
-Ordinary live `command_run` is different: without a whole-repository writer
-grant it keeps Git metadata read-only and defaults `lfs.storage` to disposable
-scratch. That default is not a write grant or a persistent cache. Whole-project
-writing commands do not use this redirect.
+Tool state needs no list: a writing worker's grant is the whole checkout. No
+snapshot, overlay or hard-link detachment is prepared: a project file hard-linked
+to a file elsewhere (a uv `.venv` or pnpm store) is written through that link, as
+in the owner's terminal. Preparation never walks the project. The project's secret
+files are hidden only from read-only roles and from Guarded commands whose grant
+is not the whole checkout (inside an open write grant Landlock cannot protect them,
+so none is looked for). For those, the service keeps an index of each checkout's
+secret files from a walk that skips `.git`, `.cortex`, `target`, `node_modules` and
+virtual environments and is bounded at 2,000,000 entries (`project_tree_limit`). The
+first such command of a checkout in a service process waits for that walk. Later
+ones use the last finished walk plus a fresh read of the checkout's top level, and
+the walk is refreshed in the background. A secret file created below the top level
+after the last finished walk is therefore hidden from the command after the next
+one, not from the next one. The rest of the ruleset follows the ancestors of the
+hidden paths only.
 
-Tool state needs no list: a writing worker's grant is the whole project, and only
-the private names above are withheld. A regular file with more than one hard link
-stays read-only (its other link may be outside the project), unless every one of
-its links was found as a granted, non-deny-write path inside the project: esbuild
-links its two binaries to each other, and pinning them made every `npm ci` fail
-with `EBUSY`. Links are counted as distinct directory entries, so a tree seen
-twice through a bind mount never makes up a missing outside link. Guarded and
-engine launches retain directory-wide read-only demotion above 256 such files.
-
-Every sandboxed command's preparation makes one complete pass over the project tree
-(`policy::scan` in `crates/workspace-service/src/native_command_policy.rs`); it finds
-both the private names above at any depth (they are never descended) and the
-writable regular files with more than one link. Directory listings give each entry's
-type, so only regular files inside the write set are `fstatat`ed, relative to their
-open directory, and directories are listed by up to eight threads. The limit stays
-2,000,000 entries (`project_tree_limit`). The scan is not cached between commands:
-a new link to a project file made from outside the project changes no project
-directory, so no cheap revalidation could notice it. On this checkout (about 490,000
-scanned entries, a debug build, warm cache) the whole preparation fell from about
-1.7 s to about 0.24 s, of which the scan is about 0.16 s; on a cold or busy disk it
-is still proportional to the number of entries. What the scan guarantees is the tree
-as it was listed: an entry created after its directory was listed and before the
-command starts (a new private-named entry, a new outside hard link) is not covered
-by that command's mounts and is seen by the next command's scan. A link count that
-rises between the scan and the launch is the same window.
-
-Development/Auto writing-worker commands instead detach granted external hardlinks
-before granting writes. A uv `.venv` or pnpm `node_modules` can then be updated,
-unlinked or recreated without writing through its project aliases into the shared
-cache. Internal-only writable hardlinks stay linked; denied/private paths and
-private symlink targets are not detached. Symlinks themselves are unchanged.
-Each affected regular file gets an independent inode using a Linux reflink when
-available, otherwise a bounded streaming copy. Ownership, modes (including
-executability), timestamps and extended attributes are retained. This is persistent
-project-local preparation, not a change to the cache, tool configuration or other
-projects. Read-only roles, verification and engines never opt into it.
-
-A git-ignored directory holding more than 100,000 such shared files is not detached
-but bound read-only as a whole (one mount): retained verification workspace copies
-(about 1.5 million pnpm links) made every writer command time out here
-(`command_hardlink_materialization_timeout`, 2026-10-21). A materialization that still
-exceeds its byte or time limit is refused with the directory holding most shared
-files and what to do (remove or regenerate those copies, or git-ignore a disposable
-directory), instead of a bare code.
-
-Preparation preflights at most **2 GiB of logical file bytes per command** (counting
-each alias separately, even for reflinks), with a **60 s cooperative copy deadline**.
-Blocking filesystem calls can exceed that deadline. An INFO log records file count,
-published bytes and elapsed seconds, without paths or content. Unsupported
-reflinks fall back to copying; size/time limits, I/O/metadata errors and observed
-concurrent source changes stop preparation before any command is launched, never
-relax the shared-inode protection. Large environments may need owner-managed
-independent copies; no automatic escalation is performed.
-
-A complete copy is fsynced before each atomic file replacement, then the parent is
-fsynced. No environment directory is removed or swapped. All original package paths
-always contain complete files, even if interruption leaves some inodes detached and
-others still shared; the next preparation rescans and resumes. This is **not a
-whole-tree transaction** or rollback of inode identity. Normal errors remove the
-current temporary file; a process/host crash can leave a hidden `.cortex-unlink-*`
-temporary beside the unchanged original, never a half-written package file.
-The gateway rechecks authority/policy before persistent preparation and fences it
-with the command's durable started receipt. Copying or spawn failure after that
-point retains an uncertain-effect receipt; an identical request key cannot replay
-it. Resumption requires a fresh authorized command, not automatic retry.
-Source checks detect observed concurrent updates but do not exclude a hostile
-same-user process racing the final check/rename. Direct host aliases, Docker and
-the already host-writable Development profile remain outside this project-alias
-protection; this does not claim the shared cache is globally read-only.
-
-Coverage: the `workspace-service` Rust tests exercise copying, metadata,
-protected paths, bounded/error/interrupted preparation and shared-inode integrity;
-the real-bubblewrap recreate case requires working user namespaces.
-
-Finding these links and the private names takes a full scan of the project (one
-`lstat` per granted file) before every sandboxed launch. On a large tree on a
-cold HDD that scan took minutes, so the engine had not even started while the
-chat showed nothing. A scan that runs longer than 3 s now opens a chat card,
-`Preparing the sandbox (coordinator|worker)`, with the entries scanned and the
-seconds spent, and closes it when the scan ends (`orchestration.sandbox
-.SCAN_PROGRESS`). The scan itself is unchanged: the hard-link check is what
-keeps a write through a link from reaching a file outside the project. A
-sandboxed engine is never launched with the home directory or `/` as its
-project (`engine_cwd_is_home`), because the scan would cover all of it. A
-catalog probe of a session opened in the home directory took 283 s before it
-was stopped.
-
-Every side effect has a durable started receipt before execution. Identical retries
-return the retained result. Conflicting keys fail. An interrupted operation with
-an unknown outcome is never automatically executed again. Complete command bytes
-are stored as an artifact; a passed check must reference a completed, successful,
-nontrivial command receipt with complete retained output belonging to the exact
-worker attempt (see [check evidence](../orchestration/index.md#check-evidence)). An MCP
-success envelope, an engine-native tool call, model text or missing signal cannot
-establish a passing check; such a claim is kept `unverified`.
+A command's payload also never waits for the project digest or the dirty-path
+listing that bind its check evidence and its change record. Both run beside the
+preparation and the launch. When they finish before the payload is released (the
+usual case), they are exactly the launch state. When one is still running at the
+release, a sweep of inode change times (ctime, which an unprivileged process cannot
+set back) from the release instant runs as soon as it ends. The sweep covers every
+deliverable path, every directory outside wholly ignored trees, and Git's index,
+HEAD, current ref and exclude file. A quiet checkout keeps the observation. Any
+change drops the digest, so the check binds no revision (as when the digests before
+and after differ). For the change record, changed paths and the listed paths in
+changed directories are attributed to the command, and every listed path is
+attributed once Git's own state moved. A sweep that cannot vouch (a nested checkout,
+too many entries, a failed read) makes the record incomplete. One limit is new: an
+untracked file that existed at the release and was deleted before the overlapping
+listing read its directory is not named. The digest now skips Git-ignored files,
+which never fed it. The finish observation records how the "before" observation
+ended (`before_observation`: `none`, `before_release`, `overlapped` or
+`overlapped_changed`, with `before_observation_ms`, `before_sweep_ms` and
+`before_sweep_reason`).
 
 ## External MCP
 
@@ -907,21 +830,24 @@ outside the coordinator role, never as a fallback around a denied action.
 Built-in worker command/read-search discovery does not depend on external MCP
 configuration. Its role-offer hints confer no access; project path reservations
 are not outside grants, and safe host-history discovery must not resume an agent.
-Read-only/Guarded command `/var/tmp` is scratch-backed, so a missing path in that
-namespace is not proof of host absence. Authorized host-only reads/searches can
+A path a confined command cannot read (a hidden secret or store) is not proof of
+host absence. Authorized host-only reads/searches can
 use the `outside_command` consent route when offered to a writing worker.
 Where the route is unavailable, report the capability gap. This does not
 relax masks or permit retrying a denied operation. Executable no-paid fixtures
 exercise allowed, denied and genuinely missing host reads without a sandbox;
-namespace-dependent checks remain unverified wherever user namespaces are unavailable. See
+Landlock-dependent checks remain unverified wherever Landlock is unavailable. See
 [capability-based delegation](../roles-and-delegation/index.md#capability-based-delegation).
 
 The engine receives a private broker endpoint, not the original executable or
-credentials. The runtime proxy starts the server in the same scoped sandbox,
+credentials. The runtime proxy starts the server under its Landlock ruleset (the real filesystem
+readable except the owner's secrets, the project's secret files and the Cortex
+stores; writes only to its write grants, worker scopes and private runtime
+directory; the shared network),
 filters discovery and calls, rejects server-initiated sampling/elicitation, binds
 request receipts to the actual channel and kills the child on revocation. A partial
 JSON line has the same deadline as a complete response. An unresolved receipt
-blocks replay. A read-path grant cannot overlay the project or its private masks.
+blocks replay. Read-path grants are validated but grant nothing extra: every non-secret path is readable.
 A worker scope that does not exist yet is not granted to the server. An optional
 server that cannot be attached safely, or that exits before the session is
 created, is withheld from that session only, with a recorded reason
@@ -929,8 +855,8 @@ created, is withheld from that session only, with a recorded reason
 
 The owner may opt a server out of that sandbox with `"containment": "none"` on
 its entry, or for every entry without its own value as the registry default.
-Such a server runs with the owner's full user authority: no Landlock, seccomp or
-network restriction, and its path grants, `network` flag and runtime-directory
+Such a server runs with the owner's full user authority: no Landlock, and its
+path grants, `network` flag (never enforced) and runtime-directory
 variables are not applied. Only its tool grants, the channel-bound relay and the
 process-group stop at session end still apply; a daemon that detaches from that
 group is outside Cortex's kill guarantee. Settings shows such a server as

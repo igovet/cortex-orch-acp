@@ -373,6 +373,20 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
       if (active && mine === settling && !refreshing) setSyncing(false);
     });
   };
+  // Sprints a create command answered, until a facts read that began after the answer has delivered their project: the sprint owns
+  // its page, so until then "not in the model" means "not read yet", never "not found".
+  const [awaitingSprints, setAwaitingSprints] = createSignal<ReadonlyMap<string, string>>(new Map());
+  const settleAwaiting = (began: ReadonlyMap<string, string>, deliveredProjects: ReadonlySet<string>) => {
+    const done = [...began].filter(([id, project]) => deliveredProjects.has(project) && awaitingSprints().get(id) === project);
+    if (done.length) setAwaitingSprints(held => { const next = new Map(held); for (const [id] of done) next.delete(id); return next; });
+  };
+  /** One project's list rows are final: its board and its facts were both read in this run (or it has nothing to read). */
+  const projectSettled = (project: Pick<WorkspaceState["projects"][number], "id" | "repository" | "activated" | "issue">): boolean => {
+    if (port.mode !== "real" || project.activated === false || project.issue) return true;
+    factsInstalls();
+    const factsOn = port.readsFacts === true;
+    return savedProjects().get(project.id) === project.repository || (readProjects().has(project.id) && (!factsOn || facts.has(project.id)));
+  };
   let machineReading: Promise<void> | undefined;
   /** `first`: an owner action's project, read before anything else already queued. */
   const refresh = (projectId?: string, first = false): Promise<void> => {
@@ -402,6 +416,7 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
   };
   const readCoherent = async (projectId?: string, full = false) => {
     const epoch = actionEpoch;
+    const began = awaitingSprints();
     let serviceAnswered = false;
     try {
       const offered = projectId ? capabilities() : await port.query("capabilities.get", {});
@@ -429,6 +444,7 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
           const held = facts.get(id);
           if (held && !delivered.has(id)) guarded(() => setProjected(current => applyFacts(current, held)), undefined);
         }
+        settleAwaiting(began, delivered);
         setConnection({ state: "connected", reason: null, at: Date.now() });
         setReady(true);
         setReadIssue(null);
@@ -569,6 +585,13 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
     pendingTask: (type: "start_task" | "close_task" | "accept_result" | "archive_task", taskId: string) =>
       [...pendingRequests().values()].some(c => c.type === type && c.taskId === taskId),
     savedView: (project: Pick<WorkspaceState["projects"][number], "id" | "repository">) => savedProjects().get(project.id) === project.repository,
+    /** A sprint page's id is not in the model yet and no confirmed read has answered for it: it is loading, not missing. */
+    sprintPending: (sprintId: string, projectId: string): boolean => {
+      if (port.mode !== "real" || state().sprints.some(s => s.id === sprintId)) return false;
+      const project = state().projects.find(p => p.id === projectId);
+      return awaitingSprints().has(sprintId) || (!!project && !projectSettled(project));
+    },
+    projectSettled,
     mode: port.mode, state, index, ready, readProjects, readIssue, lastReadFailed, machineLoaded, machineIssue, modelsPending, modelsIssue,
     /** The composer's lists are known: the machine answered and is not still fetching the models. Until then an empty list means "not yet". */
     optionsKnown: () => machineLoaded() && !modelsPending(),
@@ -767,6 +790,7 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
             return s;
           }),
         }));
+        if (result.ok && command.type === "create_sprint" && result.entityId && !projected().sprints.some(s => s.id === result.entityId)) setAwaitingSprints(held => new Map(held).set(result.entityId!, command.projectId));
         if (result.ok && command.type === "git_commit" && checkoutDrafts.get(command.checkoutId) === command.message) checkoutDrafts.delete(command.checkoutId);
         if (command.type === "delete_sprint" && result.ok) {
           // This is the service's confirmed deletion, not an optimistic project refresh.

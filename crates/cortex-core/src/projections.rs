@@ -301,7 +301,7 @@ pub(crate) fn task_with_disposition(
                     (phase, state) = ("planning", "starting");
                     if row(db,"SELECT task_id FROM task_stopped WHERE task_id=?", [runtime])?.is_some() {
                         (phase,state)=("stopped","stopped");
-                    } else if let Some(notice)=row(db,"SELECT payload_json FROM task_events WHERE task_id=? AND event_type='progress' AND json_valid(payload_json) AND json_extract(payload_json,'$.message_key') IN ('engine_retry.launch','engine_retry.gave_up','engine_retry.recovered') ORDER BY id DESC LIMIT 1", [runtime])? {
+                    } else if let Some(notice)=row(db,"SELECT payload_json FROM task_events WHERE task_id=? AND event_type='progress' AND assignment_ref IS NULL AND json_valid(payload_json) AND json_extract(payload_json,'$.message_key') IN ('engine_retry.launch','engine_retry.gave_up','engine_retry.recovered') ORDER BY id DESC LIMIT 1", [runtime])? {
                         let value: Value=serde_json::from_str(field(&notice,"payload_json").unwrap_or("{}"))?;
                         match field(&value,"message_key") {
                             Some("engine_retry.launch") => warnings.push("engine_launch_retrying".into()),
@@ -477,6 +477,21 @@ fn files_wait(
     runtime: &str,
     root: &str,
 ) -> CoreResult<Option<(String, Option<FilesWait>)>> {
+    // A historical wait can survive a policy change or the end of its writer.
+    // In review, only a live checkout conflict can still justify showing it.
+    let reviewing: bool = db.query_row(
+        "SELECT state='REVIEWING' FROM runtime_tasks WHERE task_id=?",
+        [runtime],
+        |r| r.get(0),
+    )?;
+    let review_holder = if reviewing {
+        let Some(wait) = crate::scheduler::policy::review_writer_tx(db, runtime)? else {
+            return Ok(None);
+        };
+        wait["holder_task"].as_str().map(str::to_owned)
+    } else {
+        None
+    };
     let recorded_owner_wait: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=?1
            AND e.type='NATIVE_WRITE_CONFLICT_WAITING'
@@ -510,10 +525,11 @@ fn files_wait(
             coalesce((SELECT d.description FROM workspace_tasks d JOIN workspace_executions x USING(task_id) WHERE x.runtime_task_id=h.task_id),h.goal) AS title
          FROM runtime_events e JOIN runtime_tasks h ON h.task_id=json_extract(e.payload_json,'$.holder_task')
          WHERE e.task_id=?1 AND e.type='NATIVE_WRITE_CONFLICT_WAITING' AND h.state NOT IN ('COMPLETED','CANCELLED','FAILED')
+         AND (?3 IS NULL OR (h.task_id=?3 AND json_extract(e.payload_json,'$.node')='review'))
          AND e.id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type IN
             ('PLAN_ACCEPTED','USER_STEERING','USER_ANSWER_RECEIVED','ASSIGNMENT_CREATED')),0)
          ORDER BY e.id DESC LIMIT 1",
-        [runtime, project],
+        (runtime, project, review_holder),
     )?
     else {
         return Ok(None);
@@ -1234,6 +1250,36 @@ mod files_wait_tests {
                 Ok(())
             })
             .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_sprint_plan_review_does_not_project_a_stale_writer_wait() {
+        let root = std::env::temp_dir().join(format!("plan-review-wait-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let store = Store::open(
+            crate::ProjectKey::new(&root, crate::StoreChannel::Dev).unwrap(),
+            crate::OpenMode::Initialize,
+        ).unwrap();
+        let machine = lifecycle::TaskMachine::new(&store);
+        machine.create("t", "Plan", "o").unwrap();
+        machine.create("h", "Write docs", "o").unwrap();
+        store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='REVIEWING',revision=1 WHERE task_id='t'", [])?;
+            db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='h'", [])?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'_plan_review_1','worker-code-reviewer','Review','[]','[\"**\"]','review','pending',NULL,NULL)", [])?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('h',1,'write','worker-backend-dev','Write','[]','[\"docs/\"]','execution','running','writer',NULL)", [])?;
+            lifecycle::event_tx(db, "t", "NATIVE_WRITE_CONFLICT_WAITING",
+                json!({"node":"review","holder_task":"h","paths":[root.join("docs")]}))?;
+            assert_eq!(super::files_wait(db, "p", "t", root.to_str().unwrap())?, None);
+
+            // The same retained wait is still visible for a change review while the writer is live.
+            db.execute("UPDATE runtime_nodes SET node_id='_review_1' WHERE task_id='t'", [])?;
+            lifecycle::event_tx(db, "t", "NATIVE_PROJECT_WRITTEN", json!({"path":"src/lib.rs"}))?;
+            assert!(super::files_wait(db, "p", "t", root.to_str().unwrap())?.is_some());
+            Ok(())
+        }).unwrap();
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

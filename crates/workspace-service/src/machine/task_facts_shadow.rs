@@ -342,5 +342,10 @@ pub async fn cross_branch(
             .await?;
     }
     facts["alreadyInTarget"] = serde_json::json!(true);
+    if patch.is_empty() {
+        // The task branch carries nothing beyond its base: the result is the report.
+        facts["noChanges"] = serde_json::json!(true);
+        facts["pendingPaths"] = serde_json::json!([]);
+    }
     Ok(())
 }

@@ -265,6 +265,23 @@ describe("a sprint planned by a runtime task", () => {
     expect(place.reveal).toBe('[id="decision-d1"]');
   });
 
+  it("shows only a skeleton while the conversation is unread, then every saved answer, question and status together", async () => {
+    const saved = "Only stage";
+    const state = world({ asking: false, sprint: { planning: "planning", conversation: [{ kind: "answer", text: saved }] }, task: { planningSprintId: "sp" } });
+    const loading = { ...state, sessions: [{ ...state.sessions[0], historyRead: { state: "loading" as const } }] };
+    const p = await mount(`/m/${M}/p/p/s/sp/planning`, loading);
+    const feed = conversation()!.querySelector(".timeline")!;
+    expect(feed.querySelector(".ws-skel, [aria-busy]")).not.toBeNull();
+    expect(feed.textContent).not.toContain(saved);
+    
+    expect(feed.querySelector(".answered")).toBeNull();
+    expect(feed.textContent).not.toContain("Coffee landing page");
+    p.emit(projection("2", state)); await settle();
+    expect(feed.textContent).toContain(saved);
+    expect(feed.textContent).toContain("I am studying the project");
+    expect(feed.textContent).toContain("Coffee landing page");
+  });
+
   it("keeps saved notes, messages and unanswered questions in Conversation after cancellation", async () => {
     const state = world({ legacy: true, sprint: { planning: "cancelled", conversation: [
       { kind: "note", text: "Here is the plan I propose." },
@@ -316,7 +333,9 @@ describe("a sprint planned by a runtime task", () => {
     const loading = { ...live, sessions: [{ ...live.sessions[0], historyRead: { state: "loading" as const } }] };
     p.emit(projection("3", loading)); await settle();
     expect(feed?.textContent).toContain("Loading the conversation");
-    expect(feed?.textContent).toContain(savedNote);
+    // Saved notes and the sprint brief are part of the conversation: only its skeleton shows until the first reads are in.
+    expect(feed?.textContent).not.toContain(savedNote);
+    expect(feed?.textContent).not.toContain("Coffee landing page");
     expect(feed?.textContent).not.toContain("I am studying the project");
 
     p.emit(projection("4", live)); await settle();

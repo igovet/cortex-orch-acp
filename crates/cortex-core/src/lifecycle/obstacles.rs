@@ -293,6 +293,18 @@ const NETWORK_PHRASES: [&str; 26] = [
     "could not connect to",
     "unable to connect to",
 ];
+/// Wording of a failure that a later identical run cleared.
+const RESOLVED_PHRASES: [&str; 8] = [
+    "passing rerun",
+    "passing identical rerun",
+    "rerun passed",
+    "retry passed",
+    "retry passes",
+    "resolved failure",
+    "failure was resolved",
+    "passed on retry",
+];
+
 const DECISION_PHRASES: [&str; 12] = [
     "contradict",
     "conflicting requirement",
@@ -586,6 +598,15 @@ pub fn classify(s: &Signals) -> Classification {
             DETAIL_CHARS,
         )
     };
+    // A failure the worker itself reports as cleared by a passing retry is the
+    // coordinator's to rule on from the evidence, never an owner decision.
+    if kind == OWNER_DECISION && contains_any(&detail, &RESOLVED_PHRASES) {
+        return Classification::new(
+            TECHNICAL,
+            "blocker_owner_decision_resolved",
+            summary("The failure was resolved by a passing retry; the coordinator decides whether the stop condition still applies"),
+        );
+    }
     if kind == OWNER_DECISION {
         return Classification::new(
             OWNER_DECISION,
@@ -1371,46 +1392,21 @@ pub fn classify_failed_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
                 ),
             );
         }
-        let obstacle = open_obstacle_tx(db, task, &found, Some(&node), revision)?;
-        if found.class == OWNER_DECISION {
-            if let Some(id) = obstacle.as_deref() {
-                publish_node_question_tx(db, task, revision, &node, &assignment, id, &found.detail)?;
-            }
+        // A worker's owner_decision blocker is never a runtime-authored owner question: it
+        // returns to the coordinator, who resolves it from the owner's instructions or asks
+        // a concrete question in the task language through its own question tool.
+        let to_coordinator = found.class == OWNER_DECISION;
+        if to_coordinator {
+            let detail = clip(&format!("Worker owner_decision blocker for the coordinator to resolve or put to the owner as a concrete question: {}", found.detail), DETAIL_CHARS);
+            found = Classification::new(TECHNICAL, "blocker_owner_decision_to_coordinator", detail);
         }
+        let obstacle = open_obstacle_tx(db, task, &found, Some(&node), revision)?;
         let mut payload = found.to_json();
         payload["node"] = json!(node);
         payload["revision"] = json!(revision);
         payload["assignment_ref"] = json!(assignment);
         payload["obstacle"] = json!(obstacle);
         event_tx(db, task, "FAILURE_CLASSIFIED", payload)?;
-    }
-    Ok(())
-}
-
-/// Put a decision on the ordinary owner question surface without taking the
-/// task out of execution. The exact failed assignment remains the answer's scope.
-fn publish_node_question_tx(
-    db: &Transaction<'_>, task: &str, revision: i64, node: &str, assignment: &str,
-    decision: &str, detail: &str,
-) -> CoreResult<()> {
-    let question = new_id("pq");
-    // The detail's classifier prefix is runtime prose; preserve the actual blocker verbatim.
-    let detail = detail.strip_prefix("A decision only the owner can make blocks this work: ")
-        .or_else(|| detail.strip_prefix("The requirements conflict and need the owner's decision: "))
-        .unwrap_or(detail);
-    let prompt = if domain::task_language_tx(db, task)? == "ru" {
-        format!("Как продолжить работу «{node}»? {detail}")
-    } else {
-        format!("How should work on “{node}” proceed? {detail}")
-    };
-    if db.execute(
-        "INSERT OR IGNORE INTO pending_questions(id,task_id,assignment_ref,dedup_key,text,options_json,status,created_at)
-         VALUES (?,?,?,?,?,'[]','open',?)",
-        (&question, task, assignment, format!("obstacle:{decision}"), &prompt, crate::now()),
-    )? == 1 {
-        event_tx(db, task, "USER_QUESTION_REQUESTED", json!({"question_id":question,
-            "question":prompt,"options":[],"node":node,"revision":revision,
-            "assignment_ref":assignment,"obstacle":decision}))?;
     }
     Ok(())
 }

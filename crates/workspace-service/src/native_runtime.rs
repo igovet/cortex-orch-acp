@@ -51,6 +51,12 @@ impl ArchiveHold {
 
 /// Deadline for a live steering reply, not for its supervised cleanup.
 const ACTIVE_STEERING_TURN_BOUND: std::time::Duration = std::time::Duration::from_secs(600);
+/// Pauses before each retry of a runtime transition that failed in the store.
+const STORAGE_RETRY_PAUSES: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(3),
+    std::time::Duration::from_secs(10),
+];
 
 enum TurnOutcome {
     Ordinary,
@@ -150,6 +156,86 @@ mod refill_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn native_sprint_plan_review_dispatches_with_an_active_writer() {
+        use cortex_core::{lifecycle, scheduler};
+        let (runtime, owner, task, root) = fixture().await;
+        runtime.host.executor.publication(|store| {
+            let peer = lifecycle::TaskMachine::new(store).create("peer", "Other work", "peer-owner")?;
+            store.write(|db| {
+                let policy = scheduler::policy::NativePolicy::default();
+                db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='peer'", [])?;
+                db.execute("INSERT INTO runtime_nodes VALUES ('peer',1,'write','worker-backend-dev','Work','[]','[\"backend/\",\"dashboard/\",\"docs/\"]','execution','pending',NULL,NULL)", [])?;
+                assert_eq!(scheduler::claim_ready_tx(db, "peer", &peer, "fixture", &policy)?.len(), 1);
+                db.execute("DELETE FROM runtime_nodes WHERE task_id='t'", [])?;
+                db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='t'", [])?;
+                lifecycle::event_tx(db, "t", "SPRINT_PLANNING_BOUND", json!({"policy":lifecycle::sprint_planning::POLICY}))?;
+                let tasks = json!([{"key":"first","title":"First","description":"Do the work","dependsOn":[]}]);
+                let args = json!({"request_key":"submit","tasks":tasks});
+                assert_eq!(lifecycle::sprint_planning::submit_tx(db, "t", "coordinator", "submit", &args, &tasks)?["review"], "scheduled");
+                assert!(scheduler::policy::write_conflict_tx(db, "t")?.is_none());
+                let obstacles = scheduler::policy::claim_obstacles_tx(db, "t", policy.now_seconds)?;
+                assert_eq!(obstacles[0]["reason"], "claimable");
+                // The plan review does not reserve the checkout in the other direction.
+                db.execute("INSERT INTO runtime_nodes VALUES ('peer',1,'also-write','worker-backend-dev','Work','[]','[\"frontend/\"]','execution','pending',NULL,NULL)", [])?;
+                assert_eq!(scheduler::claim_ready_tx(db, "peer", &peer, "fixture", &policy)?.len(), 1);
+                Ok(())
+            })
+        }).unwrap().await.unwrap().unwrap();
+
+        let step = runtime.host.advance(task, owner).await.unwrap();
+        assert_eq!(step["state"], "REVIEWING");
+        assert_eq!(step["writeConflict"], false);
+        assert_eq!(step["assignments"].as_array().unwrap().len(), 1);
+        assert_eq!(step["assignments"][0]["node"], "_plan_review_1");
+        assert_eq!(step["assignments"][0]["stage"], "review");
+        runtime.host.executor.read(|db| {
+            assert_eq!(db.query_row("SELECT status FROM runtime_nodes WHERE task_id='peer' AND node_id='write'", [], |r| r.get::<_, String>(0))?, "running");
+            Ok(())
+        }).unwrap().await.unwrap().unwrap();
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_sprint_revision_review_does_not_bind_checkout_bytes() {
+        use cortex_core::lifecycle::{self, completion::EvidenceSnapshot};
+        let (runtime, owner, task, root) = fixture().await;
+        runtime.host.executor.publication(|store| {
+            lifecycle::TaskMachine::new(store).create("peer", "Other work", "peer-owner")?;
+            store.write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='peer'", [])?;
+                db.execute("INSERT INTO runtime_nodes VALUES ('peer',1,'write','worker-backend-dev','Write','[]','[\"docs/\"]','execution','running','peer-work',NULL)", [])?;
+                db.execute("UPDATE runtime_tasks SET state='REVIEWING' WHERE task_id='t'", [])?;
+                db.execute("UPDATE runtime_nodes SET status='completed' WHERE task_id='t'", [])?;
+                lifecycle::event_tx(db, "t", "NATIVE_PROJECT_WRITTEN", json!({"path":"src/file.rs"}))?;
+                db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'_sprint_revision_review_1','worker-code-reviewer','Review proposal','[]','[\"**\"]','review','pending',NULL,NULL)", [])?;
+                Ok(())
+            })
+        }).unwrap().await.unwrap().unwrap();
+        let step = runtime.host.advance(task, owner).await.unwrap();
+        assert_eq!(step["writeConflict"], false);
+        let item = &step["assignments"][0];
+        assert_eq!(item["node"], "_sprint_revision_review_1");
+        let assignment = item["assignment_ref"].as_str().unwrap().to_owned();
+        runtime.host.executor.write(move |db| {
+            assert_eq!(lifecycle::completion::review_bound_files(db, "t", &assignment)?, Some(vec![]));
+            assert!(lifecycle::completion::review_change_set_limits_tx(db, "t", &assignment)?.is_empty());
+            let unrelated_checkout = EvidenceSnapshot {
+                project_digest: Some("f".repeat(64)),
+                ..Default::default()
+            };
+            assert!(lifecycle::review::preflight_result_tx(
+                db, "t", &assignment, "review-result", &unrelated_checkout,
+            )?.is_none());
+            Ok(())
+        }).unwrap().await.unwrap().unwrap();
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn native_obstacle_review_retry_gets_a_fresh_binding_on_the_same_node() {
         use crate::native_owner_actions::{act, list, Act};
         let (runtime, owner, task, root) = fixture().await;
@@ -158,6 +244,7 @@ mod refill_tests {
         runtime.host.executor.write(|db| {
             db.execute("UPDATE runtime_tasks SET state='REVIEWING',review_cycle=1 WHERE task_id='t'", [])?;
             db.execute("UPDATE runtime_nodes SET status='completed',assignment_ref='old-work',result_json='{}' WHERE node_id='next'", [])?;
+            cortex_core::lifecycle::event_tx(db, "t", "NATIVE_PROJECT_WRITTEN", json!({"path":"src/main.rs"}))?;
             let result = json!({"verdict":"INCOMPLETE","findings":[],"report_ref":"r_aaaaaaaaaaaa",
                 "not_covered":[{"item":"registry evidence","blocker":"missing_access",
                     "reason":"HTTP 403 from https://registry.npmjs.org/"}]});
@@ -2672,12 +2759,14 @@ impl Runtime {
                                 store, &project, &actor(), request["target"].as_str().unwrap_or(""),
                             )?
                         {
-                            if policy.is_some() {
+                            // Only the Automatic continuation policy may start in a worktree, and only
+                            // for a member of a sprint that shares one worktree (checked by Core).
+                            if policy.is_some() && policy != Some(cortex_core::workspace::NativeExecutionPolicy::AutomaticContinuation) {
                                 return Err(CoreError::Refused("native_worktree_unavailable"));
                             }
                             let state = maintenance.as_deref()
                                 .ok_or(CoreError::Refused("native_worktree_unavailable"))?;
-                            return crate::machine::start_worktree(store, state, &project, &actor(), &request, queued.as_ref());
+                            return crate::machine::start_worktree(store, state, &project, &actor(), &request, queued.as_ref(), policy);
                         }
                         let start = || cortex_core::workspace::start_native_input_with_policy(
                             store, &project, &actor(), &request,
@@ -3371,6 +3460,29 @@ a question to the owner (question text and option labels). Write reports, report
         mut error: CoreError,
         cancelled: watch::Receiver<bool>,
     ) {
+        // A store error inside a runtime transition is retried after a short pause
+        // from the task's unchanged state; only a persistent one is recorded, and the
+        // task then keeps its state with a technical blocker (`automatic::stop_tx`).
+        for pause in STORAGE_RETRY_PAUSES {
+            if error.code() != cortex_core::lifecycle::automatic::STORAGE_HELD_REASON {
+                break;
+            }
+            eprintln!("workspace-service: runtime transition failed in the store, retrying ({error:?})");
+            let mut stop = self.stop.subscribe();
+            let mut cancel = cancelled.clone();
+            tokio::select! {
+                _ = tokio::time::sleep(pause) => {}
+                _ = stop.changed() => {}
+                _ = cancel.changed() => {}
+            }
+            if *cancelled.borrow() || *self.stop.borrow() {
+                return;
+            }
+            match self.progress(task, owner, cancelled.clone()).await {
+                Ok(()) => return,
+                Err(next) => error = next,
+            }
+        }
         for round in 0..3 {
             if *cancelled.borrow() || *self.stop.borrow() {
                 return;

@@ -339,8 +339,14 @@ pub async fn run(
                 }
                 "project.config.read" => super::project_config::read(root, config),
                 "project.config.save" => super::project_config_save::save(root, config, params),
+                "automatic.finish" if params["sprintMerge"] == true => {
+                    super::integration::automatic_sprint_merge(root, project, state, params, &mut git).await
+                }
                 "automatic.finish" => {
                     super::integration::automatic(root, project, state, params, &mut git).await
+                }
+                "product.integrate" if params["method"] == "sprint_merge" => {
+                    super::integration::sprint_merge(root, project, state, params, &mut git).await
                 }
                 "product.integrate" => {
                     super::integration::run(root, project, state, params, &mut git).await

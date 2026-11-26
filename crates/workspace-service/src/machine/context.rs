@@ -70,8 +70,18 @@ pub(super) fn owned_checkout(
 }
 
 pub(super) fn set_worktree(record: &mut Value, w: &cortex_core::workspace::worktrees::Worktree) {
+    let shared = record["checkout"]["shared"] == true;
     record["checkout"] = json!({"id":w.id,"kind":"worktree","path":w.path,"branch":w.branch});
     record["baseRevision"] = json!(w.base_sha);
+    if shared {
+        // A member of a shared sprint worktree finishes onto the sprint branch (a commit of
+        // its own files); the sprint's real target is merged once, when the sprint completes.
+        if record["sprintTargetBranch"].is_null() {
+            record["sprintTargetBranch"] = record["targetBranch"].clone();
+        }
+        record["checkout"]["shared"] = json!(true);
+        record["targetBranch"] = json!(w.branch);
+    }
 }
 
 pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) -> Result<Value> {
@@ -368,4 +378,24 @@ pub fn attachments(root: &Path, state: &Path, project: &str, task: &str) -> Resu
     let mut wrapped = json!({"attachments":files});
     super::attachment_files::externalize(state, &mut wrapped)?;
     Ok(wrapped["attachments"].take())
+}
+
+/// Whether a task is a member of a sprint that shares one worktree (saved by the host
+/// at materialization; the product overlay need not carry it).
+pub(super) fn shared_member(root: &Path, project: &str, task: &str) -> Result<bool> {
+    let Some(store) = open(root, OpenMode::LiveReadOnly)? else { return Ok(false); };
+    store
+        .read(|db| {
+            Ok(db
+                .query_row(
+                    "SELECT json_extract(o.options_json,'$.sprintWorktree.sprintId') IS NOT NULL
+                     FROM workspace_tasks t JOIN workspace_task_options o USING(task_id)
+                     WHERE t.project_id=? AND t.task_id=?",
+                    (project, task),
+                    |r| r.get::<_, bool>(0),
+                )
+                .optional()?
+                .unwrap_or(false))
+        })
+        .map_err(core)
 }

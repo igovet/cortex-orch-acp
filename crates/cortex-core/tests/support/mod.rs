@@ -35,7 +35,8 @@ pub fn count(store: &Store, table: &str) -> i64 {
 pub fn with_goal(plan: &serde_json::Value) -> serde_json::Value {
     let mut plan = plan.clone();
     if plan["outcomes"].is_null() {
-        plan["outcomes"] = serde_json::json!([{"id":"goal","statement":"The requested work is done"}]);
+        plan["outcomes"] =
+            serde_json::json!([{"id":"goal","statement":"The requested work is done"}]);
         for task in plan["tasks"].as_array_mut().into_iter().flatten() {
             if task["delivers"].is_null() {
                 task["delivers"] = serde_json::json!(["goal"]);

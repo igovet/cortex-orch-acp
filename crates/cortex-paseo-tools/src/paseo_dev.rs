@@ -185,7 +185,7 @@ fn refused_inside_cortex_sandbox(label: &str) -> bool {
     if let Some(scratch) = cortex_sandbox_var_tmp() {
         eprintln!(
             "{label}: refusing to start a long-lived Paseo process inside a Cortex sandbox (/var/tmp is its scratch {scratch}, deleted \
-             when the command ends, after which every engine jail the daemon launches fails in bwrap); run it through outside_command or a normal terminal"
+             when the command ends, after which the daemon loses its temporary files); run it through outside_command or a normal terminal"
         );
         return true;
     }

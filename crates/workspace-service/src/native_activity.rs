@@ -538,10 +538,9 @@ fn record_tx(
             continue;
         }
         let seq: i64 = db.query_row(
-            "SELECT coalesce(max(seq),-1)+1 FROM (
-            SELECT seq FROM host_transcript WHERE session_id=? UNION ALL
-            SELECT seq FROM host_updates WHERE session_id=?)",
-            (session, session),
+            "SELECT max(coalesce((SELECT max(seq) FROM host_transcript WHERE session_id=?1),-1),
+                coalesce((SELECT max(seq) FROM host_updates WHERE session_id=?1),-1))+1",
+            (session,),
             |r| r.get(0),
         )?;
         match &item {
@@ -580,6 +579,33 @@ fn record_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The next chunk number is two indexed maxima; it equals the former scan of both tables.
+    #[test]
+    fn next_chunk_number_equals_the_whole_session_scan() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(cortex_core::store::schema::SQL).unwrap();
+        let next = |s: &str| -> (i64, i64) {
+            let fast = db.query_row(
+                "SELECT max(coalesce((SELECT max(seq) FROM host_transcript WHERE session_id=?1),-1),
+                    coalesce((SELECT max(seq) FROM host_updates WHERE session_id=?1),-1))+1",
+                (s,), |r| r.get(0)).unwrap();
+            let scan = db.query_row(
+                "SELECT coalesce(max(seq),-1)+1 FROM (SELECT seq FROM host_transcript WHERE session_id=? UNION ALL SELECT seq FROM host_updates WHERE session_id=?)",
+                (s, s), |r| r.get(0)).unwrap();
+            (fast, scan)
+        };
+        db.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        assert_eq!(next("s"), (0, 0));
+        for n in 0..5 {
+            db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,created_at) VALUES ('s',?,'agent_message','x','t')", [n]).unwrap();
+        }
+        assert_eq!(next("s"), (5, 5));
+        db.execute("INSERT INTO host_updates VALUES ('s',9,'{}','t')", []).unwrap();
+        db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,created_at) VALUES ('other',40,'agent_message','x','t')", []).unwrap();
+        assert_eq!(next("s"), (10, 10));
+        assert_eq!(next("other"), (41, 41));
+        assert_eq!(next("none"), (0, 0));
+    }
     use cortex_core::{
         channels::{self, Principal},
         lifecycle::{self, TaskMachine},

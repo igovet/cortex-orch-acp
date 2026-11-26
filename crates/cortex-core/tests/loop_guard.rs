@@ -341,7 +341,7 @@ fn a_different_failure_and_the_owners_steering_start_the_ladder_again() {
         assert_eq!(resume_and_plan(db, &task, 1)["strategy"], "repair");
         // Another failure has its own fingerprint and its own first rung.
         domain::stop_tx(db, &task, "coordinator_no_progress_limit")?;
-        assert_eq!(resume_and_plan(db, &task, 2)["strategy"], "repair");
+        assert_eq!(resume_and_plan(db, &task, 2)["strategy"], "consult");
         verification_failed(db, &task, 3);
         domain::stop_tx(db, &task, "verification_failed")?;
         assert_eq!(resume_and_plan(db, &task, 3)["strategy"], "escalate_route");

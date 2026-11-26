@@ -49,7 +49,10 @@ branch guess. Native engine sessions use a read-only checkout view. Scoped file
 tools are the write path; they exclude sibling checkouts, the main project folder,
 private stores and Git control paths. Brokered commands and verification use a
 read-only checkout and Git metadata, private writable scratch and no network.
-They refuse an outside cwd, privilege escalation and unisolated host reroutes.
+They refuse an outside cwd and privilege escalation. Reading is never confined to
+the checkout: every role reads any host path with `project_read` (absolute path),
+the main checkout is mounted read-only into commands, and a writing worker may use
+`outside_command`; the sealed live `.cortex` store files stay refused. Writes stay in the checkout (`outside_write` is refused).
 External MCP and OpenCode routes are unavailable in this mode; an unsupported
 view refuses rather than running unconfined. This is checkout separation and
 constrained effects, not hostile-code isolation. In particular, the engine view

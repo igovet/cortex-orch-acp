@@ -367,3 +367,68 @@ fn a_review_cycle_continuation_renews_the_plan_budget() {
         assert_eq!(cycle, if resumed { 1 } else { 4 }, "resumed: {resumed}");
     }
 }
+
+#[test]
+fn plan_re_review_is_a_delta_and_the_plan_proceeds_after_two_change_rounds() {
+    use cortex_core::lifecycle::review;
+    let (_p, s, task, _) = start(Some(NativeExecutionPolicy::SprintPlanning));
+    let digest = "a".repeat(64);
+    for round in 1..=3 {
+        let plan = json!([{"key":"t1","title":"First","description":format!("Do it v{round}"),"dependsOn":[]}]);
+        let args = json!({"tasks":plan,"request_key":format!("p{round}")});
+        s.write(|db| sprint_planning::submit_tx(db, &task, "c", &format!("p{round}"), &args, &plan))
+            .unwrap();
+        let node = format!("_plan_review_{round}");
+        let objective: String = s
+            .read(|db| Ok(db.query_row("SELECT objective FROM runtime_nodes WHERE task_id=? AND node_id=?", (&task, &node), |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(objective.contains("DELTA re-review"), round > 1, "round {round}");
+        reviewed(
+            &s,
+            &task,
+            &node,
+            json!({"verdict":"REQUEST_CHANGES","report_ref":"r_aaaaaaaaaaaa",
+            "project_digest":digest,"findings":[{"node":"t1","files":[],"fix":format!("New finding {round}")}]}),
+        );
+        s.write(|db| review::advance_tx(db, &task)).unwrap();
+        if round < 3 {
+            assert_eq!(state(&s, &task), "RECOVERING", "round {round}");
+            s.write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id=?", [&task])?;
+                Ok(())
+            })
+            .unwrap();
+        }
+    }
+    // The third review's findings are notes: the plan proceeds to verification.
+    assert_eq!(state(&s, &task), "VERIFYING");
+    let notes: i64 = s
+        .read(|db| Ok(db.query_row("SELECT count(*) FROM runtime_events WHERE task_id=? AND type='SPRINT_PLAN_REVIEW_NOTES'", [&task], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(notes, 1);
+}
+
+#[test]
+fn a_plan_review_never_waits_for_another_tasks_writer() {
+    use cortex_core::{lifecycle::TaskMachine, scheduler::policy};
+    let (_p, s, task, _) = start(Some(NativeExecutionPolicy::SprintPlanning));
+    let first = json!([{"key":"t1","title":"First","description":"Do it","dependsOn":[]}]);
+    let args = json!({"tasks":first,"request_key":"p1"});
+    s.write(|db| sprint_planning::submit_tx(db, &task, "c", "p1", &args, &first))
+        .unwrap();
+    assert_eq!(state(&s, &task), "REVIEWING");
+    TaskMachine::new(&s).create("u", "other work", "owner").unwrap();
+    s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='u'", [])?;
+        db.execute(
+            "INSERT INTO runtime_nodes(task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status)
+             VALUES ('u',1,'w','worker-backend-dev','o','[]','[\"src/**\"]','execution','running')",
+            [],
+        )?;
+        assert!(policy::write_conflict_tx(db, &task)?.is_none());
+        let obstacles = policy::claim_obstacles_tx(db, &task, 0.0)?;
+        assert_eq!(obstacles[0]["reason"], "claimable");
+        Ok(())
+    })
+    .unwrap();
+}

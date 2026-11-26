@@ -111,7 +111,7 @@ fn worker(db: &rusqlite::Transaction<'_>, task: &str) -> CoreResult<()> {
         "UPDATE runtime_tasks SET state='EXECUTING', revision=1 WHERE task_id=?",
         [task],
     )?;
-    db.execute("INSERT INTO runtime_nodes VALUES (?,1,'writer','worker-backend-dev','Work','[]','[\"source.txt\"]','execution','running','fixture-assignment',NULL)", [task])?;
+    db.execute("INSERT INTO runtime_nodes VALUES (?,1,'writer','worker-backend-dev','Work','[]','[\"source.txt\",\"blob.bin\",\"bad.bin\",\"linked.txt\"]','execution','running','fixture-assignment',NULL)", [task])?;
     Ok(())
 }
 
@@ -166,16 +166,48 @@ fn worktree_file_effects_require_checkout_bound_coverage_and_receipts() {
             true,
         )
     };
-    let edit = json!({"path":"source.txt","edits":[{"old_string":"committed","new_string":"edited worktree"}]});
-    assert_eq!(
-        invoke("project_edit", edit.clone()).unwrap()["structuredContent"]["error"],
-        "gateway_read_required"
-    );
-    assert!(invoke(
-        "project_read",
-        json!({"path":key.root().join("source.txt")})
+    // Absolute paths are host reads, even when the contents match the bound
+    // checkout. Neither the main checkout nor a sibling read grants coverage.
+    for checkout in [key.root(), sibling.as_path()] {
+        let read = invoke(
+            "project_read",
+            json!({"path":checkout.join("source.txt"),"line_numbers":false}),
+        )
+        .unwrap();
+        assert_eq!(read["structuredContent"]["host"], true);
+        assert_eq!(read["structuredContent"]["content"], "committed\n");
+    }
+    let denied = invoke(
+        "project_write",
+        json!({
+            "path":"source.txt",
+            "content":"not authorized by a host read",
+            "expected_sha256":format!("{:x}", Sha256::digest(b"committed")),
+        }),
     )
-    .is_err());
+    .unwrap();
+    assert_eq!(denied["isError"], true);
+    assert_eq!(
+        denied["structuredContent"]["error"],
+        "gateway_complete_read_required"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("source.txt")).unwrap(),
+        "committed"
+    );
+
+    let edit = json!({"path":"source.txt","edits":[{"old_string":"committed","new_string":"edited worktree"}]});
+    // A failed match returns the current page inline and that read is bound to this checkout.
+    let miss = invoke(
+        "project_edit",
+        json!({"path":"source.txt","edits":[{"old_string":"absent text","new_string":"x"}]}),
+    )
+    .unwrap();
+    assert_eq!(miss["structuredContent"]["code"], "gateway_edit_not_found");
+    assert_eq!(
+        miss["structuredContent"]["current_read"]["sha256"],
+        format!("{:x}", Sha256::digest(b"committed"))
+    );
     for path in [
         ".git",
         ".cortex/private",
@@ -187,7 +219,6 @@ fn worktree_file_effects_require_checkout_bound_coverage_and_receipts() {
             "{path}"
         );
     }
-    assert!(invoke("project_read", json!({"path":sibling.join("source.txt")})).is_err());
     assert_eq!(
         invoke(
             "project_read",
@@ -236,52 +267,122 @@ fn worktree_file_effects_require_checkout_bound_coverage_and_receipts() {
         fs::read_to_string(sibling.join("source.txt")).unwrap(),
         "committed"
     );
+
+    // Idempotent edit: an old_string equal to new_string that is present succeeds
+    // without writing.
+    let same = invoke(
+        "project_edit",
+        json!({"path":"source.txt","edits":[{"old_string":"edited","new_string":"edited"}]}),
+    )
+    .unwrap();
+    assert_eq!(same["structuredContent"]["outcome"], "unchanged");
+    assert_eq!(same["isError"], false);
+    // A stale read does not block an edit whose old_string still matches uniquely.
+    fs::write(root.join("source.txt"), "edited worktree, changed outside").unwrap();
+    let applied = invoke(
+        "project_edit",
+        json!({"path":"source.txt","edits":[{"old_string":"worktree","new_string":"tree"}]}),
+    )
+    .unwrap();
+    assert_eq!(applied["structuredContent"]["outcome"], "written");
+    assert_eq!(
+        fs::read_to_string(root.join("source.txt")).unwrap(),
+        "edited tree, changed outside"
+    );
+    // Binary write: base64 of the exact bytes, same receipts as a text write.
+    use base64::Engine as _;
+    let blob = [0u8, 1, 2, 255, 254, 0];
+    let encoded = base64::engine::general_purpose::STANDARD.encode(blob);
+    let created = invoke(
+        "project_write",
+        json!({"path":"blob.bin","content":encoded,"encoding":"base64","expected_sha256":"absent","request_key":"bin"}),
+    )
+    .unwrap();
+    assert_eq!(created["structuredContent"]["outcome"], "written");
+    assert_eq!(created["structuredContent"]["encoding"], "base64");
+    assert_eq!(created["structuredContent"]["size_bytes"], blob.len());
+    assert_eq!(
+        created["structuredContent"]["sha256"],
+        format!("{:x}", Sha256::digest(blob))
+    );
+    assert_eq!(fs::read(root.join("blob.bin")).unwrap(), blob);
+    let receipt: Value = store
+        .read(|db| {
+            let value: String = db.query_row(
+                "SELECT result_json FROM runtime_requests WHERE task_id=? AND request_key='bin'",
+                [&task],
+                |r| r.get(0),
+            )?;
+            Ok(serde_json::from_str(&value)?)
+        })
+        .unwrap();
+    assert_eq!(receipt["complete"], true);
+    assert_eq!(receipt["reply"]["structuredContent"]["encoding"], "base64");
+    // Replaying the keyed write returns the retained receipt and writes nothing.
+    let replay = invoke(
+        "project_write",
+        json!({"path":"blob.bin","content":encoded,"encoding":"base64","expected_sha256":"absent","request_key":"bin"}),
+    )
+    .unwrap();
+    assert_eq!(replay["structuredContent"]["outcome"], "written");
+    // Overwriting a binary file needs its identity read, then replaces the bytes.
+    let read = invoke("project_read", json!({"path":"blob.bin"})).unwrap();
+    assert_eq!(read["structuredContent"]["binary"], true);
+    let sha = read["structuredContent"]["sha256"].clone();
+    let replaced = invoke(
+        "project_write",
+        json!({"path":"blob.bin","content":base64::engine::general_purpose::STANDARD.encode([9u8, 0, 8]),"encoding":"base64","expected_sha256":sha}),
+    )
+    .unwrap();
+    assert_eq!(replaced["structuredContent"]["outcome"], "written");
+    assert_eq!(fs::read(root.join("blob.bin")).unwrap(), [9u8, 0, 8]);
+    // Malformed base64 changes nothing.
+    let bad = invoke(
+        "project_write",
+        json!({"path":"bad.bin","content":"***","encoding":"base64","expected_sha256":"absent"}),
+    )
+    .unwrap();
+    assert_eq!(bad["isError"], true);
+    assert!(!root.join("bad.bin").exists());
+    // A hard-linked file reads, and a write replaces the directory entry without
+    // touching the other link's inode.
+    let external = f.0.join("external.txt");
+    fs::write(&external, "shared").unwrap();
+    fs::hard_link(&external, root.join("linked.txt")).unwrap();
+    let linked = invoke("project_read", json!({"path":"linked.txt"})).unwrap();
+    assert_eq!(linked["isError"], false);
+    assert_eq!(
+        linked["structuredContent"]["sha256"],
+        format!("{:x}", Sha256::digest(b"shared"))
+    );
+    let edited = invoke(
+        "project_edit",
+        json!({"path":"linked.txt","edits":[{"old_string":"shared","new_string":"private"}]}),
+    )
+    .unwrap();
+    assert_eq!(edited["structuredContent"]["outcome"], "written");
+    assert_eq!(fs::read_to_string(root.join("linked.txt")).unwrap(), "private");
+    assert_eq!(fs::read_to_string(&external).unwrap(), "shared");
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(fs::metadata(root.join("linked.txt")).unwrap().nlink(), 1);
 }
 
 fn have_namespace() -> bool {
-    let available = std::process::Command::new("/usr/bin/bwrap")
-        .args([
-            "--unshare-pid",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--symlink",
-            "usr/bin",
-            "/bin",
-            "--symlink",
-            "usr/lib",
-            "/lib",
-            "--symlink",
-            "usr/lib64",
-            "/lib64",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--",
-            "/usr/bin/true",
-        ])
-        .env_clear()
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
+    let available = crate::native_sandbox::abi() >= 1;
     if std::env::var_os("CORTEX_REQUIRE_NAMESPACE_FIXTURES").is_some() {
-        assert!(available, "worktree fixtures require Bubblewrap namespaces");
+        assert!(available, "worktree fixtures require Landlock");
     }
     available
 }
 
-// Return the observed process cwd only if it matches ACP session/new cwd. The
-// linked route also checks that the accounts/engine can start without granting
-// write authority over Git inputs or access to adjacent checkouts and stores.
+// Return the observed process cwd only if it matches ACP session/new cwd. A linked
+// route starts the engine in its worktree; like every native engine it is not
+// confined (owner decision), so it sees the main checkout too.
 const PEER: &str = r#"
 cwd=$(pwd -P)
 if [ "$1" = linked ]; then
     logical=${2#logical=}
-    sibling=${3#sibling=}
-    [ ! -e "$logical/source.txt" ] && [ ! -e "$sibling/source.txt" ] || exit 21
-    [ ! -e "$logical/.cortex" ] && [ ! -e "$logical/.cortex-dev" ] || exit 22
-    ! (printf 'bad' > source.txt) && ! (printf 'bad' > .git) || exit 23
+    [ -e "$logical/source.txt" ] || exit 21
 fi
 options='[{"id":"model","currentValue":"fake","options":[{"value":"fake"}]},{"id":"mode","currentValue":"default","options":[{"value":"default"}]}]'
 while IFS= read -r frame; do
@@ -428,8 +529,9 @@ fn worktree_native_cwd_and_command_mounts_with_real_namespace() {
             r#"
             [ "$(pwd -P)" = "$1" ]
             [ "$(cat ../source.txt)" = committed ]
-            [ ! -e "$2/source.txt" ] && [ ! -e "$3/source.txt" ]
-            [ ! -e "$2/.cortex" ] && [ ! -e "$2/.cortex-dev" ]
+            [ -f "$2/source.txt" ] && [ -f "$3/source.txt" ] && [ -r /etc/hostname ] && ! (printf bad > "$3/source.txt")
+            ! (printf bad > "$2/source.txt")
+            for f in "$2"/.cortex/* "$2"/.cortex-dev/*; do [ -f "$f" ] || continue; ! cat "$f" >/dev/null 2>&1 || exit 7; done
             ! (printf bad > ../source.txt) && ! (printf bad > ../.git)
             [ "$(git -C .. rev-parse --show-toplevel)" = "$4" ]
             printf good > "$TMPDIR/cortex-check-output"

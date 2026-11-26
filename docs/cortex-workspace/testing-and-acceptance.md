@@ -14,7 +14,7 @@ The no-paid `worktree-bound-probe` case in `crates/workspace-service/tests/nativ
 uses real disposable Git checkouts and a fake ACP peer. It exercises overlapping
 writes to the same relative path in two worktrees, checkout-specific Changes,
 Code, review and verification, and clean removal versus dirty retention after
-squash. Run it on a host supporting the real Bubblewrap namespaces:
+squash. Run it on a host with Landlock enabled:
 
 ```bash
 umask 022
@@ -43,7 +43,7 @@ owner's Ubuntu session, GPU or a physical Android device.
 
 Run `bash scripts/qualify-dev-deb.sh smoke --archive newest` on the exact candidate
 before any separately authorized desktop scenario. Both smoke and drive run a fixed
-no-task planning preflight and read-only Bubblewrap command on a disposable Git fixture
+no-task planning preflight and read-only Landlock command on a disposable Git fixture
 inside the extracted service's own startup. A missing, incomplete, truncated, nonzero
 or unexpected verification receipt fails the run. The launcher keeps the service's
 fresh verifier reference in `nested-verifier.out`; a probe on the bare host is not

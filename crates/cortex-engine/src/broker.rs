@@ -342,8 +342,7 @@ impl Broker {
         &self.endpoint
     }
     /// The broker's private directory: its socket, relay token and the
-    /// session's model instructions. A confined engine sees it, read-only, at
-    /// [`VIEW_DIRECTORY`]`/<name>`.
+    /// session's model instructions.
     pub fn directory(&self) -> &Path {
         &self.directory
     }
@@ -367,45 +366,11 @@ impl Drop for Broker {
         let _ = fs::remove_dir_all(&self.directory);
     }
 }
-/// Where a confined engine's filesystem view shows each of its session's broker
-/// directories (read-only, by their own name). Only such a view creates it: the
-/// host's `/run` is root-owned and has no such directory.
-pub const VIEW_DIRECTORY: &str = "/run/cortex/mcp";
-/// A relay endpoint names the broker through the service's pinned
-/// `/proc/<pid>/fd/<fd>/cortex-mcp-<token>/broker.sock` path. Inside a confined
-/// engine (its own PID namespace and procfs) that path names nothing, or another
-/// process: the same broker directory is reached at [`VIEW_DIRECTORY`] instead.
-fn view_endpoint(endpoint: &Path) -> Option<PathBuf> {
-    use std::path::Component;
-    let parts: Vec<Component> = endpoint.components().collect();
-    let [Component::RootDir, Component::Normal(proc_), Component::Normal(pid), Component::Normal(fd), Component::Normal(number), Component::Normal(name), Component::Normal(socket)] =
-        parts.as_slice()
-    else {
-        return None;
-    };
-    let digits = |s: &std::ffi::OsStr| {
-        !s.is_empty() && s.as_encoded_bytes().iter().all(u8::is_ascii_digit)
-    };
-    if *proc_ != "proc" || *fd != "fd" || *socket != "broker.sock" || !digits(pid) || !digits(number)
-    {
-        return None;
-    }
-    let token = name.to_str()?.strip_prefix("cortex-mcp-")?;
-    if token.len() != 24 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    let directory = Path::new(VIEW_DIRECTORY).join(name);
-    fs::symlink_metadata(&directory)
-        .is_ok_and(|m| m.is_dir())
-        .then(|| directory.join("broker.sock"))
-}
 /// Secret-free executable adapter: reads the owner-only, no-follow token file.
 pub async fn relay(endpoint: &Path) -> Result<()> {
     if !endpoint.is_absolute() {
         return Err(Error::Invalid);
     }
-    let mapped = view_endpoint(endpoint);
-    let endpoint = mapped.as_deref().unwrap_or(endpoint);
     let dir = endpoint.parent().ok_or(Error::Invalid)?;
     let info = fs::symlink_metadata(dir)?;
     if !info.is_dir() || info.uid() != unsafe { libc::geteuid() } || info.mode() & 0o077 != 0 {
@@ -438,27 +403,4 @@ pub async fn relay(endpoint: &Path) -> Result<()> {
         result=tokio::io::copy(&mut r,&mut stdout)=>{result?;},
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn only_a_shown_broker_directory_replaces_the_service_endpoint() {
-        let endpoint =
-            Path::new("/proc/1234/fd/7/cortex-mcp-0123456789abcdef01234567/broker.sock");
-        // The host has no view directory: the service path stays in use.
-        if !Path::new(VIEW_DIRECTORY).exists() {
-            assert_eq!(view_endpoint(endpoint), None);
-        }
-        for other in [
-            "/proc/1234/fd/7/cortex-mcp-0123/broker.sock",
-            "/proc/self/fd/7/cortex-mcp-0123456789abcdef01234567/broker.sock",
-            "/proc/1234/fd/7/cortex-mcp-0123456789abcdef01234567/other.sock",
-            "/tmp/cortex-mcp-0123456789abcdef01234567/broker.sock",
-            "/proc/1234/fd/7/../cortex-mcp-0123456789abcdef01234567/broker.sock",
-        ] {
-            assert_eq!(view_endpoint(Path::new(other)), None, "{other}");
-        }
-    }
 }

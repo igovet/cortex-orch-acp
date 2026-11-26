@@ -1124,6 +1124,14 @@ fn recover_task_tx(
     archive_fenced: bool,
 ) -> CoreResult<Option<(String, OwnerEpoch, TaskState)>> {
     let state: TaskState = state.parse().map_err(CoreError::Refused)?;
+    // A node result that is not JSON (an empty string an older build stored) makes
+    // every `json_extract` over the task's nodes fail with "malformed JSON", which
+    // surfaced as `storage_unavailable` and failed this recovery on every start. It
+    // carries no report, so it becomes the empty object and the evidence reads again.
+    db.execute(
+        "UPDATE runtime_nodes SET result_json='{}' WHERE task_id=? AND result_json IS NOT NULL AND NOT json_valid(result_json)",
+        [task],
+    )?;
     let owner = if legacy {
         let adopted = ownership::acquire_tx(db, &task, "native-recovery", Some(epoch))?;
         // Preserve creation provenance; ownership transfer is a separate event.
@@ -1649,12 +1657,17 @@ impl Runtime {
                         if continued.unwrap_or(false) {
                             return Ok(());
                         }
-                        lifecycle::event_tx(
+                        // Recorded once: a restart that fails the same way and finds the
+                        // task already held (any reason) adds neither an event nor a state change.
+                        recovery_required_once_tx(
                             db,
                             task,
-                            "NATIVE_RECOVERY_REQUIRED",
                             json!({"reason":"native_recovery_failed","code":code,"replayed":false}),
                         )?;
+                        let (state, _) = domain::task_tx(db, task)?;
+                        if state == TaskState::Recovering && held.is_some() {
+                            return Ok(());
+                        }
                         domain::native_recovery_required_tx(db, task, "native_recovery_failed")
                     });
                 }
@@ -2265,6 +2278,35 @@ mod restart_tests {
                 )?)
             })
             .unwrap()
+    }
+    /// Owner store 2026-11-26 (t_1a47c7660a94): a completed node with an empty
+    /// `result_json` made recovery fail with `storage_unavailable` on every start.
+    #[test]
+    fn a_node_with_a_malformed_result_does_not_fail_recovery() {
+        let (root, store) = empty_store();
+        store
+            .write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='RECOVERING',revision=4,blocker='native_outside_outcome_unknown'", [])?;
+                db.execute("INSERT INTO runtime_nodes(task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status,assignment_ref,result_json)
+                    VALUES ('t',4,'n','worker-backend-dev','work','[]','[\"src\"]','execution','completed','a1','')",[])?;
+                db.execute("INSERT INTO runtime_requests VALUES ('t','w1','c1','outside_write','digest','{\"complete\":false}')",[])?;
+                Ok(())
+            })
+            .unwrap();
+        for _ in 0..2 {
+            store
+                .write(|db| {
+                    recover_task_tx(db, "t", "RECOVERING", "owner".into(), 1, false, false, Some("boot"), false)
+                })
+                .unwrap();
+        }
+        assert!(count(&store, "NATIVE_RECOVERY_REQUIRED") <= 1);
+        let valid: bool = store
+            .read(|db| Ok(db.query_row("SELECT json_valid(result_json) FROM runtime_nodes WHERE node_id='n'", [], |r| r.get(0))?))
+            .unwrap();
+        assert!(valid);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
     /// Owner stores 2026-11-21 13:54 (cortex 323970-323984, Youtube 49909): a restart
     /// turned every interrupted task into a ladder rung (`repair`) and a new plan. It

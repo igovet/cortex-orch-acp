@@ -677,6 +677,7 @@ export function WorkerPane(props: { model: Accessor<SessionModel>; pick: string;
           </Show></div>}>
           <div class="res-sec"><div class="res-h">Checks</div><For each={check().checks}>{c => <div class="chk"><I n={CHECK_ICON[c.outcome].icon} s={14} class={CHECK_ICON[c.outcome].tone} /><code>{c.name}</code><span class="src">{checkSource(c, ws.t("unsourcedCheck"))}</span></div>}</For></div>
         </Show>
+        <Show when={(session().verificationCommands ?? []).length > 0}><div class="res-sec"><div class="res-h">Verification commands</div><For each={session().verificationCommands}>{c => <div class="chk"><I n={c.command?.state === "passed" ? "check" : c.command?.state === "running" ? "circle" : "x"} s={14} /><code>{c.text}</code><span class="src">{c.command?.state === "failed" ? `Failed, exit ${c.command.exit}` : c.command?.state === "passed" ? "Passed" : c.command?.state}</span></div>}</For></div></Show>
       </div>
     </>;
     // Until the task's first facts read is in, a worker missing from them is not yet known, not absent.

@@ -62,7 +62,7 @@ task's own changes.
   entry differs are recorded on the command's `NATIVE_COMMAND_FINISHED`
   observation (`changed_paths`, `changed_paths_complete`,
   `crates/workspace-service/src/native_change_set.rs`). A read-only `command_run`,
-  `project_git` (status or diff only), a runtime verification run (deliverable
+  `project_git` (read-only status, diff and history), a runtime verification run (deliverable
   files mounted read-only) and a payload that provably never started record an
   empty, complete list without listing;
 - it changed during a turn of a writing worker whose engine could change files
@@ -530,7 +530,7 @@ review assignment the next result is recorded, and an approval carries the
 `unverified` runtime check `Changed files the reviewer did not read` naming every
 required file still unread, disclosed under Not verified (owner store 2026-11-21:
 one review was refused five times for 32 small generated SVG files and the task
-waited on the owner). The count belongs to the review lineage and the file's exact
+waited on the owner). A coverage refusal also delivers: its `inline_reads` holds the current pages of the missing changed files (continuing after the lines this channel already read, at most about 64 KB per refusal, never a protected path or a file outside the reviewer's read scope), read on the reviewer's channel and recorded exactly as the same `project_read` would be, so the next identical submission passes; a `review_predecessor_reports_required` refusal delivers the required reports through their last page the same way (the `REPORT_PAGE_READ` receipt). A `read_batch` page is cut to fit the batch's inline item bound so a batched read always records its coverage. The count belongs to the review lineage and the file's exact
 bytes, not to one assignment: refusals of every review assignment of the task since
 it was last reopened (reassignments, later review cycles and later plan revisions
 alike) count together per path and `current_sha256`, so once a file's bytes were
@@ -682,7 +682,7 @@ Implemented in `crates/cortex-core/src/lifecycle/review.rs` and the `workspace-s
 
 ### Coordinator return budget
 
-A failed worker (`worker_failed`), a worker the owner stopped when nothing else can run (`worker_stopped_by_owner`), a lost worker whose retries are used up, or a review that requests changes without findings on a plan with several implementers (`review_changes_without_findings`) returns the task to the coordinator instead of stopping. The runtime records `RETURNED_TO_COORDINATOR`, revokes the worker channels, cancels the live assignments and moves through RECOVERING to PLANNING. `MAX_COORDINATOR_RETURNS` bounds these returns. The count covers `RETURNED_TO_COORDINATOR` events after the task's latest `PLAN_ACCEPTED`, `USER_ANSWER_RECEIVED` or `USER_STEERING` event. An accepted plan or explicit user guidance therefore renews the allowance, and failures in earlier plan revisions do not exhaust later work. A second bound, `MAX_AUTONOMOUS_COORDINATOR_RETURNS` (6), counts returns since the user last spoke (`USER_STEERING`, `USER_ANSWER_RECEIVED` or `WORKER_USER_ANSWER_RECEIVED`), across plan revisions. A new plan alone does not renew it, so a coordinator that answers every return with another plan of failing work stops for the user instead of looping. The boundaries are event ids, so existing stores need no migration.
+A failed worker (`worker_failed`), a worker the owner stopped when nothing else can run (`worker_stopped_by_owner`), a lost worker whose retries are used up, or a review that requests changes without findings on a plan with several implementers (`review_changes_without_findings`) returns the task to the coordinator instead of stopping. The runtime records `RETURNED_TO_COORDINATOR`, revokes the worker channels, cancels the live assignments and moves through RECOVERING to PLANNING. `MAX_COORDINATOR_RETURNS` bounds these returns. The count covers `RETURNED_TO_COORDINATOR` events after the task's latest `PLAN_ACCEPTED`, `USER_ANSWER_RECEIVED` or `USER_STEERING` event. An accepted plan or explicit user guidance therefore renews the allowance, and failures in earlier plan revisions do not exhaust later work. A second bound, `MAX_AUTONOMOUS_COORDINATOR_RETURNS` (6), counts returns since the user last spoke (`USER_STEERING`, `USER_ANSWER_RECEIVED` or `WORKER_USER_ANSWER_RECEIVED`), across plan revisions. A new plan alone does not renew it, so a coordinator that answers every return with another plan of failing work stops for the user instead of looping. The boundaries are event ids, so existing stores need no migration. A sprint plan review that requests changes returns the plan with reason `plan_review_requested_changes`. Completion of a planning task weighs only the newest plan review; earlier, superseded plan reviews and their checks do not count, and a plan review records no execution-route independence warning.
 
 When either allowance is exhausted, the return is refused. A worker failure or an exhausted lost-worker retry then becomes a continuation on the strategy ladder (no-stop policy): the next attempt escalates its route, consults, or hands the work to another role; the owner is not asked. A review without findings instead falls through to the conservative fallback fixes described under [targeted review fixes](#targeted-review-fixes).
 
@@ -913,7 +913,7 @@ request key reusable. Its `missing` items name each open check by its name and
 text or output: `no_passing_rerun` (no later run of the same argv, cwd and
 profile), `later_run_unresolved` or `later_run_failed` (the latest rerun has no
 complete result, or failed too), `rerun_not_cited` (the latest rerun passed but no
-check cites it), `rerun_named_differently`, `rerun_<gap>` (the cited passing rerun
+check cites it and it did not observe the exact submitted checkout; a rerun the runtime observed passing on the exact checkout closes the failure itself, recorded `flaky: true`, `closed_as: "runtime_observed_rerun"`, never as a passed check). A passed check citing the exact rerun (same argv, cwd and checkout) closes the failure whatever its name, and a later command run with no recorded identity (killed, no receipt) does not block that closure when a recorded passing rerun observed the exact checkout. A failed run an earlier submission cited and this one omits is carried over by the runtime as a failed check (closed by the exact rerun when one exists) instead of being refused. A failed run whose own recorded output names project files that all were written by other assignments or tasks, none in this assignment's work set, is attributed by the runtime (`attributed_to: "other_work"`, `foreign_failure` with the named paths and writers; `worker_checks::attribute_foreign`): it stays a failed run in the record, is disclosed, and no longer blocks the result or completion, but it is never a pass of this assignment's own check. Evidence the runtime cannot establish (no recorded work set, output not inline and complete, a named file nobody else wrote) attributes nothing. Neither marker can be supplied by a model. The other open-check items: `rerun_named_differently`, `rerun_<gap>` (the cited passing rerun
 does not verify, for example `rerun_revision_mismatch` when it observed neither the
 submitted checkout nor an unchanged work set, with that remedy rather than advice to
 rerun what already passed), `later_run_unrecorded`, `nonzero_exit` and
@@ -1284,7 +1284,7 @@ Engine processes run in the engine jail, whose launch-time writable project
 mount for a writing worker can be broader than its runtime-declared assignment
 scope; native subagents are disabled. The runtime gateway checks current
 channel authority and declared assignment scope before each operation,
-contains commands and external MCP servers with bubblewrap, and retains exact
+contains Guarded/Development commands and external MCP servers with Landlock, and retains exact
 receipts. Worker access requests extend declared writer reservations only, not
 the OS jail. See [permissions and containment](../permissions-and-containment/index.md).
 

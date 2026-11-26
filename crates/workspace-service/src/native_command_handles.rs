@@ -51,18 +51,46 @@ fn directory(store: &Store, task: &str) -> PathBuf {
     store.key().directory().join(task).join(".native-output")
 }
 
+/// Whether a lease-backed command keeps its authority after one check: a definite
+/// refusal revokes it; an unanswered check (busy store) holds for a bounded grace.
+fn lease_valid(outcome: &Result<CoreResult<()>, tokio::time::error::Elapsed>, since_confirmed: Duration) -> bool {
+    match outcome {
+        Ok(result) => result.is_ok(),
+        Err(_) => since_confirmed < LEASE_GRACE,
+    }
+}
+/// How long an unanswered (not refused) authority check may keep a lease alive.
+const LEASE_GRACE: Duration = Duration::from_secs(20);
 /// Only this evidence permits automatic host routing after a sandbox attempt.
 /// It is written after an explicit launcher failure on the supervisor's private
 /// control pipe, before the final `go`. Payload stdout/stderr never reach it.
 pub(super) const PRESTART_LAUNCHER_FAILURE: &str = "supervisor_launcher_failed_before_release";
 
+/// Automatic launch attempts after the first, for a preparation that failed before the
+/// payload was released.
+const LAUNCH_RETRIES: u32 = 2;
+/// Transient preparation failures that provably precede the payload release: a failed
+/// supervisor spawn or a preparation I/O error (a permission refusal is not transient).
+fn prestart_retryable(cause: Option<&str>) -> bool {
+    cause.is_some_and(|c| {
+        c == "supervisor_spawn_failed"
+            // A concurrent writer touched a hard-linked file during detachment: the next
+            // preparation rescans the checkout and detaches the current versions.
+            || matches!(
+                c,
+                "sandbox_unavailable:command_hardlink_changed"
+                    | "sandbox_unavailable:command_hardlink_materialization_timeout"
+            )
+            || (c.starts_with("preparation_io_") && c != "preparation_io_PermissionDenied")
+    })
+}
 fn launcher_failure(cause: Option<&str>) -> bool {
     matches!(
         cause,
         Some(
-            "sandbox_unavailable:bubblewrap_missing"
-                | "sandbox_unavailable:bubblewrap_launch_failed"
-                | "sandbox_unavailable:namespace_or_mount_setup_failed"
+            "sandbox_unavailable:landlock_unavailable"
+                | "sandbox_unavailable:landlock_launch_failed"
+                | "sandbox_unavailable:landlock_probe_failed"
                 | "sandbox_unavailable:setup_timeout"
         )
     )
@@ -136,7 +164,9 @@ pub(super) fn cortex_store_hint(mode: &str, argv: &Value, output: &[&[u8]]) -> O
         return None;
     }
     let has = |chunk: &[u8], needle: &[u8]| chunk.windows(needle.len()).any(|w| w == needle);
-    let read_only = output.iter().any(|c| has(c, b"Read-only file system"));
+    let read_only = output
+        .iter()
+        .any(|c| has(c, b"Read-only file system") || has(c, b"Permission denied"));
     let named = argv.to_string().contains(".cortex")
         || output.iter().any(|c| has(c, b".cortex"));
     (read_only && named).then(|| json!({
@@ -145,8 +175,8 @@ pub(super) fn cortex_store_hint(mode: &str, argv: &Value, output: &[&[u8]]) -> O
         "next": "Use project_write or project_edit for .cortex files; the runtime will ask the owner. Do not retry the shell write.",
     }))
 }
-/// A program the command (or a script it ran) could not find: bubblewrap's own
-/// `execvp NAME: No such file or directory`, or exit 127 with a shell's or `env`'s
+/// A program the command (or a script it ran) could not find: the supervisor's
+/// `cortex: execvp NAME: No such file or directory`, or exit 127 with a shell's or `env`'s
 /// "not found". The program is named only when it is a plain short name.
 pub(super) fn missing_program_hint(exit_code: Option<i64>, output: &[&[u8]]) -> Option<Value> {
     let text: String = output
@@ -166,7 +196,7 @@ pub(super) fn missing_program_hint(exit_code: Option<i64>, output: &[&[u8]]) -> 
     };
     let execvp = text.lines().find_map(|line| {
         line.trim()
-            .strip_prefix("bwrap: execvp ")?
+            .strip_prefix("cortex: execvp ")?
             .strip_suffix(": No such file or directory")
             .map(|name| plain(name))
     });
@@ -315,6 +345,8 @@ impl ScopedAuthority {
     }
 }
 
+/// How often a running command's authority is confirmed (the supervisor lease is 2 s).
+const AUTHORITY_POLL: Duration = Duration::from_millis(250);
 async fn authorize(
     ex: &StoreExecutor,
     c: &Credential,
@@ -332,7 +364,12 @@ async fn authorize(
     let scoped = scoped.cloned();
     recv(ex.write(move |db| {
         let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
-        if access::current(db, &i.task)? != mode || native_commands::denials(db, &i.task)? != denied
+        // A running read-only command cannot write, so owner write denials and
+        // access-mode changes made for other work never revoke it; only the
+        // channel authentication above and a scoped authority do.
+        let unrelated = readonly && !preparation;
+        if !unrelated
+            && (access::current(db, &i.task)? != mode || native_commands::denials(db, &i.task)? != denied)
         {
             return Err(CoreError::Refused("access_changed"));
         }
@@ -483,10 +520,29 @@ pub(super) async fn execute(
     scoped: Option<ScopedAuthority>,
     operation: String,
     checkout: Option<Value>,
+    launch: crate::native_change_set::Launch,
 ) -> CoreResult<Value> {
     let status_file = format!("{id}.status");
     let stopping = format!("{id}.stop");
     let lease = scoped.is_some() || checkout.is_some();
+    // A read-only or Guarded command hides the checkout's secret files; unless its
+    // grant is the whole checkout, the service's index names them (see
+    // `native_sandbox::indexed_project_secrets`), so the supervisor never walks.
+    let secrets = if matches!(profile.as_str(), "read_only" | "guarded") {
+        let (r, w) = (root.clone(), writes.clone());
+        tokio::task::spawn_blocking(move || {
+            let r = r.canonicalize().ok()?;
+            if w.iter().any(|w| w.canonicalize().is_ok_and(|w| r.starts_with(w))) {
+                return None;
+            }
+            crate::native_sandbox::indexed_project_secrets(&r).ok()
+        })
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
     let spec = Spec {
         root: root.clone(),
         cwd: cwd.clone(),
@@ -496,6 +552,7 @@ pub(super) async fn execute(
         checkout: checkout.clone(),
         writes,
         protected,
+        secrets,
         output: dir.join(&output),
         status: dir.join(&status_file),
         stop: dir.join(&stopping),
@@ -517,24 +574,27 @@ pub(super) async fn execute(
     let mut cause: Option<String> = None;
     let mut timings = serde_json::Map::new();
     let millis = |since: std::time::Instant| json!(since.elapsed().as_millis() as u64);
+    // The "before" digest and the dirty-path listing for the change record run beside
+    // the preparation and the payload, never ahead of its release (see
+    // `native_change_set::Before`); a read-only command cannot change deliverable
+    // files and lists nothing.
+    let before = {
+        let (digest_root, digest_argv, unscoped) = (root.clone(), argv.clone(), scoped.is_none());
+        crate::native_change_set::Before::start(
+            launch.clone(),
+            root.clone(),
+            async move {
+                if unscoped { native_commands::check_digest(digest_root, &digest_argv).await } else { None }
+            },
+            !(readonly || scoped.is_some() || checkout.is_some()),
+        )
+    };
     let launched = async {
-    let digest = std::time::Instant::now();
-    // The dirty-path listing for the change record runs beside the digest; a
-    // read-only command cannot change deliverable files and lists nothing.
-    let (before, listed) = tokio::join!(
-        async {
-            if scoped.is_some() { None } else { native_commands::check_digest(root.clone(), &argv).await }
-        },
-        async {
-            if readonly || scoped.is_some() || checkout.is_some() {
-                None
-            } else {
-                Some(crate::native_change_set::snapshot(root.clone()).await)
-            }
-        }
-    );
-    timings.insert("digest_ms".into(), millis(digest));
-    let mut launcher = Command::new(std::env::current_exe()?);
+    let mut attempts = 0u32;
+    let mut retried: Vec<String> = Vec::new();
+    let (child, messages, h, input) = loop {
+    let attempt_result = async {
+    let mut launcher = Command::from(crate::native_command_scope::launcher(&std::env::current_exe()?));
     // Read now, so a changed tool search path applies from the next command on.
     if let Some(path) = crate::tool_path::for_commands() {
         launcher.env("PATH", path);
@@ -652,6 +712,9 @@ pub(super) async fn execute(
                 Ok(())
                 })
             })?).await.inspect_err(|e| cause = Some(store_cause(e)))?;
+            // The payload may run from here on: a "before" observation still running is
+            // checked against this instant.
+            launch.released();
             input.write_all(b"go\n").await?;
             break;
         }
@@ -661,11 +724,29 @@ pub(super) async fn execute(
         }
         input.write_all(b"go\n").await?;
     }
-    let authority_pipe = lease.then_some(input);
-    Ok::<_, CoreError>((before, listed, child, messages, h, authority_pipe))
+    Ok::<_, CoreError>((child, messages, h, input))
     }
     .await;
-    let (before, listed, mut child, _messages, h, authority_pipe) = match launched {
+    match attempt_result {
+        Ok(v) => break v,
+        Err(e) if attempts < LAUNCH_RETRIES && prestart_retryable(cause.as_deref()) => {
+            // The payload was never released: preparing again cannot repeat an effect.
+            attempts += 1;
+            retried.push(cause.take().unwrap_or_default());
+            tokio::time::sleep(Duration::from_millis(250 * u64::from(attempts))).await;
+            let _ = e;
+        }
+        Err(e) => return Err(e),
+    }
+    };
+    let authority_pipe = lease.then_some(input);
+    if !retried.is_empty() {
+        timings.insert("launch_retries".into(), json!(retried.len()));
+    }
+    Ok::<_, CoreError>((child, messages, h, authority_pipe))
+    }
+    .await;
+    let (mut child, _messages, h, authority_pipe) = match launched {
         Ok(launched) => {
             unreleased.ex = None;
             launched
@@ -731,6 +812,8 @@ pub(super) async fn execute(
     let monitor = tokio::spawn(async move {
         let mut authority_pipe = authority_pipe;
         let mut phase = "process_observation";
+        let mut last_confirmed = std::time::Instant::now() - AUTHORITY_POLL;
+        let mut confirmed = true;
         let result = async {
             let status = loop {
                 let status = observe(&dir, &h)?;
@@ -738,27 +821,41 @@ pub(super) async fn execute(
                     break status;
                 }
                 let owner_stopped = *cancelled.borrow();
-                let authorization = authorize(
-                    &ex,
-                    &c,
-                    &mode,
-                    &denied,
-                    readonly,
-                    &reference,
-                    false,
-                    scoped.as_ref(),
-                );
+                // Process exit is observed every 50 ms, but the authority check is a
+                // writer-lane transaction: running it at that rate per command starved
+                // every owner-facing write. It is confirmed at `AUTHORITY_POLL`, well
+                // inside the supervisor's two-second lease; an owner stop never waits.
+                let confirm_due = last_confirmed.elapsed() >= AUTHORITY_POLL;
                 let valid = if owner_stopped {
                     false
-                } else if lease {
-                    matches!(
-                        tokio::time::timeout(Duration::from_secs(1), authorization).await,
-                        Ok(Ok(()))
-                    )
+                } else if !confirm_due {
+                    confirmed
                 } else {
-                    authorization.await.is_ok()
+                    let authorization = authorize(
+                        &ex,
+                        &c,
+                        &mode,
+                        &denied,
+                        readonly,
+                        &reference,
+                        false,
+                        scoped.as_ref(),
+                    );
+                    let valid = if lease {
+                        matches!(
+                            tokio::time::timeout(Duration::from_secs(1), authorization).await,
+                            Ok(Ok(()))
+                        )
+                    } else {
+                        authorization.await.is_ok()
+                    };
+                    last_confirmed = std::time::Instant::now();
+                    confirmed = valid;
+                    valid
                 };
-                let renewed = if let Some(pipe) = authority_pipe.as_mut().filter(|_| valid) {
+                let renewed = if !confirm_due && !owner_stopped && valid {
+                    true
+                } else if let Some(pipe) = authority_pipe.as_mut().filter(|_| valid) {
                     matches!(
                         tokio::time::timeout(
                             Duration::from_millis(200),
@@ -782,7 +879,8 @@ pub(super) async fn execute(
                 _=cancelled.changed()=>{} }
             };
             phase = "settlement";
-            let (after, changes) = tokio::join!(
+            let observed = before.finish().await;
+            let (after, mut changes) = tokio::join!(
                 async {
                     if scoped.is_some() {
                         None
@@ -791,16 +889,18 @@ pub(super) async fn execute(
                     }
                 },
                 async {
-                    match &listed {
+                    match &observed.listing {
                         None => crate::native_change_set::unchanged("read_only"),
-                        Some(before) => crate::native_change_set::record(
-                            before,
+                        Some(listed) => crate::native_change_set::record_with(
+                            listed,
                             &crate::native_change_set::snapshot(root.clone()).await,
+                            observed.touched.as_ref(),
                         ),
                     }
                 }
             );
-            let revision = if before == after { after } else { None };
+            crate::native_change_set::add(&mut changes, &observed.meta);
+            let revision = if observed.digest == after { after } else { None };
             let actor = c.channel_id;
             let task = i.task;
             let key = args["request_key"].as_str().unwrap().to_owned();
@@ -1065,9 +1165,8 @@ fn inline_gone(identity: &Value, boot: Option<&str>) -> Option<&'static str> {
 ///   outcome, or (output unverifiable) as `outcome_not_recorded` with its exit code;
 /// - a supervised launch whose supervisor is gone is settled `outcome_not_recorded`
 ///   when it ran in an earlier boot, when the payload's recorded process group has
-///   no member, or for the read-only profile, whose bubblewrap runs with
-///   `--die-with-parent --unshare-pid` (the supervisor's death ends the whole PID
-///   namespace); otherwise it stays unknown;
+///   no member; otherwise it stays unknown (no profile runs in its own PID
+///   namespace, so a lost supervisor alone proves nothing);
 /// - a `command_run` receipt without a bound supervisor never launched (the payload
 ///   is released only after the handle commits): `command_not_started`;
 /// - an unsupervised process (outside commands, legacy launches) is gone per
@@ -1141,14 +1240,6 @@ pub(super) fn resettle_row(
                         "outcome_not_recorded",
                         None,
                         "supervisor_and_process_group_gone",
-                    ))
-                } else if h["profile"] == "read_only"
-                    || h["profile"] == crate::native_command_sandbox::WORKTREE_READ_ONLY
-                {
-                    Some((
-                        "outcome_not_recorded",
-                        None,
-                        "supervisor_gone_pid_namespace",
                     ))
                 } else {
                     None
@@ -1224,6 +1315,39 @@ pub(super) fn orphans(
         .collect::<Result<Vec<_>, _>>()?)
 }
 
+/// A supervisor that reported `finished` this long ago has delivered everything its
+/// observer needs; an observer that has still not settled the receipt is hung.
+const HUNG_AFTER_FINISHED: Duration = Duration::from_secs(120);
+/// Whether this receipt's supervisor finished more than [`HUNG_AFTER_FINISHED`] ago
+/// while the receipt is still unsettled (the watchdog case: the observing call is
+/// stuck, so nothing else would ever settle it).
+fn hung_after_finish(store: &Store, task: &str, actor: &str, key: &str) -> bool {
+    let Ok(Some(raw)) = store.read(|db| {
+        use rusqlite::OptionalExtension;
+        Ok(db
+            .query_row(
+                "SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?",
+                (task, actor, key),
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else { return false };
+    if v["settled"] == true || !v["handle"].is_object() {
+        return false;
+    }
+    let Ok(file) = leaf(&v["handle"], "status") else { return false };
+    let path = directory(store, task).join(file);
+    supervisor::status(&path).is_ok_and(|s| s["state"] == "finished")
+        && std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= HUNG_AFTER_FINISHED)
+}
+
 /// Checks every orphaned receipt with [`resettle_row`], skipping commands this
 /// process still runs or observes (`busy` and in-flight calls). Each receipt is
 /// decided alone. Returns how many were settled and the rows left open.
@@ -1238,6 +1362,7 @@ pub(super) fn resettle(
         if reference
             .as_deref()
             .is_some_and(|r| busy.contains(r) || native_commands::in_flight(r))
+            && !hung_after_finish(store, &task, &actor, &key)
         {
             continue;
         }
@@ -1254,6 +1379,23 @@ mod resettle_tests {
     use super::*;
     use cortex_core::{lifecycle::TaskMachine, OpenMode, ProjectKey, StoreChannel};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn busy_authority_check_does_not_revoke_a_read_only_lease() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let timed_out = rt.block_on(async {
+            tokio::time::timeout(
+                Duration::from_millis(1),
+                std::future::pending::<CoreResult<()>>(),
+            )
+            .await
+        });
+        assert!(timed_out.is_err());
+        assert!(lease_valid(&timed_out, Duration::from_secs(3)));
+        assert!(!lease_valid(&timed_out, LEASE_GRACE));
+        assert!(lease_valid(&Ok(Ok(())), LEASE_GRACE * 2));
+        assert!(!lease_valid(&Ok(Err(CoreError::Refused("access_changed"))), Duration::ZERO));
+    }
 
     fn row(db: &rusqlite::Connection, op: &str, key: &str, value: Value) -> CoreResult<()> {
         db.execute(
@@ -1274,13 +1416,13 @@ mod resettle_tests {
             })
             .unwrap()
     }
-    /// The two observed shapes of a missing program (bubblewrap's own execvp failure,
+    /// The two observed shapes of a missing program (the supervisor's execvp report,
     /// and a shell's exit 127) name it; other failures and odd names do not.
     #[test]
     fn a_missing_program_is_named_with_the_search_path_it_was_looked_up_on() {
         let execvp = missing_program_hint(
             Some(1),
-            &[b"bwrap: execvp npm: No such file or directory\n"],
+            &[b"cortex: execvp npm: No such file or directory\n"],
         )
         .unwrap();
         assert_eq!(execvp["code"], "program_not_found");
@@ -1362,6 +1504,31 @@ mod resettle_tests {
             .unwrap();
         assert_eq!(observation["timings"], timings);
         assert_eq!(observation["cause"], "sandbox_unavailable:setup_timeout");
+        // A settlement without a caller cause (recovery) still names why.
+        store
+            .write(|db| {
+                row(
+                    db,
+                    "command_run",
+                    "recovered",
+                    json!({"complete":false,
+                    "tool_call_ref":"native-command:recovered","argv":["cargo","test"]}),
+                )?;
+                native_commands::settle_unrecorded_tx(
+                    db,
+                    "t",
+                    "gone-channel",
+                    "recovered",
+                    Some("native-command:recovered"),
+                    "command_not_started",
+                    None,
+                    "not_launched",
+                    None,
+                    &Value::Null,
+                )
+            })
+            .unwrap();
+        assert_eq!(receipt(&store, "recovered")["cause"], "not_launched");
         // Only fixed codes are kept; anything else is reduced to one generic cause.
         assert_eq!(
             launch_cause("bad cause /home/x"),
@@ -1573,6 +1740,48 @@ mod resettle_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test]
+    async fn the_watchdog_settles_a_hung_observer_only_after_its_supervisor_finished_long_ago() {
+        let root = std::env::temp_dir().join(format!(
+            "command-resettle-hung-{}",
+            crate::native_effects::identity().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let key = ProjectKey::new(&root, StoreChannel::Dev).unwrap();
+        let store = Store::open(key, OpenMode::Initialize).unwrap();
+        TaskMachine::new(&store).create("t", "resettle", "owner").unwrap();
+        let dir = directory(&store, "t");
+        cortex_core::store::locks::private_directory(&store.key().directory().join("t"), true).unwrap();
+        cortex_core::store::locks::private_directory(&dir, true).unwrap();
+        let identity = json!({"pid":1,"boot_id":boot_id().unwrap(),"start_ticks":0});
+        let handle = json!({"reference":"native-command:hung","identity":identity,"status":"h.status",
+            "stop":"h.stop","output":"h.bin","id":"lo_h","argv":["/bin/false"],"cwd":"/","profile":"read_only",
+            "mode":"development","denied":[]});
+        let status = json!({"ref":"native-command:hung","supervisor":identity,"state":"finished",
+            "exit_code":3,"signal":null,"failure":null,"hash":"0","byte_count":0});
+        for (name, body) in [("h.status", status.to_string()), ("h.bin", String::new())] {
+            let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(dir.join(name)).unwrap();
+            std::io::Write::write_all(&mut file, body.as_bytes()).unwrap();
+        }
+        store.write(|db| {
+            row(db, "command_run", "hung", json!({"complete":false,"tool_call_ref":"native-command:hung","argv":["/bin/false"],"handle":handle}))?;
+            Ok(())
+        }).unwrap();
+        let busy = std::collections::BTreeSet::from(["native-command:hung".to_owned()]);
+        // The observer may still be about to settle it: left alone.
+        assert_eq!(resettle(&store, &busy, false).unwrap().0, 0);
+        assert_ne!(receipt(&store, "hung")["settled"], true);
+        let old = std::time::SystemTime::now() - Duration::from_secs(600);
+        OpenOptions::new().write(true).open(dir.join("h.status")).unwrap().set_modified(old).unwrap();
+        assert_eq!(resettle(&store, &busy, false).unwrap().0, 1);
+        let hung = receipt(&store, "hung");
+        assert_eq!(hung["settled"], true);
+        assert_eq!(hung["failure"], "outcome_not_recorded");
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn cortex_store_hint_points_guarded_commands_at_the_file_tools() {
         let argv = json!(["/bin/sh", "-c", "echo x > .cortex/x"]);
@@ -1690,5 +1899,24 @@ mod resettle_tests {
         );
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_transient_prestart_causes_are_retried() {
+        for c in [
+            "supervisor_spawn_failed",
+            "preparation_io_NotFound",
+            "sandbox_unavailable:command_hardlink_changed",
+        ] {
+            assert!(prestart_retryable(Some(c)), "{c}");
+        }
+        for c in [
+            "preparation_io_PermissionDenied",
+            "sandbox_unavailable:landlock_unavailable",
+            "refused:access_changed",
+        ] {
+            assert!(!prestart_retryable(Some(c)), "{c}");
+        }
+        assert!(!prestart_retryable(None));
     }
 }

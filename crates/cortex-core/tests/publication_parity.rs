@@ -572,3 +572,71 @@ fn sprint_reads_only_committed_immutable_reports_without_recovering_the_writer()
     }
     assert_eq!(std::fs::read(intent).unwrap(), b"incomplete");
 }
+
+fn pipeline_pages(api: &Publisher, id: &str) -> (Vec<String>, String, usize) {
+    let mut text = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = api.read_report("t", id, cursor.as_deref(), 7).unwrap();
+        text.push(page.markdown.clone());
+        if page.next_cursor.is_none() {
+            return (text, page.sha256, page.total_characters);
+        }
+        cursor = page.next_cursor;
+    }
+}
+#[test]
+fn pipeline_editions_keep_exact_bytes_digest_and_pages_across_cached_reads() {
+    use sha2::{Digest, Sha256};
+    let (p, s) = setup();
+    let api = Publisher::new(&s);
+    let id = publish(&s, "первая ✓ 😀 edition", true);
+    publish(&s, "second", true);
+    publish(&s, "третья — edition", true);
+    let file = p.key().directory().join("t/pipeline.md");
+    let bytes = std::fs::read(&file).unwrap();
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    let sha = format!("{:x}", Sha256::digest(&bytes));
+    // First read verifies the file; later reads reuse that and must agree exactly.
+    let (pages_a, sha_a, total_a) = pipeline_pages(&api, &id);
+    let (pages_b, sha_b, total_b) = pipeline_pages(&api, &id);
+    assert_eq!(pages_a.concat(), text);
+    assert_eq!((pages_a, sha_a.as_str(), total_a), (pages_b, sha_b.as_str(), total_b));
+    assert_eq!(sha_a, sha);
+    assert_eq!(total_a, text.chars().count());
+    // Newest edition first, older ones below, exactly one separator between them.
+    assert!(text.find("третья").unwrap() < text.find("second").unwrap());
+    assert!(text.find("second").unwrap() < text.find("первая").unwrap());
+    let listed = api.list("t", None, 10).unwrap();
+    assert_eq!(listed.reports[0].sha256, sha);
+    // A same-length out-of-band rewrite is never served from remembered state.
+    let mut tampered = bytes.clone();
+    let at = tampered.len() - 1;
+    tampered[at] = if tampered[at] == b'x' { b'y' } else { b'x' };
+    std::fs::write(&file, &tampered).unwrap();
+    let error = api.read_report("t", &id, None, 7).unwrap_err();
+    assert_eq!(error.code(), "file_conflict");
+    assert!(api.list("t", None, 10).is_err());
+}
+#[test]
+fn an_install_interrupted_after_its_backup_link_leaves_the_previous_file_intact() {
+    use sha2::{Digest, Sha256};
+    let (p, s) = setup();
+    let id = publish(&s, "old", true);
+    let dir = p.key().directory().join("t");
+    let old = std::fs::read(dir.join("pipeline.md")).unwrap();
+    let digest = format!("{:x}", Sha256::digest(&old));
+    let (intent, journal) =
+        PublicationIntent::prepare(&dir, &id, "pipeline.md", "uncommitted", Some(&digest)).unwrap();
+    // The state a crash between the backup hard link and the replacing rename leaves.
+    let _ = intent;
+    let journaled: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+    let backup = dir.join(journaled["backup"].as_str().unwrap());
+    std::fs::hard_link(dir.join("pipeline.md"), backup).unwrap();
+    Publisher::new(&s).reconcile("t").unwrap();
+    assert_eq!(std::fs::read(dir.join("pipeline.md")).unwrap(), old);
+    assert!(std::fs::read_dir(&dir)
+        .unwrap()
+        .all(|e| !e.unwrap().file_name().to_string_lossy().starts_with(".backup_")));
+}

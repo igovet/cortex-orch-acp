@@ -225,6 +225,46 @@ fn an_existing_store_gains_the_call_index_on_a_writable_open_only() {
     )
     .unwrap();
 }
+/// An existing format-12 store gains the tool-call reference indexes on its next writable
+/// open only, and the hot per-task lookups use them instead of parsing every payload.
+#[test]
+fn an_existing_store_gains_the_tool_call_indexes_on_a_writable_open_only() {
+    let p = Project::new();
+    drop(p.open());
+    let count = |db: &Connection| {
+        db.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('runtime_events_by_tool_call_ref','runtime_events_finished_ref')",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    let db = Connection::open(p.key().database()).unwrap();
+    db.execute_batch("DROP INDEX runtime_events_by_tool_call_ref; DROP INDEX runtime_events_finished_ref;")
+        .unwrap();
+    drop(db);
+    drop(Store::open(p.key(), OpenMode::InspectImmutable).unwrap());
+    drop(Store::open(p.key(), OpenMode::LiveReadOnly).unwrap());
+    assert_eq!(count(&Connection::open(p.key().database()).unwrap()), 0);
+    let s = p.open();
+    s.read(|db| {
+        assert_eq!(count(db), 2);
+        let plan = |sql: &str| -> String {
+            let mut q = db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            q.query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        let by_ref = plan("SELECT payload_json FROM runtime_events WHERE task_id='t' AND type='TOOL_COMPLETED' AND json_extract(payload_json,'$.tool_call_ref')='r' ORDER BY id DESC LIMIT 1");
+        assert!(by_ref.contains("runtime_events_by_tool_call_ref"), "{by_ref}");
+        let finished = plan("SELECT 1 FROM runtime_events f WHERE f.task_id='t' AND f.type='NATIVE_COMMAND_FINISHED' AND json_extract(f.payload_json,'$.receipt.tool_call_ref')='r'");
+        assert!(finished.contains("runtime_events_finished_ref"), "{finished}");
+        Ok(())
+    })
+    .unwrap();
+}
 #[test]
 fn channels_never_read_or_import_the_other_store() {
     let p = Project::new();

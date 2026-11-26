@@ -572,6 +572,10 @@ fn apply(
     for c in &candidate.changes {
         let Change::Add { id, complexity, .. } = c else { continue };
         let mut o = json!({"checkout":{"kind":sprint.get("checkout").filter(|c| !c.is_null()).map(|c| c["kind"].clone()).unwrap_or_else(|| json!("main"))}});
+        if sprint["checkout"]["kind"] == "worktree" && sprint["checkout"]["shared"] == true {
+            o["sprintWorktree"] = json!({"sprintId":sprint["id"],
+                "title":sprint["title"].as_str().filter(|t| !t.trim().is_empty()).unwrap_or("sprint")});
+        }
         if let Some(route) = &route {
             o["settings"] = route.clone();
         } else if let Some(a) = routes(complexity).filter(|r| {
@@ -628,7 +632,7 @@ fn apply(
         .changes
         .iter()
         .filter_map(|c| match c {
-            Change::Add { id, description, .. } => Some(core_workspace::BatchDraft { task_id: id, description, options: &options[id] }),
+            Change::Add { id, description, .. } => Some(core_workspace::BatchDraft { task_id: id, description, options: &options[id], attachments: None }),
             _ => None,
         })
         .collect();

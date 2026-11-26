@@ -522,55 +522,31 @@ fn code_lsp_paths_are_checkout_local_and_not_aliases() {
 }
 
 fn sandbox_cargo(root: &Path) {
-    let sandbox =
-        crate::native_command_sandbox::Sandbox::prepare_language(root, &[], true).unwrap();
-    let mut command = sandbox
+    let sandbox = crate::native_command_sandbox::Sandbox::prepare_language(root, true).unwrap();
+    let output = sandbox
         .command(&[
             "/bin/sh".into(),
             "-c".into(),
-            r#"case ":$PATH:" in *:/tmp/home/.cargo/bin:*) echo path=yes;; *) echo path=no;; esac
-[ -d /tmp/home ] && echo scratch=yes
-[ -d /tmp/home/.cargo/bin ] && echo bindir=yes
-[ -x /tmp/home/.cargo/bin/cargo ] && echo executable=yes
-[ -f /tmp/home/.rustup/settings.toml ] && echo rustup_settings=yes
-test ! -r .cortex/private.rs || exit 85
-(touch write-forbidden) 2>/dev/null && exit 86
-cargo metadata --locked --offline --format-version=1 --no-deps"#
+            r#"if cat .cortex/private.rs 2>/dev/null; then exit 85; fi
+if (echo x > write-forbidden) 2>/dev/null; then exit 86; fi
+case "$CARGO_TARGET_DIR" in "$TMPDIR"/*) ;; *) exit 87;; esac
+cargo metadata --locked --offline --format-version=1 --no-deps >/dev/null"#
                 .into(),
         ])
+        .unwrap()
+        .output()
         .unwrap();
-    let mount_added = command
-        .get_args()
-        .any(|arg| arg == "/tmp/home/.cargo/bin/cargo");
-    let host_home_has_cargo = std::env::var_os("HOME")
-        .is_some_and(|home| PathBuf::from(home).join(".cargo/bin/cargo").is_file());
-    let host_cargo_home_has_cargo = std::env::var_os("CARGO_HOME")
-        .is_some_and(|home| PathBuf::from(home).join("bin/cargo").is_file());
-    let output = command.output().unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let shell_flags: Vec<_> = stdout
-        .lines()
-        .filter(|line| {
-            [
-                "path=",
-                "scratch=",
-                "bindir=",
-                "executable=",
-                "rustup_settings=",
-            ]
-            .iter()
-            .any(|prefix| line.starts_with(prefix))
-        })
-        .collect();
-    assert!(output.status.success(), "Sandbox Cargo metadata: exit {:?}; {:?}; mount={mount_added}; HOME Cargo={host_home_has_cargo}; CARGO_HOME Cargo={host_cargo_home_has_cargo}; lockfile={}, read-only={}, toolchain={}, not-found={}, path-error={}, sandbox={}",
-        output.status.code(), shell_flags, stderr.contains("lockfile"), stderr.to_lowercase().contains("read-only"),
-        stderr.contains("toolchain"), stderr.contains("not found"), stderr.contains("No such file"), stderr.contains("bwrap"));
+    assert!(
+        output.status.success(),
+        "Sandbox Cargo metadata: exit {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(!root.join("write-forbidden").exists());
 }
 
 #[test]
-#[ignore = "requires usable bubblewrap namespaces and a local Rust toolchain"]
+#[ignore = "requires Landlock and a local Rust toolchain"]
 fn code_lsp_sandbox_projects_are_read_only() {
     let f = Fixture::new();
     fs::create_dir(f.0.join("src")).unwrap();
@@ -590,10 +566,10 @@ fn code_lsp_sandbox_projects_are_read_only() {
     sandbox_cargo(&f.0);
 }
 
-/// Requires an actual staging tree from bundle-engines and a user namespace.
+/// Requires an actual staging tree from bundle-engines and Landlock.
 /// No models, no desktop session, no network from either language server.
 #[tokio::test]
-#[ignore = "requires staged pinned language payload and usable bubblewrap namespaces"]
+#[ignore = "requires a staged pinned language payload and Landlock"]
 async fn code_lsp_pinned_servers_diagnostics_and_definitions() {
     let runtime = PathBuf::from(
         std::env::var_os("CORTEX_CODE_TEST_RUNTIME").expect("sibling of staged engines"),

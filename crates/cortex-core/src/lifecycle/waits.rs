@@ -255,7 +255,7 @@ pub fn answered_question_tx(
         .collect::<Result<Vec<_>, _>>()?;
     for (id, text, options, answer) in rows {
         let options = labels(&serde_json::from_str::<Vec<Value>>(&options).unwrap_or_default());
-        if question_identity(&text, &options) == wanted {
+        if question_identity(&text, &options) == wanted || substantially_same(&wanted, &question_identity(&text, &options)) {
             return Ok(Some((id, answer)));
         }
     }
@@ -776,4 +776,28 @@ pub fn recover_deliveries_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()>
         }
     }
     Ok(())
+}
+
+fn tokens(text: &str) -> std::collections::BTreeSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3)
+        .map(str::to_owned)
+        .collect()
+}
+fn jaccard(a: &std::collections::BTreeSet<String>, b: &std::collections::BTreeSet<String>) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    a.intersection(b).count() as f64 / a.union(b).count() as f64
+}
+/// Two questions that ask the same thing in other words: high word overlap of the
+/// question text, or of the text together with the options.
+fn substantially_same(a: &(String, Vec<String>), b: &(String, Vec<String>)) -> bool {
+    let (qa, qb) = (tokens(&a.0), tokens(&b.0));
+    let all = |q: &std::collections::BTreeSet<String>, o: &[String]| {
+        let mut s = q.clone();
+        s.extend(o.iter().flat_map(|o| tokens(o)));
+        s
+    };
+    jaccard(&qa, &qb) >= 0.7 || jaccard(&all(&qa, &a.1), &all(&qb, &b.1)) >= 0.6
 }

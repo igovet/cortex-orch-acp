@@ -3,6 +3,7 @@
 //! nothing is ever delegated to another runtime.
 pub(super) mod conflicts;
 mod effects;
+mod sprint;
 mod update;
 use super::{
     context,
@@ -178,6 +179,28 @@ pub async fn run(
     integrate(root, project, state, params, git, false).await
 }
 
+/// The sprint's single merge of its shared worktree branch (owner-confirmed).
+pub async fn sprint_merge(
+    root: &Path,
+    project: &str,
+    state: &Path,
+    params: &Value,
+    git: &mut Git,
+) -> Result<Value> {
+    sprint::run(root, project, state, params, git, false).await
+}
+
+/// The same merge for the Automatic queue, which declines targets other than the open branch.
+pub(super) async fn automatic_sprint_merge(
+    root: &Path,
+    project: &str,
+    state: &Path,
+    params: &Value,
+    git: &mut Git,
+) -> Result<Value> {
+    sprint::run(root, project, state, params, git, true).await
+}
+
 pub(super) async fn automatic(
     root: &Path,
     project: &str,
@@ -260,6 +283,50 @@ fn finish_in_place(
     Ok(json!({"done":true,"inPlace":true}))
 }
 
+/// A task whose accepted result changed no files has nothing to merge: it closes as done
+/// (the result is the report) and its task-owned worktree is released.
+#[allow(clippy::too_many_arguments)]
+fn finish_no_changes(
+    root: &Path,
+    project: &str,
+    state: &Path,
+    task: &str,
+    record: &Value,
+    sprint: &Value,
+    recheck: &Value,
+    automatic: bool,
+) -> Result<Value> {
+    {
+        let _lock = Lock::new(state, "machine.lock")?;
+        let mut product = super::native::product(state, project)?;
+        if product["tasks"][task] != *record {
+            return Err(stale());
+        }
+        if automatic && !automatic_member(&product, task, sprint, recheck) {
+            return Ok(json!({"deferred":true}));
+        }
+        let saved = &mut product["tasks"][task];
+        saved["status"] = json!("done");
+        saved["doneAt"] = json!(now_ms());
+        saved["closedAs"] = json!("as_is");
+        saved["notVerifiedByCortex"] = json!(false);
+        saved["noFileChanges"] = json!(true);
+        settings::write_json(&product_path(state, project)?, &product)?;
+    }
+    // A shared sprint worktree stays for the sprint's own merge and cleanup.
+    if context::shared_member(root, project, task)? {
+        return Ok(json!({"done":true,"noFileChanges":true,"worktreeCleanup":"shared"}));
+    }
+    use cortex_core::{workspace::worktrees::{self, Cleanup}, OpenMode};
+    let cleanup = (|| {
+        let store = context::open(root, OpenMode::RuntimeValidate)?.ok_or_else(|| context::core(cortex_core::CoreError::Refused("worktree_not_owned")))?;
+        store.write(|db| worktrees::queue_merge_cleanup_tx(db, project, task)).map_err(context::core)?;
+        worktrees::finish_cleanup(&store, project, task, Cleanup::Close).map_err(context::core)
+    })();
+    let status = match cleanup { Ok(Some(v)) => v["status"].clone(), _ => json!("retained") };
+    Ok(json!({"done":true,"noFileChanges":true,"worktreeCleanup":status}))
+}
+
 async fn integrate(
     root: &Path,
     project: &str,
@@ -310,7 +377,7 @@ async fn integrate(
         {
             return Ok(json!({"deferred":true}));
         }
-        if record["checkout"]["kind"] != "main" {
+        if record["checkout"]["kind"] != "main" && !context::shared_member(root, project, task)? {
             return Err(refuse(
                 "native_worktree_unavailable",
                 "Automatic requires the project folder checkout.",
@@ -377,7 +444,12 @@ async fn integrate(
     // Unsupported legacy shapes retain their interpreter before inspection.
     let binding = context::owned_checkout(root, project, task)?;
     let mut inspected = record.clone();
-    if let Some(w) = &binding { context::set_worktree(&mut inspected, w); }
+    if let Some(w) = &binding {
+        if context::shared_member(root, project, task)? {
+            inspected["checkout"]["shared"] = json!(true);
+        }
+        context::set_worktree(&mut inspected, w);
+    }
     if truth(&params["targetBranch"]) {
         inspected["targetBranch"] = params["targetBranch"].clone();
     }
@@ -405,7 +477,11 @@ async fn integrate(
     };
     // Preserve existing containment admission for unwitnessed actions. For an
     // accepted ordinary commit, drift must win even if it made the task diff empty.
-    if contained && !record["acceptance"]["committedDigest"].is_string() {
+    let no_file_changes = binding.is_some()
+        && facts["noChanges"] == true
+        && facts["alreadyInTarget"] == true
+        && facts["pendingPaths"].as_array().is_some_and(|p| p.is_empty());
+    if contained && !no_file_changes && !record["acceptance"]["committedDigest"].is_string() {
         return already_in_target();
     }
     let verified = verified_result(
@@ -434,6 +510,9 @@ async fn integrate(
                 "Files changed after acceptance. Rerun checks and accept the new result.",
             ));
         }
+    }
+    if no_file_changes {
+        return finish_no_changes(root, project, state, task, record, scheduler_sprint, recheck, automatic);
     }
     if contained {
         return already_in_target();

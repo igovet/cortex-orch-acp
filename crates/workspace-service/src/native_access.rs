@@ -52,12 +52,26 @@ fn writer(db: &rusqlite::Transaction<'_>, c: &Credential) -> CoreResult<Identity
     waits::check_mutation_tx(db, &i.task, assignment)?;
     Ok(i)
 }
+/// A writing worker, or (for reads only) any other authenticated role. Outside Auto a
+/// non-writer runs `outside_command` inside a read-only whole-host view; in Auto every
+/// role and stage runs it on the host exactly like a writing worker.
+fn actor(db: &rusqlite::Transaction<'_>, c: &Credential, write: bool) -> CoreResult<(Identity, bool)> {
+    match writer(db, c) {
+        Ok(i) => Ok((i, false)),
+        Err(CoreError::Refused("writing_worker_required" | "writing_scope_required")) if !write => {
+            let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
+            let ro = access::current(db, &i.task)? != "auto";
+            Ok((i, ro))
+        }
+        Err(e) => Err(e),
+    }
+}
 pub(super) fn still_confirmed(
     db: &rusqlite::Transaction<'_>,
     credential: &Credential,
     expected_mode: &str,
 ) -> CoreResult<()> {
-    let identity = writer(db, credential)?;
+    let (identity, _) = actor(db, credential, false)?;
     if access::current(db, &identity.task)? != expected_mode {
         return Err(CoreError::Refused("access_mode_changed"));
     }
@@ -200,8 +214,8 @@ async fn execute_as(
     let k = key.clone();
     let h = hash.clone();
     let n = name.clone();
-    let (mode,incoming,saved,who,ru)=recv(executor.write(move|db|{
-        let i=writer(db,&c)?;
+    let (mode,incoming,saved,who,ru,ro)=recv(executor.write(move|db|{
+        let (i,ro)=actor(db,&c,write)?;
         // Assignment scope grants project-relative targets only. No mode or
         // outside consent can widen it for a managed Codex channel.
         if scoped {
@@ -219,7 +233,7 @@ async fn execute_as(
             if op!=n || d!=h {return Err(CoreError::Refused("request_key_conflict"));}
             let saved:Value=serde_json::from_str(&result)?;
             if saved["complete"]!=true {return Err(CoreError::Refused("outside_outcome_unknown"));}
-            return Ok((mode,None,Some(saved["reply"].clone()),who,false));
+            return Ok((mode,None,Some(saved["reply"].clone()),who,false,ro));
         }
         let sessions=db.prepare("SELECT session_id FROM acp_host_sessions WHERE task_id=? AND json_extract(client_info,'$.name')='cortex-rust-acp'")?
             .query_map([&i.task],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
@@ -228,7 +242,7 @@ async fn execute_as(
             (&i.task,&k,&c.channel_id,&n,&h,json!({"complete":false,"mode":mode}).to_string()))?;
         lifecycle::event_tx(db,&i.task,"NATIVE_OUTSIDE_REQUESTED",json!({"channel_id":c.channel_id,"operation":n,"request_key":k,"mode":mode}))?;
         let ru = lifecycle::domain::task_language_tx(db, &i.task)? == "ru";
-        Ok((mode,sessions.into_iter().next(),None,who,ru))
+        Ok((mode,sessions.into_iter().next(),None,who,ru,ro))
     })?).await?;
     if let Some(saved) = saved {
         return Ok(saved);
@@ -276,7 +290,14 @@ async fn execute_as(
     use crate::native_owner_decisions::Owner;
     let (approved, decider) = if class == PathClass::LiveStore && write {
         (false, "runtime".to_owned())
-    } else if mode == "auto" {
+    } else if ro {
+        (true, "read_only_sandbox".to_owned())
+    } else if mode == "auto"
+        && (rerouted.is_some() || write || !crate::native_commands::deletion(
+            &serde_json::from_value::<Vec<String>>(args["argv"].clone()).unwrap_or_default(),
+        ))
+    {
+        // A rerouted command_run already asked the owner about a deletion.
         (true, format!("mode:{mode}"))
     } else {
         let mut card = cortex_engine::permission::owner_card(&request, &who, rule, ru);
@@ -327,6 +348,7 @@ async fn execute_as(
             let c = credential.clone();
             let expected = mode.clone();
             recv(executor.write(move |db| {
+                writer(db, &c)?;
                 still_confirmed(db, &c, &expected)?;
                 atomic_write(&root, &args, &data)
             })?).await
@@ -334,13 +356,13 @@ async fn execute_as(
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
             let pending = crate::native_commands::outside_capture(
                 executor.clone(), credential.clone(), running, path, &args, &mode, cancelled,
-                rerouted,
+                rerouted, ro,
             );
             tokio::pin!(pending);
             loop {
                 tokio::select! {
                     result=&mut pending=>break result,
-                    _=tokio::time::sleep(std::time::Duration::from_millis(50))=>{
+                    _=tokio::time::sleep(std::time::Duration::from_millis(250))=>{
                         let c=credential.clone();let expected=mode.clone();
                         if recv(executor.write(move|db|still_confirmed(db, &c, &expected))?).await.is_err() {
                             cancel.send_replace(true);

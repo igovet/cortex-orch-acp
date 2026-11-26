@@ -266,51 +266,22 @@ fn access_parks_its_node_once_unrelated_work_continues_and_resolution_retries_it
 }
 
 #[test]
-fn an_owner_decision_is_answerable_while_an_independent_node_runs() {
-    let (project, s, task) = started();
+fn a_worker_owner_decision_returns_to_the_coordinator_without_a_runtime_question() {
+    let (_project, s, task) = started();
     plan(&s, &task, json!({"kind":"owner_decision","detail":"Keep the v1 endpoint or remove it?"}));
-    let question = s.write(|db| {
+    s.write(|db| {
         db.execute("UPDATE runtime_nodes SET status='running',assignment_ref='asg-b' WHERE task_id=? AND node_id='b'", [&task])?;
         obstacles::classify_failed_tx(db, &task)?;
         obstacles::classify_failed_tx(db, &task)?;
-        assert!(!obstacles::settle_parked_tx(db, &task)?);
         assert_eq!(domain::task_tx(db, &task)?.0, TaskState::Executing);
-        Ok(db.query_row("SELECT id FROM pending_questions WHERE task_id=? AND assignment_ref='asg-a' AND status='open'",
-            [&task], |r| r.get::<_, String>(0))?)
-    }).unwrap();
-    assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 1);
-    assert_eq!(count(&s, &task, "USER_QUESTION_REQUESTED"), 1);
-    assert_eq!(count(&s, &task, "AUTOMATIC_CONTINUATION"), 0);
-    drop(s);
-    let s = project.open();
-    let decision = workspace::control::decisions(&s, "p", "owner",
-        &json!({"operation":"decisions.get","target":format!("wd_{question}")})).unwrap();
-    assert_eq!(decision["status"], "pending");
-    assert_eq!(decision["scope"], "asg-a");
-    assert_eq!(decision["allowedOperations"], json!(["decisions.answer"]));
-    assert_eq!(decision["options"], json!([]));
-    let answer = json!({
-        "protocol":{"major":1,"minor":8}, "requestId":"answer-v1", "projectId":"p", "actorId":"owner",
-        "operation":"decisions.answer", "target":decision["decisionId"], "expectedVersion":decision["version"],
-        "ownerEpoch":decision["ownerEpoch"],
-        "payload":{"executionId":decision["executionId"], "acpSessionId":decision["acpSessionId"], "batchId":null,
-            "answers":[{"decisionId":decision["decisionId"],"questionId":question,
-                "expectedVersion":decision["version"], "optionId":null, "text":"Keep v1"}]}
-    });
-    workspace::control::answer(&s, "p", "owner", &answer).unwrap();
-    s.write(|db| {
-        assert!(!lifecycle::waits::answer_tx(db, &task, &question, "Remove v1", "text", None)?);
-        assert_eq!(domain::task_tx(db, &task)?.0, TaskState::Executing);
-        assert!(obstacles::open_decisions(db, &task)?.is_empty());
-        assert_eq!(obstacles::retry_decision_answer(db, &task, "a", 1)?.as_deref(), Some("Keep v1"));
-        assert_eq!(obstacles::retry_decision_answer(db, &task, "b", 1)?, None);
-        let sibling: String = db.query_row("SELECT status FROM runtime_nodes WHERE task_id=? AND node_id='b' AND assignment_ref='asg-b'",
-            [&task], |r| r.get(0))?;
-        assert_eq!(sibling, "running");
+        let open: i64 = db.query_row("SELECT count(*) FROM pending_questions WHERE task_id=?", [&task], |r| r.get(0))?;
+        assert_eq!(open, 0);
+        let rule: String = db.query_row("SELECT json_extract(payload_json,'$.rule') FROM runtime_events WHERE task_id=? AND type='FAILURE_CLASSIFIED'", [&task], |r| r.get(0))?;
+        assert_eq!(rule, "blocker_owner_decision_to_coordinator");
         Ok(())
     }).unwrap();
-    assert_eq!(count(&s, &task, "ASSIGNMENT_RETRIED"), 1);
-    assert_eq!(latest(&s, &task, "ASSIGNMENT_RETRIED")["previous_assignment"], "asg-a");
+    assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 0);
+    assert_eq!(count(&s, &task, "USER_QUESTION_REQUESTED"), 0);
 }
 
 #[test]
@@ -537,4 +508,14 @@ fn a_technical_failure_is_not_parked_and_progress_is_marked() {
     }).unwrap();
     assert_eq!(kinds, ["plan_accepted", "check_passed", "node_completed"]);
     assert_eq!(latest(&s, &task, "TASK_PROGRESS")["node"], "b");
+}
+
+#[test]
+fn a_failure_cleared_by_a_passing_retry_is_not_an_owner_decision() {
+    let s = signals(Some("owner_decision"),
+        "The brief requires stopping on any failing command. It records an initial exit 1 and a passing identical rerun.", &[], "");
+    let found = obstacles::classify(&s);
+    assert_eq!((found.class, found.rule), ("technical", "blocker_owner_decision_resolved"), "{found:?}");
+    let real = signals(Some("owner_decision"), "Keep the v1 endpoint or remove it?", &[], "");
+    assert_eq!(obstacles::classify(&real).class, "owner_decision");
 }

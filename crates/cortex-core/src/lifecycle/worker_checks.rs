@@ -113,7 +113,9 @@ pub fn load_runs(db: &Connection, task: &str, channel: &str) -> CoreResult<Vec<R
         .map(|(operation, raw, order)| {
             let saved: Value = serde_json::from_str(&raw)?;
             let receipt = if operation == "outside_command" {
-                saved["reply"]["structuredContent"].clone()
+                let mut receipt = saved["reply"]["structuredContent"].clone();
+                crate::workspace::worktrees::bind_outside_receipt(db, task, &mut receipt)?;
+                receipt
             } else {
                 saved
             };
@@ -471,6 +473,10 @@ pub fn evaluate(checks: &[Value], runs: &[Run], digest: Option<&str>) -> CoreRes
             "claimed_outcome",
             "revision_digest",
             "revision_binding",
+            "closed_as",
+            "flaky",
+            "attributed_to",
+            "foreign_failure",
         ] {
             c.as_object_mut()
                 .ok_or(CoreError::Refused("invalid_native_result"))?
@@ -531,17 +537,35 @@ pub fn evaluate(checks: &[Value], runs: &[Run], digest: Option<&str>) -> CoreRes
                     .zip(&assessments)
                     .filter(|(c, a)| {
                         c["outcome"] == "passed"
-                            && c["name"] == check["name"]
                             && c["tool_call_ref"] == latest.reference()
                             && a.strength == "verified"
                     })
                     .collect();
-                if cited.len() == 1
-                    && !runs
+                // A later run with no recorded identity (killed or lost, no receipt) cannot
+                // be known to differ from the command; it blocks closure only when no
+                // recorded passing rerun observed the exact submitted checkout.
+                let unknown_later = !latest.exact(digest)
+                    && runs
                         .iter()
-                        .any(|r| r.order > run.order && !r.identity() && !r.never_launched())
-                {
+                        .any(|r| r.order > run.order && !r.identity() && !r.never_launched());
+                if cited.len() == 1 && !unknown_later {
                     c["closed_by"] = json!(latest.reference());
+                } else if cited.is_empty()
+                    && !checks.iter().any(|x| x["tool_call_ref"] == latest.reference())
+                    && latest.identity()
+                    && latest.exact(digest)
+                    && !serde_json::from_value::<Vec<String>>(latest.receipt["argv"].clone())
+                        .map(|a| trivial_command(&a))
+                        .unwrap_or(true)
+                    && !unknown_later
+                {
+                    // The identical command later passed on the exact submitted checkout and
+                    // the runtime observed that run itself: the failure was flaky. It stays
+                    // in the record as a failed run, closed by the observed rerun and marked
+                    // so; no passed check is created for it.
+                    c["closed_by"] = json!(latest.reference());
+                    c["closed_as"] = json!("runtime_observed_rerun");
+                    c["flaky"] = json!(true);
                 }
             }
         }
@@ -729,7 +753,6 @@ pub fn open_items(evaluated: &[Value], runs: &[Run]) -> Vec<String> {
             .collect();
         match cited.as_slice() {
             [] => items.push(format!("{label}: rerun_not_cited: the latest rerun [{rerun}] passed; cite it as a passed check named \"{}\"", name(check))),
-            [c] if c["name"] != check["name"] => items.push(format!("{label}: rerun_named_differently: cite the passing rerun [{rerun}] under the same name \"{}\"", name(check))),
             [c] if c["outcome"] != "passed" => {
                 let gap = c["evidence_gap"].as_str().unwrap_or("unverified");
                 items.push(format!("{label}: rerun_{gap}: the passing rerun [{rerun}] does not verify: {}", gap_hint(gap)));
@@ -741,9 +764,139 @@ pub fn open_items(evaluated: &[Value], runs: &[Run]) -> Vec<String> {
 }
 pub fn resolved(check: &Value) -> bool {
     check["outcome"] == "failed"
-        && ["closed_by", "retracted_by", "superseded_by"]
+        && ["closed_by", "retracted_by", "superseded_by", "attributed_to"]
             .iter()
             .any(|k| check[*k].is_string())
+}
+
+/// Project-relative file paths a command's output names (`dir/file.ext`, with an
+/// optional `:line:col` suffix). Absolute paths, parent traversals and dependency
+/// directories are never project files and are not named.
+fn named_paths(output: &str) -> Vec<String> {
+    let mut found = std::collections::BTreeSet::new();
+    for token in output.split(|c: char| c.is_whitespace() || "\"'()[]<>,;=`|{}".contains(c)) {
+        let mut path = token.trim_start_matches("./");
+        while let Some((head, tail)) = path.rsplit_once(':') {
+            if tail.is_empty() || tail.bytes().all(|b| b.is_ascii_digit()) {
+                path = head;
+            } else {
+                break;
+            }
+        }
+        let name = path.rsplit('/').next().unwrap_or("");
+        let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+        if path.len() < 3
+            || path.len() > 200
+            || path.starts_with('/')
+            || !path.contains('/')
+            || path.split('/').any(|p| p.is_empty() || p == ".." || p == "node_modules" || p.starts_with('.'))
+            || ext.is_empty()
+            || ext.len() > 6
+            || !ext.bytes().all(|b| b.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        found.insert(path.to_owned());
+        if found.len() >= 64 {
+            break;
+        }
+    }
+    found.into_iter().collect()
+}
+/// The first other assignment (or task) whose own tools wrote `path`.
+fn other_writer(
+    db: &Connection,
+    task: &str,
+    assignment: &str,
+    path: &str,
+) -> CoreResult<Option<(String, String)>> {
+    Ok(db
+        .query_row(
+            "SELECT e.task_id, c.assignment_id FROM runtime_events e
+             JOIN trusted_channels c ON c.task_id=e.task_id
+               AND c.channel_id=json_extract(e.payload_json,'$.channel_id')
+             WHERE e.type IN ('NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED')
+               AND json_extract(e.payload_json,'$.path')=?1
+               AND NOT (e.task_id=?2 AND c.assignment_id=?3) LIMIT 1",
+            (path, task, assignment),
+            |r| Ok((r.get(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default())),
+        )
+        .optional()?)
+}
+/// The runtime attributes a verified failed check that no passing rerun closed:
+/// when its own recorded output names project files, every one of them was written
+/// by another assignment or task and none lies in this assignment's work set (its
+/// scope and its own writes), the failure belongs to that other work. The check
+/// stays a failed run in the record (never a pass), carries `attributed_to` and
+/// the `foreign_failure` evidence, and no longer blocks this assignment's result or
+/// completion. Evidence the runtime cannot establish (no recorded work set, output
+/// not retained inline and complete, a named file nobody else wrote) attributes
+/// nothing: the check stays open. Never taken from a model argument.
+pub fn attribute_foreign(
+    db: &Connection,
+    task: &str,
+    assignment: &str,
+    checks: &mut [Value],
+    runs: &[Run],
+) -> CoreResult<()> {
+    for check in checks.iter_mut() {
+        if check["outcome"] != "failed"
+            || check["evidence_strength"] != "verified"
+            || check["claimed_outcome"] == "passed"
+            || resolved(check)
+        {
+            continue;
+        }
+        let Some(reference) = check["tool_call_ref"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(run) = runs.iter().find(|r| r.reference() == reference) else {
+            continue;
+        };
+        let Some(output) = run.receipt["output"]
+            .as_str()
+            .filter(|o| run.receipt["byte_count"].as_u64() == Some(o.len() as u64))
+        else {
+            continue;
+        };
+        if !run.verified_failure() {
+            continue;
+        }
+        let paths = named_paths(output);
+        let Some(record) = work_set_record(db, task, &reference)? else {
+            continue;
+        };
+        let mut own: Vec<String> = record["work_set"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        own.extend(written_paths(db, task, assignment, None)?);
+        let mut writers = Vec::new();
+        let mut foreign = !paths.is_empty();
+        for path in &paths {
+            let other = if in_work_set(path, &own) {
+                None
+            } else {
+                other_writer(db, task, assignment, path)?
+            };
+            match other {
+                Some((t, a)) => writers.push(json!({"path":path,"task":t,"assignment":a})),
+                None => {
+                    foreign = false;
+                    break;
+                }
+            }
+        }
+        if foreign {
+            check["attributed_to"] = json!("other_work");
+            check["foreign_failure"] = json!({"basis":"runtime_attribution",
+                "named_paths":paths,"written_by_others":writers,
+                "note":"Every project file the failing run's output names was written by other work and none belongs to this assignment; the check is a failed run recorded as foreign, not a pass of this assignment's own check."});
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -895,6 +1048,10 @@ mod tests {
                         | "duplicate"
                         | "never_launched_between"
                         | "never_launched_same_after"
+                        | "missing_ref"
+                        | "name"
+                        | "unrecorded"
+                        | "settled_unknown_between"
                 ),
                 "{case}"
             );
@@ -1196,14 +1353,17 @@ mod tests {
         let failed = check("failed", "bad");
         assert!(items(&[failed.clone()], &[bad.clone()])[0]
             .starts_with("check [bad]: no_passing_rerun: no later run of the same npm argv"));
-        assert!(items(&[failed.clone()], &[bad.clone(), good.clone()])[0]
+        // An uncited exact rerun the runtime observed closes the failure itself (flaky);
+        // one that did not observe the submitted checkout still has to be cited.
+        assert!(items(&[failed.clone()], &[bad.clone(), good.clone()]).is_empty());
+        let mut inexact = good.clone();
+        inexact.receipt["revision_digest"] = json!("b".repeat(64));
+        assert!(items(&[failed.clone()], &[bad.clone(), inexact])[0]
             .starts_with("check [bad]: rerun_not_cited: the latest rerun [good] passed"));
         let mut other = check("passed", "good");
         other["name"] = json!("other");
-        assert!(
-            items(&[failed.clone(), other], &[bad.clone(), good.clone()])[0]
-                .contains("rerun_named_differently")
-        );
+        // The exact passing rerun closes the failure whatever name cites it.
+        assert!(items(&[failed.clone(), other], &[bad.clone(), good.clone()]).is_empty());
         good.receipt["revision_digest"] = Value::Null;
         let mismatch = items(
             &[failed.clone(), check("passed", "good")],
@@ -1223,6 +1383,111 @@ mod tests {
         // A closed failure names nothing.
         let ok = run("ok", 2, 0, json!(["npm", "test"]), "passed");
         assert!(items(&[failed, check("passed", "ok")], &[bad, ok]).is_empty());
+    }
+    /// Owner stores (60 `open_failed_check`, 44 `failed_check_repair_required`): an
+    /// identical rerun the runtime observed passing on the exact checkout makes the
+    /// earlier failure flaky: closed by that observed run and marked, with no passed
+    /// check created and a model-supplied marker discarded.
+    /// A failed check closes against the exact passing rerun by argv, cwd and checkout
+    /// regardless of the passed check's name; a later run with no recorded identity (killed,
+    /// no receipt) does not block that closure, but without an exact rerun it still does.
+    #[test]
+    fn exact_rerun_closes_regardless_of_name_and_unrecorded_later_runs() {
+        let bad = run("bad", 1, 1, json!(["cargo", "test"]), "failed");
+        let good = run("good", 2, 0, json!(["cargo", "test"]), "passed");
+        let mut lost = run("lost", 3, 0, json!(["cargo", "test"]), "");
+        lost.receipt = json!({"tool_call_ref":"lost","complete":false});
+        let mut other = check("passed", "good");
+        other["name"] = json!("renamed");
+        let runs = vec![bad.clone(), good.clone(), lost.clone()];
+        let out = evaluate_pair(&[check("failed", "bad"), other.clone()], &runs).unwrap();
+        assert_eq!(out[0]["closed_by"], "good");
+        assert_eq!(out[0]["outcome"], "failed", "never turned into a pass");
+        let out = evaluate_pair(&[check("failed", "bad")], &runs).unwrap();
+        assert_eq!(out[0]["closed_as"], "runtime_observed_rerun");
+        // Without an exact passing rerun the unknown later run keeps the failure open.
+        let mut inexact = good.clone();
+        inexact.receipt["revision_digest"] = json!("b".repeat(64));
+        let runs = vec![bad.clone(), inexact, lost];
+        assert!(!resolved(&evaluate_pair(&[check("failed", "bad"), other], &runs).unwrap()[0]));
+        // No rerun at all: the failure stays failed and open.
+        assert!(!resolved(&evaluate_pair(&[check("failed", "bad")], &[bad]).unwrap()[0]));
+    }
+    #[test]
+    fn an_uncited_observed_passing_rerun_closes_the_failure_as_flaky() {
+        let runs = vec![
+            run("bad", 1, 1, json!(["cargo", "test"]), "failed"),
+            run("good", 2, 0, json!(["cargo", "test"]), "passed"),
+        ];
+        let mut failed = check("failed", "bad");
+        failed["attributed_to"] = json!("other_work");
+        failed["flaky"] = json!(false);
+        let out = evaluate_pair(&[failed], &runs).unwrap();
+        assert_eq!(out[0]["outcome"], "failed", "never turned into a pass");
+        assert_eq!(out[0]["closed_by"], "good");
+        assert_eq!(out[0]["closed_as"], "runtime_observed_rerun");
+        assert_eq!(out[0]["flaky"], true);
+        assert!(out[0]["attributed_to"].is_null());
+        assert!(resolved(&out[0]));
+        assert_eq!(out.len(), 1, "no passed check is synthesized");
+        // A trivial command is no verification.
+        let runs = vec![
+            run("bad", 1, 1, json!(["true"]), "failed"),
+            run("good", 2, 0, json!(["true"]), "passed"),
+        ];
+        assert!(!resolved(&evaluate_pair(&[check("failed", "bad")], &runs).unwrap()[0]));
+    }
+    #[test]
+    fn named_paths_are_project_relative_files_only() {
+        let out = "FAIL src/a/b.test.tsx:12:3\n  at /usr/lib/x.js:1\n--> crates/x/src/y.rs:9:1\nnode_modules/z/q.js foo.bar ../up/f.rs";
+        assert_eq!(
+            named_paths(out),
+            vec!["crates/x/src/y.rs".to_owned(), "src/a/b.test.tsx".to_owned()]
+        );
+    }
+    /// A verified failed run whose output names only files other work wrote, none in
+    /// the assignment's own set, is attributed to that work; any file of its own, a
+    /// file nobody else wrote, or an unknown work set leaves the check open.
+    #[test]
+    fn a_failure_in_files_only_other_work_wrote_is_attributed_not_a_blocker() {
+        let (root, store) = store();
+        let runs = vec![run("bad", 1, 1, json!(["npm", "test"]), "FAIL ui/demand-reads.test.tsx:3:1")];
+        let attribute = |db: &Connection, runs: &[Run]| {
+            let mut out = evaluate_pair(&[check("failed", "bad")], runs).unwrap();
+            attribute_foreign(db, "t", "a", &mut out, runs).unwrap();
+            out
+        };
+        store
+            .write(|db| {
+                for (channel, assignment) in [("own", "a"), ("sibling", "b")] {
+                    db.execute("INSERT INTO trusted_channels(channel_id,secret_hash,task_id,principal_thread_id,role,assignment_id,attempt_id,owner_epoch,issued_at)
+                        VALUES (?,'fixture','t','thread','worker',?,'x',1,'now')", (channel, assignment))?;
+                }
+                let write = |channel: &str, path: &str| {
+                    super::super::event_tx(db, "t", "NATIVE_PROJECT_WRITTEN", json!({"channel_id":channel,"path":path,"sha256":"0"}))
+                };
+                super::super::event_tx(db, "t", "NATIVE_COMMAND_STARTED", json!({"ref":"bad"}))?;
+                // No recorded work set: nothing is established.
+                assert!(attribute(db, &runs)[0]["attributed_to"].is_null());
+                let scope = vec!["packages/mine/**".to_owned()];
+                let set = work_set_tx(db, "t", Some("a"), &scope)?.unwrap();
+                record_work_set_tx(db, "t", "bad", "a", &set, &"d".repeat(64), &"d".repeat(64))?;
+                // A named file nobody wrote is not foreign work.
+                assert!(attribute(db, &runs)[0]["attributed_to"].is_null());
+                write("sibling", "ui/demand-reads.test.tsx")?;
+                let out = attribute(db, &runs);
+                assert_eq!(out[0]["attributed_to"], "other_work");
+                assert_eq!(out[0]["outcome"], "failed", "still a failed run, never a pass");
+                assert_eq!(out[0]["foreign_failure"]["written_by_others"][0]["assignment"], "b");
+                assert!(resolved(&out[0]));
+                // The same file also written by this assignment is its own failure.
+                write("own", "ui/demand-reads.test.tsx")?;
+                assert!(attribute(db, &runs)[0]["attributed_to"].is_null());
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
     fn store() -> (std::path::PathBuf, crate::Store) {
         let root = std::env::temp_dir().join(format!("work-set-{}", uuid::Uuid::new_v4()));

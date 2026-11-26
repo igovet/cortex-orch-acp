@@ -230,7 +230,7 @@ or credential contents. A newly launchable install after admission refuses
 without switching providers.
 
 The preceding admission description is historical. The current Rust version
-probe and catalogue use separate Bubblewrap launch paths; neither is a sparse
+probe and catalogue use separate Landlock launch paths; neither is a sparse
 filesystem jail for task engines. See [current OpenCode launch boundaries](features/opencode-engine/index.md#current-rust-launch-boundaries).
 
 #### Native launch-capable catalog producer
@@ -1111,7 +1111,7 @@ Fields:
 
 - Root `version`: integer, exactly `1`; `servers`: object keyed by server name. The loader also accepts `mcpServers` as an alias for the server map.
 - Root `containment`: optional registry default for entries without their own `containment`, `"contained"` (the default when absent) or `"none"`.
-- `containment`: optional, `"contained"` or `"none"`; overrides the root default. Any other value, at either level, makes the registry invalid. `"none"` runs the server without the Cortex sandbox, with the owner's full user authority: no Landlock, seccomp or network restriction. `read_paths`, `write_paths`, `network` and `runtime_dir_env` are then ignored (a missing grant path no longer drops the server), and the server gets the owner's `HOME`, a `PATH` of its executable's directory, `~/.local/bin`, `~/bin`, `/usr/local/bin`, `/usr/bin` and `/bin`, and the Cortex process's `XDG_RUNTIME_DIR`. Tool grants and the relay still apply, and Cortex stops the server's process group when the session ends; a daemon that detaches from that group is not stopped by Cortex. Use it only for a server you trust like any program you run yourself, typically one that cannot start inside the sandbox. It is machine-local: profiles neither capture nor replace it. The Settings switch **Run without the sandbox** writes it per server, omitting it when it equals the registry default.
+- `containment`: optional, `"contained"` or `"none"`; overrides the root default. Any other value, at either level, makes the registry invalid. `"none"` runs the server without the Cortex sandbox, with the owner's full user authority: no Landlock. `read_paths`, `write_paths`, `network` and `runtime_dir_env` are then ignored (a missing grant path no longer drops the server), and the server gets the owner's `HOME`, a `PATH` of its executable's directory, `~/.local/bin`, `~/bin`, `/usr/local/bin`, `/usr/bin` and `/bin`, and the Cortex process's `XDG_RUNTIME_DIR`. Tool grants and the relay still apply, and Cortex stops the server's process group when the session ends; a daemon that detaches from that group is not stopped by Cortex. Use it only for a server you trust like any program you run yourself, typically one that cannot start inside the sandbox. It is machine-local: profiles neither capture nor replace it. The Settings switch **Run without the sandbox** writes it per server, omitting it when it equals the registry default.
 - Required `command`: non-empty executable string; `args`: optional string array, default `[]`.
 - Optional `enabled`: boolean; `false` skips this registry entry. When omitted it defaults to true.
 - `env`: optional environment object or array of `{"name":"KEY","value":"VALUE"}` objects; names and values must be strings without NUL. Reserved launch variables cannot be overridden. Do not put real credentials in this file; protect this owner-only registry and prefer a server's supported external secret source.
@@ -1119,7 +1119,7 @@ Fields:
 - `read_only_tools`: optional array, default `[]`, subset of `allowed_tools`.
 - `coordinator_tools`: optional array, subset of `read_only_tools`; use this to limit which read-only tools the coordinator receives.
 - `read_paths`, `write_paths`: optional arrays of absolute paths, default `[]`. Writes are limited to explicit grants and the engine jail's scope. A writing worker's scope path that does not exist yet when its session starts is not granted to the server.
-- `network`: optional boolean, default `false`.
+- `network`: optional boolean, default `false`; accepted for compatibility, not enforced (every server shares the host network).
 - `runtime_dir_env`: optional unique array of environment-variable names. The runtime provides a private per-server directory through these names. `PATH`, `HOME`, `TMPDIR`, and `XDG_RUNTIME_DIR` are reserved.
 - `always_load_tools`: optional array, subset of `allowed_tools`. The gateway marks these tools with MCP `_meta` `"anthropic/alwaysLoad": true` in `tools/list`, so Claude keeps their schemas in the prompt instead of deferring them behind `ToolSearch`. Codex ignores the mark. Each listed schema costs prompt context in every Claude session that receives the tool.
 - `roles`: optional non-empty unique subset of `coordinator`, `worker`.
@@ -1130,8 +1130,8 @@ Cortex-owned entries take precedence over client-supplied MCP entries with the s
 The additive Rust native host reads the same owner-global registry and grant fields.
 Its incoming client accepts configured names only; unlike the retained adapter's
 session fallback, an unconfigured client entry is refused. Native containment uses
-Landlock/seccomp with narrower local-socket and project-scope support, not Python's
-namespace launcher. See [native external MCP boundaries](project/native-incoming-acp.md#external-mcp-boundary)
+Landlock (real filesystem readable except secrets and Cortex stores, writes only to
+grants and scopes, shared network), not a namespace launcher. See [native external MCP boundaries](project/native-incoming-acp.md#external-mcp-boundary)
 before selecting that optional entry point; this does not change installed clients.
 
 ### MCP servers that need a sign-in

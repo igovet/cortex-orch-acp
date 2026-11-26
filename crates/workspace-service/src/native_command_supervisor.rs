@@ -1,9 +1,6 @@
 //! Private per-command supervisor. Only the inherited pipe can authorize launch;
 //! restart observers read its durable status; they never execute the payload.
-use crate::{
-    native_command_live::{Profile, Sandbox as LiveSandbox},
-    native_command_sandbox::{Sandbox, CODEX_SCRATCH, WORKTREE_READ_ONLY},
-};
+use crate::native_command_sandbox::{Profile, Sandbox, CODEX_SCRATCH, WORKTREE_READ_ONLY};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -32,19 +29,6 @@ fn live_profile(name: &str) -> io::Result<Profile> {
     }
 }
 
-enum Prepared {
-    Live(LiveSandbox),
-    Scoped(Sandbox),
-}
-
-impl Prepared {
-    fn command_at(&self, argv: &[String], cwd: &Path) -> io::Result<Command> {
-        match self {
-            Self::Live(sandbox) => sandbox.command_at(argv, Some(cwd)),
-            Self::Scoped(sandbox) => sandbox.command_at(argv, Some(cwd)),
-        }
-    }
-}
 const AUTHORITY_LEASE: Duration = Duration::from_secs(2);
 
 /// Probe the real command preparations from process-level integration fixtures
@@ -57,7 +41,7 @@ pub fn observe_command_view(root: &Path, profile: &str) -> io::Result<()> {
     } else {
         vec![root.to_path_buf()]
     };
-    LiveSandbox::prepare(root, profile, &writes, &[], false)?;
+    Sandbox::prepare(root, profile, &writes, &[], false)?;
     Ok(())
 }
 #[derive(Serialize, Deserialize)]
@@ -73,6 +57,11 @@ pub(crate) struct Spec {
     pub checkout: Option<Value>,
     pub writes: Vec<PathBuf>,
     pub protected: Vec<PathBuf>,
+    /// The service's index of the checkout's secret files for a read-only or
+    /// Guarded command (`native_sandbox::indexed_project_secrets`), so that this
+    /// preparation never walks the project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<Vec<PathBuf>>,
     pub output: PathBuf,
     pub status: PathBuf,
     pub stop: PathBuf,
@@ -222,7 +211,7 @@ pub fn run() -> io::Result<()> {
             return Err(io::Error::other("invalid_scoped_command_spec"));
         }
         handshake(&mut input, json!({"authorize":true}))?;
-        Sandbox::prepare_scoped(&spec.root, &spec.protected).map(Prepared::Scoped)
+        Sandbox::prepare_scoped(&spec.root, &spec.protected)
     } else if spec.profile == WORKTREE_READ_ONLY {
         let logical = spec.checkout.as_ref().and_then(|v| v["logical"].as_str())
             .map(Path::new).ok_or_else(|| io::Error::other("invalid_worktree_command_spec"))?;
@@ -231,23 +220,23 @@ pub fn run() -> io::Result<()> {
             return Err(io::Error::other("invalid_worktree_command_spec"));
         }
         handshake(&mut input, json!({"authorize":true}))?;
-        Sandbox::prepare_worktree(&spec.root, logical, &spec.protected).map(Prepared::Scoped)
+        Sandbox::prepare_worktree(&spec.root, logical, &spec.protected)
     } else {
         let profile = match live_profile(&spec.profile)? {
             Profile::Development if spec.auto => Profile::Auto,
             p => p,
         };
-        LiveSandbox::prepare_authorized(
+        Sandbox::prepare_authorized(
             &spec.root,
             profile,
             &spec.writes,
             &spec.protected,
+            spec.secrets.as_deref(),
             &mut || handshake(&mut input, json!({"authorize":true})),
             &mut timings,
         )
-        .map(Prepared::Live)
     };
-    let mut sandbox = match prepared {
+    let sandbox = match prepared {
         Ok(sandbox) => sandbox,
         Err(e) => {
             // Tell the service why nothing will launch: a fixed reason code and the
@@ -272,7 +261,7 @@ pub fn run() -> io::Result<()> {
     handshake(&mut input, json!({"ready":own,"timings":timings}))?;
     let launched_at = Instant::now();
     let output = Arc::new(Mutex::new(private(&spec.output)?));
-    let mut command: Command = sandbox.command_at(&spec.argv, &spec.cwd)?;
+    let mut command: Command = sandbox.command_at(&spec.argv, Some(&spec.cwd))?;
     command
         .current_dir(&spec.cwd)
         .stdin(Stdio::null())
@@ -286,6 +275,16 @@ pub fn run() -> io::Result<()> {
     let mut code = None;
     let mut signal = None;
     match command.spawn() {
+        // The program itself is missing or not executable: report it like a shell does.
+        Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied) => {
+            let message = format!(
+                "cortex: execvp {}: {}\n",
+                spec.argv[0],
+                if e.kind() == io::ErrorKind::NotFound { "No such file or directory" } else { "Permission denied" }
+            );
+            output.lock().unwrap().write_all(message.as_bytes())?;
+            code = Some(if e.kind() == io::ErrorKind::NotFound { 127 } else { 126 });
+        }
         Err(_) => failure = Some("spawn_failed"),
         Ok(mut child) => {
             let pid = child.id();
@@ -358,6 +357,15 @@ pub fn run() -> io::Result<()> {
                         code = status.code();
                     }
                     signal = status.signal();
+                    if failure.is_none() && (signal == Some(libc::SIGKILL) || code != Some(0)) {
+                        if let Some(peak) = crate::native_command_scope::oom_killed() {
+                            failure = Some("out_of_memory");
+                            let _ = output
+                                .lock()
+                                .unwrap()
+                                .write_all(crate::native_command_scope::oom_message(peak).as_bytes());
+                        }
+                    }
                 }
                 Err(_) => failure = Some("wait_failed"),
             }
@@ -371,14 +379,6 @@ pub fn run() -> io::Result<()> {
             if !matches!(out, Ok(Ok(()))) || !matches!(err, Ok(Ok(()))) {
                 failure = Some("output_incomplete");
             }
-        }
-    }
-    if let Prepared::Live(live) = &mut sandbox {
-        if !live.finish().is_empty() {
-            output
-                .lock()
-                .unwrap()
-                .write_all(b"\nCortex removed newly planted Git control paths.\n")?;
         }
     }
     drop(sandbox);

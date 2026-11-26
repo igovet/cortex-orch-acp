@@ -950,3 +950,56 @@ fn sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
 }
+
+/// Marks a saved draft as a member of a sprint that shares one worktree, the way the
+/// sprint materialization saves it.
+fn share_with_sprint(s: &Store, draft: &str, sprint: &str, title: &str) {
+    s.write(|db| {
+        db.execute(
+            "UPDATE workspace_task_options SET options_json=json_set(options_json,'$.sprintWorktree',json(?)) WHERE task_id=?",
+            (json!({"sprintId":sprint,"title":title}).to_string(), draft),
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn sprint_members_share_one_worktree_and_per_task_drafts_keep_their_own() {
+    use cortex_core::workspace::{start_native_worktree, worktrees::resolve};
+    use std::fs;
+    let (p, s) = setup();
+    let machine = Project::new();
+    git(&p.0, &["init"]);
+    fs::write(p.0.join("file"), "committed").unwrap();
+    git(&p.0, &["add", "file"]);
+    git(&p.0, &["commit", "-m", "base"]);
+    let mut drafts = Vec::new();
+    for n in 0..3 {
+        let mut c = command();
+        c["requestId"] = json!(format!("create-{n}"));
+        c["payload"]["description"] = json!(format!("Member {n}"));
+        c["payload"]["checkout"] = json!({"kind":"worktree"});
+        drafts.push(create_draft(&s, "p", "owner", &c).unwrap().receipt["target"].as_str().unwrap().to_owned());
+    }
+    let (a, b, c) = (drafts[0].clone(), drafts[1].clone(), drafts[2].clone());
+    share_with_sprint(&s, &a, "sp_1", "Ship it");
+    share_with_sprint(&s, &b, "sp_1", "Ship it");
+    let started: Vec<_> = [(&a, "a"), (&b, "b"), (&c, "c")].into_iter().map(|(draft, request)| {
+        let first = start_native_worktree(&s, "p", "owner", &start_command(draft, request), &machine.0).unwrap_or_else(|e| panic!("{request}: {e:?}"));
+        let task = first["task"].as_str().unwrap().to_owned();
+        let owner = cortex_core::ownership::OwnerEpoch { owner: "owner".into(), epoch: first["owner"]["epoch"].as_i64().unwrap() };
+        let w = resolve(&s, &task, &owner).unwrap().worktree.unwrap();
+        (w.id, w.path, w.branch)
+    }).collect();
+    assert_eq!(started[0], started[1], "two members of one sprint use one worktree, path and branch");
+    assert!(started[0].2.starts_with("cw/ship-it-"), "{}", started[0].2);
+    assert_ne!(started[0].1, started[2].1, "a task without the sprint marker keeps its own worktree");
+    assert_ne!(started[0].2, started[2].2);
+    assert_eq!(count(&s, "task_workspaces"), 3);
+    // One checkout, one registration: the repository lists the main folder, the sprint worktree and the loose one.
+    assert_eq!(git(&p.0, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 3);
+    let options: String = s.read(|db| Ok(db.query_row(
+        "SELECT options_json FROM workspace_task_options WHERE task_id=?", [&b], |r| r.get(0))?)).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&options).unwrap()["checkout"]["shared"], true);
+}

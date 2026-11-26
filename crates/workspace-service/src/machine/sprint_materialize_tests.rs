@@ -662,3 +662,79 @@ fn sprint_live_graph_failed_atomic_save_leaves_the_previous_graph() {
     assert_eq!(env.bytes(), before);
     assert_eq!(graph(&env), view);
 }
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// The description's own file (a document) and a planning-chat message's file (an
+/// image) both become attachments of every created task.
+fn with_files(env: &Env) -> Vec<Value> {
+    let png: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, b'I', b'H', b'D', b'R', 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89];
+    let files = vec![
+        json!({"name":"Site Fixes v1.md","mimeType":"text/markdown","data":b64(b"# Fixes\n")}),
+        json!({"name":"shot.png","mimeType":"image/png","data":b64(png)}),
+    ];
+    let mut product = env.saved();
+    product["sprints"][0]["attachments"] = json!([files[0]]);
+    product["sprints"][0]["conversation"] =
+        json!([{"kind":"message","text":"see","attachments":[files[1]]}]);
+    settings::write_json(&product_path(&env.state, "p").unwrap(), &product).unwrap();
+    files
+}
+
+#[test]
+fn every_created_task_gets_the_sprints_description_and_chat_files() {
+    let env = env("files", 2);
+    let files = with_files(&env);
+    env.run(1).unwrap();
+    for (_, _, options) in env.drafts() {
+        assert_eq!(options["attachments"], json!(files));
+    }
+}
+
+#[test]
+fn a_draft_created_without_the_files_gets_them_and_a_running_task_is_told_once() {
+    let env = env("backfill", 2);
+    env.run(1).unwrap();
+    let files = with_files(&env);
+    let store = Store::open(context::key(&env.root).unwrap(), OpenMode::Initialize).unwrap();
+    let ids: Vec<String> = env.saved()["sprints"][0]["taskIds"]
+        .as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()).collect();
+    // The second task runs: bound to an execution whose runtime task is working.
+    let running = ids[1].clone();
+    store.write(move |db| {
+        db.execute_batch("PRAGMA foreign_keys=OFF")?;
+        db.execute("INSERT INTO workspace_executions(execution_id,task_id,runtime_task_id) VALUES ('x',?,'rt')", [&running]).ok();
+        Ok(())
+    }).ok();
+    let mut product = env.saved();
+    super::super::sprint_files::backfill(&store, &env.state, "p", &mut product, "sp").unwrap();
+    let drafts = env.drafts();
+    assert_eq!(drafts.iter().find(|d| d.0 == ids[0]).unwrap().2["attachments"], json!(files));
+    // Repeating adds nothing.
+    super::super::sprint_files::backfill(&store, &env.state, "p", &mut product, "sp").unwrap();
+    assert_eq!(env.drafts().iter().find(|d| d.0 == ids[0]).unwrap().2["attachments"], json!(files));
+}
+
+#[test]
+fn a_shared_worktree_sprint_marks_every_member_with_its_sprint_and_a_per_task_one_does_not() {
+    for (shared, name) in [(true, "shared-wt"), (false, "separate-wt")] {
+        let env = env(name, 3);
+        let mut saved = env.saved();
+        saved["sprints"][0]["checkout"] = json!({"kind":"worktree","shared":shared});
+        settings::write_json(&product_path(&env.state, "p").unwrap(), &saved).unwrap();
+        assert_eq!(env.run(1).unwrap()["created"], 3);
+        let drafts = env.drafts();
+        assert_eq!(drafts.len(), 3);
+        for (task, _, options) in &drafts {
+            assert_eq!(options["checkout"], json!({"kind":"worktree"}), "{task}");
+            if shared {
+                assert_eq!(options["sprintWorktree"], json!({"sprintId":"sp","title":"Sprint"}), "{task}");
+            } else {
+                assert!(options.get("sprintWorktree").is_none(), "{task}");
+            }
+        }
+    }
+}

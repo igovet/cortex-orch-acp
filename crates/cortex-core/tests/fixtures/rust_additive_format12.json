@@ -58,5 +58,17 @@
     "type": "index",
     "tbl_name": "host_transcript",
     "sql": "CREATE INDEX host_transcript_by_message ON host_transcript(session_id, kind, message_id)"
+  },
+  {
+    "name": "runtime_events_by_tool_call_ref",
+    "type": "index",
+    "tbl_name": "runtime_events",
+    "sql": "CREATE INDEX runtime_events_by_tool_call_ref ON runtime_events(task_id, json_extract(payload_json,'$.tool_call_ref'), type, id)"
+  },
+  {
+    "name": "runtime_events_finished_ref",
+    "type": "index",
+    "tbl_name": "runtime_events",
+    "sql": "CREATE INDEX runtime_events_finished_ref ON runtime_events(task_id, json_extract(payload_json,'$.receipt.tool_call_ref'), id) WHERE type='NATIVE_COMMAND_FINISHED'"
   }
 ]

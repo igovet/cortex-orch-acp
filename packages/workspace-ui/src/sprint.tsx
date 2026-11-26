@@ -17,12 +17,13 @@ import { activePlanningWarning, clock, decisionRoute, humanStatus, classifiedPla
 import { Conversation as TaskConversation, firstWorker, TaskWorkers, useSessionClock } from "./session";
 import { sessionModel, type SessionModel } from "./session-model";
 import { PlanningPlace } from "./task-place";
+import { Skeleton } from "./skeleton";
 import { share } from "./stable";
 import { ResultText } from "./result-text";
 import { ResultScope } from "./result-links";
 import { CopySource, MessageTools } from "./message-copy";
 import { SentMessages } from "./sent";
-import { createLabel, itemTitle, planCaption, planGraph, planningAsks, planningThread, planRows, queueStall, sprintGap, sprintSummary, SPRINT_CLOSE_NOTE, type PlanRow } from "./sprint-model";
+import { createLabel, itemTitle, planCaption, planGraph, planningAsks, planningThread, planRows, queueStall, separateWorktrees, sprintCheckoutLabel, sprintGap, sprintSummary, SPRINT_CLOSE_NOTE, type PlanRow } from "./sprint-model";
 import { graphCounts, planLayers } from "./plan-graph";
 import { GraphView, type GraphApi, type GraphLinks, type GraphMemory } from "./sprint-graph";
 import { arrange, INLINE_FLOOR, inlineScale, type Opened } from "./sprint-space";
@@ -56,17 +57,18 @@ export function SprintTarget(props: { sprint: Sprint; summary: ProjectSummary; c
 }
 
 function SprintCheckout(props: { sprint: Sprint }) {
-  return <Show when={props.sprint.checkout}><span class="cap muted" aria-label="Sprint checkout">Tasks: {props.sprint.checkout!.kind === "worktree" ? "Separate worktree per task" : "Project folder"}</span></Show>;
+  return <Show when={props.sprint.checkout}><span class="cap muted" aria-label="Sprint checkout">Tasks: {sprintCheckoutLabel(props.sprint.checkout!)}</span></Show>;
 }
 
 export function RunMode(props: { sprint: Sprint; describedBy?: string }) {
   const ws = useWs();
   const set = (runMode: Sprint["runMode"]) => { if (props.sprint.runMode !== runMode) ws.run({ type: "set_run_mode", sprintId: props.sprint.id, runMode }); };
   const described = () => ws.gate("set_run_mode") ? props.describedBy : undefined;
+  const blocked = (mode: Sprint["runMode"]) => mode !== "manual" && separateWorktrees(props.sprint) ? ws.t("separateWorktreesManualOnly") : undefined;
   const id = createUniqueId();
   return <div class="seg" role="group" aria-label="Sprint run mode">
     <For each={SPRINT_RUN_MODES}>{mode => <>
-      <button aria-current={props.sprint.runMode === mode ? "true" : "false"} aria-describedby={[`${id}-${mode}`, described()].filter(Boolean).join(" ")} {...ws.needs("set_run_mode")} onClick={() => set(mode)}>{sprintModeLabel[mode]}</button>
+      <button aria-current={props.sprint.runMode === mode ? "true" : "false"} aria-describedby={[`${id}-${mode}`, described()].filter(Boolean).join(" ")} {...ws.needs("set_run_mode")} aria-disabled={blocked(mode) ? "true" : undefined} data-why={blocked(mode)} onClick={() => { if (!blocked(mode)) set(mode); }}>{sprintModeLabel[mode]}</button>
       <span hidden id={`${id}-${mode}`}>{sprintModeDescription[mode]}</span>
     </>}</For>
   </div>;
@@ -169,6 +171,14 @@ export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }
     const blocked = sprintCloseBlockers(ws.store.state(), props.sprint);
     return ws.gate("close_sprint") ?? (blocked.length ? `Close sprint is blocked by: ${blocked.map(b => `${b.title}: ${b.reason}`).join("; ")}.` : undefined);
   });
+  // A shared-worktree sprint is merged into its target once, after every member finished onto its branch.
+  const mergeable = () => props.sprint.checkout?.kind === "worktree" && props.sprint.checkout.shared === true && !props.sprint.merge && !props.sprint.archivedAt
+    && props.sprint.planning === "created" && (() => { const members = ws.store.state().tasks.filter(t => t.sprintId === props.sprint.id && !t.archive); return members.length > 0 && members.every(t => t.status === "done"); })();
+  const mergeSprint = () => {
+    const target = props.sprint.targetBranch ?? "the target branch";
+    ws.open({kind:"confirm",title:"Merge the sprint branch?",action:"Merge sprint",note:`All finished tasks are merged into ${target} as one commit, then the sprint worktree is removed. The branch stays in Git.`,
+      go:async () => (await ws.run({type:"merge_sprint",sprintId:props.sprint.id,confirmed:true})).ok});
+  };
   const close = () => {
     if (closeWhy()) return;
     ws.open({kind:"confirm",title:"Close this sprint?",action:"Close sprint",note:SPRINT_CLOSE_NOTE,
@@ -195,6 +205,8 @@ export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }
   </Show>}><>
     <Show when={props.tab === "summary"}><QueueButton sprint={props.sprint} line /></Show>
     <Show when={props.sprint.planning === "created"}><button class="btn btn-line tb-fold" onClick={() => ws.newItem("task", props.sprint.projectId, props.sprint.id)}><I n="plus" s={14} />New task</button></Show>
+    <Show when={mergeable()}><button class="btn btn-primary tb-fold" {...ws.needs("merge_sprint")} onClick={mergeSprint}>Merge sprint branch…</button></Show>
+    <Show when={props.sprint.merge}><span class="cap muted">Merged into {props.sprint.merge!.target}</span></Show>
     <button class="btn btn-line tb-fold" aria-disabled={closeWhy() ? "true" : undefined} data-why={closeWhy()} onClick={close}>Close sprint…</button>
     <button data-tooltip="" class="ib" popovertarget="m-sprint-menu" aria-label="Sprint actions"><I n="more" /></button>
     <Pop id="m-sprint-menu" class="pop-right" align="right" label="Sprint actions">
@@ -937,7 +949,9 @@ function SummaryTab(props: { route: SprintRoute; sprint: Sprint }) {
 export function SprintPage(props: { route: SprintRoute; summary: ProjectSummary }) {
   const ws = useWs();
   const sprint = useSprint(() => props.route.sprint);
-  return <Show when={sprint()} fallback={<div class="note-panel"><span class="w500">Sprint not found</span></div>}>{s =>
+  // A sprint not yet in the model is loading until a confirmed read says otherwise: only then is it missing.
+  const loading = () => ws.store.sprintPending(props.route.sprint, props.route.project);
+  return <Show when={sprint()} fallback={<Show when={!loading()} fallback={<div class="ws-skel-pane" aria-busy="true"><Skeleton kind="conversation" label="Loading the sprint…" /></div>}><div class="note-panel"><span class="w500">Sprint not found</span></div></Show>}>{s =>
     <ResultScope.Provider value={() => ({ projectId: s().projectId, taskId: planningTaskOf(ws.store.state(), s()) ?? undefined, projectCode: true })}>
       <Show when={!s().archivedAt} fallback={<SummaryTab route={props.route} sprint={s()} />}><Show when={props.route.tab !== "summary"} fallback={<SummaryTab route={props.route} sprint={s()} />}><PlanningTab route={props.route} sprint={s()} summary={props.summary} /></Show></Show>
     </ResultScope.Provider>

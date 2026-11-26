@@ -332,6 +332,10 @@ CREATE TABLE IF NOT EXISTS runtime_events (
 );
 CREATE INDEX IF NOT EXISTS runtime_events_task ON runtime_events(task_id,id);
 CREATE INDEX IF NOT EXISTS runtime_events_type ON runtime_events(type,task_id,id);
+-- Tool-call lookups (worker history, task facts) name one reference per task; without these
+-- they parse every TOOL_COMPLETED / TOOL_AUTHORIZED / COMMAND_* payload of the task.
+CREATE INDEX IF NOT EXISTS runtime_events_by_tool_call_ref ON runtime_events(task_id, json_extract(payload_json,'$.tool_call_ref'), type, id);
+CREATE INDEX IF NOT EXISTS runtime_events_finished_ref ON runtime_events(task_id, json_extract(payload_json,'$.receipt.tool_call_ref'), id) WHERE type='NATIVE_COMMAND_FINISHED';
 CREATE TABLE IF NOT EXISTS runtime_requests (
  task_id TEXT NOT NULL, request_key TEXT NOT NULL, actor TEXT NOT NULL,
  operation TEXT NOT NULL, digest TEXT NOT NULL, result_json TEXT NOT NULL,

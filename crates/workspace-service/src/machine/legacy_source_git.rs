@@ -1,5 +1,5 @@
-//! Legacy Git file selection. Only fixed ls-files runs, in a no-home, no-network
-//! bubblewrap view. Unavailable Git retains the legacy whole-tree fallback.
+//! Legacy Git file selection. Only fixed ls-files runs, with a private HOME under
+//! a Landlock ruleset (scratch-only writes, excluded entries hidden). Unavailable Git retains the legacy whole-tree fallback.
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
@@ -128,28 +128,15 @@ impl Drop for Scratch {
 /// (depth first, each directory in its read order), so the view is the same; when that
 /// walk would stop (an unreadable entry, the entry bound or the deadline) it is the
 /// ordered walk that runs and decides.
-fn mask(
-    command: &mut Command,
-    root: &Path,
-    remaining: &mut usize,
-    deadline: Instant,
-) -> io::Result<()> {
+/// The excluded entries the listing must not read, hidden by the Landlock ruleset.
+fn mask(root: &Path, remaining: &mut usize, deadline: Instant) -> io::Result<Vec<PathBuf>> {
     let Some(mut found) = mask_parallel(root, *remaining, deadline, MASK_WALKERS) else {
-        return mask_ordered(command, root, remaining, deadline);
+        let mut hidden = Vec::new();
+        mask_ordered(&mut hidden, root, remaining, deadline)?;
+        return Ok(hidden);
     };
     found.sort_by(|a, b| a.0.cmp(&b.0));
-    for (_, path, directory) in found {
-        if directory {
-            command
-                .arg("--tmpfs")
-                .arg(&path)
-                .arg("--remount-ro")
-                .arg(&path);
-        } else {
-            command.arg("--ro-bind").arg("/dev/null").arg(&path);
-        }
-    }
-    Ok(())
+    Ok(found.into_iter().map(|(_, path, _)| path).collect())
 }
 /// Threads of one parallel mask walk.
 const MASK_WALKERS: usize = 8;
@@ -258,7 +245,7 @@ fn mask_parallel(
     found.into_inner().ok()
 }
 fn mask_ordered(
-    command: &mut Command,
+    hidden: &mut Vec<PathBuf>,
     root: &Path,
     remaining: &mut usize,
     deadline: Instant,
@@ -274,17 +261,11 @@ fn mask_ordered(
             .iter()
             .any(|n| entry.file_name() == *n)
         {
-            if kind.is_dir() {
-                command
-                    .arg("--tmpfs")
-                    .arg(entry.path())
-                    .arg("--remount-ro")
-                    .arg(entry.path());
-            } else if !kind.is_symlink() {
-                command.arg("--ro-bind").arg("/dev/null").arg(entry.path());
+            if !kind.is_symlink() {
+                hidden.push(entry.path());
             }
         } else if kind.is_dir() {
-            mask_ordered(command, &entry.path(), remaining, deadline)?;
+            mask_ordered(hidden, &entry.path(), remaining, deadline)?;
         }
     }
     Ok(())
@@ -306,76 +287,28 @@ pub(super) fn listed(root: &Path) -> Result<Option<Listed>, ()> {
             .write(true)
             .create_new(true)
             .open(&output)?;
-        let mut command = Command::new("/usr/bin/bwrap");
-        command.env_clear().env("PATH", "/usr/bin:/bin").args([
-            "--die-with-parent",
-            "--unshare-pid",
-            "--unshare-ipc",
-            "--unshare-net",
-            "--clearenv",
-            "--setenv",
-            "PATH",
-            "/usr/local/bin:/usr/bin:/bin",
-            "--setenv",
-            "LANG",
-            "C.UTF-8",
-        ]);
-        for name in ["HOME", "TMPDIR", "TMP", "TEMP"] {
-            command.arg("--setenv").arg(name).arg(&scratch.0);
-        }
-        for name in ["/usr", "/bin", "/sbin", "/lib", "/lib64"] {
-            let path = Path::new(name);
-            if path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
-                command.arg("--symlink").arg(fs::read_link(path)?).arg(path);
-            } else if path.is_dir() {
-                command.arg("--ro-bind").arg(path).arg(path);
-            }
-        }
-        for name in ["/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/localtime"] {
-            if Path::new(name).is_file() {
-                command.arg("--ro-bind").arg(name).arg(name);
-            }
-        }
-        fs::create_dir(scratch.0.join("var-tmp"))?;
-        command.args(["--proc", "/proc", "--dev", "/dev", "--bind", "/tmp", "/tmp"]);
+        let hidden = mask(root, &mut 2_000_000, Instant::now() + Duration::from_secs(20))?;
+        // The real host under Landlock: writes only to the private scratch and
+        // devices; the excluded entries and the live Cortex stores are unreadable.
+        let mut writes = crate::native_sandbox::devices();
+        writes.push(scratch.0.clone());
+        let mut hidden = hidden;
+        hidden.extend(crate::native_sandbox::live_stores(root));
+        let rules = std::sync::Arc::new(crate::native_sandbox::Sandbox::host(
+            &crate::native_sandbox::HostPolicy { writes, hidden, ..Default::default() },
+        )?);
+        let mut command = Command::new("/usr/bin/git");
         command
-            .arg("--bind")
-            .arg(scratch.0.join("var-tmp"))
-            .arg("/var/tmp");
-        command.arg("--bind").arg(&scratch.0).arg(&scratch.0);
-        command.arg("--ro-bind").arg(root).arg(root);
-        mask(
-            &mut command,
-            root,
-            &mut 2_000_000,
-            Instant::now() + Duration::from_secs(20),
-        )?;
-        for dir in &dirs {
-            command.arg("--ro-bind").arg(dir).arg(dir);
-        }
-        command
-            .arg("--setenv")
-            .arg("GIT_DIR")
-            .arg(&dirs[0])
-            .arg("--setenv")
-            .arg("GIT_WORK_TREE")
-            .arg(root)
+            .env_clear()
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("LANG", "C.UTF-8")
+            .env("GIT_DIR", &dirs[0])
+            .env("GIT_WORK_TREE", root)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .current_dir(root)
             .args([
-                "--setenv",
-                "GIT_CONFIG_NOSYSTEM",
-                "1",
-                "--setenv",
-                "GIT_CONFIG_GLOBAL",
-                "/dev/null",
-                "--setenv",
-                "GIT_TERMINAL_PROMPT",
-                "0",
-            ])
-            .arg("--chdir")
-            .arg(root)
-            .args([
-                "--",
-                "/usr/bin/git",
                 "--no-optional-locks",
                 "-c",
                 "core.fsmonitor=false",
@@ -396,12 +329,15 @@ pub(super) fn listed(root: &Path) -> Result<Option<Listed>, ()> {
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .stdout(stdout);
+        for name in ["HOME", "TMPDIR", "TMP", "TEMP"] {
+            command.env(name, &scratch.0);
+        }
         unsafe {
-            command.pre_exec(|| {
+            command.pre_exec(move || {
                 if libc::setpgid(0, 0) != 0 {
                     return Err(io::Error::last_os_error());
                 }
-                Ok(())
+                rules.enter()
             });
         }
         let mut child = command.spawn()?;

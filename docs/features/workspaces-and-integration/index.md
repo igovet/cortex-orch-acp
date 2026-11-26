@@ -23,7 +23,14 @@ ready nodes remain pending until a worker slot is free. A connection's
 `max_concurrent_sessions` limit (default 4, configurable from 1 through 64) can
 further lower the session's worker capacity on that connection; coordinators
 are never limited and never take a worker slot. Overlapping write scopes are
-serialized. When a task finishes its execution steps, new writing assignments in the same checkout queue while existing writers drain. Independent review and final verification share the checkout with readers. Writers in separate worktrees can proceed. External digest drift during verification starts fresh independent review within the review-cycle limit. Each observed command output remains in the original run. A finished worker keeps its session slot until its
+serialized. When execution finishes with recorded changes or incomplete change
+evidence, new writers in the same checkout queue while active writers drain for
+code review. The reservation lasts through verification and final reconciliation.
+Verification that runs host commands needs a stable checkout even without
+recorded changes. Sprint plan reviews, sprint revision reviews and reviews with
+no project changes to certify do not wait for writers or take a new reservation.
+A sprint revision review preserves an existing reservation if the task's current
+revision has already passed host verification. Writers in separate worktrees can proceed. External digest drift during verification starts fresh independent review within the review-cycle limit. Each observed command output remains in the original run. A finished worker keeps its session slot until its
 engine is confirmed gone and the reservation is released or safely reclaimed.
 A finished, failed or cancelled worker's write scope is likewise held until
 its engine's reservation is released on a confirmed exit (or every delegation
@@ -63,7 +70,7 @@ only through partial ACP tool-call events rather than the gateway (see
 [codex-engine](../codex-engine/index.md)'s current runtime gateway policy).
 Coordinator, consultant and review roles are read-only; other
 workers may write only within their assigned scopes. File replacement checks an
-expected hash or absence and rejects private paths, symlinks and hardlinks.
+expected hash or absence and rejects private paths and symlinks. A hard-linked regular file inside the project reads normally and a write replaces its directory entry atomically without touching the shared inode. `project_write` also takes `encoding: "base64"` for binary content (decoded size at most 750000 bytes); command `changed_paths` are attributed project writes too, and `project_edit` treats an unchanged result as success and applies when the old text still matches uniquely.
 Direct private/Git/denied-path overlays are not a guarantee against arbitrary host
 code, outside aliases or Docker. A project digest does not cover outside resources.
 Writing-worker commands in Development and Auto use host-writable mounts through the

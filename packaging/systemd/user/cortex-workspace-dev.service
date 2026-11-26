@@ -13,16 +13,12 @@ RuntimeDirectoryMode=0700
 Restart=on-failure
 RestartSec=5s
 KillMode=control-group
-# Every task process (engines, builds, tests, renders) runs in this unit's cgroup.
-# Under contention the desktop gets the CPU first, and above MemoryHigh the kernel
-# reclaims this unit's memory instead of swapping out the session. Nothing is
-# killed for it (no MemoryMax), and an idle machine runs tasks at full speed.
-CPUWeight=20
+# The service and its engines run at normal CPU and disk priority. Task commands (builds,
+# tests, renders) run in their own transient scopes (CPUWeight 20, nice 10, idle disk class,
+# MemoryHigh 60%, MemoryMax 75% of RAM), so a runaway command is throttled or OOM-killed
+# alone and never starves the service. The service keeps a reservation.
+MemoryLow=1G
 MemoryHigh=60%
-# Disk access of task processes yields to the session wherever the block device's
-# scheduler honours I/O priorities (BFQ); with the `none` scheduler it changes nothing.
-IOSchedulingClass=best-effort
-IOSchedulingPriority=7
 TimeoutStopSec=30s
 
 [Install]

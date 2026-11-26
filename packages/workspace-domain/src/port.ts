@@ -1,5 +1,5 @@
 import type { McpServer, ConnectResult } from "./index";
-import type { CommandOutput, CommandOutputRead, Decision, EngineWeeklyUsage, LiveSprintGraph, Machine, Message, Project, ProjectRepo, SessionOptions, Sprint, Task, TaskChanges, TaskSession, TimelineEntry, Worker, WorkspaceCommand, WorkspaceState } from "./types";
+import type { Activity, CommandOutput, CommandOutputRead, Decision, EngineWeeklyUsage, LiveSprintGraph, Machine, Message, Project, ProjectRepo, SessionOptions, Sprint, Task, TaskChanges, TaskSession, TimelineEntry, Worker, WorkspaceCommand, WorkspaceState } from "./types";
 
 /**
  * The one seam between the presentation and any backend. A screen sends intents and reads projections; it never changes
@@ -21,6 +21,8 @@ export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptanc
   status?: "ready_to_merge" | "done"; automaticReady?: boolean; planning?: boolean; purged?: boolean; retiredPlanner?: boolean;
   /** Latest coordinator attempt clock and reported usage, read with task facts. */
   coordinatorMetrics?: Pick<TaskSession["coordinator"], "elapsedMs" | "runningSince" | "usage">;
+  /** The runtime's own verification commands: no worker owns them. */
+  verificationCommands?: Activity[];
   /** Owner reopen generation. An older result's presentation facts cannot cross it. */
   reworkEvent?: string;
 };
@@ -81,6 +83,8 @@ export type QueryOperation = keyof QueryResults;
 
 export interface WorkspacePort {
   readonly mode: PortMode;
+  /** True while the port reads each project's facts apart from its board and may deliver either late, project by project (a list built from one before the other would reshuffle). */
+  readonly readsFacts?: boolean;
   /** Private owner maintenance input is never retained in command history or receipts. */
   machineAction?(op: "workflow.describe" | "maintenance" | "engine.connection" | "native.engine_login", params: Record<string, unknown>): Promise<Record<string, unknown>>;
   query<O extends QueryOperation>(operation: O, parameters: QueryParameters[O]): Promise<QueryResults[O]>;
@@ -280,7 +284,7 @@ export const projectionKey = (update: ProjectionUpdate) => update.scope === "wor
 export function overlayTask(task: Task, overlay: TaskOverlay | undefined, branch: string): Task {
   const checkout = task.checkout.kind === "main" ? { kind: "main" as const, branch } : task.checkout;
   if (!overlay) return { ...task, checkout };
-  const { status, automaticReady, planning: _planning, purged: _purged, coordinatorMetrics: _coordinatorMetrics, ...facts } = overlay;
+  const { status, automaticReady, planning: _planning, purged: _purged, coordinatorMetrics: _coordinatorMetrics, verificationCommands: _verificationCommands, ...facts } = overlay;
   // Runtime activity supersedes acceptance of an older result, even if a
   // machine-state write failed after durable steering capture.
   const reopened = task.process === "live" && status === "ready_to_merge";
@@ -343,7 +347,8 @@ function withFactEntries(session: TaskSession, facts: ProjectFacts): TaskSession
   });
   const metrics = facts.overlays[session.taskId]?.coordinatorMetrics;
   const coordinator = metrics ? { ...session.coordinator, ...metrics } : session.coordinator;
-  return { ...session, coordinator, decisions, timeline: [...kept, ...entries] };
+  const commands = facts.overlays[session.taskId]?.verificationCommands;
+  return { ...session, coordinator, ...(commands ? { verificationCommands: commands } : {}), decisions, timeline: [...kept, ...entries] };
 }
 
 /** One project's records replaced by what its facts say now. When they are the same records in the same order, each stays

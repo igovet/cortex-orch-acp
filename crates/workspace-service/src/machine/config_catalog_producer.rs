@@ -654,7 +654,6 @@ async fn observe_opencode(
     // An install that cannot be resolved and verified is never launched.
     let binary =
         oc::verified_install(&command, &env.home, path.as_ref()).map_err(|_| portable())?;
-    let bwrap = oc::isolating_bwrap(path.as_ref()).ok_or_else(portable)?;
     let temp = Scratch::new().map_err(|_| "engine_unreachable:OSError".to_owned())?;
     let (workspace, jail_tmp) = (temp.0.join("workspace"), temp.0.join("jail-tmp"));
     for directory in [&workspace, &jail_tmp] {
@@ -681,7 +680,6 @@ async fn observe_opencode(
         "argv_hash":format!("{:x}",Sha256::digest(joined.as_bytes()))[..16]},"cwd":workspace}),
     );
     let launch = oc::launch(
-        &bwrap,
         &binary,
         &env.home,
         &expected,
@@ -1083,7 +1081,7 @@ if [ "$1" = "--version" ]; then echo "opencode {version}"; exit 0; fi
 [ -n "$OPENCODE_CONFIG_CONTENT" ] || exit 91
 [ "$OPENCODE_DISABLE_PROJECT_CONFIG" = 1 ] || exit 92
 [ "$XDG_DATA_HOME" = "{data}" ] || exit 93
-[ -e "$HOME/.config/opencode/owner-secret.txt" ] && exit 96
+cat "$HOME/.aws/credentials" >/dev/null 2>&1 && exit 96
 prompt=$(printf %s "$OPENCODE_CONFIG_CONTENT" | sed -n 's/.*{{file:\([^}}]*\)}}.*/\1/p')
 [ -r "$prompt" ] || exit 97
 [ -z "${{CORTEX_CHANNEL_SECRET+x}}" ] || exit 98
@@ -1109,7 +1107,7 @@ while IFS= read -r line; do
 done
 "##,
             data = f.env.home.join(".local/share").display(),
-            seen = f.root.join("opencode-seen").display(),
+            seen = f.env.home.join(".cache/opencode-seen").display(),
         );
         fs::write(&binary, script).unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1119,10 +1117,10 @@ done
         let native = f.env.home.join(".local/share/opencode");
         fs::create_dir_all(&native).unwrap();
         fs::write(native.join("auth.json"), "{}").unwrap();
-        // The owner's own configuration must stay hidden from the jailed engine.
-        let owner = f.env.home.join(".config/opencode");
+        // An owner credential store must stay unreadable under the engine's Landlock domain.
+        let owner = f.env.home.join(".aws");
         fs::create_dir_all(&owner).unwrap();
-        fs::write(owner.join("owner-secret.txt"), "hidden").unwrap();
+        fs::write(owner.join("credentials"), "hidden").unwrap();
         json!({"id":"cn_0000000000a1","name":"OpenCode","engine":"opencode","provider":"opencode",
             "auth_mode":"native_account","key_kind":null,"endpoint":null,
             "launch_command":[binary,"acp"],
@@ -1133,27 +1131,14 @@ done
             "created_at":"2026-11-16T00:00:00.000000+00:00","updated_at":"2026-11-16T00:00:00.000000+00:00",
             "max_concurrent_sessions":4})
     }
-    fn bwrap_usable() -> bool {
-        oc::isolating_bwrap(std::env::var_os("PATH").as_ref()).is_some_and(|b| {
-            std::process::Command::new(b)
-                .args([
-                    "--unshare-user",
-                    "--unshare-pid",
-                    "--unshare-ipc",
-                    "--ro-bind",
-                    "/",
-                    "/",
-                    "/bin/true",
-                ])
-                .status()
-                .is_ok_and(|s| s.success())
-        })
+    fn landlock_usable() -> bool {
+        crate::native_sandbox::abi() >= 1
     }
     #[test]
     fn opencode_catalog_is_read_natively_inside_the_jail_without_leaking() {
-        if !bwrap_usable() {
+        if !landlock_usable() {
             eprintln!(
-                "bubblewrap with user namespaces is unavailable: jailed OpenCode read not run"
+                "Landlock is unavailable: confined OpenCode read not run"
             );
             return;
         }
@@ -1167,7 +1152,7 @@ done
         assert!(admitted(&f.env, &r));
         let reply = run(&f.env, &r, || Ok(())).unwrap();
         assert_eq!(reply["success"], true, "{reply}");
-        assert!(f.root.join("opencode-seen").exists());
+        assert!(f.env.home.join(".cache/opencode-seen").exists());
         let catalog = f.env.state.join("cortex/catalog/cn_0000000000a1");
         let snapshot = fs::read_dir(&catalog)
             .unwrap()
@@ -1179,15 +1164,15 @@ done
         assert_eq!(body["entries"][0]["route"]["engine"], "opencode");
         // The owner's own configuration was never modified.
         assert_eq!(
-            fs::read_to_string(f.env.home.join(".config/opencode/owner-secret.txt")).unwrap(),
+            fs::read_to_string(f.env.home.join(".aws/credentials")).unwrap(),
             "hidden"
         );
     }
     #[test]
     fn opencode_refresh_reports_unqualified_version_missing_mode_and_untrusted_install() {
-        if !bwrap_usable() {
+        if !landlock_usable() {
             eprintln!(
-                "bubblewrap with user namespaces is unavailable: jailed OpenCode read not run"
+                "Landlock is unavailable: confined OpenCode read not run"
             );
             return;
         }

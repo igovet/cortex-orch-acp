@@ -142,6 +142,14 @@ author, the kept routes and the effort target are recorded under
 the reviewer got its model. A hinted model that review routing set aside reads
 `ignored:owner_preferred` or `ignored:review_independence`.
 
+An unscoped statement that only one model may do the work ("this work only by
+Opus", "делать ТОЛЬКО opus") is the owner's pin for the whole task: it applies to
+every stage, the mandatory independent review, audits and the consultant included,
+and is recorded as `user_model_request` (the pin wins over review independence).
+When the pinned route is temporarily unavailable the attempt waits for it; it is
+never routed elsewhere and the owner is not asked. A statement that names a work
+purpose ("Opus for design") keeps covering only that purpose.
+
 For a policy-only guarantee across the workload, the owner pins the reviewer
 role to the selected route. A recorded purpose-scoped request can also select
 that reviewer at dispatch, but this preflight does not read task sources.

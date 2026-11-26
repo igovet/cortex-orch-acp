@@ -279,7 +279,7 @@ fn build_package(p: &Package) -> Res<()> {
     write_text(
         &control.join("control"),
         &format!(
-            "Package: {package_name}\nVersion: {version}\nArchitecture: {architecture}\nSection: devel\nPriority: optional\nMaintainer: Cortex\nDepends: {dependencies}, git, ca-certificates, bubblewrap, systemd, dbus-user-session, pulseaudio-utils, bzip2\nDescription: {title} local desktop\n"
+            "Package: {package_name}\nVersion: {version}\nArchitecture: {architecture}\nSection: devel\nPriority: optional\nMaintainer: Cortex\nDepends: {dependencies}, git, ca-certificates, systemd, dbus-user-session, pulseaudio-utils, bzip2\nDescription: {title} local desktop\n"
         ),
     )?;
     run(

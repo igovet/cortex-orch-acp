@@ -39,7 +39,32 @@ fn executable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 impl Program {
+    /// The server at its real install paths: the command runs on the host under
+    /// the read-only Landlock profile, so no install is mounted anywhere.
     pub(super) fn resolve(
+        language: Language,
+        dev: bool,
+        settings: &Value,
+        runtime: Option<&Path>,
+    ) -> Result<Self> {
+        let mut program = Self::resolve_named(language, dev, settings, runtime)?;
+        let mut mounts = std::mem::take(&mut program.mounts);
+        mounts.sort_by_key(|(_, target)| std::cmp::Reverse(target.as_os_str().len()));
+        let real = |value: &str| {
+            for (source, target) in &mounts {
+                if let Ok(rest) = Path::new(value).strip_prefix(target) {
+                    let path = if rest.as_os_str().is_empty() { source.clone() } else { source.join(rest) };
+                    return path.to_string_lossy().into_owned();
+                }
+            }
+            value.to_owned()
+        };
+        program.argv = program.argv.iter().map(|a| real(a)).collect();
+        program.tsserver = program.tsserver.as_deref().map(real);
+        Ok(program)
+    }
+
+    fn resolve_named(
         language: Language,
         dev: bool,
         settings: &Value,
@@ -66,7 +91,8 @@ impl Program {
             .and_then(|p| {
                 let basename = p.file_name()?.to_str()?;
                 let real = p.canonicalize().ok()?;
-                executable(&real).then(|| (real, format!("{OVERRIDE}/{basename}")))
+                // The configured path itself: a multicall executable (rustup) keys on its name.
+                executable(&real).then(|| (p.to_path_buf(), format!("{OVERRIDE}/{basename}")))
             })
         {
             // Keep argv[0]'s basename for multicall executables (e.g. rustup).
@@ -167,7 +193,7 @@ impl Program {
                 .map_err(|_| "sandbox_unavailable")?;
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                let sandbox = Sandbox::prepare_language(&root, &self.mounts, rust)?;
+                let sandbox = Sandbox::prepare_language(&root, rust)?;
                 let command = sandbox.command(&self.argv)?;
                 io::Result::Ok((sandbox, command))
             })
@@ -194,7 +220,7 @@ fn spawn(mut command: Command) -> io::Result<Child> {
 }
 
 pub(super) struct Peer {
-    // The PID namespace is torn down when bwrap exits, including descendants.
+    // Dropping the peer kills the server; the sandbox scratch goes with it.
     _child: Child,
     _sandbox: Option<Sandbox>,
     stdin: ChildStdin,

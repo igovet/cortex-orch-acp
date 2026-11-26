@@ -28,9 +28,11 @@ struct Spec {
     reads: Vec<PathBuf>,
     writes: Vec<PathBuf>,
     runtime_env: Vec<String>,
+    /// Accepted for compatibility; every server shares the host network.
+    #[allow(dead_code)]
     network: bool,
     env_order: Vec<String>,
-    /// The owner's explicit opt-out: no Landlock/seccomp and no grant checks.
+    /// The owner's explicit opt-out: no Landlock policy and no grant checks.
     uncontained: bool,
 }
 fn get<'a>(v: &'a Value, key: &str) -> Fallible<&'a Value> {
@@ -482,7 +484,8 @@ async fn discover_with_registry(
         return unsupported("configuration", "OSError");
     }
     // An uncontained server's grants are not enforced, so they are not checked
-    // and no Landlock/seccomp policy (or its per-file walk) is prepared.
+    // and no Landlock policy (or its per-file walk) is prepared.
+    let home = std::env::var_os("HOME").unwrap_or_default();
     let sandbox = if spec.uncontained {
         None
     } else {
@@ -494,23 +497,13 @@ async fn discover_with_registry(
         {
             return json!({"ok":false,"code":"path_refused","message":"A sandbox grant is private, missing or a symlink. Correct it before retrying."});
         }
-        match crate::native_sandbox::Sandbox::external(
-            &root,
-            &runtime,
-            &spec.reads,
-            &spec.writes,
-            spec.network,
-        ) {
+        match crate::native_sandbox::Sandbox::external(&root, Path::new(&home), &runtime, &spec.writes) {
             Ok(s) => Some(s),
             Err(_) => return unsupported("sandbox", "OSError"),
         }
     };
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    let path = if spec.uncontained {
-        crate::native_mcp::owner_path(Path::new(&spec.command), Path::new(&home))
-    } else {
-        "/usr/bin:/bin".into()
-    };
+    // Contained or not, the server finds its tools as the owner's terminal does.
+    let path = crate::native_mcp::owner_path(Path::new(&spec.command), Path::new(&home));
     let mut command = Command::new(&spec.command);
     command
         .args(&spec.args)

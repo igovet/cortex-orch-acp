@@ -27,7 +27,7 @@ coordinator, worker and consultant catalogue), and discovery entries mark the
 batchable reads with `read_batch_supported: true`.
 
 `read_batch` groups explicitly selected independent read-only reads:
-`project_read` (files and directory listings), `project_git` (status and diff),
+`project_read` (files and directory listings), `project_git` (status, diff and read-only history),
 `read_skill`, `list_reports`, `read_report`, `read_draft`, `list_sources`,
 `read_source`, `read_large_output`, `read_capsule`, `tools_discover`,
 `command_status` (workers) and `task_get_context` and `list_route_options`

@@ -957,7 +957,24 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
     // The review of a submitted sprint plan (see `sprint_planning`): findings return the
     // plan to its coordinator for a revision within the same bounded rules.
     let plan_review = super::sprint_planning::is_plan_review(&review);
-    match result["verdict"].as_str() {
+    // After the allowed change-request rounds a plan proceeds: further findings are
+    // notes (shown to the owner in Hybrid), never another return.
+    let mut verdict = result["verdict"].as_str();
+    if plan_review
+        && matches!(verdict, Some("REQUEST_CHANGES" | "BLOCK"))
+        && result["findings"].as_array().is_some_and(|f| !f.is_empty())
+        && super::sprint_planning::change_rounds_tx(db, task)? >= super::sprint_planning::MAX_PLAN_CHANGE_ROUNDS
+    {
+        event_tx(
+            db,
+            task,
+            "SPRINT_PLAN_REVIEW_NOTES",
+            json!({"review":review,"verdict":result["verdict"],"report_ref":result["report_ref"],
+                "findings":result["findings"]}),
+        )?;
+        verdict = Some("APPROVE");
+    }
+    match verdict {
         Some("APPROVE") => {
             // The stage is approved, but an outcome of the goal is not delivered: no
             // verification. The coordinator plans the rest; the plan's verification

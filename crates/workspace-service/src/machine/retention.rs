@@ -493,6 +493,9 @@ pub(crate) async fn scheduled_project(
             }
         }
     }
+    if !stopping() {
+        compact_closed_activity(root).await;
+    }
     Ok(changed)
 }
 
@@ -701,4 +704,19 @@ pub async fn delete_sprint(
     let mut reply = result;
     reply["progressed"] = json!(true);
     Ok(reply)
+}
+
+/// Closed tasks older than this many days lose their streamed worker activity that carries no
+/// evidence (hidden chunks, superseded intermediate tool states); see `docs/project/storage.md`.
+const ACTIVITY_COMPACTION_DAYS: u64 = 7;
+
+/// Best effort and bounded: a busy store, a high load average or any error leaves the rows for the
+/// next hourly pass. It never publishes an invalidation, because nothing a client shows changes.
+async fn compact_closed_activity(root: &Path) {
+    let Ok(key) = context::key(root) else { return };
+    let _ = tokio::task::spawn_blocking(move || {
+        let store = cortex_core::Store::open_for_workspace_retention(key)?;
+        store.compact_closed_task_activity(ACTIVITY_COMPACTION_DAYS, cortex_core::store::CompactionBudget::default())
+    })
+    .await;
 }

@@ -421,13 +421,13 @@ fn the_strategy_ladder_continues_without_a_cap_and_consults_on_its_rung() {
 /// A degenerate model turn never runs on the same model again: its continuation is at
 /// least an escalated rung and moves the coordinator to another model.
 /// A coordinator that keeps ending turns without a plan, a result or a question has
-/// already burned its turns on every rung: the first sighting repairs, the second moves
+/// already burned its turns on every rung: the first sighting runs the senior consultation, the second moves
 /// the coordinator to another model (`reassign`), and the third is the owner's question
 /// (`LOOP_BROKEN` action `ask_owner`), never the two further rungs of the full ladder.
 #[test]
-fn a_silent_coordinator_takes_two_rungs_and_then_the_owner_is_asked() {
+fn a_silent_coordinator_is_consulted_first_then_reassigned_and_only_then_the_owner_is_asked() {
     let (_p, s, task, _) = start(true);
-    for (n, strategy) in [(1i64, "repair"), (2, "reassign")] {
+    for (n, strategy) in [(1i64, "consult"), (2, "reassign")] {
         s.write(|db| {
             domain::stop_tx(db, &task, "coordinator_no_progress_limit")?;
             let owed = automatic::owed(db, &task)?.unwrap();
@@ -942,4 +942,54 @@ fn only_work_that_fell_short_routes_escalated() {
     assert!(esc("docs", 4));
     event("EXECUTION_BASELINE", json!({"revision":5}));
     assert!(!esc("docs", 5));
+}
+
+/// A tripped review-cycle limit runs the senior consultation first and records the
+/// consultation request; the owner is not asked.
+#[test]
+fn a_review_cycle_limit_runs_the_senior_consultation_before_anything_else() {
+    let (_p, s, task, _) = start(true);
+    s.write(|db| {
+        domain::stop_tx(db, &task, "review_cycle_limit")?;
+        let owed = automatic::owed(db, &task)?.unwrap();
+        assert_eq!(owed.evidence["strategy"], "consult");
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(event_count(&s, &task, "AUTOMATIC_CONSULTATION_REQUESTED"), 1);
+    assert_eq!(support::count(&s, "pending_questions"), 0);
+}
+
+/// A store error inside a runtime transition (`storage_unavailable`) is neither a
+/// restart nor a failure of the work: a VERIFYING task with an approved review
+/// keeps its state with a technical blocker. Nothing is classified, no rung is
+/// taken, no continuation is owed and the task never rewinds to planning.
+#[test]
+fn a_storage_error_in_a_transition_keeps_the_task_in_its_state() {
+    for enabled in [false, true] {
+        let (_p, s, task, _) = start(enabled);
+        s.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='VERIFYING',blocker=NULL WHERE task_id=?", [&task])?;
+            assert_eq!(domain::stop_tx(db, &task, "storage_unavailable")?, TaskState::Verifying);
+            assert!(automatic::owed(db, &task)?.is_none());
+            Ok(())
+        })
+        .unwrap();
+        let (state, blocker, classified, continued, held): (String, String, i64, i64, i64) = s
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT state,blocker,
+                        (SELECT count(*) FROM runtime_events WHERE task_id=?1 AND type='FAILURE_CLASSIFIED'),
+                        (SELECT count(*) FROM runtime_events WHERE task_id=?1 AND type='AUTOMATIC_CONTINUATION'),
+                        (SELECT count(*) FROM runtime_events WHERE task_id=?1 AND type='TASK_TRANSITION_HELD')
+                     FROM runtime_tasks WHERE task_id=?1",
+                    [&task],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(state, "VERIFYING");
+        assert_eq!(blocker, automatic::STORAGE_HELD_BLOCKER);
+        assert_eq!((classified, continued, held), (0, 0, 1));
+    }
 }

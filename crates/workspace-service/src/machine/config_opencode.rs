@@ -15,7 +15,7 @@ use std::{
     io::{Read, Write},
     os::unix::{
         ffi::OsStrExt,
-        fs::{DirBuilderExt, MetadataExt},
+        fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
         process::CommandExt,
     },
     path::{Path, PathBuf},
@@ -140,54 +140,48 @@ pub(crate) fn first_version(text: &str) -> Option<String> {
 fn private_dir(path: &Path) -> std::io::Result<()> {
     fs::DirBuilder::new().mode(0o700).create(path)
 }
-/// `orchestration.sandbox.verification_command(system_root=True)` for an empty root.
-fn verification(bwrap: &Path, root: &Path, scratch: &Path, argv: &[&OsStr]) -> Command {
-    let var_tmp = scratch.join("var-tmp");
-    let _ = private_dir(&var_tmp);
-    let mut c = Command::new(bwrap);
-    c.args(["--die-with-parent", "--unshare-net", "--clearenv"])
-        .args(["--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin"]);
+/// A read-only command on the real host for an empty root: Landlock allows writes
+/// only to the scratch and devices and hides the owner's keys and credential stores.
+fn verification(root: &Path, scratch: &Path, argv: &[&OsStr]) -> Option<Command> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut writes = vec![scratch.to_path_buf()];
+    writes.extend(crate::native_sandbox::devices());
+    let hidden = crate::native_sandbox::secrets(home.as_deref(), &std::env::vars_os().collect());
+    let rules = std::sync::Arc::new(
+        crate::native_sandbox::Sandbox::host(&crate::native_sandbox::HostPolicy {
+            writes,
+            hidden,
+            ..Default::default()
+        })
+        .ok()?,
+    );
+    let (program, args) = argv.split_first()?;
+    let mut c = Command::new(program);
+    c.args(args)
+        .current_dir(root)
+        .env_clear()
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin");
     for name in ["HOME", "TMPDIR", "TMP", "TEMP"] {
-        c.arg("--setenv").arg(name).arg(scratch);
+        c.env(name, scratch);
     }
-    c.args(["--setenv", "LANG", "C.UTF-8"])
-        .args(["--setenv", "PYTHONDONTWRITEBYTECODE", "1"])
-        .args(["--ro-bind", "/", "/", "--proc", "/proc"])
-        .args(["--dev-bind", "/dev", "/dev", "--bind", "/tmp", "/tmp"])
-        .arg("--bind")
-        .arg(&var_tmp)
-        .arg("/var/tmp")
-        .arg("--bind")
-        .arg(scratch)
-        .arg(scratch)
-        .arg("--ro-bind")
-        .arg(root)
-        .arg(root)
-        .arg("--chdir")
-        .arg(root)
-        .arg("--")
-        .args(argv);
-    c
+    c.env("LANG", "C.UTF-8").env("PYTHONDONTWRITEBYTECODE", "1");
+    unsafe {
+        c.pre_exec(move || rules.enter());
+    }
+    Some(c)
 }
 /// `opencode_install.probe_version`: `<binary> --version` in a network-less,
 /// read-only sandbox with a throwaway HOME; `None` when it cannot be established.
 pub(crate) fn probe_version(binary: &Path, path: Option<&OsString>) -> Option<String> {
-    let bwrap = which("bwrap", path)?;
+    let _ = path;
     let directory = std::env::temp_dir().join(format!("cortex-opencode-version-{}", unique()));
     private_dir(&directory).ok()?;
     let run = || -> Option<String> {
         let (root, scratch) = (directory.join("root"), directory.join("scratch"));
         private_dir(&root).ok()?;
         private_dir(&scratch).ok()?;
-        let mut command = verification(
-            &bwrap,
-            &root,
-            &scratch,
-            &[binary.as_os_str(), "--version".as_ref()],
-        );
+        let mut command = verification(&root, &scratch, &[binary.as_os_str(), "--version".as_ref()])?;
         command
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -677,12 +671,6 @@ pub(crate) fn owner_providers(
 
 // --- the catalog-read launch ------------------------------------------------------
 
-/// OpenCode needs an unprivileged (non-setuid) bubblewrap: its per-sandbox user
-/// namespace keeps another jail from reading the control-server credential.
-pub(crate) fn isolating_bwrap(path: Option<&OsString>) -> Option<PathBuf> {
-    let bwrap = which("bwrap", path)?;
-    (fs::metadata(&bwrap).ok()?.mode() & 0o4000 == 0).then_some(bwrap)
-}
 /// `sandbox.tool_state_dirs`: the HOME directories every sandboxed process may write.
 fn tool_state_dirs(home: &Path) -> Vec<PathBuf> {
     for name in [".cache", ".npm"] {
@@ -743,19 +731,6 @@ fn tool_state_dirs(home: &Path) -> Vec<PathBuf> {
     found.sort();
     found
 }
-fn memfd(content: &[u8]) -> std::io::Result<fs::File> {
-    use std::os::fd::FromRawFd;
-    let name = CString::new("cortex-engine-data").unwrap();
-    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let mut file = unsafe { fs::File::from_raw_fd(fd) };
-    file.write_all(content)?;
-    use std::io::Seek;
-    file.rewind()?;
-    Ok(file)
-}
 /// The jailed OpenCode launch of one catalog read plus what must outlive its spawn.
 pub(crate) struct Launch {
     pub command: Command,
@@ -769,7 +744,6 @@ pub(crate) struct Launch {
 /// (`PATH`, `LANG`, ...). `data` is the engine's own data directory
 /// (`$XDG_DATA_HOME/opencode`).
 pub(crate) fn launch(
-    bwrap: &Path,
     binary: &Path,
     home: &Path,
     data: &Path,
@@ -797,38 +771,10 @@ pub(crate) fn launch(
         jail_tmp.join("xdg-state").to_string_lossy().into_owned(),
     );
     env.insert("TMPDIR".into(), jail_tmp.to_string_lossy().into_owned());
-    let mut c = Command::new(bwrap);
-    c.args([
-        "--die-with-parent",
-        "--unshare-user",
-        "--unshare-pid",
-        "--unshare-ipc",
-        "--clearenv",
-    ]);
-    for (name, value) in &env {
-        c.arg("--setenv").arg(name).arg(value);
-    }
-    let var_tmp = jail_tmp.join("var-tmp");
-    private_dir(&var_tmp)?;
-    c.args(["--ro-bind", "/", "/", "--proc", "/proc"])
-        .args(["--dev-bind", "/dev", "/dev", "--bind", "/tmp", "/tmp"])
-        .arg("--bind")
-        .arg(&var_tmp)
-        .arg("/var/tmp")
-        .arg("--bind")
-        .arg(jail_tmp)
-        .arg(jail_tmp);
-    for name in ["/etc/passwd", "/etc/group"] {
-        if Path::new(name).is_file() {
-            c.args(["--ro-bind", name, name]);
-        }
-    }
-    // HOME is read-only; the tool directories (and OpenCode's data directory) are not.
-    c.arg("--ro-bind").arg(home).arg(home);
-    for directory in tool_state_dirs(home) {
-        c.arg("--bind").arg(&directory).arg(&directory);
-    }
-    c.arg("--ro-bind").arg(workspace).arg(workspace);
+    // OpenCode reads Cortex's imported configuration, never the owner's own files.
+    let config_home = jail_tmp.join("xdg-config");
+    private_dir(&config_home)?;
+    env.insert("XDG_CONFIG_HOME".into(), config_home.to_string_lossy().into_owned());
     if !data.exists() {
         fs::DirBuilder::new()
             .mode(0o700)
@@ -839,68 +785,63 @@ pub(crate) fn launch(
     if !real.is_dir() {
         return Err(std::io::Error::other("engine_state_dir_invalid"));
     }
-    c.arg("--bind").arg(&real).arg(&real);
-    // `bin` holds helper executables OpenCode later runs outside any jail: read-only.
+    // `bin` holds helper executables OpenCode later runs outside any confinement: read-only.
     let bin = real.join("bin");
     if !bin.exists() && bin.symlink_metadata().is_err() {
         private_dir(&bin)?;
     }
-    if let Ok(target) = bin.canonicalize() {
-        if target.starts_with(&real) {
-            c.arg("--ro-bind").arg(&target).arg(&target);
-        }
-    }
-    let plugins = real.join("plugins");
-    if plugins.is_dir() && !plugins.is_symlink() {
-        c.arg("--tmpfs")
-            .arg(&plugins)
-            .arg("--remount-ro")
-            .arg(&plugins);
-    }
-    // The owner's own OpenCode configuration is hidden behind a private tmpfs.
-    let masked = home.join(".config/opencode");
-    let masked = if masked.is_symlink() {
-        masked.canonicalize().ok()
-    } else {
-        Some(masked)
-    };
-    if let Some(masked) = masked.filter(|m| m.is_dir()) {
-        c.arg("--tmpfs").arg(masked);
-    }
+    // The prompt and the imported credential files, owner-only, in the private scratch.
     let mut files = vec![];
     let mut data_files = vec![(
         prompt.to_string_lossy().into_owned(),
         CATALOG_PROBE_PROMPT.as_bytes().to_vec(),
     )];
     data_files.extend(owner.files.iter().cloned());
-    let mut descriptors = vec![];
     for (destination, content) in &data_files {
-        let file = memfd(content)?;
-        use std::os::fd::AsRawFd;
-        descriptors.push(file.as_raw_fd());
-        c.args(["--perms", "0400", "--ro-bind-data"])
-            .arg(file.as_raw_fd().to_string())
-            .arg(destination);
+        let destination = Path::new(destination);
+        if !destination.starts_with(jail_tmp) {
+            return Err(std::io::Error::other("engine_data_file_outside_scratch"));
+        }
+        if let Some(parent) = destination.parent() {
+            fs::DirBuilder::new().mode(0o700).recursive(true).create(parent)?;
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o400)
+            .open(destination)?;
+        file.write_all(content)?;
         files.push(file);
     }
-    c.arg("--chdir")
-        .arg(workspace)
-        .arg("--");
-    // Only the explicitly selected synthetic guest gets extra setup.
+    // Landlock on the real host: writes only to the scratch, OpenCode's data
+    // directory (not `bin`), the owner's tool directories and devices; the
+    // owner's keys and credential stores stay unreadable (OpenCode's own sign-in
+    // in its data directory excepted). Siblings cannot read each other's
+    // environment or descriptors: separate Landlock domains cannot ptrace.
+    let mut writes = vec![jail_tmp.to_path_buf(), real.clone()];
+    writes.extend(tool_state_dirs(home));
+    writes.extend(crate::native_sandbox::devices());
+    let mut hidden = crate::native_sandbox::secrets(Some(home), &environ.iter().map(|(k, v)| (k.into(), v.into())).collect());
+    hidden.retain(|p| !p.starts_with(&real) && !p.starts_with(data));
+    let rules = std::sync::Arc::new(crate::native_sandbox::Sandbox::host(
+        &crate::native_sandbox::HostPolicy { writes, read_only: vec![bin], hidden, ..Default::default() },
+    )?);
     #[cfg(test)]
-    c.args(crate::native_account_fixture::prefix("catalogue", home)?);
-    c.arg(binary).arg(ACP);
-    c.env_clear().env("PATH", "/usr/bin:/bin");
-    // The descriptors were created close-on-exec: only this child inherits them.
+    let prefix = crate::native_account_fixture::prefix("catalogue", home)?;
+    #[cfg(not(test))]
+    let prefix: Vec<String> = Vec::new();
+    let mut c = match prefix.split_first() {
+        // Only the explicitly selected synthetic guest gets extra setup.
+        Some((first, rest)) => {
+            let mut c = Command::new(first);
+            c.args(rest).arg(binary);
+            c
+        }
+        None => Command::new(binary),
+    };
+    c.arg(ACP).env_clear().envs(&env).current_dir(workspace);
     unsafe {
-        c.pre_exec(move || {
-            for fd in &descriptors {
-                if libc::fcntl(*fd, libc::F_SETFD, 0) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        });
+        c.pre_exec(move || rules.enter());
     }
     Ok(Launch {
         command: c,

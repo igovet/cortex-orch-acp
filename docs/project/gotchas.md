@@ -112,8 +112,8 @@ See [contained execution](../features/permissions-and-containment/index.md#git-a
 
 ## Nested user namespaces are not a lifecycle-test dependency
 
-A correctly enforced host policy can deny a second bubblewrap namespace inside
-Cortex's sandbox. A lifecycle test then used to end in WAITING_USER instead of
+Historical (commands now use Landlock, which creates no namespace): a correctly
+enforced host policy could deny a second bubblewrap namespace inside Cortex's sandbox. A lifecycle test then used to end in WAITING_USER instead of
 COMPLETED because its verification command could not launch. Test-only launch
 seams now execute those checks without nesting; production still requires its
 sandbox. Real bubblewrap tests probe once and skip known namespace denial

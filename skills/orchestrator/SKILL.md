@@ -45,9 +45,9 @@ plans and visibility into any external MCP inventory never grant access.
 For requested outside-folder or host-history investigation, an unknown source
 location is the worker's discovery objective, not proof of unavailable access.
 Orient with permitted reads, then plan bounded source discovery. Read-only
-investigators lack outside-command consent routes: host-only data hidden by
-scratch mounts needs a writing specialist with a read-only objective and the
-advertised consent route. Missing inside a command namespace is not proof of
+investigators lack outside-command consent routes: host-only data hidden from
+confined commands needs a writing specialist with a read-only objective and the
+advertised consent route. Denied inside a confined command is not proof of
 host absence. Never remount or retry a permission refusal.
 Do not demand pasted data just because your own tools cannot reach it. A host
 session UUID is a host identity, not a current-project Cortex report reference;
