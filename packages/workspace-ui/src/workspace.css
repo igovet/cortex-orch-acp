@@ -1152,9 +1152,13 @@ button.step-t { text-align: left; font: inherit; }
 .ws-tab-x:hover { background: var(--bg-hover); color: var(--fg); }
 .ws-tab-new { flex: none; align-self: center; margin: 0 4px; }
 .ws-panes { position: relative; flex: 1 1 auto; min-height: 0; }
-/* Background reconciliation must not move a control between pointer press and release. */
 .main { position: relative; }
-.ws-sync { position: absolute; right: 12px; bottom: 12px; z-index: 40; max-width: calc(100% - 24px); padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--bg-raised); color: var(--fg-2); font-size: var(--t-sec); line-height: 18px; pointer-events: none; }
+/* Reserve room even while idle: reconciliation must not move a control between pointer press and release. */
+.ws-pane-header { display: flex; flex: none; min-width: 0; background: var(--bg-sidebar); border-bottom: 1px solid var(--line); }
+.ws-pane-header > .ws-tabstrip { flex: 1 1 0; min-width: 0; height: 35px; border-bottom: 0; }
+.ws-sync-slot { display: flex; align-items: center; justify-content: flex-end; flex: 0 1 15em; min-width: 0; max-width: 50%; font-size: var(--t-sec); }
+.ws-sync-slot:only-child { flex: 1; max-width: none; min-height: 22px; justify-content: flex-start; }
+.ws-sync { min-width: 0; padding-inline: 12px; color: var(--fg-2); line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .crumbs > .cur { flex: 0 1 auto; min-width: 64px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 /* The project crumb gives up its room first, so the task's own title stays readable; a press on either leads to all of it. */
 .crumbs > a { flex: 0 3 auto; min-width: 40px; overflow: hidden; text-overflow: ellipsis; }

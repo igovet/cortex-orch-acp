@@ -77,7 +77,24 @@ it.each([0, 80, 200])("saving a draft settles its confirmed state promptly and s
   const s = machine(latency, () => false);
   await saveDraft(s, tick, latency);
   const before = s.calls.length, pressed = Date.now();
-  for (let i = 0; i < 100 && !landed(); i++) await tick(50);
+  const slot = document.querySelector(".main > .ws-pane-header > .ws-sync-slot");
+  expect(slot).not.toBeNull();
+  let sawSync = false;
+  for (let i = 0; i < 100 && !landed(); i++) {
+    await tick(50);
+    const notice = document.querySelector(".ws-sync");
+    if (notice) {
+      sawSync = true;
+      // The status sits in the shell, not in the pane that owns the form/composer.
+      expect(notice.parentElement).toBe(slot);
+      expect(notice.closest(".ws-panes, [role=tablist]")).toBeNull();
+      expect(notice.getAttribute("role")).toBe("status");
+      expect(notice.textContent).toBe("Updating confirmed state…");
+    }
+  }
+  if (latency > 0) expect(sawSync).toBe(true);
+  expect(slot!.childElementCount).toBe(0);
+  expect(slot!.isConnected).toBe(true);
   const took = Date.now() - pressed;
   expect(landed()).toBe(true);
   // The save is a few requests in a row; a second is ample on a loaded test machine.
