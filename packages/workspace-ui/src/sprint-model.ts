@@ -9,7 +9,7 @@ export const itemTitle = (item: PlanItem) => item.title ?? item.description;
 export function planningAsks(sprint: Sprint, session: TaskSession | undefined): Ask[] {
   if (sprint.planning === "created" || sprint.planning === "cancelled") return [];
   const open = (session?.decisions ?? []).filter(d => d.kind === "question" && !d.suspended && (isOpen(d) || d.held));
-  if (open.length) return open.map(d => ({ id: d.id, text: d.text, from: "", at: d.at, unavailable: d.unavailable, options: d.options, answer: d.answer }));
+  if (open.length) return open;
   const asked = sprint.planning === "question" ? openPlanningQuestion(sprint) : null;
   return asked ? [{ id: "planning", text: asked.text, from: "", at: asked.at ?? null, options: (asked.options ?? []).map(label => ({ label })), answer: null }] : [];
 }

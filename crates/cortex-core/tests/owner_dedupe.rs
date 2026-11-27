@@ -235,7 +235,7 @@ fn a_reworded_answered_review_item_is_disclosed_not_asked() {
 /// Youtube t_f2c20 37453 -> 37538: the same decision in a new revision, through the
 /// stop route, is applied, never another OWNER_DECISION_REQUIRED and `ask_owner`.
 #[test]
-fn an_answered_decision_in_a_new_revision_is_not_asked_again() {
+fn coordinator_can_apply_an_answer_from_an_earlier_revision_without_reasking() {
     let (_p, s, task) = started();
     let fail = |revision: i64, node: &str, detail: &str| {
         s.write(|db| {
@@ -251,30 +251,132 @@ fn an_answered_decision_in_a_new_revision_is_not_asked_again() {
         .unwrap()
     };
     fail(1, "export", "Keep the deprecated /v1/export endpoint for existing clients or remove it in this release?");
-    // The worker blocker goes to the coordinator; no runtime question is published.
-    assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 0);
+    assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 1);
     assert_eq!(count(&s, &task, "USER_QUESTION_REQUESTED"), 0);
-    // The coordinator asks the owner itself and the owner answers.
     s.write(|db| {
         answered(db, &task, "coordinator-question", "Keep the deprecated /v1/export endpoint for existing clients or remove it in this release?", "Remove it in this release");
         Ok(())
-    })
-    .unwrap();
-    // The next plan's worker words the same decision differently.
+    }).unwrap();
     fail(2, "export_cleanup", "Whether to keep the deprecated /v1/export endpoint for existing clients or remove it is the owner's choice.");
-    assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 0);
-    let classified = latest(&s, &task, "FAILURE_CLASSIFIED");
-    assert_eq!(
-        (classified["class"].as_str(), classified["rule"].as_str()),
-        (Some("technical"), Some("blocker_owner_decision_to_coordinator"))
-    );
-    assert_eq!(count(&s, &task, "USER_QUESTION_REQUESTED"), 0);
-    // Not parked: the ordinary technical route applies, no owner stop.
     s.write(|db| {
-        assert!(obstacles::unparked_failure(db, &task)?);
+        let trigger = obstacles::decision_trigger(db, &task, None)?.unwrap();
+        assert_eq!(trigger.node, "export_cleanup");
+        let owner = db.query_row("SELECT owner_ref,epoch FROM task_owners WHERE task_id=?", [&task],
+            |r| Ok(cortex_core::ownership::OwnerEpoch { owner:r.get(0)?, epoch:r.get(1)? }))?;
+        let credential = cortex_core::channels::issue_tx(db, &task, &owner,
+            cortex_core::channels::Principal::OwnerDecision { obstacle: &trigger.obstacle })?;
+        cortex_core::channels::bind_session_tx(db, &credential, "fixture")?;
+        cortex_core::recovery_context::generation_tx(db, &credential, "session_open", None)?;
+        let (delivery,_) = cortex_core::recovery_context::delivery_tx(db,&credential)?;
+        let entries = cortex_core::recovery_context::decision_inline(db,&task)?;
+        cortex_core::recovery_context::record_decision_inline_tx(db,&task,&credential.channel_id,&delivery,&entries)?;
+        db.execute("UPDATE capsule_deliveries SET state='transmitted' WHERE id=?", [&delivery])?;
+        assert!(obstacles::coordinator_retry_decision_tx(db, &task, &credential.channel_id, "wrong",
+            &json!({"obstacle":"od_stale","owner_question_id":"coordinator-question","refined_brief":"Remove it"})).is_err());
+        assert!(obstacles::coordinator_retry_decision_tx(db, &task, &credential.channel_id, "no-answer",
+            &json!({"obstacle":trigger.obstacle,"owner_question_id":"missing","refined_brief":"Remove it"})).is_err());
+        let args = json!({"obstacle":trigger.obstacle,"owner_question_id":"coordinator-question","refined_brief":"Remove /v1/export from the local change."});
+        let result = obstacles::coordinator_retry_decision_tx(db, &task, &credential.channel_id, "retry", &args)?;
+        assert_eq!(result["node"], "export_cleanup");
+        assert_eq!(obstacles::coordinator_retry_decision_tx(db, &task, &credential.channel_id, "retry", &args)?, result);
+        assert!(obstacles::coordinator_retry_decision_tx(db, &task, &credential.channel_id, "another", &args).is_err());
+        assert!(!obstacles::fallback_decision_tx(db, &task, &trigger.obstacle, "timeout")?);
+        assert_eq!(obstacles::retry_decision_brief(db, &task, "export_cleanup", 2)?.as_deref(),
+            Some("Remove /v1/export from the local change."));
+        let old: String = db.query_row("SELECT status FROM runtime_nodes WHERE task_id=? AND revision=1", [&task], |r| r.get(0))?;
+        assert_eq!(old, "failed");
+        Ok(())
+    }).unwrap();
+    assert_eq!(latest(&s, &task, "ASSIGNMENT_RETRIED")["decided_by"], "coordinator");
+    assert_eq!(count(&s, &task, "ASSIGNMENT_RETRIED"), 1);
+    assert_eq!(count(&s, &task, "USER_QUESTION_REQUESTED"), 0);
+    s.read(|db| {
+        let questions: i64 = db.query_row("SELECT count(*) FROM pending_questions WHERE task_id=? AND dedup_key LIKE 'obstacle:%'",
+            [&task], |r| r.get(0))?;
+        assert_eq!(questions, 0);
+        Ok(())
+    }).unwrap();
+}
+
+/// The capsule previews owner answers (300/400 characters). A clipped preview is
+/// marked incomplete and never authorizes a retry by itself: the decision turn gets
+/// the whole question and answer, and an answer too long to deliver is refused.
+#[test]
+fn a_clipped_owner_answer_authorizes_a_retry_only_when_delivered_in_full() {
+    use cortex_core::recovery_context;
+    let (_p, s, task) = started();
+    let question = format!("{}Keep the deprecated /v1/export endpoint for existing clients?",
+        "The export clients migrate on their own schedule and some still call it. ".repeat(5));
+    assert!(question.chars().count() > 300);
+    let decisive = "but keep the old endpoint until the migration finishes";
+    let answer = format!("{}Remove it in this release, {decisive}.",
+        "The local change may remove the export handler and its tests. ".repeat(7));
+    assert!(answer[..answer.find(decisive).unwrap()].chars().count() > 400);
+    let huge = format!("{}only after the owner signs off.", "Remove it. ".repeat(400));
+    assert!(huge.chars().count() > recovery_context::OWNER_ANSWER_EVIDENCE_CHARS);
+    s.write(|db| {
+        answered(db, &task, "pq_huge", "Remove /v1/export?", &huge);
+        answered(db, &task, "pq_long", &question, &answer);
+        answered(db, &task, "pq_short", "Which branch?", "dev");
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1,plan_json='{\"tasks\":[],\"verification\":[]}' WHERE task_id=?", [&task])?;
+        let failed = json!({"assignment_outcome":"failed","report_ref":"r_aaaaaaaaaaaa","checks":[],"summary":"stuck",
+            "blocker":{"kind":"owner_decision","detail":"Keep /v1/export for existing clients or remove it?"}});
+        db.execute("INSERT INTO runtime_nodes VALUES (?,1,'export','worker-backend-dev','A','[]','[\"src\"]','execution','failed','asg-export',?)",
+            (&task, failed.to_string()))?;
+        obstacles::classify_failed_tx(db, &task)?;
+        // The capsule preview is visibly clipped and drops the decisive condition.
+        let ctx = recovery_context::snapshot(db, &task)?;
+        let listed = ctx["owner_decisions_so_far"]["answers"].as_array().unwrap().clone();
+        let entry = |id: &str| listed.iter().find(|a| a["question_id"] == id).unwrap().clone();
+        let preview = entry("pq_long");
+        assert_eq!(preview["complete"], false);
+        assert!(preview["question"].as_str().unwrap().ends_with('…'));
+        assert!(preview["answer"].as_str().unwrap().ends_with('…'));
+        assert!(!preview["answer"].as_str().unwrap().contains(decisive));
+        assert_eq!(preview["answer_chars"], answer.chars().count());
+        assert_eq!(preview["question_chars"], question.chars().count());
+        assert_eq!(entry("pq_short")["complete"], true);
+        assert_eq!(entry("pq_short")["answer"], "dev");
+        let trigger = obstacles::decision_trigger(db, &task, None)?.unwrap();
+        let owner = db.query_row("SELECT owner_ref,epoch FROM task_owners WHERE task_id=?", [&task],
+            |r| Ok(cortex_core::ownership::OwnerEpoch { owner:r.get(0)?, epoch:r.get(1)? }))?;
+        let credential = cortex_core::channels::issue_tx(db, &task, &owner,
+            cortex_core::channels::Principal::OwnerDecision { obstacle: &trigger.obstacle })?;
+        cortex_core::channels::bind_session_tx(db, &credential, "fixture")?;
+        cortex_core::recovery_context::generation_tx(db, &credential, "session_open", None)?;
+        let (delivery,_) = recovery_context::delivery_tx(db,&credential)?;
+        let entries = recovery_context::decision_inline(db, &task)?;
+        let full = entries.iter().find(|a| a.id == "pq_long").unwrap();
+        assert_eq!((&full.question,&full.answer),(&question,&answer));
+        assert!(entries.iter().all(|a| a.id != "pq_huge"));
+        recovery_context::record_decision_inline_tx(db,&task,&credential.channel_id,&delivery,&entries)?;
+        let eligible = |db: &rusqlite::Transaction<'_>| recovery_context::owner_answer_delivered_completely(
+            db,&task,&credential.channel_id,"pq_long");
+        assert!(!eligible(db)?, "building a prompt alone is not transmission");
+        db.execute("UPDATE capsule_deliveries SET state='transmitted' WHERE id=?", [&delivery])?;
+        assert!(eligible(db)?);
+        recovery_context::generation_tx(db,&credential,"observed_compaction",Some("fixture"))?;
+        assert!(!eligible(db)?);
+        let (delivery,_) = recovery_context::delivery_tx(db,&credential)?;
+        recovery_context::record_decision_inline_tx(db,&task,&credential.channel_id,&delivery,&entries)?;
+        db.execute("UPDATE capsule_deliveries SET state='transmitted' WHERE id=?", [&delivery])?;
+        db.execute("UPDATE pending_questions SET answer_text='changed' WHERE id='pq_long'",[])?;
+        assert!(!eligible(db)?);
+        db.execute("UPDATE pending_questions SET answer_text=? WHERE id='pq_long'",[&answer])?;
+        let refused = obstacles::coordinator_retry_decision_tx(db, &task, &credential.channel_id, "huge",
+            &json!({"obstacle":trigger.obstacle,"owner_question_id":"pq_huge","refined_brief":"Remove it."}))
+            .unwrap_err();
+        assert!(format!("{refused:?}").contains("owner_decision_prior_answer_incomplete"), "{refused:?}");
+        let brief = format!("Remove /v1/export from the local change, {decisive}.");
+        let result = obstacles::coordinator_retry_decision_tx(db, &task, &credential.channel_id, "long",
+            &json!({"obstacle":trigger.obstacle,"owner_question_id":"pq_long","refined_brief":brief}))?;
+        assert_eq!(result["node"], "export");
         Ok(())
     })
     .unwrap();
+    let retried = latest(&s, &task, "ASSIGNMENT_RETRIED");
+    assert_eq!((retried["decided_by"].as_str(), retried["owner_question_id"].as_str()), (Some("coordinator"), Some("pq_long")));
+    assert_eq!(count(&s, &task, "ASSIGNMENT_RETRIED"), 1);
 }
 
 /// A dismissed (or resolved but still failing) access action is opened at most

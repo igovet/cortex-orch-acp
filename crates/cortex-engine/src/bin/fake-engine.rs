@@ -1616,6 +1616,7 @@ pub async fn main() {
                         "escalation_request",
                         "ask_question",
                         "user_question_request",
+                        "owner_decision_retry",
                         "plan_submit",
                         "sprint_plan_submit",
                         "list_route_options",

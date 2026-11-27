@@ -9,6 +9,8 @@ results. The runtime chooses what executes and whether the task can complete.
 See [verification status](../../project/verification.md) for retained test evidence
 and its automated evidence limits.
 
+Repair review packets include the outstanding verification commands from earlier attempts. Reviewers check claims about excluded tests against the applicable build configuration or test listing and disclose gaps. Final verification uses its existing command evidence rules.
+
 ## Runtime-composed synthesis
 
 Independent review and final verification remain separate mandatory gates for
@@ -1308,14 +1310,21 @@ pending question is opened and `LOOP_BROKEN` (`kind: owner_question`) is recorde
 Only answers since the newest reopen or owner message count, so after either the
 question may be asked again. A skill proposal keeps its own rules.
 
-An obstacle the owner already settled is not raised again. A failed node's or
-stop's owner decision that repeats one the owner answered in any revision since the
+An obstacle the owner already settled is not raised again. A stop's or review's
+owner decision that repeats one the owner answered in any revision since the
 newest reopen or owner message (its text cites the answered question, names only
 the same files, or uses mostly the same words) opens no second
 `OWNER_DECISION_REQUIRED` and no `ask_owner` continuation: it is classified
 `technical` (`rule: owner_decision_answered`) with the owner's answer in its detail,
-and the failed node's result carries the disclosed `unverified` runtime check `Owner
-decision applied: …`. Missing access whose owner action for the same service was
+and the result carries the disclosed `unverified` runtime check `Owner
+decision applied: …`. This rule applies to the stop and review paths only. For a
+failed execution node, the first `owner_decision` on a subject opens
+`OWNER_DECISION_REQUIRED` and triggers a coordinator decision. If the same subject
+recurs on the same node and revision after a retry based on either the owner's answer
+or the coordinator's decision, it is classified `technical` (`rule:
+owner_decision_repeated`) without a new trigger. The runtime matches the full
+normalized blocker text; for older records without a subject digest it falls back
+to the display summary. Missing access whose owner action for the same service was
 resolved or dismissed twice (`ACCESS_REPEAT_LIMIT`) opens no third action: the
 failure is `technical` (`rule: access_repeats`) and the node's result discloses
 `Access to <service> not available`. Both record `LOOP_BROKEN` (`action:

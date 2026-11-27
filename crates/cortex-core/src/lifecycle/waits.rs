@@ -579,7 +579,11 @@ pub fn answer_tx(
     if node_question {
         event_tx(db, task, "OWNER_DECISION_ANSWERED", json!({"question_id":question,"answer_source":source}))?;
         if state == TaskState::Executing {
-            super::obstacles::retry_unblocked_tx(db, task)?;
+            let assignment: String = db.query_row(
+                "SELECT assignment_ref FROM pending_questions WHERE task_id=? AND id=?",
+                (task, question), |r| r.get(0),
+            )?;
+            super::obstacles::retry_unblocked_assignment_tx(db, task, Some(&assignment))?;
         }
         return Ok(true);
     }

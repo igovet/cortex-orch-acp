@@ -31,6 +31,17 @@ fn questions(store: &Store, i: &Identity) -> CoreResult<Vec<Value>> {
         for record in &mut records{
             let id=record["question_id"].as_str().unwrap().to_owned();
             let dedup:String=db.query_row("SELECT dedup_key FROM pending_questions WHERE id=?",[&id],|r|r.get(0))?;
+            if dedup.starts_with("obstacle:") {
+                let actor: Option<String> = db.query_row(
+                    "SELECT json_extract(payload_json,'$.asked_by') FROM runtime_events
+                     WHERE task_id=? AND type='USER_QUESTION_REQUESTED' AND json_extract(payload_json,'$.question_id')=?
+                     ORDER BY id DESC LIMIT 1",
+                    (&i.task,&id), |r|r.get::<_, Option<String>>(0),
+                ).optional()?.flatten();
+                if let Some(actor)=actor {
+                    record["asked_by"]=json!(actor);
+                }
+            }
             if let Some(rest)=dedup.strip_prefix("runtime:").filter(|r|!r.starts_with("stop:")) {
                 let channel=rest.split(':').next().unwrap_or("");
                 let role:Option<String>=db.query_row("SELECT role FROM trusted_channels WHERE channel_id=? AND task_id=?",(channel,&i.task),|r|r.get(0)).optional()?;
@@ -113,7 +124,26 @@ fn expired(
     meta["next_offset"] = Value::Null;
     Ok(reply(meta))
 }
-pub(super) fn execute(store: &Store, i: &Identity, name: &str, args: &Value) -> CoreResult<Value> {
+pub(super) fn execute(store: &Store, i: &Identity, channel: &str, name: &str, args: &Value, batched: bool) -> CoreResult<Value> {
+    let decision = i.stage.as_deref() == Some(cortex_core::lifecycle::obstacles::DECISION_STAGE);
+    if decision && name == "list_sources" {
+        if let Some(after) = args["answered_after"].as_i64() {
+            // A separate keyset cursor: source revisions and question rows are independent.
+            let limit = args["limit"].as_u64().unwrap_or(8).min(8) as usize;
+            return store.read(|db| {
+                let mut stmt = db.prepare("SELECT rowid,id,substr(text,1,80) FROM pending_questions
+                    WHERE task_id=? AND rowid>? AND status='answered' AND answer_source IN ('text','elicitation')
+                    AND answer_text IS NOT NULL AND dedup_key NOT LIKE 'native_permission:%' ORDER BY rowid LIMIT ?")?;
+                let rows = stmt.query_map((&i.task,after,(limit+1) as i64), |r| {
+                    let id:String=r.get(1)?;
+                    Ok((r.get::<_,i64>(0)?,json!({"question_id":id,"preview":r.get::<_,String>(2)?,
+                        "question_source_ref":format!("{id}:question"),"source_ref":format!("{id}:answer")})))
+                })?.collect::<Result<Vec<_>,_>>()?;
+                Ok(reply(json!({"answered_questions":rows.iter().take(limit).map(|r| &r.1).collect::<Vec<_>>(),
+                    "next_answered_after":(rows.len()>limit).then(||rows[limit-1].0)})))
+            });
+        }
+    }
     if name == "list_sources" {
         let after = args["after"].as_i64().unwrap_or(0);
         let limit = args["limit"].as_u64().unwrap_or(50) as usize;
@@ -154,6 +184,28 @@ pub(super) fn execute(store: &Store, i: &Identity, name: &str, args: &Value) -> 
         .ok_or(CoreError::Refused("invalid_source_ref"))?;
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
     let limit = args["limit"].as_u64().unwrap_or(65536) as usize;
+    if decision {
+        if let Some((id, field @ ("answer" | "question"))) = reference.rsplit_once(':') {
+            return store.write(|db| {
+                let text:String = db.query_row("SELECT CASE ? WHEN 'answer' THEN answer_text ELSE text END
+                    FROM pending_questions WHERE task_id=? AND id=? AND status='answered'
+                    AND answer_source IN ('text','elicitation') AND answer_text IS NOT NULL
+                    AND dedup_key NOT LIKE 'native_permission:%'", (field,&i.task,id), |r|r.get(0))
+                    .optional()?.ok_or(CoreError::Refused("unknown_source_ref"))?;
+                let digest = hash(text.as_bytes());
+                let meta = json!({"source_ref":reference,"question_id":id,"kind":field,"availability":"stored",
+                    "sha256":digest,"trust_label":if field=="answer" {"user_direct"} else {"runtime_recorded"}});
+                // Keep individual responses small and preserve split UTF-8 bytes losslessly.
+                let limit = limit.min(2048);
+                let result = page(meta,text.as_bytes(),offset,limit,false);
+                if !batched && offset <= text.len() {
+                    cortex_core::recovery_context::decision_source_page_tx(db,&i.task,channel,reference,&digest,
+                        offset,offset.saturating_add(limit).min(text.len()))?;
+                }
+                Ok(reply(result))
+            });
+        }
+    }
     if reference.starts_with("pq_") && reference.ends_with(":answer") {
         let mut q = questions(store, i)?
             .into_iter()

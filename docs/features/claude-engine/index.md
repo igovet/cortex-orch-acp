@@ -433,10 +433,10 @@ key file name there (`.env*`, SSH key names, `*.pem`, `*.key`, token and secret
 names), and asks for everything else. The runtime answers each request by the
 access mode's decision table (see
 [native engines](../permissions-and-containment/index.md#native-engines)): Cortex
-private state is refused in every mode; Auto allows everything else and records
+private state follows the owner-card rule (Auto allows, Guarded and Development ask) except a write to a live store file, which is refused in every mode, Auto included (`cortex_live_store`); Auto allows the remaining requests and records
 the rule; Development allows reads outside the project and asks the owner for
 credential reads; Guarded asks the owner before reads outside the project,
-credential reads and web fetches. Read-only channels get only reads and web fetches (which follow the fetch rule above). Claude has no
+credential reads and web fetches. Read-only channels get only reads and web fetches (which follow the fetch rule above); their native edit, execute, delete and move requests are refused in every mode, Auto included (`read_only`). Claude has no
 native write tool in a Cortex session, so the write rows apply to it only if it
 ever sends such a request. The Claude process is not sandboxed. Whether a real
 turn lists no native `Bash`, `Edit` or `Write`, keeps the attached MCP servers

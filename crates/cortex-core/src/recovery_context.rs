@@ -49,7 +49,7 @@ const NOISE: &str = "('NATIVE_TURN_SETTLED','NATIVE_CONTEXT_DELIVERY','NATIVE_CO
     'NATIVE_GUIDANCE_QUEUED','NATIVE_GUIDANCE_SETTLED','ROUTING_INSTRUCTIONS_SNAPSHOTTED','NATIVE_START_ADMITTED',
     'NATIVE_DOCUMENT_TOOL','NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_RECONCILED','NATIVE_ATTEMPT_DELIVERY',
     'NATIVE_PERMISSION_REQUESTED','NATIVE_PERMISSION_DECIDED','NATIVE_PERMISSION_AUTO_ALLOWED','NATIVE_PERMISSION_CANCELLED',
-    'REPORT_PAGE_READ','EXTERNAL_TOOL_AUTHORIZED','EXTERNAL_TOOL_RESULT','NATIVE_ACCESS_MODE_CONFIRMED',
+    'OWNER_DECISION_INLINE_ANSWER','OWNER_DECISION_SOURCE_PAGE','REPORT_PAGE_READ','EXTERNAL_TOOL_AUTHORIZED','EXTERNAL_TOOL_RESULT','NATIVE_ACCESS_MODE_CONFIRMED',
     'NATIVE_SESSION_CONFIGURED','NATIVE_ROUTE_SELECTED','NATIVE_TURN_DEGENERATE','ENVIRONMENT_PREFLIGHT',
     'TASK_PROGRESS','FAILURE_CLASSIFIED','EXTERNAL_WAIT_RECHECKED')";
 const REPORT_TOOLS: &str =
@@ -865,22 +865,147 @@ pub fn record_delivery_tx(
     Ok(())
 }
 
-/// The owner's answers on this task, newest first and bounded: what the owner
-/// already decided, so a coordinator proceeds from it instead of asking again.
-fn owner_answers_so_far(db: &Connection, task: &str) -> CoreResult<Value> {
-    let clip = |s: &str, n: usize| s.chars().take(n).collect::<String>();
-    let rows = db
+/// Capsule preview bounds of one owner answer, in characters: question, answer.
+pub const OWNER_ANSWER_PREVIEW_CHARS: (usize, usize) = (300, 400);
+/// Inline evidence bound. Longer texts require paged source reads.
+pub const OWNER_ANSWER_EVIDENCE_CHARS: usize = 4_000;
+const OWNER_ANSWERS_LISTED: usize = 8;
+
+/// One answered owner question of this task, with its complete recorded text.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OwnerAnswer {
+    #[serde(rename = "question_id")]
+    pub id: String,
+    pub question: String,
+    pub answer: String,
+    pub answered_at: String,
+}
+
+impl OwnerAnswer {
+    /// Whether the capsule preview shows the whole question and answer.
+    pub fn previewed_completely(&self) -> bool {
+        self.question.chars().count() <= OWNER_ANSWER_PREVIEW_CHARS.0
+            && self.answer.chars().count() <= OWNER_ANSWER_PREVIEW_CHARS.1
+    }
+    /// Whether an owner-decision turn receives the whole question and answer.
+    pub fn delivered_completely(&self) -> bool {
+        self.question.chars().count() <= OWNER_ANSWER_EVIDENCE_CHARS
+            && self.answer.chars().count() <= OWNER_ANSWER_EVIDENCE_CHARS
+    }
+}
+
+/// The owner's answered questions on this task, newest first and bounded to the
+/// same rows the capsule lists. Permission cards are not owner decisions.
+pub fn owner_answers(db: &Connection, task: &str) -> CoreResult<Vec<OwnerAnswer>> {
+    Ok(db
         .prepare(
-            "SELECT text,coalesce(answer_text,''),CAST(coalesce(answered_at,'') AS TEXT) FROM pending_questions
+            "SELECT id,text,coalesce(answer_text,''),CAST(coalesce(answered_at,'') AS TEXT) FROM pending_questions
              WHERE task_id=? AND status='answered' AND answer_text IS NOT NULL
              AND dedup_key NOT LIKE 'native_permission:%'
-             ORDER BY rowid DESC LIMIT 8",
+             ORDER BY rowid DESC LIMIT ?",
         )?
-        .query_map([task], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        .query_map((task, OWNER_ANSWERS_LISTED as i64), |r| {
+            Ok(OwnerAnswer { id: r.get(0)?, question: r.get(1)?, answer: r.get(2)?, answered_at: r.get(3)? })
         })?
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Scope coverage to the exact session/context currently attached to this channel.
+fn decision_generation(db: &Connection, task: &str, channel: &str) -> CoreResult<String> {
+    Ok(db.query_row("SELECT g.id FROM delegation_provisioning p JOIN context_generations g
+        ON g.engine_session_ref='native:'||p.attempt_id||':'||p.engine_session_ref
+        WHERE p.task_id=? AND p.channel_id=? AND g.task_id=p.task_id ORDER BY g.sequence DESC LIMIT 1",
+        (task,channel), |r| r.get(0))?)
+}
+
+/// Record bytes offered inline, not a model claim or a deferred batch handle.
+pub fn decision_source_page_tx(db: &Transaction<'_>, task: &str, channel: &str,
+    reference: &str, digest: &str, start: usize, end: usize) -> CoreResult<()> {
+    let generation = decision_generation(db, task, channel)?;
+    crate::lifecycle::event_tx(db, task, "OWNER_DECISION_SOURCE_PAGE", json!({
+        "channel":channel,"generation":generation,"source":reference,"sha256":digest,
+        "start":start,"end":end
+    }))?;
+    Ok(())
+}
+
+/// Build and bind the same bounded inline evidence in the decision prompt's
+/// transaction. Never infer delivery by querying the newest eight at retry time.
+pub fn decision_inline(db: &Connection, task: &str) -> CoreResult<Vec<OwnerAnswer>> {
+    Ok(owner_answers(db, task)?.into_iter().filter(OwnerAnswer::delivered_completely).collect())
+}
+
+/// Called with the exact serialized entries when recording prompt transmission.
+pub fn record_decision_inline_tx(db: &Transaction<'_>, task: &str, channel: &str, delivery: &str,
+    entries: &[OwnerAnswer]) -> CoreResult<()> {
+    for a in entries {
+        crate::lifecycle::event_tx(db, task, "OWNER_DECISION_INLINE_ANSWER", json!({
+            "channel":channel,"delivery":delivery,"question_id":a.id,
+            "question_sha256":crate::digest(a.question.as_bytes()),"answer_sha256":crate::digest(a.answer.as_bytes())
+        }))?;
+    }
+    Ok(())
+}
+
+pub fn owner_answer_delivered_completely(db: &Connection, task: &str, channel: &str,
+    question: &str) -> CoreResult<bool> {
+    let generation = decision_generation(db, task, channel)?;
+    let (q,a): (String,String) = db.query_row("SELECT text,answer_text FROM pending_questions
+        WHERE task_id=? AND id=?", (task,question), |r| Ok((r.get(0)?,r.get(1)?)))?;
+    // A built but unsent prompt cannot authorize a retry. Bind the pair of
+    // inline digests to the prompt's actual transmission record.
+    let inline: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events e JOIN capsule_deliveries d
+        ON d.id=json_extract(e.payload_json,'$.delivery') AND d.task_id=e.task_id
+        WHERE e.task_id=? AND e.type='OWNER_DECISION_INLINE_ANSWER' AND d.context_generation_id=?
+        AND d.state IN ('transmitted','delivery_confirmed','continuation_observed')
+        AND json_extract(e.payload_json,'$.channel')=? AND json_extract(e.payload_json,'$.question_id')=?
+        AND json_extract(e.payload_json,'$.question_sha256')=? AND json_extract(e.payload_json,'$.answer_sha256')=?)",
+        (task,&generation,channel,question,crate::digest(q.as_bytes()),crate::digest(a.as_bytes())), |r|r.get(0))?;
+    if inline { return Ok(true); }
+    let mut pages = db.prepare("SELECT json_extract(payload_json,'$.start') AS start,
+        json_extract(payload_json,'$.end') FROM runtime_events WHERE task_id=? AND type='OWNER_DECISION_SOURCE_PAGE'
+        AND json_extract(payload_json,'$.channel')=? AND json_extract(payload_json,'$.generation')=?
+        AND json_extract(payload_json,'$.source')=? AND json_extract(payload_json,'$.sha256')=? ORDER BY start")?;
+    for (suffix,text) in [("question",q),("answer",a)] {
+        let mut covered = None;
+        let ranges = pages.query_map((task,channel,&generation,format!("{question}:{suffix}"),crate::digest(text.as_bytes())),
+            |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?;
+        for range in ranges {
+            let (start,end) = range?;
+            if start > covered.unwrap_or(0) { break; }
+            covered = Some(end.max(covered.unwrap_or(0)));
+        }
+        if covered != Some(text.len() as i64) { return Ok(false); }
+    }
+    Ok(true)
+}
+
+/// The owner's answers on this task, newest first and bounded: what the owner
+/// already decided, so a coordinator proceeds from it instead of asking again.
+/// A clipped preview ends with an ellipsis and is marked `complete: false`.
+fn owner_answers_so_far(db: &Connection, task: &str) -> CoreResult<Value> {
+    let clip = |s: &str, n: usize| {
+        if s.chars().count() <= n {
+            return s.to_owned();
+        }
+        let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    };
+    let answers = owner_answers(db, task)?
+        .iter()
+        .map(|a| {
+            let mut entry = json!({"question_id":a.id,"question":clip(&a.question,OWNER_ANSWER_PREVIEW_CHARS.0),
+                "answer":clip(&a.answer,OWNER_ANSWER_PREVIEW_CHARS.1),"answered_at":a.answered_at,
+                "complete":a.previewed_completely()});
+            if !a.previewed_completely() {
+                entry["question_chars"] = json!(a.question.chars().count());
+                entry["answer_chars"] = json!(a.answer.chars().count());
+            }
+            entry
+        })
+        .collect::<Vec<_>>();
     Ok(json!({
-        "note":"The owner already decided these (newest first). Proceed from them; never ask the same or a near-identical question again.",
-        "answers":rows.iter().map(|(q,a,t)|json!({"question":clip(q,300),"answer":clip(a,400),"answered_at":t})).collect::<Vec<_>>()}))
+        "note":"The owner already decided these (newest first). Proceed from them; never ask the same or a near-identical question again. An entry with complete:false is a clipped preview: do not act on a condition it may omit; find older or longer answers with list_sources and page both texts in full with read_source before citing them.",
+        "answers":answers}))
 }

@@ -117,6 +117,7 @@ export function mapDecision(decision: WireDecision): Decision {
     id: decision.decisionId, kind: permission ? "permission" : "question", from: typeof decision.askedBy === "string" ? decision.askedBy : "", workerId: null, batchId: decision.batchId, at: typeof decision.createdAt === "string" ? lastConfirmed(decision.createdAt) : null, text: decision.prompt,
     // The runtime's stop question says what each answer does and which one it recommends.
     options: decision.options.map(option => ({ label: option.label, optionId:option.optionId, ...(typeof option.detail === "string" && option.detail ? { sub: option.detail } : {}), ...(option.recommended === true ? { recommended: true as const } : {}) })), answer: decision.status === "answered" ? { text: typeof decision.answerText === "string" ? decision.answerText : "Answered", at: typeof decision.answeredAt === "string" ? lastConfirmed(decision.answeredAt) : null, ...answerFiles(decision.answerAttachments) } : null, withdrawn: !open && decision.status !== "answered" && decision.status !== "pending", suspended:decision.status === "pending" && !open,
+    ...(decision.language === "ru" || decision.language === "en" ? { language: decision.language } : {}),
     ...(decision.optionsOnly === true ? { optionsOnly: true as const } : {}),
     ...(typeof decision.headline === "string" && decision.headline ? { headline: decision.headline } : {}),
     // A batch member's short subject label, when the asker gave one.
@@ -210,5 +211,5 @@ function mapPermission(raw: unknown): NonNullable<Decision["permission"]> {
   const p = typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : {};
   const text = (v: unknown) => typeof v === "string" ? v : "";
   return { operation: text(p.operation), paths: Array.isArray(p.paths) ? p.paths.filter((s): s is string => typeof s === "string") : [],
-    reason: text(p.reason), reasonText: text(p.reasonText), access: text(p.access) };
+    reason: text(p.reason), reasonText: text(p.reasonText), access: text(p.access), command: text(p.command), cwd: text(p.cwd), why: text(p.why) };
 }

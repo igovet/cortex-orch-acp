@@ -3,6 +3,7 @@ import { capabilityOf, FEATURES, isOpen, type Activity, type Decision, type Owne
 import { CodeView } from "./code";
 import { archiveRow, daysLeft } from "./archive-model";
 import { AttachChips, Composer, TaskAttachments } from "./composer";
+import { questionCopy } from "./copy";
 import { useWs } from "./ctx";
 import { Confirmed, createBodyMark, createTicker, ScreenActive } from "./freshness";
 import { A, closePop, Count, createFollow, I, Keyed, MenuItem, Pop, useWantOverview } from "./kit";
@@ -258,7 +259,10 @@ function DecisionCard(props: { m: SessionModel; d: Decision; now: number }) {
       <Show when={blocked() && props.m.mode === "paused"}><div class="cap muted ws-dc-note">Preserved while paused. Resume the task to answer.</div></Show>
       <dl class="kv ws-dc-kv">
         <dt>Operation</dt><dd>{OPERATION[perm().operation] ?? perm().operation}</dd>
-        <dt>Resource</dt><dd><PermissionPaths paths={perm().paths} /></dd>
+        <Show when={perm().command} fallback={<><dt>Resource</dt><dd><PermissionPaths paths={perm().paths} /></dd></>}>
+          <dt>Command</dt><dd><PermissionCommand text={perm().command!} /></dd>
+          <Show when={perm().cwd}><dt>Directory</dt><dd class="mono">{perm().cwd}</dd></Show>
+        </Show>
         <dt>Why</dt><dd>{permissionWhy(perm())}</dd>
         <Show when={perm().access}><dt>Mode</dt><dd>{accessName(perm().access)}</dd></Show>
       </dl>
@@ -303,7 +307,15 @@ export const permissionLine = (d: Decision) => {
   const where = p.paths.length === 0 ? "" : p.paths.length === 1 ? ` ${p.paths[0]}` : ` ${p.paths.length} paths`;
   return `${d.from ? d.from.charAt(0).toUpperCase() + d.from.slice(1) : "A worker"} wants to ${what}${where}`;
 };
-export const permissionWhy = (p: NonNullable<Decision["permission"]>) => REASON[p.reason] ?? (p.reasonText ? `${p.reasonText.charAt(0).toUpperCase()}${p.reasonText.slice(1)}.` : "It is outside the usual bounds.");
+export const permissionWhy = (p: NonNullable<Decision["permission"]>) => p.why ? p.why : REASON[p.reason] ?? (p.reasonText ? `${p.reasonText.charAt(0).toUpperCase()}${p.reasonText.slice(1)}.` : "It is outside the usual bounds.");
+/** A command line in monospace; a long one shows its start and folds the full text. */
+function PermissionCommand(props: { text: string }) {
+  const long = () => props.text.length > 240;
+  return <Show when={long()} fallback={<code class="mono ws-perm-cmd">{props.text}</code>}>
+    <code class="mono ws-perm-cmd">{props.text.slice(0, 240)}…</code>
+    <details><summary>Full command</summary><pre class="mono ws-perm-cmd">{props.text}</pre></details>
+  </Show>;
+}
 /** The exact paths; past three, the rest fold behind a count. */
 function PermissionPaths(props: { paths: string[] }) {
   const shown = () => props.paths.slice(0, 3);
@@ -318,7 +330,10 @@ function PermissionPaths(props: { paths: string[] }) {
 function Questions(props: { m: SessionModel; asks: Decision[]; now: number }) {
   const ws = useWs();
   const decision = (ask: Ask) => props.asks.find(d => d.id === ask.id)!;
-  const blocked = (ask: Ask) => decisionBlocked(props.m, decision(ask));
+  const blocked = (ask: Ask) => {
+    const d = decision(ask), copy = questionCopy(d.language);
+    return d.unavailable ?? (d.suspended || props.m.mode === "paused" ? copy.resume : props.m.mode === "live" ? undefined : copy.blocked);
+  };
   // The answer goes into the task's running session, whose model and effort are already chosen, so the form offers neither.
   // A sprint's planning task is answered through its sprint's planning, which keeps the sprint's state with the answer.
   const planning = usePlanningSprint();
@@ -330,9 +345,9 @@ function Questions(props: { m: SessionModel; asks: Decision[]; now: number }) {
     if (sprint) return ws.run({ type: "answer_planning", sprintId: sprint.id, decisionId: first.ask.id, answer: first.text, optionId: first.optionId, attachments: first.attachments, now: ws.store.clock(), ...batch });
     return ws.run({ type: "answer_decision", taskId: props.m.view.id, decisionId: first.ask.id, answer: first.text, optionId: first.optionId, attachments: first.attachments, now: ws.store.clock(), ...batch });
   };
-  return <QuestionForm asks={props.asks} needs={planning() ? "answer_planning" : "answer_decision"} blocked={blocked} projectId={props.m.view.project.id} onSend={send} waiting={ask => ask.at === null ? "" : `waiting ${age(ask.at, props.now)}`}
+  return <QuestionForm asks={props.asks} needs={planning() ? "answer_planning" : "answer_decision"} blocked={blocked} projectId={props.m.view.project.id} onSend={send} waiting={ask => ask.at === null ? "" : questionCopy(ask.language).waiting(age(ask.at, props.now))}
     note={ask => <>
-      <Show when={blocked(ask) && props.m.mode === "paused"}><div class="cap muted ws-dc-note">Preserved while paused. Resume the task to answer.</div></Show>
+      <Show when={blocked(ask) && props.m.mode === "paused"}><div class="cap muted ws-dc-note">{questionCopy(ask.language).paused}</div></Show>
       <StopTargets m={props.m} d={decision(ask)} />
     </>} />;
 }

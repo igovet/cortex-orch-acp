@@ -5560,11 +5560,17 @@ async fn coordinator_owner_decision_tools_bind_the_exact_failed_worker() {
         let h = p.host().await;
         let s = p.store();
         let owner = h.create("decision".into(), "Fixture".into(), "owner".into()).await.unwrap();
+        std::fs::write(p.0.join("record-prompts"), "").unwrap();
+        let verification = json!([["fixture-check", "--stop-on-any-failure"]]);
         let obstacle = s.write(|db| {
-            db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='decision'", [])?;
+            db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1,plan_json=? WHERE task_id='decision'",
+                [json!({"verification":verification}).to_string()])?;
             let failed = json!({"blocker":{"kind":"owner_decision","detail":"Keep the existing API?"}});
-            db.execute("INSERT INTO runtime_nodes VALUES ('decision',1,'blocked','worker-backend-dev','Keep API compatible','[]','[]','execution','failed','failed-worker',?)",
+            db.execute("INSERT INTO runtime_nodes (task_id,revision,node_id,role,objective,scope_json,dependencies_json,stage,status,assignment_ref,result_json)
+                VALUES ('decision',1,'blocked','worker-backend-dev','Keep API compatible','[\"src/api.rs\"]','[\"checks\"]','execution','failed','failed-worker',?)",
                 [failed.to_string()])?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('decision',1,'checks','worker-qa-engineer','Check','[]','[]','execution','completed','checks-worker',?)",
+                [json!({"report_ref":"r_0123456789ab","report_structure":{"status":"complete"}}).to_string()])?;
             db.execute("INSERT INTO runtime_nodes VALUES ('decision',1,'other','worker-backend-dev','Unrelated','[]','[]','execution','completed','other-worker','{}')", [])?;
             event_tx(db, "decision", "NATIVE_TASK_SETTINGS", json!({"settings":{"language":language}}))?;
             event_tx(db, "decision", "USER_STEERING", json!({"deny_write":["protected.txt"]}))?;
@@ -5581,12 +5587,52 @@ async fn coordinator_owner_decision_tools_bind_the_exact_failed_worker() {
                 db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,answer_text,answer_source,status,created_at)
                     VALUES ('permission','decision','native_permission:private','Allow?','Yes','text','answered','now')",[])?;
             }
+            if action == "retry" {
+                let mut brief = cortex_core::assignment_brief::extras(
+                    db, "decision", "blocked", "worker-backend-dev", "execution", language,
+                )?;
+                brief["assignment_ref"] = json!("failed-worker");
+                brief["node"] = json!("blocked");
+                brief["stage"] = json!("execution");
+                brief["role"] = json!("worker-backend-dev");
+                brief["objective"] = json!("Keep API compatible");
+                brief["scope"] = json!(["src/api.rs"]);
+                event_tx(db, "decision", "NATIVE_WORKER_BRIEF_RETAINED", json!({"brief":brief}))?;
+                // Current plan/constraint material is not an exact dispatch snapshot.
+                db.execute("UPDATE runtime_tasks SET plan_json='{}' WHERE task_id='decision'", [])?;
+            }
             obstacles::classify_failed_tx(db, "decision")?;
             Ok(obstacles::decision_trigger(db, "decision", None)?.unwrap().obstacle)
         }).unwrap();
+        let (_, prompt) = h.owner_decision_turn("decision", Some(&obstacle)).await.unwrap().unwrap();
         let driver = tokio::time::timeout(Duration::from_secs(12), h.dispatch(
             "decision".into(), owner, SessionRole::OwnerDecision { obstacle: obstacle.clone() }, p.route()
         )).await.unwrap_or_else(|_| panic!("could not dispatch {language} decision session for {action}")).unwrap();
+        driver.prompt(&prompt.unwrap()).await.unwrap();
+        let log = std::fs::read_to_string(p.0.join("prompt-log.jsonl")).unwrap();
+        let frame: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+        let decision: Value = frame["prompt"].as_array().unwrap().iter()
+            .filter_map(|part| part["text"].as_str())
+            .find_map(|text| {
+                let (_, data) = text.split_once("Blocked execution node (runtime data):\n")?;
+                serde_json::from_str(data.lines().next()?).ok()
+            }).expect("the fake peer did not receive the decision payload");
+        assert_eq!(decision["assignment_ref"], "failed-worker");
+        assert_eq!(decision["blocker"], "Keep the existing API?");
+        assert_eq!(decision["brief_origin"], if action == "retry" {
+            "worker_brief"
+        } else {
+            "reconstructed_from_current_records"
+        });
+        let brief = &decision["assignment_brief"];
+        assert_eq!(brief["assignment_ref"], decision["assignment_ref"]);
+        assert_eq!(brief["objective"], "Keep API compatible");
+        assert_eq!(brief["scope"], json!(["src/api.rs"]));
+        assert_eq!(brief["acceptance"]["verification_commands"], verification);
+        assert_eq!(brief["constraints"]["write_denials"]["paths"], json!(["protected.txt"]));
+        assert_eq!(brief["predecessor_reports"][0]["report_id"], "r_0123456789ab");
+        assert_eq!(brief["predecessor_reports"][0]["node"], "checks");
+        assert_eq!(brief["predecessor_reports"][0]["report_structure"], "complete");
         let count = |kind: &str| s.read(|db| Ok(db.query_row(
             "SELECT count(*) FROM runtime_events WHERE task_id='decision' AND type=?", [kind], |r| r.get::<_, i64>(0),
         )?)).unwrap();
@@ -5649,7 +5695,7 @@ async fn coordinator_owner_decision_tools_bind_the_exact_failed_worker() {
             assert_eq!(steering::write_denials(db, "decision")?, ["protected.txt"]);
             let rows: String = db.query_row("SELECT group_concat(node_id||':'||status, ',') FROM
                 (SELECT * FROM runtime_nodes WHERE task_id='decision' ORDER BY node_id)", [], |r| r.get(0))?;
-            assert_eq!(rows,"blocked:pending,other:completed");
+            assert_eq!(rows,"blocked:pending,checks:completed,other:completed");
             Ok(())
         }).unwrap();
         tokio::time::timeout(Duration::from_secs(8), driver.shutdown()).await

@@ -396,6 +396,8 @@ export type PlanNode = { id: string; title: string; who: string; workerId: strin
 export type DecisionTarget = { kind: "task"; taskId: string; title: string } | { kind: "report"; reportId: string; role: string } | { kind: "rule"; path: string };
 export type Decision = {
   id: string; kind: "question" | "permission"; from: string; workerId: string | null; at: number | null;
+  /** The runtime's resolved task language, when available in the question projection. */
+  language?: "ru" | "en";
   /** `sub` says what choosing the option does; `recommended` marks the runtime's recommended answer. */
   text: string; unavailable?: string; options: { label: string; sub?: string; optionId?: string; recommended?: true }[];
   effect?: string; scope?: string; ifDenied?: string;
@@ -414,7 +416,7 @@ export type Decision = {
   /** A withdrawn question the runtime replaced with a later one names that one. */
   replacedBy?: string;
   /** A native engine permission request waiting for the owner: what it does, where, why it needs the owner, under which access mode. */
-  permission?: { operation: string; paths: string[]; reason: string; reasonText: string; access: string };
+  permission?: { operation: string; paths: string[]; reason: string; reasonText: string; access: string; /** A command request: its redacted command line, working directory and concrete reason. */ command?: string; cwd?: string; why?: string };
 };
 export type TimelineEntry =
   | { id: string; kind: "cortex"; text: string }

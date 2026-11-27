@@ -229,6 +229,69 @@ export function workspaceCopy(key: CopyKey, locale = globalThis.navigator?.langu
   return (locale.toLowerCase().split("-")[0] === "ru" ? RU[key] : undefined) ?? COPY[key];
 }
 
+const QUESTION_EN = {
+  question: "Question",
+  count: (n: number) => `${n} questions`,
+  position: (n: number, total: number) => `Question ${n} of ${total}`,
+  askedBy: (from: string) => `Asked by ${from}`,
+  coordinator: "coordinator",
+  askedAutomatically: "Asked automatically",
+  answer: "Answer:",
+  notChosen: "not chosen yet",
+  choices: (n?: number) => n === undefined ? "Answers" : `Answers to question ${n}`,
+  answerLabel: (n?: number) => n === undefined ? "Your answer" : `Your answer to question ${n}`,
+  write: (files: boolean): string => files ? "Write your answer, tag @files…" : "Write your answer…",
+  own: (files: boolean): string => files ? "Or write your own answer, tag @files…" : "Or write your own answer…",
+  add: (files: boolean): string => files ? "Add to your answer, tag @files…" : "Add to your answer…",
+  send: "Send answer",
+  sendAll: "Send answers",
+  sending: (many: boolean): string => many ? "Sending the answers…" : "Sending the answer…",
+  attachments: "Attachments are still loading",
+  incomplete: (n: number, total: number) => `Answer every question first: ${n} of ${total} answered`,
+  choose: "Choose or write an answer first",
+  progress: (n: number, total: number) => `${n} of ${total} answered`,
+  failure: "The answers were not sent.",
+  retained: "Your answers are kept; send them again when ready.",
+  retry: "Retry",
+  sent: (many: boolean): string => many ? "Answers sent; work continues with them." : "Answer sent; work continues with it.",
+  waiting: (duration: string) => `waiting ${duration}`,
+  paused: "Preserved while paused. Resume the task to answer.",
+  resume: "Resume the task first",
+  blocked: "This task cannot take an answer now",
+};
+const QUESTION_RU: typeof QUESTION_EN = {
+  question: "Вопрос",
+  count: n => `Вопросы (${n})`,
+  position: (n, total) => `Вопрос ${n} из ${total}`,
+  askedBy: from => `Спрашивает ${from}`,
+  coordinator: "координатор",
+  askedAutomatically: "Вопрос задан автоматически",
+  answer: "Ответ:",
+  notChosen: "пока не выбран",
+  choices: n => n === undefined ? "Ответы" : `Ответы на вопрос ${n}`,
+  answerLabel: n => n === undefined ? "Ваш ответ" : `Ваш ответ на вопрос ${n}`,
+  write: files => files ? "Напишите ответ, упомяните файлы через @…" : "Напишите ответ…",
+  own: files => files ? "Или напишите свой ответ, упомяните файлы через @…" : "Или напишите свой ответ…",
+  add: files => files ? "Дополните ответ, упомяните файлы через @…" : "Дополните ответ…",
+  send: "Отправить ответ",
+  sendAll: "Отправить ответы",
+  sending: many => many ? "Отправляем ответы…" : "Отправляем ответ…",
+  attachments: "Вложения ещё загружаются",
+  incomplete: (n, total) => `Сначала ответьте на все вопросы: ${n} из ${total}`,
+  choose: "Выберите или напишите ответ",
+  progress: (n, total) => `Дано ответов: ${n} из ${total}`,
+  failure: "Не удалось отправить ответы.",
+  retained: "Ваши ответы сохранены. Отправьте их ещё раз, когда будете готовы.",
+  retry: "Повторить",
+  sent: many => many ? "Ответы отправлены. Работа продолжается." : "Ответ отправлен. Работа продолжается.",
+  waiting: duration => `Ждём ${duration}`,
+  paused: "Вопрос сохранён. Чтобы ответить, возобновите задачу.",
+  resume: "Сначала возобновите задачу",
+  blocked: "Сейчас нельзя ответить на этот вопрос",
+};
+/** Question copy takes the runtime's resolved language, never the UI locale. Older projections default to English. */
+export const questionCopy = (language?: "ru" | "en") => language === "ru" ? QUESTION_RU : QUESTION_EN;
+
 export const WRITING_CHANGES = "Writing from the changes…";
 
 const draftReasons: Readonly<Record<string, string>> = {

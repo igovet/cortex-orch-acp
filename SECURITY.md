@@ -268,8 +268,7 @@ settled at the next start only when the process table shows no engine adapter,
 Codex App Server or session relay of this user working in the project (an
 unreadable entry counts as one); the task is then held for the owner, never
 relaunched by itself. This is not detached unsandboxed descendant settlement
-or engine-session recovery. Auto runs every role's command directly on the owner's full host with no owner card: deletions, administrative commands and writes to the live store files are all allowed (the owner chose this; a write to a live store file can corrupt the running store). Brokered worker commands in Guarded and Development, read-only
-roles and runtime verification run on the host at their real paths, with the
+or engine-session recovery. Auto runs ordinary unscoped commands for any role directly on the owner's host with no owner card, including commands that delete files, perform administrative actions or write to the live store. Such a write can corrupt the running store. Brokered worker commands in Guarded and Development and runtime verification run on the host at their real paths, with the
 owner's tools, PATH, HOME and the shared network, under a Landlock ruleset the
 per-command supervisor enters just before exec; no namespace, mount, overlay or
 snapshot copy is created (see [Landlock command boundary](#landlock-command-boundary)).
@@ -538,6 +537,12 @@ deltas are validated at the Rust and TypeScript bridges; generation, sequence or
 entity-base conflicts require resnapshot, never guessed success. The window keeps
 its last confirmed state during failed reads. Legacy mutation authorization and
 result/decision evidence checks remain on the existing adapter.
+The process-local wake is scoped to one logical project/store channel and carries
+no data, cursor or authority. The Core writer issues it after a successful commit
+when its write path recorded row changes, not from a SQLite commit hook. A wake
+is not proof of a change in the outbox. Each subscribed project still reads the
+committed WAL at its durable cursor; another process cannot send this wake and
+its committed changes are picked up by periodic read-only checks.
 A confirmed draft rename returns its committed version for the next Start;
 older in-flight reads cannot replace that command version. This does not bypass
 server-side version checks, retry a refused Start or authorize a started-task edit.
@@ -2922,34 +2927,37 @@ Workspace Auto host commands can use a fresh private directory per invocation th
 
 The Workspace session prompt derives host-command guidance from the served channel catalogue. A linked checkout selects the working directory. The runtime evaluates access on each call.
 
-**Auto uses a private host namespace for ordinary commands.** In Auto every
+**Auto runs unscoped commands directly on the host.** In Auto every
 role and stage, the coordinator, consultant, reviewers, explorers, read-only and
 worktree assignments included, can run ordinary `command_run` and
-`outside_command` requests with the task checkout writable and the Cortex store
-directories read-only. Each invocation gets its own temporary directory. A command
-that requests `sudo`, `pkexec`, `doas`, Docker or service control requires a separate
-owner confirmation and then runs through the full-host route. A read-only role gets
-the same command route without a "writing worker required" refusal, and a read-only
+`outside_command` requests. An unscoped Auto `command_run` is rerouted to the
+outside (host) route and runs as the owner without a sandbox, so it is not
+confined to a namespace and the Cortex store directories are not made read-only
+for it (`crates/workspace-service/src/native_commands.rs`, the `auto_host`
+reroute). Each invocation gets its own temporary directory. Auto approves
+eligible administrative commands on this route without a separate owner card.
+A read-only role gets the same command route without a "writing worker required" refusal, and a read-only
 task is never told that SSH or host commands are forbidden. The command's working
-directory is its own checkout or worktree. Two guards remain in Auto: a
-command whose argv deletes or overwrites a live Cortex store file
-(`.cortex/*.sqlite3*`) is refused (`cortex_live_store`), and a deletion (the
-recognizer for `rm`, `unlink`, `rmdir`, `shred`, `find -delete`, `git clean`/`rm`,
-`rsync --delete`, also through wrappers and `sh -c`, and `project_delete`) always
-waits for the owner's answer on a permission card and is never answered by Auto; a
-denial is a normal refusal. Guarded and Development keep the behaviour described
-below. Managed Codex scoped channels are unchanged.
+directory is its own checkout or worktree. The command argv seal on live Cortex store files
+(`.cortex/*.sqlite3*`, `cortex_live_store`) applies only in Guarded and Development
+(`crates/workspace-service/src/native_commands.rs`). Auto does not ask for a
+Cortex permission card for a recognized deletion command or an eligible
+`project_delete` call. Guarded and Development retain their deletion consent
+checks. Managed Codex scoped channels are unchanged.
 
-Shell commands follow the same decision where a command can: in Auto, `command_run`
-sees the real `.cortex`/`.cortex-dev` read-write, with every live store file that
-exists at launch (`live_store_file`) bound read-only over it, so it cannot be
-changed, deleted or renamed; a live file absent at launch is not pre-created, so a
-command could create one by name, which the file tools refuse. In Guarded and
-Development the directories stay read-only inside a shell command, because a running
-command cannot pause for a per-write owner prompt; the failed command's result carries
-a `cortex_store` hint to use `project_write`/`project_edit` instead, where the runtime
-asks the owner. The access mode selects the view (`Profile::Auto`); the reported
-command `profile` stays `development`.
+Only a sandboxed Auto command view (`Profile::Auto`, used where a command still
+runs under the sandbox rather than the unscoped host route; managed Codex scoped
+channels use their own scratch profile) sees the real `.cortex`/`.cortex-dev`
+read-write with every live store file that exists at launch (`live_store_file`)
+hidden or bound read-only over it. That protection does not apply to the unscoped
+Auto host route above, and a live file absent at launch is not pre-created. The
+gateway refuses `project_write` and `project_edit` on live store files in Guarded
+and Development but admits eligible calls in Auto
+(`crates/workspace-service/src/native_access.rs`). An unscoped Auto host command
+or gateway write can therefore reach the running database and WAL. `project_delete`
+does not use that admission path and refuses private store paths in every mode.
+For other Cortex private state, a `cortex_store` hint may direct a failed command
+to `project_write` or `project_edit`, where Guarded and Development ask the owner.
  A path that cannot be resolved asks the owner outside Auto. Read-only roles (the coordinator, the consultant, architect,
 ux-designer, explorer, planner, security-auditor, accessibility-auditor,
 database-architect, performance-engineer, the runtime-reserved build-verification
@@ -3049,7 +3057,9 @@ runtime before the call runs (`admit_protected` in
 `crates/workspace-service/src/native_access.rs`): Auto allows, Guarded and
 Development ask the owner (Allow once / Deny; without an owner surface the call is
 refused with `protected_path_not_confirmed`), and a write to a live store file is
-refused in every mode (`cortex_live_store`). Each decision is one
+refused in Guarded and Development (`cortex_live_store`) but admitted in Auto, where a
+gateway write can reach the running database or WAL and corrupt the store (the native
+engine refusal does not cover the gateway). Each decision is one
 `NATIVE_PROTECTED_PATH_DECIDED` event with the operation, path, rule, mode and
 decider; the admission covers exactly that call. A `.git` or credential-file read
 needs no gateway decision. Plan scopes, `scope_request` and `access_request` may
@@ -3059,7 +3069,8 @@ Inside `read_batch` a protected path keeps its `private_or_invalid_path` refusal
 a batch never waits for the owner; `project_mkdir`, `project_delete` and the
 skill-link tool still refuse protected paths. The same on-request rule applies to
 another project's Cortex state reached through `outside_write`/`outside_command`,
-except a write to its live store files. An `access_request` reserves additional work for
+except a write to its live store files, which is refused in Guarded and Development
+but allowed in Auto (`crates/workspace-service/src/native_access.rs`). An `access_request` reserves additional work for
 coordination. A directory path with one trailing slash (`.next/`) is that
 directory, `[`/`]` are literal path characters, and an absolute or `..` path is
 refused as `outside_project` with guidance; generated build/test output needs no
@@ -3370,7 +3381,7 @@ only from `sudo` on the host with the password the owner types
 
 Capability is not authorization to delete data, modify production/shared systems,
 change credentials, upload/push/deploy or run paid checks. Those effects still
-need explicit task authorization. Declared `rm` commands use gateway consent
+need explicit task authorization. Outside Auto, declared `rm` commands use gateway consent
 (`command_delete`), including recognized argv wrappers (`env`, `sudo`, `xargs`,
 `exec`) and explicit `sh`/`bash`/`dash`/`zsh` command scripts with leading whitespace.
 Recognized shell options with operands (for example `bash -o pipefail -c`) do
@@ -3386,28 +3397,29 @@ Literal non-shell argv arguments containing separators and `rm` text do not
 request deletion consent. Refused, absent or malformed approval starts no process.
 This lexical classifier
 is not a semantic firewall: interpreters, scripts and daemon operations can hide
-effects. `project_delete` consent remains. Both `outside_command` and `outside_write` are available to eligible writing
+effects. `project_delete` asks for consent outside Auto; private store paths are
+refused even in Auto. Both `outside_command` and `outside_write` are available to eligible writing
 workers in the main checkout in all three modes. Guarded and Development ask
 the owner for the specific action; Auto decides eligible requests automatically.
-A missing or refused approval blocks the effect. Coordinators and read-only
-roles (including reviewers and build-verification workers) do not receive these
-routes. Workspace-linked writers can see the tools, but dispatch refuses them.
+A missing or refused required approval blocks the effect. `outside_write`
+requires a writing worker in the main checkout. Auto's unscoped host-command
+route is not limited to those workers.
 
-Cortex private targets remain refused. Outside writes to credential or
-control-plane targets are not categorically blocked: eligible requests follow
-the mode's decision. An outside command runs with the owner's host access, not
+The outside-effect decision classifies private, credential and control-plane
+targets; eligible requests follow the mode's decision, with the live-store
+restrictions described above. An outside command runs with the owner's host access, not
 inside the Cortex command sandbox. Checking its working directory does not
 contain the payload.
 The access mode never changes an engine session's own mode.
 
 **Guarded** remains the explicit restrictive command profile (host/HOME mostly
 read-only, writable project and tool caches) with consent for every outside
-write and outside command. **Auto** uses the Development host-writable command
-profile for writing workers and runtime auto-approval of every consent card and
-of every native permission request except a write to a live store file,
-each recorded with its rule (see the [decision table](#native-engine-tools)); the
-engine session mode stays the same as in the other modes, and read-only roles and
-reviewers stay read-only. Development allows native reads outside the project and
+write and outside command. **Auto** routes ordinary unscoped commands to the host
+and approves eligible outside effects without an owner card. It also approves
+native permission requests except a write to a live store file or an
+edit, execute, delete or move on a read-only channel (both refused in every mode, Auto
+included: `cortex_live_store`, `read_only`), each recorded with its rule (see the [decision table](#native-engine-tools)); the
+engine session mode stays the same as in the other modes. Development allows native reads outside the project and
 asks the owner for native writes outside it, credential and key material, Git
 control and engine/Cortex configuration writes and deletions; Guarded also asks
 before native reads outside the project.

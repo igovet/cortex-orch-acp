@@ -62,12 +62,67 @@ pub fn catalogue(role: &str, profile: Option<&str>, stage: Option<&str>) -> Resu
                     "text":{"type":"string","minLength":1,"maxLength":4000,
                         "description":"English instruction within the current assignment's authority."}}}}));
     }
+    if role == "coordinator" && stage == Some("owner_decision") {
+        let mut question = tools.iter().find(|t| t["name"] == "user_question_request")
+            .cloned().ok_or(Error::Forbidden)?;
+        let original = &question["inputSchema"]["properties"];
+        question["inputSchema"] = json!({
+            "type":"object","additionalProperties":false,
+            "required":["question","options","recommended","request_key"],
+            "properties":{"question":original["question"],"options":original["options"],
+                "recommended":original["recommended"],"request_key":original["request_key"]}
+        });
+        question["inputSchema"]["properties"]["question"]["description"] =
+            json!("One short question about this blocked node in the resolved task language.");
+        question["inputSchema"]["properties"]["options"]["description"] =
+            json!("Meaningful choices, with labels and any details in the resolved task language.");
+        question["inputSchema"]["properties"]["recommended"]["description"] =
+            json!("One recommended choice, by its 1-based position in options.");
+        question["description"] = json!("Ask one short, plain question about this turn's blocked node, with meaningful options and one recommendation. Write the question and option labels/details in the task language from the prompt. Custom free text stays available. The runtime binds the question to the exact failed assignment without pausing unrelated work. End the turn after the call commits.");
+        tools.retain(|t| active_steering_read(t["name"].as_str().unwrap_or_default()));
+        for t in &mut tools {
+            if t["name"] == "list_sources" {
+                t["inputSchema"]["properties"]["answered_after"] = json!({"type":"integer","minimum":0,
+                    "description":"List only answered non-permission questions, eight at most per page. Start with zero, then pass next_answered_after until null. Both source refs are returned."});
+            } else if t["name"] == "read_source" {
+                t["inputSchema"]["properties"]["source_ref"]["description"] = json!("Exact listed source ref. For prior decision evidence page <question_id>:question and <question_id>:answer with direct calls, not read_batch. Follow next_offset until null for both.");
+                t["inputSchema"]["properties"]["offset"]["maximum"] = json!(i64::MAX);
+            }
+        }
+        // Keyed by content digest like every tool; found by its advertised name.
+        let retry = snapshot()["tools"].as_object().and_then(|tools| {
+            tools.values().find(|t| t["name"] == "owner_decision_retry")
+        }).cloned().ok_or(Error::Forbidden)?;
+        tools.extend([question, retry]);
+    }
     tools.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Ok(tools)
 }
 pub fn active_steering_read(name: &str) -> bool {
     matches!(name, "tools_discover" | "read_batch" | "read_capsule" | "read_report"
         | "list_reports" | "read_skill" | "list_sources" | "read_source" | "project_read")
+}
+
+#[cfg(test)]
+#[test]
+fn owner_decision_tools_are_only_offered_on_the_scoped_coordinator_channel() {
+    let retry = |tools: &[Value]| tools.iter().any(|t| t["name"] == "owner_decision_retry");
+    assert!(!retry(&catalogue("coordinator", None, None).unwrap()));
+    assert!(!retry(&catalogue("coordinator", None, Some("active_steering")).unwrap()));
+    assert!(!retry(&catalogue("worker", Some("worker-backend-dev"), Some("execution")).unwrap()));
+    let tools = catalogue("coordinator", None, Some("owner_decision")).unwrap();
+    assert!(retry(&tools));
+    for name in ["list_sources","read_source"] {
+        assert!(tools.iter().any(|tool| tool["name"] == name));
+    }
+    assert!(!tools.iter().any(|t| t["name"] == "plan_submit" || t["name"] == "project_edit"));
+    let ask = tools.iter().find(|t| t["name"] == "user_question_request").unwrap();
+    let schema = &ask["inputSchema"];
+    assert!(validate(schema, &json!({"question":"Keep it?", "options":["Yes","No"],
+        "recommended":1,"request_key":"ask"})).is_ok());
+    assert!(validate(schema, &json!({"question":"Keep it?", "options":["Yes"],
+        "recommended":1,"request_key":"ask"})).is_err());
+    assert!(validate(schema, &json!({"question":"Keep it?","request_key":"ask"})).is_err());
 }
 
 pub fn validate(schema: &Value, v: &Value) -> Result<()> {

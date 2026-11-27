@@ -130,25 +130,33 @@ table (`classify` in `crates/cortex-engine/src/permission.rs`, path classes in
 | Credential and key material anywhere, read or write | ask the owner | ask the owner | allow, recorded (`auto_credential`) |
 | Git control files, engine and Cortex configuration, write | ask the owner | ask the owner | allow, recorded (`auto_control`) |
 | Cortex private state (`.cortex`, `.cortex-dev`, dev owner files, service state), read or write | ask the owner | ask the owner | allow, recorded (`auto_private`) |
-| Live store files (`cortex.sqlite3` and its `-wal`, `-shm`, `-journal`, the store's `.*.lock` files), write | refused (`cortex_live_store`) | refused | refused |
+| Live store files (`cortex.sqlite3` and its `-wal`, `-shm`, `-journal`, the store's `.*.lock` files), write | refused (`cortex_live_store`) | refused (`cortex_live_store`) | refused (`cortex_live_store`) |
 | Web fetch | ask the owner | allow | allow |
 
 Read-only roles and review-stage sessions get only the read rows and the web-fetch row:
-their native write, delete and execute requests are refused in every mode under the
-`read_only` rule, while a web fetch, which only reads, follows the web-fetch row like any
-other channel's. This table applies to native engine tools only. Cortex private state
+their native edit, execute, delete and move requests are refused in every mode, Auto included,
+under the `read_only` rule (a native write to a live store file on such a channel is refused
+under `cortex_live_store`, which is checked first). A web fetch, which only reads, is not
+refused there and follows the web-fetch row like any other channel's. This table applies to native engine tools only. Cortex private state
 is allowed on request by owner decision (2026-11-25): a task that needs something
 changed there gets it once the owner allows it, never silently and never refused
-outright. Only writes to the live store files stay refused in every mode: the
+outright. Native writes to the live store files are refused in every access mode, Auto included
+(`cortex_live_store`); Auto allows only the remaining native requests without an owner card. The
 runtime holds POSIX locks on them and commits through the database and its WAL, so
-a write from another process can corrupt the running store. The gateway applies
-the same rule to a direct `project_read`, `project_write` or `project_edit` of
-Cortex private state and to a gateway write of `.git` or of a credential file
+a write from another process can corrupt the running store. The gateway (project file
+tools and `outside_write`/`outside_command`) is decided separately and does not share that
+Auto refusal: a direct `project_read`, `project_write` or `project_edit` of
+Cortex private state and a gateway write of `.git` or of a credential file
 (`.env*`, keys and credential files by name in any directory, not source that only
-mentions a token or password) (`NATIVE_PROTECTED_PATH_DECIDED`;
-refused `protected_path_not_confirmed` when no owner can answer); inside
+mentions a token or password) are allowed on request (`NATIVE_PROTECTED_PATH_DECIDED`;
+refused `protected_path_not_confirmed` when no owner can answer). A gateway write of a live
+store file (`cortex_live_store`) is refused in Guarded and Development, but in Auto the
+runtime admits it (`admit_protected` and the outside-effect decision in
+`crates/workspace-service/src/native_access.rs`). Safety implication: in Auto a gateway
+write can reach the running database or WAL and corrupt the store; it is not protected by
+the native refusal above. Inside
 `read_batch`, `project_mkdir`, `project_delete` and the skill-link tool these paths
-stay refused (deleting a credential file follows the ordinary deletion consent).
+stay refused (deleting a credential file follows the ordinary deletion rules).
 A plan scope, `scope_request` or `access_request` may name Cortex private state,
 `.git` and credential files; it grants no write there, and each write is decided
 as above, so a task asking for such a change is planned and the owner is asked
@@ -257,14 +265,14 @@ work, and whether a deletion waits for the user.
 | Behavior | Guarded | Development (fresh-session default) | Auto |
 | --- | --- | --- | --- |
 | Where a writing worker works | project writes; command cwd inside the task tree | host-visible session; eligible non-private host cwd | same as Development |
-| Writing-worker `command_run` | `guarded`: host at real paths under Landlock; writes to the checkout, scratch and tool caches; secrets hidden | `development`: as Guarded plus `/tmp`, `/var/tmp` and an outside cwd; only Cortex stores hidden | host command in a private namespace with the checkout writable and Cortex store directories read-only; administrative commands use the confirmed full-host route |
+| Writing-worker `command_run` | `guarded`: host at real paths under Landlock; writes to the checkout, scratch and tool caches; secrets hidden | `development`: as Guarded plus `/tmp`, `/var/tmp` and an outside cwd; only Cortex stores hidden | unscoped commands run as the owner via `outside_command`, without a sandbox or argv seal; no owner card for eligible deletions or administrative commands |
 | `outside_write` | action-specific owner consent | action-specific owner consent | runtime decides automatically |
 | `outside_command` | action-specific owner consent | action-specific owner consent | runs on the full host without an owner card, deletions, administrative commands and live store files included |
 | Eligible writer command requests recognized privilege or has a proven pre-launch sandbox failure | routes through `outside_command`; owner consents | same as Guarded | routes through `outside_command`; Auto decides |
-| `sudo`, `pkexec`, `doas` or another administrative host action | owner password prompt on the desktop or a paired phone | same | separate owner confirmation, then the password prompt if needed |
-| Declared deletion (`project_delete`, `command_delete`, native delete) | consent card | consent card | owner consent card |
+| `sudo`, `pkexec`, `doas` or another administrative host action | owner password prompt on the desktop or a paired phone | same | eligible host command approved by Auto; no separate Cortex owner card |
+| Declared deletion (`project_delete`, a recognized deletion command, or native delete) | consent card for eligible requests | consent card for eligible requests | no owner card for eligible requests; protected project paths remain refused by `project_delete`, and native tool refusals still apply |
 | Reads by ordinary brokered commands | owner-readable inputs exposed by the command profile, no per-read card | same | same |
-| Read-only/reviewer `command_run` | `read_only` (Landlock: scratch and caches only, secrets hidden); cwd inside the task tree | `read_only`; eligible non-private host cwd also allowed | host command on the full host with no namespace or overlay |
+| Read-only/reviewer `command_run` | `read_only` (Landlock: scratch and caches only, secrets hidden); cwd inside the task tree | `read_only`; eligible non-private host cwd also allowed | unscoped commands run on the host without a sandbox |
 | Automatic runtime verification | `read_only` under Landlock, shared network, existing ignored-directory grants | same | same |
 | Engine session mode (see [Native engines](#native-engines)) | independent of access mode | independent of access mode | independent of access mode; no bypass or full access |
 | Channel, role, revocation, owner deny, review and completion gates | retained | retained | retained |
@@ -282,16 +290,15 @@ A setup failure does not retry on the host. See [the tool search path boundary](
 Both `outside_command` and `outside_write` are available to eligible writing
 workers in the main checkout in all three modes. Guarded and Development ask
 the owner for the specific action; Auto decides eligible requests automatically.
-A missing or refused approval blocks the effect. Coordinators and read-only
-roles (including reviewers and build-verification workers) do not receive these
-routes. Workspace-linked writers can see the tools, but dispatch refuses them.
+A missing or refused required approval blocks the effect. `outside_write`
+requires a writing worker in the main checkout. Auto's unscoped host-command
+route is not limited to those workers.
 
-The broker checks the command's working directory or the write target. It refuses
-Cortex private paths and symlink aliases; `outside_write` also refuses a target
-inside the project. Credential and control-plane classifications are not blanket
-refusals for `outside_write`: otherwise eligible targets follow the decision
-for the current mode. `outside_command` runs on the host without the command
-sandbox. Its working-directory check and action decision do not constrain
+The broker checks the command's working directory or the write target and
+refuses symlink aliases; `outside_write` also refuses a target inside the project.
+The outside-effect decision classifies private, credential and control-plane paths;
+eligible requests follow the current mode, with the live-store restrictions noted
+above. On the full-host `outside_command` route there is no command sandbox. Its working-directory check and action decision do not constrain
 the payload's filesystem effects; this is an owner-trust route, not containment.
 
 Development is trusted local development, **not a hostile-code sandbox**.
@@ -313,9 +320,9 @@ credential copying or daemon installation is implicit. Docker login and
 credential/configuration changes are separately authorized work.
 
 Host capability never authorizes deletion, production/shared-system mutation,
-publication, credential changes or paid checks. Declared `rm` commands receive
-gateway consent via `command_delete`; denial starts no process. Read-only
-roles cannot use a declared deletion command, even with owner approval.
+publication, credential changes or paid checks. Outside Auto, declared `rm`
+commands require gateway consent via `command_delete`; denial starts no process.
+In those modes, read-only roles cannot use a declared deletion command.
 The gateway preserves argv boundaries: literal `echo`/`printf` arguments containing
 `;`, `|`, newlines or `rm` text are not executable declarations. It recognizes
 `env`, `sudo`, `xargs` and `exec` argv wrappers, `find -exec`/`-execdir`, and explicit
@@ -331,7 +338,12 @@ and ordinary arguments are not shell prefixes. Rejected consent precedes
 working-directory preparation, command mounts and process launch.
 Shell text remains lexical matching, not complete shell interpretation. The
 classifier is not a semantic firewall for interpreters, scripts or Docker effects.
-In Workspace Auto, every role runs every command directly on the full host as the owner, including in a linked checkout, with no namespace, overlay or argv seal and no owner card: deletions, administrative commands, protected working directories and the live Cortex store files are all allowed. Each command gets a private directory at `CORTEX_COMMAND_TMPDIR`. Cortex removes it when the command ends. No access mode selects Claude `bypassPermissions` or
+In Workspace Auto, ordinary unscoped commands run on the host as the owner,
+including in a linked checkout, with no sandbox, argv seal or owner card. That
+route can delete files, run administrative commands or write to the live store.
+Managed Codex scoped commands do not use this route. Each Auto host invocation
+gets a private directory at `CORTEX_COMMAND_TMPDIR`, which Cortex removes when
+the command ends. No access mode selects Claude `bypassPermissions` or
 Codex `agent-full-access`, and no Cortex Claude or Codex session has a native
 shell, so commands go through the brokered gateway tools.
 
@@ -521,8 +533,8 @@ creating a directory or asking for deletion confirmation. Different payloads
 are different actions; an intentional repeat of the same payload after other
 changes needs a fresh explicit key. A pending/unknown receipt still refuses replay.
 `project_delete` requires the exact existing SHA-256, supports binary files and
-checks their raw-byte SHA-256 before unlinking, again after the owner's
-confirmation. A refusal before any possible side effect keeps no replayable
+checks their raw-byte SHA-256 before unlinking, including after the owner's
+confirmation when required. A refusal before any possible side effect keeps no replayable
 auto-key receipt, so an identical keyless retry can succeed after correction. An
 explicit key retains the refusal with its structured code, field and hint; use a
 new explicit key for the corrected action. A declined or unavailable deletion
@@ -766,7 +778,7 @@ tree, so Git control files inside it are not separately protected:
 | The checkout's `.git` (data and control files) | writable | denied |
 | A linked worktree's common Git directory outside the checkout | read-only (linked-worktree commands are read-only) | denied |
 | The project's `.git` for reviewers and read-only roles | read-only | denied |
-| `.cortex`, `.cortex-dev` | hidden outside a writer's checkout; inside it the live store files (`cortex.sqlite3`, `-wal`, `-shm`, `-journal`, `.*.lock`) are sealed by the argv check (`cortex_live_store`) | allowed on request (Auto allows, others ask); live store files refused |
+| `.cortex`, `.cortex-dev` | hidden outside a writer's checkout; inside it the live store files (`cortex.sqlite3`, `-wal`, `-shm`, `-journal`, `.*.lock`) are sealed by the argv check (`cortex_live_store`) in Guarded and Development only; an unscoped Auto `command_run` runs directly on the host and is not sealed | allowed on request (Auto allows, others ask); live store files refused in Guarded and Development, but admitted by the gateway in Auto (`native_access.rs`) |
 | The Dev owner and workspace state files | hidden for read-only roles | denied |
 | The project's `.codex`, `.claude`, `.agents`, `.github` | writable subject to grants | ordinary project file rules (see also [Project skill links](#project-skill-links)) |
 | Tool state in the project (`.venv`, `node_modules/.cache`, `target/`, `build/`, ...) | writable | allowed (ordinary project files) |

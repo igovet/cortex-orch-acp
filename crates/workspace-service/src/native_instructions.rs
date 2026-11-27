@@ -47,6 +47,10 @@ pub(crate) fn supports(stage: Option<&str>, name: &str) -> bool {
     if stage == Some(cortex_core::lifecycle::steering::ACTIVE_STAGE) {
         return matches!(name, "steer_plan" | "steer_worker") || schema::active_steering_read(name);
     }
+    if stage == Some(cortex_core::lifecycle::obstacles::DECISION_STAGE) {
+        return matches!(name, "owner_decision_retry" | "user_question_request")
+            || schema::active_steering_read(name);
+    }
     match name {
         "read_skill"
         | "read_batch"
@@ -156,6 +160,9 @@ pub(crate) fn compose(name: &str, stage: Option<&str>, engine: EngineKind) -> Co
     }
     text.push_str(&p.body);
     text.push_str("\n## Native capability boundary\n\nThis host is partially migrated. Only the tools advertised on this channel are available. Missing capabilities must be reported, never replaced with native engine mutations or invented receipts.\n");
+    if tools.iter().any(|tool| tool["name"] == "outside_command") {
+        text.push_str("\nFor an in-scope host operation that needs outside_command, request it through this channel. In Workspace Auto this includes writing probes and installing dependencies in a linked checkout for any role. Use the tool directly without asking the owner to authorize ordinary writes. The runtime evaluates each request under the current access mode. Report an access blocker with the actual refusal and respect a denial.\n");
+    }
     let discovery = if engine == EngineKind::Claude {
         "`mcp__cortex__tools_discover`"
     } else {
@@ -277,6 +284,18 @@ mod tests {
                 .count(),
             2
         );
+    }
+    #[test]
+    fn host_command_guidance_follows_the_served_catalogue() {
+        for engine in [EngineKind::Claude, EngineKind::Codex] {
+            for (name, stage, offered) in [
+                ("worker-devops-engineer", Some("execution"), true),
+                ("orchestrator", Some(cortex_core::lifecycle::steering::ACTIVE_STAGE), false),
+            ] {
+                let instructions = compose(name, stage, engine).unwrap();
+                assert_eq!(instructions.contains("needs outside_command"), offered);
+            }
+        }
     }
     #[test]
     fn every_profile_and_required_skill_is_embedded_and_scoped() {

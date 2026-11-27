@@ -153,6 +153,75 @@ const questions = [
   wireDecision({ decisionId: "d3", questionId: "q3", batchId: "b", executionId: "e", prompt: "Which style?", options: [{ optionId: "o4", label: "Warm" }] }),
 ];
 
+describe("question language from the runtime", () => {
+  it.each([
+    { language: "ru", browser: "en-US", heading: "Вопрос", from: "Спрашивает координатор", send: "Отправить ответ",
+      choose: "Выберите или напишите ответ", recommendation: "Рекомендую", label: "Ваш ответ" },
+    { language: "en", browser: "ru-RU", heading: "Question", from: "Asked by coordinator", send: "Send answer",
+      choose: "Choose or write an answer first", recommendation: "Recommended", label: "Your answer" },
+  ])("shows one $language question with a $browser browser", async data => {
+    vi.spyOn(navigator, "language", "get").mockReturnValue(data.browser);
+    const d = { ...questions[0], language: data.language, askedBy: "coordinator",
+      options: questions[0].options.map((o, i) => i === 0 ? { ...o, recommended: true } : o) };
+    const s = planning({ decisions: [d] });
+    s.answers["project.snapshot"] = () => snapshot("4", [wireTask({ executionId: "e", phase: "waiting", runtimeState: "WAITING_USER", executionState: "waiting_user" })]);
+    const machine = s.answers["machine.call"]!;
+    s.answers["machine.call"] = message => (message as { op: string }).op === "product.read" ? { ok: true, result: { tasks: {}, sprints: [], messages: [] } } : machine(message);
+    await mount(s.port, `/m/${LOCAL_MACHINE_ID}/t/task-1`);
+    expect($(".dc")?.getAttribute("lang")).toBe(data.language);
+    expect($(".dc-h")?.firstChild?.nextSibling?.textContent).toBe(data.heading);
+    expect($(".ws-dc-from")?.textContent).toBe(data.from);
+    expect($(".ws-dc-rec")?.textContent).toBe(data.recommendation);
+    expect($(".dc textarea")?.getAttribute("aria-label")).toBe(data.label);
+    expect(button(data.send).dataset.why).toBe(data.choose);
+    choose("Home buyers");
+    await settled();
+    expect(button(data.send).getAttribute("aria-disabled")).toBeNull();
+    expect(s.calls.filter(c => c.operation === "decisions.answer")).toEqual([]);
+  });
+
+  it.each([
+    { language: "ru", browser: "en-US", askedBy: "runtime", from: "Вопрос задан автоматически" },
+    { language: "en", browser: "ru-RU", askedBy: "runtime", from: "Asked automatically" },
+    { language: "ru", browser: "en-US", askedBy: "devops-engineer", from: "Спрашивает devops-engineer" },
+  ])("labels $askedBy in a $language task with a $browser browser", async data => {
+    vi.spyOn(navigator, "language", "get").mockReturnValue(data.browser);
+    const d = { ...questions[0], batchId: null, language: data.language, askedBy: data.askedBy };
+    const s = planning({ decisions: [d] });
+    s.answers["project.snapshot"] = () => snapshot("4", [wireTask({ executionId: "e", phase: "execution", runtimeState: "EXECUTING", executionState: "running" })]);
+    const machine = s.answers["machine.call"]!;
+    s.answers["machine.call"] = message => (message as { op: string }).op === "product.read" ? { ok: true, result: { tasks: {}, sprints: [], messages: [] } } : machine(message);
+    await mount(s.port, `/m/${LOCAL_MACHINE_ID}/t/task-1`);
+    expect($(".ws-dc-from")?.textContent).toBe(data.from);
+  });
+
+  it.each([
+    { language: "ru", browser: "en-US", heading: "Вопросы (2)", positions: ["Вопрос 1 из 2", "Вопрос 2 из 2"],
+      send: "Отправить ответы", progress: "Дано ответов: 1 из 2", incomplete: "Сначала ответьте на все вопросы: 1 из 2" },
+    { language: "en", browser: "ru-RU", heading: "2 questions", positions: ["Question 1 of 2", "Question 2 of 2"],
+      send: "Send answers", progress: "1 of 2 answered", incomplete: "Answer every question first: 1 of 2 answered" },
+  ])("shows a $language batch with a $browser browser", async data => {
+    vi.spyOn(navigator, "language", "get").mockReturnValue(data.browser);
+    const s = planning({ decisions: questions.slice(0, 2).map(d => ({ ...d, language: data.language })) });
+    await mount(s.port, SPRINT);
+    expect($(".dc")?.getAttribute("aria-label")).toBe(data.heading);
+    expect(all(".dc-panel").map(p => p.getAttribute("aria-label"))).toEqual(data.positions);
+    expect(all(".dc-panel > .dc-n").map(p => p.textContent)).toEqual(data.positions);
+    choose("Home buyers");
+    await settled();
+    expect($(".dc-send")?.textContent).toContain(data.progress);
+    expect(button(data.send).dataset.why).toBe(data.incomplete);
+    button(data.send).click();
+    expect(s.calls.filter(c => c.operation === "decisions.answer")).toEqual([]);
+    choose("Only look");
+    await settled();
+    expect(button(data.send).getAttribute("aria-disabled")).toBeNull();
+    button(data.send).click();
+    await settled();
+    expect(s.calls.filter(c => c.operation === "decisions.answer")).toHaveLength(1);
+  });
+});
+
 describe("several questions at once", () => {
   const answered = (s: ReturnType<typeof planning>) => s.calls.filter(c => c.operation === "decisions.answer").map(c => c.message as { target: string; payload: { batchId: string; answers: { decisionId: string; text: string; optionId: string | null }[] } });
 

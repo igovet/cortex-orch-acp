@@ -277,11 +277,172 @@ fn a_worker_owner_decision_returns_to_the_coordinator_without_a_runtime_question
         let open: i64 = db.query_row("SELECT count(*) FROM pending_questions WHERE task_id=?", [&task], |r| r.get(0))?;
         assert_eq!(open, 0);
         let rule: String = db.query_row("SELECT json_extract(payload_json,'$.rule') FROM runtime_events WHERE task_id=? AND type='FAILURE_CLASSIFIED'", [&task], |r| r.get(0))?;
-        assert_eq!(rule, "blocker_owner_decision_to_coordinator");
+        assert_eq!(rule, "blocker_owner_decision");
+        assert_eq!(obstacles::parked(db, &task)?.len(), 1);
+        let trigger = obstacles::decision_trigger(db, &task, None)?.unwrap();
+        assert_eq!(trigger.assignment, "asg-a");
+        assert_eq!(trigger.detail, "Keep the v1 endpoint or remove it?");
+        assert!(!trigger.started);
         Ok(())
     }).unwrap();
-    assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 0);
+    assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 1);
+    assert_eq!(count(&s, &task, "OWNER_DECISION_COORDINATOR_REQUIRED"), 1);
     assert_eq!(count(&s, &task, "USER_QUESTION_REQUESTED"), 0);
+}
+
+#[test]
+fn decision_questions_survive_reopen_and_accept_only_the_current_assignment() {
+    for language in ["ru", "en"] {
+        let (project, s, task) = started();
+        plan(&s, &task, json!({"kind":"owner_decision","detail":"Retain the old API?"}));
+        s.write(|db| {
+            lifecycle::event_tx(db, &task, "NATIVE_TASK_SETTINGS", json!({"settings":{"language":language}}))?;
+            obstacles::classify_failed_tx(db, &task)?;
+            Ok(())
+        }).unwrap();
+        drop(s);
+        let s = project.open();
+        let (question, obstacle) = s.write(|db| {
+            let trigger = obstacles::decision_trigger(db, &task, None)?.unwrap();
+            assert!(!trigger.started);
+            let owner = db.query_row("SELECT owner_ref,epoch FROM task_owners WHERE task_id=?", [&task],
+                |r| Ok(cortex_core::ownership::OwnerEpoch { owner:r.get(0)?, epoch:r.get(1)? }))?;
+            let channel = cortex_core::channels::issue_tx(db, &task, &owner,
+                cortex_core::channels::Principal::OwnerDecision { obstacle: &trigger.obstacle })?;
+            let (question, options) = if language == "ru" {
+                ("Сохранить старый API?", json!(["Сохранить", "Удалить"]))
+            } else {
+                ("Keep the old API?", json!(["Keep it", "Remove it"]))
+            };
+            let args = json!({"question":question,"options":options,"recommended":1});
+            let receipt = obstacles::ask_decision_tx(db, &task, &channel.channel_id, "question", &args)?;
+            assert_eq!(receipt["language"], language);
+            assert_eq!(receipt["question"], question);
+            assert_eq!(receipt["options"][0]["label"], options[0]);
+            assert_eq!(receipt["options"][1], options[1]);
+            assert_eq!(obstacles::ask_decision_tx(db, &task, &channel.channel_id, "question", &args)?, receipt);
+            assert!(obstacles::ask_decision_tx(db, &task, &channel.channel_id, "duplicate", &args).is_err());
+            assert!(!obstacles::fallback_decision_tx(db, &task, &trigger.obstacle, "timeout")?);
+            let id: String = db.query_row("SELECT id FROM pending_questions WHERE task_id=? AND dedup_key=? AND assignment_ref='asg-a'",
+                (&task, format!("obstacle:{}",trigger.obstacle)), |r| r.get(0))?;
+            assert_eq!(receipt["question_id"], id);
+            Ok((id, trigger.obstacle))
+        }).unwrap();
+        drop(s);
+        let s = project.open();
+        s.write(|db| {
+            if language == "ru" {
+                assert!(lifecycle::waits::answer_tx(db, &task, &question, "Сохранить", "text", None)?);
+                assert!(!lifecycle::waits::answer_tx(db, &task, &question, "Удалить", "text", None)?);
+                let statuses: String = db.query_row(
+                    "SELECT group_concat(status, ',') FROM (SELECT status FROM runtime_nodes WHERE task_id=? ORDER BY node_id)",
+                    [&task], |r| r.get(0))?;
+                assert_eq!(statuses, "pending,pending,pending");
+                // The replacement repeats the same blocker. Do not reopen or duplicate it.
+                db.execute("UPDATE runtime_nodes SET status='failed',assignment_ref='new-a',result_json=? WHERE task_id=? AND node_id='a'",
+                    (json!({"blocker":{"kind":"owner_decision","detail":"Retain the old API?"}}).to_string(), &task))?;
+                obstacles::classify_failed_tx(db,&task)?;
+                assert!(obstacles::decision_trigger(db, &task, None)?.is_none());
+            } else {
+                db.execute("UPDATE runtime_tasks SET revision=2 WHERE task_id=?", [&task])?;
+                assert!(!lifecycle::waits::answer_tx(db, &task, &question, "Keep it", "text", None)?);
+            }
+            assert!(!obstacles::fallback_decision_tx(db, &task, &obstacle, "timeout")?);
+            Ok(())
+        }).unwrap();
+        assert_eq!(count(&s, &task, "USER_QUESTION_REQUESTED"), 1);
+        assert_eq!(count(&s, &task, "OWNER_DECISION_ANSWERED"), i64::from(language == "ru"));
+        assert_eq!(count(&s, &task, "ASSIGNMENT_RETRIED"), i64::from(language == "ru"));
+    }
+}
+
+#[test]
+fn fallback_decision_persists_all_question_and_option_text_in_the_task_language() {
+    for (language, question, options) in [
+        (
+            "ru",
+            "Как продолжить эту работу? Причина остановки (по словам исполнителя): «Retain the old API?».",
+            json!([
+                "Продолжить только уже разрешённую работу",
+                {"label":"Не выполнять заблокированное действие и сообщить, что осталось","recommended":true},
+            ]),
+        ),
+        (
+            "en",
+            "How should this work continue? The worker reported this blocker: “Retain the old API?”.",
+            json!([
+                "Continue only with work already authorized",
+                {"label":"Skip the blocked action and report what remains","recommended":true},
+            ]),
+        ),
+    ] {
+        let (_project, s, task) = started();
+        plan(&s, &task, json!({"kind":"owner_decision","detail":"Retain the old API?"}));
+        s.write(|db| {
+            lifecycle::event_tx(db, &task, "NATIVE_TASK_SETTINGS", json!({"settings":{"language":language}}))?;
+            obstacles::classify_failed_tx(db, &task)?;
+            let trigger = obstacles::decision_trigger(db, &task, None)?.unwrap();
+            assert!(obstacles::fallback_decision_tx(db, &task, &trigger.obstacle, "turn_failed")?);
+            assert!(!obstacles::fallback_decision_tx(db, &task, &trigger.obstacle, "turn_failed")?);
+            Ok(())
+        }).unwrap();
+        let event = latest(&s, &task, "USER_QUESTION_REQUESTED");
+        assert_eq!(event["language"], language);
+        assert_eq!(event["fallback_reason"], "turn_failed");
+        assert_eq!(event["question"], question);
+        assert_eq!(event["options"], options);
+        assert_eq!(count(&s, &task, "USER_QUESTION_REQUESTED"), 1);
+    }
+}
+
+/// Decision identity is the worker's whole text, not its 300-character display
+/// summary: two decisions sharing a long opening each reach the coordinator, while an
+/// identical repeat after a retry of the same node and revision is technical.
+#[test]
+fn long_decisions_sharing_an_opening_stay_distinct_and_identical_repeats_do_not() {
+    let opening = format!("The release brief requires stopping on any failing command. {}", "The predecessor report records an initial exit 1 and an identical passing rerun. ".repeat(4));
+    assert!(opening.chars().count() > 300);
+    let first = format!("{opening}Should the old endpoint be kept until the migration finishes?");
+    let second = format!("{opening}Should the migration be published to production now?");
+    let (_p, s, task) = started();
+    plan(&s, &task, json!({"kind":"owner_decision","detail":first}));
+    let fail_again = |assignment: &str, detail: &str| {
+        s.write(|db| {
+            // The coordinator retried `a`; its replacement fails with `detail`.
+            let trigger = obstacles::decision_trigger(db, &task, None)?.unwrap();
+            assert_eq!(trigger.node, "a");
+            lifecycle::event_tx(db, &task, "ASSIGNMENT_RETRIED", json!({"node":"a","revision":1,
+                "obstacle":trigger.obstacle,"decided_by":"coordinator","obstacle_retry":true}))?;
+            db.execute("UPDATE runtime_nodes SET status='failed',assignment_ref=?,result_json=? WHERE task_id=? AND node_id='a'",
+                (assignment, json!({"blocker":{"kind":"owner_decision","detail":detail}}).to_string(), &task))?;
+            obstacles::classify_failed_tx(db, &task)?;
+            Ok(())
+        }).unwrap();
+    };
+    s.write(|db| {
+        obstacles::classify_failed_tx(db, &task)?;
+        let trigger = obstacles::decision_trigger(db, &task, None)?.unwrap();
+        // The coordinator turn and fallback get the whole decision, not the summary.
+        assert_eq!(trigger.detail, first);
+        Ok(())
+    }).unwrap();
+    let required = latest(&s, &task, "OWNER_DECISION_REQUIRED");
+    assert!(required["detail"].as_str().unwrap().chars().count() <= 300);
+    assert_eq!(required["full_detail"], first.as_str());
+    // A different decision behind the same 300-character opening is new.
+    fail_again("asg-a2", &second);
+    assert_eq!(latest(&s, &task, "FAILURE_CLASSIFIED")["rule"], "blocker_owner_decision");
+    assert_eq!(count(&s, &task, "OWNER_DECISION_COORDINATOR_REQUIRED"), 2);
+    s.read(|db| {
+        assert_eq!(obstacles::decision_trigger(db, &task, None)?.unwrap().detail, second);
+        Ok(())
+    }).unwrap();
+    // The same decision again (whitespace aside) after its retry is technical.
+    fail_again("asg-a3", &format!("  {}", second.replace(". ", ".  ")));
+    let repeated = latest(&s, &task, "FAILURE_CLASSIFIED");
+    assert_eq!((repeated["class"].as_str(), repeated["rule"].as_str()), (Some("technical"), Some("owner_decision_repeated")));
+    assert_eq!(count(&s, &task, "OWNER_DECISION_COORDINATOR_REQUIRED"), 2);
+    assert_eq!(count(&s, &task, "OWNER_DECISION_REQUIRED"), 2);
 }
 
 #[test]
@@ -511,11 +672,11 @@ fn a_technical_failure_is_not_parked_and_progress_is_marked() {
 }
 
 #[test]
-fn a_failure_cleared_by_a_passing_retry_is_not_an_owner_decision() {
+fn a_passing_rerun_does_not_decide_an_owner_stop_condition() {
     let s = signals(Some("owner_decision"),
         "The brief requires stopping on any failing command. It records an initial exit 1 and a passing identical rerun.", &[], "");
     let found = obstacles::classify(&s);
-    assert_eq!((found.class, found.rule), ("technical", "blocker_owner_decision_resolved"), "{found:?}");
+    assert_eq!((found.class, found.rule), ("owner_decision", "blocker_owner_decision"), "{found:?}");
     let real = signals(Some("owner_decision"), "Keep the v1 endpoint or remove it?", &[], "");
     assert_eq!(obstacles::classify(&real).class, "owner_decision");
 }

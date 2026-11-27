@@ -10,8 +10,8 @@
 //!   (`OWNER_ACTION_RESOLVED`, or an environment preflight recheck that shows the
 //!   access is now present) the parked work is retried at once.
 //! - `owner_decision`: the requirements conflict or the decision is the owner's.
-//!   The runtime opens a question for the exact failed execution node while its
-//!   siblings continue; no rung of the strategy ladder is used.
+//!   The runtime parks the exact failed execution node while its siblings continue.
+//!   A coordinator decision turn comes before any question to the owner.
 //! - `external_outage`: a built-in public endpoint is down or unreachable (DNS,
 //!   refused or timed-out connection, 5xx, 429). The runtime waits without model calls and
 //!   rechecks the host itself with backoff ([`BACKOFF`]; a rate limit from a host it
@@ -21,10 +21,10 @@
 //!   work resumes once a recheck succeeds.
 //! - `technical`: everything else, which continues on the strategy ladder.
 //!
-//! An obstacle the owner already settled is never raised again: an answered owner
-//! decision and missing access whose action was resolved or dismissed
-//! [`ACCESS_REPEAT_LIMIT`] times become technical failures with a disclosed limit
-//! (`LOOP_BROKEN`).
+//! Repeating the same decision after a retry of that node routes it as a technical
+//! failure instead of opening another question. Missing access whose action was
+//! resolved or dismissed [`ACCESS_REPEAT_LIMIT`] times becomes a technical failure
+//! with a disclosed limit (`LOOP_BROKEN`).
 //!
 //! `FAILURE_CLASSIFIED` records each classification. `TASK_PROGRESS` marks real
 //! progress ([`progress_for`]). Events are additive in format 12.
@@ -55,6 +55,9 @@ pub const TIMER: &str = "timer";
 /// failure takes the technical route and the missing access is a disclosed limit.
 pub const ACCESS_REPEAT_LIMIT: i64 = 2;
 const DETAIL_CHARS: usize = 300;
+/// The bounded worker text an owner decision keeps for its coordinator turn and
+/// fallback question. `DETAIL_CHARS` remains the display summary only.
+const DECISION_DETAIL_CHARS: usize = 2_000;
 const OUTPUT_TAIL: usize = 4_000;
 
 /// The recheck delay after `attempt` failed rechecks (0 for the first).
@@ -293,18 +296,6 @@ const NETWORK_PHRASES: [&str; 26] = [
     "could not connect to",
     "unable to connect to",
 ];
-/// Wording of a failure that a later identical run cleared.
-const RESOLVED_PHRASES: [&str; 8] = [
-    "passing rerun",
-    "passing identical rerun",
-    "rerun passed",
-    "retry passed",
-    "retry passes",
-    "resolved failure",
-    "failure was resolved",
-    "passed on retry",
-];
-
 const DECISION_PHRASES: [&str; 12] = [
     "contradict",
     "conflicting requirement",
@@ -598,20 +589,11 @@ pub fn classify(s: &Signals) -> Classification {
             DETAIL_CHARS,
         )
     };
-    // A failure the worker itself reports as cleared by a passing retry is the
-    // coordinator's to rule on from the evidence, never an owner decision.
-    if kind == OWNER_DECISION && contains_any(&detail, &RESOLVED_PHRASES) {
-        return Classification::new(
-            TECHNICAL,
-            "blocker_owner_decision_resolved",
-            summary("The failure was resolved by a passing retry; the coordinator decides whether the stop condition still applies"),
-        );
-    }
     if kind == OWNER_DECISION {
         return Classification::new(
             OWNER_DECISION,
             "blocker_owner_decision",
-            summary("A decision only the owner can make blocks this work"),
+            clip(s.blocker_detail.as_deref().unwrap_or(""), DETAIL_CHARS),
         );
     }
     if kind == "other_role_work" {
@@ -625,7 +607,7 @@ pub fn classify(s: &Signals) -> Classification {
         return Classification::new(
             OWNER_DECISION,
             "detail_conflicting_requirements",
-            summary("The requirements conflict and need the owner's decision"),
+            clip(s.blocker_detail.as_deref().unwrap_or(""), DETAIL_CHARS),
         );
     }
     let candidates = hosts(&corpus);
@@ -911,8 +893,8 @@ pub fn open_waits(db: &Connection, task: &str) -> CoreResult<Vec<Value>> {
     Ok(out)
 }
 
-/// Owner decisions the coordinator still has to ask about: no owner answer, owner
-/// message or reopen came after them.
+/// Open node decisions (including those waiting for the coordinator), plus
+/// legacy task-level decisions not superseded by later owner input.
 pub fn open_decisions(db: &Connection, task: &str) -> CoreResult<Vec<Value>> {
     let rows = db
         .prepare(
@@ -924,8 +906,14 @@ pub fn open_decisions(db: &Connection, task: &str) -> CoreResult<Vec<Value>> {
                      AND q.status='open' AND n.status='failed')
                  OR (NOT EXISTS(SELECT 1 FROM pending_questions q WHERE q.task_id=s.task_id
                          AND q.dedup_key='obstacle:'||json_extract(s.payload_json,'$.id'))
-                     AND NOT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=?1 AND e.id>s.id AND e.type IN
-                         ('USER_ANSWER_RECEIVED','USER_STEERING','WORKER_USER_ANSWER_RECEIVED','TASK_REOPENED','REPLAN_REQUEST_ACCEPTED'))))
+                     AND (EXISTS(SELECT 1 FROM runtime_nodes n JOIN runtime_tasks t
+                             ON t.task_id=n.task_id AND t.revision=n.revision
+                             WHERE n.task_id=s.task_id AND n.status='failed'
+                             AND n.assignment_ref=json_extract(s.payload_json,'$.assignment_ref')
+                             AND n.revision=json_extract(s.payload_json,'$.revision'))
+                         OR (json_extract(s.payload_json,'$.assignment_ref') IS NULL
+                             AND NOT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=?1 AND e.id>s.id AND e.type IN
+                                 ('USER_ANSWER_RECEIVED','USER_STEERING','WORKER_USER_ANSWER_RECEIVED','TASK_REOPENED','REPLAN_REQUEST_ACCEPTED'))))))
              AND EXISTS(SELECT 1 FROM runtime_tasks t WHERE t.task_id=s.task_id
                  AND t.state NOT IN ('COMPLETED','CANCELLED','FAILED'))
              ORDER BY s.id",
@@ -1192,7 +1180,9 @@ pub fn answered_decision_tx(
              FROM runtime_events e LEFT JOIN pending_questions q ON q.task_id=e.task_id
                  AND q.dedup_key='obstacle:'||json_extract(e.payload_json,'$.id')
              WHERE e.task_id=? AND e.type='OWNER_DECISION_REQUIRED' AND e.id>?
-             AND json_valid(e.payload_json) ORDER BY e.id DESC LIMIT 64",
+             AND json_valid(e.payload_json)
+             AND (q.id IS NOT NULL OR json_extract(e.payload_json,'$.assignment_ref') IS NULL)
+             ORDER BY e.id DESC LIMIT 64",
         )?
         .query_map((task, since), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?,
             r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?)))?
@@ -1374,8 +1364,20 @@ pub fn classify_failed_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
         if classified(db, task, &assignment)?.is_some() {
             continue;
         }
-        let found = classify(&node_signals(db, task, &assignment)?);
-        let mut found = settle_repeats_tx(db, task, found, Some(&node), Some(&assignment))?;
+        let signals = node_signals(db, task, &assignment)?;
+        let mut found = classify(&signals);
+        // The decision's identity and coordinator context come from the worker's whole
+        // text, never from the clipped display summary in `found.detail`.
+        let own = signals.blocker_detail.as_deref().unwrap_or("");
+        let full_detail = clip(own, DECISION_DETAIL_CHARS);
+        let subject = decision_subject_digest(own);
+        if found.class == OWNER_DECISION {
+            if decision_already_retried(db, task, &node, revision, &subject, &found.detail)? {
+                found = Classification::new(TECHNICAL, "owner_decision_repeated", found.detail);
+            }
+        } else {
+            found = settle_repeats_tx(db, task, found, Some(&node), Some(&assignment))?;
+        }
         if found.class == EXTERNAL_OUTAGE
             && outage_repeats(db, task, &node, found.host.as_deref().unwrap_or(""))?
                 >= OUTAGE_REPEAT_LIMIT
@@ -1392,23 +1394,189 @@ pub fn classify_failed_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
                 ),
             );
         }
-        // A worker's owner_decision blocker is never a runtime-authored owner question: it
-        // returns to the coordinator, who resolves it from the owner's instructions or asks
-        // a concrete question in the task language through its own question tool.
-        let to_coordinator = found.class == OWNER_DECISION;
-        if to_coordinator {
-            let detail = clip(&format!("Worker owner_decision blocker for the coordinator to resolve or put to the owner as a concrete question: {}", found.detail), DETAIL_CHARS);
-            found = Classification::new(TECHNICAL, "blocker_owner_decision_to_coordinator", detail);
-        }
-        let obstacle = open_obstacle_tx(db, task, &found, Some(&node), revision)?;
+        let obstacle = if found.class == OWNER_DECISION {
+            let id = new_id("od");
+            event_tx(db, task, "OWNER_DECISION_REQUIRED",
+                json!({"id":id,"kind":OWNER_DECISION,"detail":found.detail,"full_detail":full_detail,
+                    "subject_sha256":subject,"node":node,"revision":revision,"assignment_ref":assignment}))?;
+            Some(id)
+        } else {
+            open_obstacle_tx(db, task, &found, Some(&node), revision)?
+        };
         let mut payload = found.to_json();
         payload["node"] = json!(node);
         payload["revision"] = json!(revision);
         payload["assignment_ref"] = json!(assignment);
         payload["obstacle"] = json!(obstacle);
         event_tx(db, task, "FAILURE_CLASSIFIED", payload)?;
+        if found.class == OWNER_DECISION {
+            event_tx(db, task, "OWNER_DECISION_COORDINATOR_REQUIRED",
+                json!({"obstacle":obstacle,"assignment_ref":assignment,"node":node,"revision":revision}))?;
+        }
     }
     Ok(())
+}
+
+/// An exact failed execution assignment awaiting a coordinator decision.
+#[derive(Debug)]
+pub struct DecisionTrigger {
+    pub obstacle: String,
+    pub assignment: String,
+    pub node: String,
+    pub objective: String,
+    pub detail: String,
+    pub started: bool,
+}
+
+pub const DECISION_STAGE: &str = "owner_decision";
+
+/// Only current, unanswered triggers. Once a channel was issued, recovery must
+/// publish the fallback rather than replay a possibly delivered turn.
+pub fn decision_trigger(
+    db: &Connection,
+    task: &str,
+    obstacle: Option<&str>,
+) -> CoreResult<Option<DecisionTrigger>> {
+    Ok(db.query_row(
+        "SELECT json_extract(d.payload_json,'$.obstacle'),n.assignment_ref,n.node_id,n.objective,
+                coalesce(json_extract(s.payload_json,'$.full_detail'),json_extract(s.payload_json,'$.detail')),
+                EXISTS(SELECT 1 FROM runtime_events c WHERE c.task_id=d.task_id
+                    AND c.type='OWNER_DECISION_COORDINATOR_STARTED'
+                    AND json_extract(c.payload_json,'$.obstacle')=json_extract(d.payload_json,'$.obstacle'))
+         FROM runtime_events d JOIN runtime_nodes n ON n.task_id=d.task_id
+             AND n.assignment_ref=json_extract(d.payload_json,'$.assignment_ref')
+             AND n.node_id=json_extract(d.payload_json,'$.node')
+             AND n.revision=json_extract(d.payload_json,'$.revision')
+         JOIN runtime_tasks t ON t.task_id=n.task_id AND t.revision=n.revision
+         JOIN runtime_events s ON s.task_id=d.task_id AND s.type='OWNER_DECISION_REQUIRED'
+             AND json_extract(s.payload_json,'$.id')=json_extract(d.payload_json,'$.obstacle')
+         WHERE d.task_id=?1 AND d.type='OWNER_DECISION_COORDINATOR_REQUIRED'
+         AND (?2 IS NULL OR json_extract(d.payload_json,'$.obstacle')=?2)
+         AND t.state='EXECUTING' AND n.stage='execution' AND n.status='failed'
+         AND NOT EXISTS(SELECT 1 FROM capacity_reservations r WHERE r.task_id=n.task_id
+             AND r.assignment_ref=n.assignment_ref AND r.state!='released')
+         AND NOT EXISTS(SELECT 1 FROM task_stopped WHERE task_id=d.task_id)
+         AND NOT EXISTS(SELECT 1 FROM pending_questions q WHERE q.task_id=d.task_id
+             AND q.dedup_key='obstacle:'||json_extract(d.payload_json,'$.obstacle'))
+         ORDER BY d.id LIMIT 1",
+        (task, obstacle),
+        |r| Ok(DecisionTrigger {
+            obstacle: r.get(0)?, assignment: r.get(1)?, node: r.get(2)?,
+            objective: r.get(3)?, detail: r.get(4)?, started: r.get(5)?,
+        }),
+    ).optional()?)
+}
+
+/// The identity of one owner decision: the digest of the worker's whole normalized
+/// text, so two decisions that only share a long opening stay distinct.
+fn decision_subject_digest(detail: &str) -> String {
+    crate::digest(decision_subject(detail).as_bytes())
+}
+
+/// Whether this node already failed on the same decision in this revision and was
+/// retried, by the owner's answer or by the coordinator. Compares whole-text digests;
+/// a decision recorded before digests existed falls back to its display summary.
+fn decision_already_retried(
+    db: &Connection, task: &str, node: &str, revision: i64, subject: &str, summary: &str,
+) -> CoreResult<bool> {
+    let mut stmt = db.prepare(
+        "SELECT json_extract(s.payload_json,'$.subject_sha256'),coalesce(json_extract(s.payload_json,'$.detail'),'')
+         FROM runtime_events r
+         JOIN runtime_events s ON s.task_id=r.task_id AND s.type='OWNER_DECISION_REQUIRED'
+             AND json_extract(s.payload_json,'$.id')=json_extract(r.payload_json,'$.obstacle')
+         WHERE r.task_id=? AND r.type='ASSIGNMENT_RETRIED'
+         AND json_extract(r.payload_json,'$.node')=? AND json_extract(r.payload_json,'$.revision')=?",
+    )?;
+    let earlier = stmt.query_map((task, node, revision), |r| {
+        Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for previous in earlier {
+        let (digest, detail) = previous?;
+        let same = match digest {
+            Some(digest) => digest == subject,
+            None => decision_subject(summary) == decision_subject(&detail),
+        };
+        if same {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn decision_for_channel(
+    db: &Connection, task: &str, channel: &str,
+) -> CoreResult<DecisionTrigger> {
+    let obstacle: Option<String> = db.query_row(
+        "SELECT json_extract(payload_json,'$.obstacle') FROM runtime_events WHERE task_id=?
+         AND type='OWNER_DECISION_COORDINATOR_STARTED' AND json_extract(payload_json,'$.channel_id')=?",
+        (task, channel), |r| r.get(0),
+    ).optional()?;
+    let obstacle = obstacle.ok_or(crate::CoreError::Refused("owner_decision_not_current"))?;
+    decision_trigger(db, task, Some(&obstacle))?
+        .ok_or(crate::CoreError::Refused("owner_decision_not_current"))
+}
+
+fn publish_decision_question_tx(
+    db: &Transaction<'_>, task: &str, trigger: &DecisionTrigger,
+    form: super::waits::QuestionForm, asked_by: &str, fallback_reason: Option<&str>,
+) -> CoreResult<Value> {
+    let id = new_id("q");
+    let dedup = format!("obstacle:{}", trigger.obstacle);
+    if db.execute(
+        "INSERT OR IGNORE INTO pending_questions(id,task_id,assignment_ref,dedup_key,text,options_json,created_at)
+         VALUES (?,?,?,?,?,?,?)",
+        (&id, task, &trigger.assignment, &dedup, &form.question, json!(form.options).to_string(), crate::now()),
+    )? != 1 {
+        return refuse("owner_decision_not_current");
+    }
+    let language = domain::task_language_tx(db, task)?;
+    let result = json!({"question_id":id,"obstacle":trigger.obstacle,"assignment_ref":trigger.assignment,
+        "question":form.question,"options":form.options,"language":language,"asked_by":asked_by,
+        "node_question":true,"fallback_reason":fallback_reason});
+    event_tx(db, task, "USER_QUESTION_REQUESTED", result.clone())?;
+    Ok(result)
+}
+
+pub fn ask_decision_tx(
+    db: &Transaction<'_>, task: &str, channel: &str, key: &str, arguments: &Value,
+) -> CoreResult<Value> {
+    super::request_tx(db, task, channel, key, "user_question_request", arguments, || {
+        let trigger = decision_for_channel(db, task, channel)?;
+        let question = arguments["question"].as_str().unwrap_or_default().trim();
+        let options = arguments["options"].as_array()
+            .filter(|options| (2..=8).contains(&options.len()))
+            .ok_or(crate::CoreError::Refused("invalid_question_form"))?;
+        if question.is_empty() || arguments.get("questions").is_some()
+            || arguments.get("skill_proposal").is_some()
+            || options.iter().any(|o| super::waits::option_label(o).is_none_or(|s| s.trim().is_empty()))
+        {
+            return refuse("invalid_question_form");
+        }
+        let options = super::waits::recommended_options(options.clone(), &arguments["recommended"], false)?;
+        publish_decision_question_tx(db, task, &trigger,
+            super::waits::QuestionForm { question: question.to_owned(), options }, "coordinator", None)
+    })
+}
+
+pub fn fallback_decision_tx(
+    db: &Transaction<'_>, task: &str, obstacle: &str, reason: &str,
+) -> CoreResult<bool> {
+    let Some(trigger) = decision_trigger(db, task, Some(obstacle))? else {
+        return Ok(false);
+    };
+    let (question, options) = if domain::task_language_tx(db, task)? == "ru" {
+        (format!("Как продолжить эту работу? Причина остановки (по словам исполнителя): «{}».",
+            trigger.detail),
+         json!(["Продолжить только уже разрешённую работу", "Не выполнять заблокированное действие и сообщить, что осталось"]))
+    } else {
+        (format!("How should this work continue? The worker reported this blocker: “{}”.",
+            trigger.detail),
+         json!(["Continue only with work already authorized", "Skip the blocked action and report what remains"]))
+    };
+    let options = super::waits::recommended_options(options.as_array().unwrap().clone(), &json!(2), false)?;
+    publish_decision_question_tx(db, task, &trigger,
+        super::waits::QuestionForm { question, options }, "runtime", Some(reason))?;
+    Ok(true)
 }
 
 /// Whether a node-local question still binds to its exact current failed assignment.
@@ -1541,12 +1709,21 @@ pub fn unparked_failure(db: &Connection, task: &str) -> CoreResult<bool> {
 /// Retry, at once, each parked node whose access action was resolved or whose
 /// external wait ended. Returns the retried nodes.
 pub fn retry_unblocked_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<String>> {
-    let (state, revision) = domain::task_tx(db, task)?;
+    retry_unblocked_assignment_tx(db, task, None)
+}
+
+pub(super) fn retry_unblocked_assignment_tx(
+    db: &Transaction<'_>, task: &str, assignment: Option<&str>,
+) -> CoreResult<Vec<String>> {
+    let (state, _) = domain::task_tx(db, task)?;
     if !matches!(state, TaskState::Executing | TaskState::Recovering | TaskState::Reviewing) {
         return Ok(Vec::new());
     }
     let mut retried = Vec::new();
     for f in failed_nodes(db, task)? {
+        if assignment.is_some_and(|a| a != f.assignment) {
+            continue;
+        }
         let (true, Some(id)) = (
             matches!(f.class.as_str(), ACCESS | EXTERNAL_OUTAGE | OWNER_DECISION),
             f.obstacle.as_deref(),
@@ -1563,41 +1740,101 @@ pub fn retry_unblocked_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<St
         )? {
             continue;
         }
-        let previous: Option<String> = db
-            .query_row(
-                "SELECT json_extract(result_json,'$.report_ref') FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
-                (task, &f.assignment),
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        let changed = db.execute(
-            "UPDATE runtime_nodes SET status='pending',assignment_ref=NULL,result_json=NULL
-             WHERE task_id=?1 AND revision=?2 AND assignment_ref=?3 AND status='failed'
-             AND (?4='RECOVERING' OR stage=CASE ?4 WHEN 'REVIEWING' THEN 'review' ELSE 'execution' END)
-             AND NOT EXISTS(SELECT 1 FROM capacity_reservations
-                 WHERE task_id=?1 AND assignment_ref=?3 AND state!='released')",
-            (task, revision, &f.assignment, state.as_str()),
-        )?;
-        if changed != 1 {
-            continue;
+        let provenance = if f.class == OWNER_DECISION { json!({"decided_by":"owner"}) } else { json!({}) };
+        if retry_failed_tx(db, task, &f, id, provenance)? {
+            retried.push(f.node);
         }
-        let count: i64 = db.query_row(
-            "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'
-             AND json_extract(payload_json,'$.node')=? AND json_extract(payload_json,'$.revision')=?",
-            (task, &f.node, revision),
-            |r| r.get(0),
-        )?;
-        event_tx(
-            db,
-            task,
-            "ASSIGNMENT_RETRIED",
-            json!({"node":f.node,"revision":revision,"retry":count+1,"previous_assignment":f.assignment,
-                "previous_report":previous,"failure_class":f.class,"obstacle":id,"obstacle_retry":true}),
-        )?;
-        retried.push(f.node);
     }
     Ok(retried)
+}
+
+fn retry_failed_tx(
+    db: &Transaction<'_>, task: &str, f: &Failed, id: &str, mut evidence: Value,
+) -> CoreResult<bool> {
+    let (state, revision) = domain::task_tx(db, task)?;
+    let previous: Option<String> = db
+        .query_row(
+            "SELECT json_extract(result_json,'$.report_ref') FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
+            (task, &f.assignment), |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let changed = db.execute(
+        "UPDATE runtime_nodes SET status='pending',assignment_ref=NULL,result_json=NULL
+         WHERE task_id=?1 AND revision=?2 AND assignment_ref=?3 AND status='failed'
+         AND (?4='RECOVERING' OR stage=CASE ?4 WHEN 'REVIEWING' THEN 'review' ELSE 'execution' END)
+         AND NOT EXISTS(SELECT 1 FROM capacity_reservations
+             WHERE task_id=?1 AND assignment_ref=?3 AND state!='released')",
+        (task, revision, &f.assignment, state.as_str()),
+    )?;
+    if changed != 1 {
+        return Ok(false);
+    }
+    let count: i64 = db.query_row(
+        "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'
+         AND json_extract(payload_json,'$.node')=? AND json_extract(payload_json,'$.revision')=?",
+        (task, &f.node, revision), |r| r.get(0),
+    )?;
+    evidence.as_object_mut().unwrap().extend(
+        json!({"node":f.node,"revision":revision,"retry":count+1,"previous_assignment":f.assignment,
+            "previous_report":previous,"failure_class":f.class,"obstacle":id,"obstacle_retry":true})
+            .as_object().unwrap().clone(),
+    );
+    event_tx(db, task, "ASSIGNMENT_RETRIED", evidence)?;
+    Ok(true)
+}
+
+pub fn coordinator_retry_decision_tx(
+    db: &Transaction<'_>, task: &str, channel: &str, key: &str, arguments: &Value,
+) -> CoreResult<Value> {
+    super::request_tx(db, task, channel, key, "owner_decision_retry", arguments, || {
+        let trigger = decision_for_channel(db, task, channel)?;
+        if arguments["obstacle"] != trigger.obstacle.as_str() {
+            return refuse("owner_decision_not_current");
+        }
+        let brief = arguments["refined_brief"].as_str().unwrap_or_default().trim();
+        let answer = arguments["owner_question_id"].as_str().unwrap_or_default();
+        if brief.is_empty() {
+            return refuse("owner_decision_brief_required");
+        }
+        // This proves the cited owner answer exists, not that the model's
+        // interpretation is correct. Neither the receipt nor the brief grants
+        // permission, changes scope or overrides any existing consent gate.
+        let answered: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pending_questions WHERE task_id=? AND id=?
+             AND status='answered' AND answer_source IN ('text','elicitation')
+             AND length(trim(answer_text))>0 AND dedup_key NOT LIKE 'native_permission:%')",
+            (task, answer), |r| r.get(0),
+        )?;
+        if !answered {
+            return refuse("owner_decision_prior_answer_required");
+        }
+        // Only an answer whose whole question and answer this turn received can
+        // settle the decision: a clipped preview may omit a decisive condition.
+        if !crate::recovery_context::owner_answer_delivered_completely(db, task, channel, answer)? {
+            return refuse("owner_decision_prior_answer_incomplete");
+        }
+        let failed = Failed { node: trigger.node, assignment: trigger.assignment,
+            class: OWNER_DECISION.to_owned(), obstacle: Some(trigger.obstacle.clone()) };
+        if !retry_failed_tx(db, task, &failed, &trigger.obstacle,
+            json!({"decided_by":"coordinator","channel_id":channel,"owner_question_id":answer,"refined_brief":brief}))?
+        {
+            return refuse("owner_decision_not_current");
+        }
+        Ok(json!({"node":failed.node,"obstacle":trigger.obstacle,"decided_by":"coordinator","status":"pending"}))
+    })
+}
+
+/// Return the clarification attached to the most recent retry of this node.
+pub fn retry_decision_brief(
+    db: &Connection, task: &str, node: &str, revision: i64,
+) -> CoreResult<Option<String>> {
+    Ok(db.query_row(
+        "SELECT json_extract(payload_json,'$.refined_brief') FROM runtime_events
+         WHERE task_id=? AND type='ASSIGNMENT_RETRIED' AND json_extract(payload_json,'$.node')=?
+         AND json_extract(payload_json,'$.revision')=? ORDER BY id DESC LIMIT 1",
+        (task, node, revision), |r| r.get(0),
+    ).optional()?.flatten())
 }
 
 /// Legacy obstacle continuation for an idle plan. A node-local owner question
@@ -1970,6 +2207,7 @@ pub fn resolve_environment_actions_tx(
 pub fn require_owner_question_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
     let pending: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM runtime_events s WHERE s.task_id=?1 AND s.type='OWNER_DECISION_REQUIRED'
+         AND json_extract(s.payload_json,'$.assignment_ref') IS NULL
          AND NOT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=?1 AND e.id>s.id AND e.type IN
              ('USER_QUESTION_REQUESTED','USER_ANSWER_RECEIVED','USER_STEERING','WORKER_USER_ANSWER_RECEIVED','TASK_REOPENED')))",
         [task],

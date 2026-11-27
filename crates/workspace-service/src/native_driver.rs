@@ -27,6 +27,21 @@ fn assignment_brief(
     stage: &str,
 ) -> CoreResult<Value> {
     let language = cortex_core::assignment_brief::record_language_tx(db, task)?;
+    assignment_brief_at_language(db, task, assignment, node, role, objective, scope_json, stage, language)
+}
+
+/// Same brief shape for a retained blocker predating worker brief snapshots.
+pub(crate) fn assignment_brief_at_language(
+    db: &rusqlite::Connection,
+    task: &str,
+    assignment: &str,
+    node: &str,
+    role: &str,
+    objective: &str,
+    scope_json: &str,
+    stage: &str,
+    language: &str,
+) -> CoreResult<Value> {
     let mut item = json!({"assignment_ref":assignment, "node":node, "role":role,
         "objective":objective, "scope":serde_json::from_str::<Value>(scope_json)?, "stage":stage});
     if let Value::Object(extra) =
@@ -34,10 +49,19 @@ fn assignment_brief(
     {
         item.as_object_mut().unwrap().extend(extra);
     }
-    if let Some(answer) = lifecycle::obstacles::retry_decision_answer(
-        db, task, node, domain::task_tx(db, task)?.1,
-    )? {
+    let revision: i64 = db.query_row(
+        "SELECT revision FROM runtime_tasks WHERE task_id=?",
+        [task],
+        |row| row.get(0),
+    )?;
+    if let Some(answer) = lifecycle::obstacles::retry_decision_answer(db, task, node, revision)? {
         item["owner_decision_answer"] = json!(answer);
+    }
+    if let Some(brief) = lifecycle::obstacles::retry_decision_brief(db, task, node, revision)? {
+        item["coordinator_decision_clarification"] = json!({
+            "text":brief,
+            "authority":"Clarification only. The original assignment boundaries, owner restrictions and all explicit consent requirements still apply."
+        });
     }
     Ok(item)
 }
@@ -91,7 +115,12 @@ impl NativeHost {
                 return Ok(Vec::new());
             }
             lifecycle::obstacles::retry_unblocked_tx(db, &t)?;
-            if lifecycle::obstacles::unparked_failure(db, &t)? { return Ok(Vec::new()); }
+            if lifecycle::obstacles::unparked_failure(db, &t)?
+                && !lifecycle::obstacles::parked(db, &t)?.iter()
+                    .any(|(_, class, _)| class == lifecycle::obstacles::OWNER_DECISION)
+            {
+                return Ok(Vec::new());
+            }
             let claimed = scheduler::claim_ready_tx(
                 db,
                 &t,
@@ -199,12 +228,20 @@ impl NativeHost {
                                 let unfinished:bool=db.query_row(
                                     "SELECT EXISTS(SELECT 1 FROM runtime_nodes n JOIN runtime_tasks t USING(task_id) WHERE n.task_id=? AND n.revision=t.revision AND n.status!='completed')",
                                      [&t],|r|r.get(0))?;
-                                if failed&&!active&&!domain::return_to_coordinator_tx(db,&t,"worker_failed")?{domain::stop_tx(db,&t,"worker_failed")?;}
-                                // An owner-stopped worker is not a dead end: siblings keep
-                                // running, and once nothing else is runnable the coordinator
-                                // decides. Dependents of the stopped node never start silently.
-                                else if !failed&&!active&&domain::owner_stopped_work_is_idle_tx(db,&t)?
-                                    &&!domain::return_to_coordinator_tx(db,&t,"worker_stopped_by_owner")?{domain::stop_tx(db,&t,"worker_stopped_by_owner")?;}
+                                // Do not abandon an unresolved decision or its pending
+                                // question when a different node fails or is stopped.
+                                // The current graph remains claimable until the decision settles.
+                                let owner_stopped = !failed && !active && domain::owner_stopped_work_is_idle_tx(db, &t)?;
+                                if !active && (failed || owner_stopped) {
+                                    let decision_waiting = lifecycle::obstacles::parked(db, &t)?.iter()
+                                        .any(|(_, class, _)| class == lifecycle::obstacles::OWNER_DECISION);
+                                    if !decision_waiting {
+                                        let reason = if failed { "worker_failed" } else { "worker_stopped_by_owner" };
+                                        if !domain::return_to_coordinator_tx(db, &t, reason)? {
+                                            domain::stop_tx(db, &t, reason)?;
+                                        }
+                                    }
+                                }
                                 else if !unfinished&&!active{
                                     if scheduler::policy::review_writer_tx(db,&t)?.is_some(){return Ok(json!({"state":state,"assignments":[],"writeConflict":true}));}
                                     completion::add_review_tx(db,&t,&e)?;

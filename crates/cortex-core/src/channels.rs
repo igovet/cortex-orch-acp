@@ -32,6 +32,7 @@ pub struct Identity {
 pub enum Principal<'a> {
     Coordinator,
     ActiveSteering,
+    OwnerDecision { obstacle: &'a str },
     Worker { assignment: &'a str },
 }
 /// Worker assignments must already be claimed by the scheduler. Never replay a
@@ -45,6 +46,10 @@ pub fn issue_tx(
     ownership::check_tx(db, task, owner)?;
     let (state, revision) = domain::task_tx(db, task)?;
     let steering = matches!(who, Principal::ActiveSteering);
+    let decision = match who {
+        Principal::OwnerDecision { obstacle } => Some(obstacle),
+        _ => None,
+    };
     let (role, profile, assignment) = match who {
         Principal::Coordinator => {
             if !matches!(state, TaskState::Planning | TaskState::Reconciling) {
@@ -57,6 +62,13 @@ pub fn issue_tx(
                 || crate::lifecycle::steering::pending(db, task)?.is_empty()
             {
                 return refuse("coordinator_not_expected");
+            }
+            ("coordinator", "orchestrator".to_owned(), None)
+        }
+        Principal::OwnerDecision { obstacle } => {
+            let trigger = crate::lifecycle::obstacles::decision_trigger(db, task, Some(obstacle))?;
+            if trigger.is_none_or(|trigger| trigger.started) {
+                return refuse("owner_decision_not_current");
             }
             ("coordinator", "orchestrator".to_owned(), None)
         }
@@ -104,6 +116,10 @@ pub fn issue_tx(
         crate::lifecycle::event_tx(db, task, "NATIVE_ACTIVE_STEER_CHANNEL",
             serde_json::json!({"channel_id":channel_id,"revision":revision}))?;
     }
+    if let Some(obstacle) = decision {
+        crate::lifecycle::event_tx(db, task, "OWNER_DECISION_COORDINATOR_STARTED",
+            serde_json::json!({"channel_id":channel_id,"obstacle":obstacle,"revision":revision}))?;
+    }
     Ok(Credential { channel_id, secret })
 }
 fn equal(a: &str, b: &str) -> bool {
@@ -121,7 +137,10 @@ pub fn authenticate(
         CASE WHEN c.role='worker' THEN p.role_id END,
         CASE WHEN c.role='coordinator' AND EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=c.task_id
                  AND e.type='NATIVE_ACTIVE_STEER_CHANNEL' AND json_extract(e.payload_json,'$.channel_id')=c.channel_id)
-             THEN 'active_steering' ELSE n.stage END,
+             THEN 'active_steering'
+             WHEN c.role='coordinator' AND EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=c.task_id
+                 AND e.type='OWNER_DECISION_COORDINATOR_STARTED' AND json_extract(e.payload_json,'$.channel_id')=c.channel_id)
+             THEN 'owner_decision' ELSE n.stage END,
         CASE WHEN c.role='worker' THEN p.idempotency_key END,p.engine_session_ref,p.step,p.status,t.state
         FROM trusted_channels c JOIN task_owners o ON o.task_id=c.task_id AND o.epoch=c.owner_epoch
         JOIN runtime_tasks t ON t.task_id=c.task_id
@@ -143,7 +162,10 @@ pub fn authenticate(
         return refuse("channel_authority_refused");
     }
     let state: TaskState = state.parse().map_err(CoreError::Refused)?;
-    let permitted = if identity.stage.as_deref() == Some(crate::lifecycle::steering::ACTIVE_STAGE) {
+    let permitted = if matches!(
+        identity.stage.as_deref(),
+        Some(crate::lifecycle::steering::ACTIVE_STAGE | crate::lifecycle::obstacles::DECISION_STAGE)
+    ) {
         state == TaskState::Executing
     } else if identity.role == "coordinator" {
         matches!(

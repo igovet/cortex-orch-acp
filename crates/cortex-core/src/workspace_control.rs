@@ -1234,6 +1234,7 @@ fn answer_attachments_tx(
 }
 fn decisions_tx(db: &Transaction<'_>, b: &Binding) -> CoreResult<Vec<Value>> {
     let waits = waits::projection_tx(db, &b.task)?;
+    let language = domain::task_language_tx(db, &b.task)?;
     let rows=db.prepare("SELECT id,text,options_json,status,created_at,answered_at,answer_text,assignment_ref,dedup_key FROM pending_questions WHERE task_id=? ORDER BY rowid LIMIT 1001")?
         .query_map([&b.task],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,String>(3)?,
             r.get::<_,String>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,Option<String>>(7)?,r.get::<_,String>(8)?)))?
@@ -1308,12 +1309,18 @@ fn decisions_tx(db: &Transaction<'_>, b: &Binding) -> CoreResult<Vec<Value>> {
         // A worker's question is answered in the task's Conversation like the coordinator's, so it names the role that asked:
         // its assignment is the worker's provisioning key. A coordinator question (no assignment) names none.
         let asked_by: Option<String> = match &assignment {
+            Some(_) if node_question => db.query_row(
+                "SELECT json_extract(payload_json,'$.asked_by') FROM runtime_events
+                 WHERE task_id=? AND type='USER_QUESTION_REQUESTED' AND json_extract(payload_json,'$.question_id')=?
+                 ORDER BY id DESC LIMIT 1",
+                (&b.task, &id), |r| r.get::<_, Option<String>>(0),
+            ).optional()?.flatten(),
             Some(key) => db.query_row("SELECT role_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=? AND role_id<>'orchestrator'",
                 (&b.task,key),|r|r.get::<_,String>(0)).optional()?.map(|role| role.strip_prefix("worker-").unwrap_or(&role).to_owned()),
             None => None,
         };
         let mut value=json!({"decisionId":format!("wd_{id}"),"questionId":id,"kind":if batch.is_null(){"question"}else{"question_batch"},
-            "batchId":batch,"executionId":Value::Null,"acpSessionId":b.session,"scope":assignment.unwrap_or("task".into()),"prompt":text,
+            "batchId":batch,"executionId":Value::Null,"acpSessionId":b.session,"scope":assignment.unwrap_or("task".into()),"prompt":text,"language":language,
             "options":options,"version":version,"ownerEpoch":b.owner.epoch.to_string(),"requirementRevision":requirement.to_string(),
             "status":status,"allowedOperations":if status=="pending"&&state!=TaskState::Paused&&!interrupted{vec!["decisions.answer"]}else{vec![]},
             "createdAt":created,"answeredAt":answered,"answerText":answer});

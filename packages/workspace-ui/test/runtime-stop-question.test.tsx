@@ -63,11 +63,11 @@ it("shows each answer's consequence and the recommendation, and opens the review
   expect(location.pathname).toBe(`/m/${LOCAL_MACHINE_ID}/t/t2`);
 });
 
-it.each([["en-US", "Recommended", ""], ["ru-RU", "Рекомендую", "fullstack-dev"]])(
-  "marks but does not select the recommended option in an ordinary %s question",
-  async (locale, badge, askedBy) => {
+it.each([["en", "ru-RU", "Recommended", ""], ["ru", "en-US", "Рекомендую", "fullstack-dev"], [undefined, "ru-RU", "Recommended", ""]])(
+  "marks but does not select the recommendation for language %s in a %s browser",
+  async (language, locale, badge, askedBy) => {
     vi.spyOn(navigator, "language", "get").mockReturnValue(locale);
-    const question = wire({ runtimeStop: false, headline: undefined, askedBy, prompt: "Which layout?",
+    const question = wire({ runtimeStop: false, headline: undefined, ...(language && { language }), askedBy, prompt: "Which layout?",
       options: [{ optionId: "o1", label: "Compact" }, { optionId: "o2", label: "Spacious", recommended: true }] });
     await mount([question]);
     const options = [...document.querySelectorAll('[role="radio"]')];

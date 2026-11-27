@@ -578,10 +578,15 @@ impl NativeHost {
         }
         let limit = route.connection_limit;
         let steering = matches!(who, SessionRole::ActiveSteering);
+        let decision = match &who {
+            SessionRole::OwnerDecision { obstacle } => Some(obstacle.clone()),
+            _ => None,
+        };
         let assignment = match &who {
             SessionRole::Worker { assignment } => Some(assignment.clone()),
-            SessionRole::Coordinator | SessionRole::ActiveSteering => None,
+            SessionRole::Coordinator | SessionRole::ActiveSteering | SessionRole::OwnerDecision { .. } => None,
         };
+        let deciding = decision.is_some();
         if let Some(wait) = &wait {
             wait.ticket.as_ref().unwrap().select(
                 &route.connection, managed.as_ref().map(|(attempt, _)| attempt.key()),
@@ -622,8 +627,12 @@ impl NativeHost {
                 // sharing its connection. The ticket keeps its original position.
                 wait.ticket.as_ref().unwrap().set_held(reason.is_some());
             }
-            if steering && reason.is_some() {
-                break Err(CoreError::Refused("active_steering_route_held"));
+            if (steering || deciding) && reason.is_some() {
+                break Err(CoreError::Refused(if deciding {
+                    "owner_decision_route_held"
+                } else {
+                    "active_steering_route_held"
+                }));
             }
             let wait_id = if reason.is_some() && provider_wait.is_none() {
                 match crate::identity() {
@@ -644,11 +653,15 @@ impl NativeHost {
                 .or_else(|| wait.as_ref().map(|w| w.interrupts.clone()));
             let model = route.model.clone();
             let gate = managed.as_ref().map(|(attempt, _)| attempt.reservation_gate());
+            let decision = decision.clone();
             let result = receive(self.executor.write(move |db| {
                 let principal = match &assignment {
                     Some(assignment) => Principal::Worker { assignment },
                     None if steering => Principal::ActiveSteering,
-                    None => Principal::Coordinator,
+                    None => match decision.as_deref() {
+                        Some(obstacle) => Principal::OwnerDecision { obstacle },
+                        None => Principal::Coordinator,
+                    },
                 };
                 if let Some(interrupts) = &interrupts {
                     if let Some(error) = interrupts.interruption() {
@@ -666,7 +679,7 @@ impl NativeHost {
                     )? {
                             return Err(CoreError::Refused("native_task_interrupted"));
                         }
-                    } else if !steering && !db.query_row(
+                    } else if !steering && decision.is_none() && !db.query_row(
                         "SELECT EXISTS(SELECT 1 FROM runtime_tasks t WHERE task_id=? AND state IN ('PLANNING','RECONCILING')
                          AND NOT EXISTS(SELECT 1 FROM task_stopped s WHERE s.task_id=t.task_id))",
                         [&task], |row| row.get::<_, bool>(0),
@@ -957,7 +970,7 @@ impl NativeHost {
         let mut instructions = instructions;
         crate::native_instructions::append(&mut instructions, &format!("\n\n{}", route.instructions));
         if worktree.is_some() {
-            crate::native_instructions::append(&mut instructions, "\n\nThis task uses an isolated checkout. Use Cortex project file tools for repository writes. Commands can read this checkout and write only to private scratch, not the repository. Outside effects, native mutations and external MCP servers are unavailable for this task.");
+            crate::native_instructions::append(&mut instructions, "\n\nThis task uses a linked checkout. Use advertised Cortex project file tools for assigned repository edits. External MCP servers are not attached to this checkout.");
         }
         let project_context = crate::native_skills::project_files(
             &identity.role,
@@ -988,7 +1001,7 @@ impl NativeHost {
                 phase = "external_mcp";
                 // External MCP processes have their own authority, not the
                 // task's worktree view. Keep them off this route.
-                if worktree.is_none() && !steering {
+                if worktree.is_none() && !steering && !deciding {
                     self.mcp
                     .attach(
                         &identity,
@@ -1213,7 +1226,7 @@ impl NativeHost {
             // One bounded retry: a transport that closed while configuring an unbound
             // session whose process (and relays) confirmably exited. A fresh process,
             // broker and relays start under the same channel; both attempts are recorded.
-            let retry = attempt == 1
+            let retry = !deciding && attempt == 1
                 && !bound
                 && matches!(error, Error::Closed | Error::Io)
                 && matches!(phase, "configure" | "access_mode")
@@ -1222,7 +1235,7 @@ impl NativeHost {
             // response during session discovery. Unclassified transport failures keep
             // their generic startup diagnostic; no inference from engine text.
             let explicit_auth =
-                automatic && phase == "session_new" && matches!(error, Error::Rpc(-32000));
+                automatic && !deciding && phase == "session_new" && matches!(error, Error::Rpc(-32000));
             let blocker = if automatic && observation != ProcessObservation::ConfirmedExited {
                 "native_session_outcome_unknown"
             } else if explicit_auth {
@@ -1267,7 +1280,7 @@ impl NativeHost {
             // A launch refused because an engine file or the launcher is missing or unusable is
             // transient (a package upgrade replaces the files while this service still runs):
             // wait with backoff and start again, recording nothing, for up to a minute.
-            if phase == "launch"
+            if !deciding && phase == "launch"
                 && transient_launch_refusal(&error)
                 && observation == ProcessObservation::ConfirmedExited
                 && broker_settled
@@ -1502,6 +1515,7 @@ impl WorkerLaunch {
 pub enum SessionRole {
     Coordinator,
     ActiveSteering,
+    OwnerDecision { obstacle: String },
     Worker { assignment: String },
 }
 #[derive(Clone)]
@@ -1698,15 +1712,19 @@ impl SessionDriver {
             .map_err(|_| CoreError::Refused("channel_authority_refused"))?;
         // Normal and active-steering channels both authenticate as coordinator.
         // OpenCode already gets the language in its per-prompt instruction prefix.
+        let identity_task = identity.task.clone();
         let language_task = (identity.role == "coordinator"
             && matches!(self.engine_kind, EngineKind::Claude | EngineKind::Codex))
         .then_some(identity.task);
         let c = self.credential.clone();
-        let (delivery, capsule, live_steering, handoff, language) = receive(self.executor.write(move |db| {
+        let (delivery, capsule, owner_evidence, live_steering, handoff, language) = receive(self.executor.write(move |db| {
             let (delivery, capsule) = cortex_core::recovery_context::delivery_tx(db, &c)?;
             let language = language_task
                 .map(|task| cortex_core::assignment_brief::record_language_tx(db, &task))
                 .transpose()?;
+            let owner_evidence = if identity.stage.as_deref() == Some(lifecycle::obstacles::DECISION_STAGE) {
+                Some(cortex_core::recovery_context::decision_inline(db, &identity_task)?)
+            } else { None };
             let mut section = String::new();
             let mut handoff = None;
             if let Some(input) = steering {
@@ -1736,14 +1754,18 @@ impl SessionDriver {
                     json!({"plan":proposal,"plan_digest":digest,
                            "live_attempts":workers,"owner_messages":messages}));
             }
-            Ok((delivery, capsule, section, handoff, language))
+            Ok((delivery, capsule, owner_evidence, section, handoff, language))
         })?).await?;
+        let evidence_text = match &owner_evidence {
+            Some(entries) => format!("Complete prior owner answers (runtime data):\n{}\n\n", serde_json::to_string(entries)?),
+            None => String::new(),
+        };
         let brief = match language {
             Some(language) => {
                 let directive = crate::native_instructions::coordinator_language_directive(language);
-                format!("{directive}\n\n{text}{live_steering}")
+                format!("{directive}\n\n{evidence_text}{text}{live_steering}")
             }
-            None => format!("{text}{live_steering}"),
+            None => format!("{evidence_text}{text}{live_steering}"),
         };
         let mut prompt = format!("{}\n\n{capsule}\n\n{brief}", self.project_context);
         if self.engine_kind == EngineKind::OpenCode {
@@ -1811,6 +1833,9 @@ impl SessionDriver {
             db.execute("UPDATE capsule_deliveries SET state='continuation_observed',updated_at=?
                 WHERE engine_session_ref=? AND state='delivery_confirmed'",(cortex_core::now(),&session))?;
             db.execute("UPDATE capsule_deliveries SET state='transmitted',updated_at=? WHERE id=? AND state='built'",(cortex_core::now(),&transmitted))?;
+            if let Some(entries) = owner_evidence {
+                cortex_core::recovery_context::record_decision_inline_tx(db,&i.task,&c.channel_id,&transmitted,&entries)?;
+            }
             // What this prompt gave the engine stays verifiable afterwards (digests only).
             let tools=cortex_engine::schema::catalogue(&i.role,i.profile.as_deref(),i.stage.as_deref()).unwrap_or_default();
             let catalogue=crate::native_project::digest(&serde_json::to_vec(&tools)?);
@@ -3162,6 +3187,7 @@ impl GatewayCore for CorePolicy {
                 | "read_batch"
                 | "ask_question"
                 | "user_question_request"
+                | "owner_decision_retry"
                 | "answer_submit"
                 | "result_submit"
                 | "plan_submit"
@@ -3630,7 +3656,7 @@ impl CorePolicy {
                                     store, &i, &c, &name, &arguments, batched, &root, scoped,
                                 )
                             } else {
-                                crate::native_sources::execute(store, &i, &name, &arguments)
+                                crate::native_sources::execute(store, &i, &c.channel_id, &name, &arguments, batched)
                             }
                         })
                         .map_err(tool_error)?,
@@ -4046,6 +4072,14 @@ impl CorePolicy {
                                 }else{json!([])};
                                 lifecycle::plan::accept_routed_tx(db,&i.task,&c.channel_id,key,&arguments["plan"],&hints)
                             },
+                            "owner_decision_retry" if i.role == "coordinator"
+                                && i.stage.as_deref() == Some(lifecycle::obstacles::DECISION_STAGE) => {
+                                lifecycle::obstacles::coordinator_retry_decision_tx(db, &i.task, &c.channel_id, key, &arguments)
+                            }
+                            "user_question_request" if i.role == "coordinator"
+                                && i.stage.as_deref() == Some(lifecycle::obstacles::DECISION_STAGE) => {
+                                lifecycle::obstacles::ask_decision_tx(db, &i.task, &c.channel_id, key, &arguments)
+                            }
                             "user_question_request" if i.role == "coordinator" => {
                                 lifecycle::skill_proposals::request(db, &root, &i.task, &c.channel_id, key, &arguments)
                             }
@@ -4088,6 +4122,8 @@ impl CorePolicy {
             )
             .await;
             let value = match value {
+                Err(CoreError::Refused("owner_decision_prior_answer_incomplete")) =>
+                    return Ok(crate::native_tool_errors::reply("owner_decision_prior_answer_incomplete")),
                 Err(CoreError::Refused(code @ ("plan_outcome_dropped" | "plan_outcome_statement_required" | "plan_outcome_uncovered" | "plan_outcome_unknown" | "plan_outcome_deferral_conflict" | "plan_outcome_deferral_reason_required"))) if outcome_plan.is_some() => {
                     let i = self.identity(true).await?;
                     let plan = outcome_plan.unwrap_or_default();

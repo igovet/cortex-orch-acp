@@ -867,7 +867,8 @@ recheck channel/session authority after consent; a concurrent mode change refuse
 the pending decision. Auto chooses an offered allow-once option, falling back
 to an offered standing allow option. Other native requests follow the access mode's
 decision table ([native engine tools](../../SECURITY.md#native-engine-tools)):
-Cortex private state is refused in every mode, Auto allows and records the rest,
+a native write to a live store file and any native edit, execute, delete or move on a
+read-only channel are refused in every mode, Auto included, Auto allows and records the rest,
 and Development and Guarded ask the owner for writes outside the project,
 credential and key material, Git control and engine/Cortex configuration writes
 and deletions (Guarded also for reads outside the project) with an `Owner
@@ -1266,6 +1267,19 @@ The authenticated coordinator serves the existing `user_question_request`
 schema, including single questions, batches and `skill_proposal`. Questions
 and the Waiting User transition commit before the client sees the card.
 Only planning/reconciling can ask; worker channels cannot propose skills.
+
+A separate owner-decision coordinator channel (stage `owner_decision`) is
+permitted only while the task is EXECUTING, after a worker's `owner_decision`
+blocker. The decision prompt includes the blocker and the assignment-bound
+worker brief (including acceptance checks, constraints and predecessor report
+references), without further clipping. Older triggers without a retained brief
+are labelled as reconstructed from current records. There `user_question_request`
+is narrowed to one question with 2–8
+options and a recommendation, without batches or skill proposals. The question is
+stored as the node-bound `obstacle:<id>` row without a Waiting User transition and
+is answered through the existing path. `owner_decision_retry` retries exactly the
+blocked node with coordinator provenance: no answered `obstacle:<id>` row is
+created, no write denial is lifted and no consent is granted. The cited answer must be a real answered non-permission owner question whose whole question and answer reached that coordinator channel: inline and whole in the transmitted decision prompt, or read to the last byte on the same channel and context generation through `list_sources` (`answered_after`/`next_answered_after`) and direct, non-batched `read_source` pages of `<id>:question` and `<id>:answer` with an unchanged digest. Otherwise the call is refused as `owner_decision_prior_answer_incomplete`. Capsule previews of earlier answers are clipped and marked `complete: false`. See [owner decision blockers](../features/steering-and-questions/index.md#owner-decision-blockers).
 Evidence must name 2–5 distinct ordinary published reports in the project store;
 the saved proposal includes bounded report titles and case descriptions.
 Create/update checks inspect real skill directories without following symlinks.

@@ -385,16 +385,38 @@ async function openPage(svc: ReturnType<typeof service>, rowOf = (_row: Element)
   const box = root.querySelector<HTMLElement>(".task-panel .timeline")!, inner = box.firstElementChild!;
   let top = 0;
   const viewport = 400;
-  const height = () => Array.from(inner.children, rowHeight).reduce((a, b) => a + b, 0);
-  const slack = () => box.classList.contains("ws-history-end") ? Math.max(0, viewport - height()) : 0;
+  // Model one layout per DOM change, not one scan of every row for each rectangle
+  // that the scroll controller measures. Consume queued mutations for synchronous reads.
+  let layout: { height: number; rows: Map<Element, { y: number; h: number }> } | undefined;
+  const mutations = new MutationObserver(() => { layout = undefined; });
+  mutations.observe(inner, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style"] });
+  const unmount = dispose;
+  dispose = () => { mutations.disconnect(); unmount?.(); };
+  const measure = () => {
+    if (mutations.takeRecords().length) layout = undefined;
+    if (!layout) {
+      const rows = new Map<Element, { y: number; h: number }>();
+      let height = 0;
+      for (const row of inner.children) {
+        const h = rowHeight(row);
+        rows.set(row, { y: height, h });
+        height += h;
+      }
+      layout = { height, rows };
+    }
+    return layout;
+  };
+  const height = () => measure().height;
   Object.defineProperties(box, { clientHeight: { get: () => viewport }, scrollHeight: { get: () => Math.max(height(), viewport) }, scrollTop: { get: () => top, set: (v: number) => { top = Math.max(0, Math.min(v, height() - viewport)); } } });
   const rect = Element.prototype.getBoundingClientRect;
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
     if (this === box) return { top: 0, bottom: viewport, height: viewport } as DOMRect;
     if (this.parentElement === inner) {
-      const rows = [...inner.children];
-      const y = slack() + rows.slice(0, rows.indexOf(this)).reduce((n, row) => n + rowHeight(row), 0) - top, h = rowHeight(this);
-      return { top: y, bottom: y + h, height: h } as DOMRect;
+      const { height, rows } = measure();
+      const row = rows.get(this)!;
+      const slack = box.classList.contains("ws-history-end") ? Math.max(0, viewport - height) : 0;
+      const y = slack + row.y - top;
+      return { top: y, bottom: y + row.h, height: row.h } as DOMRect;
     }
     return rect.call(this);
   });
