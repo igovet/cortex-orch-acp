@@ -3,17 +3,28 @@
 //! (`~/.local/state/cortex-workspace*`, `~/.config`, the runtime directory).
 #![allow(dead_code)]
 
+pub fn is_private_home(path: &std::path::Path) -> bool {
+    path.parent() == Some(std::env::temp_dir().as_path())
+        && path
+            .file_name()
+            .is_some_and(|name| name.as_encoded_bytes().starts_with(b"cw-test-home-"))
+}
+
 extern "C" fn private_home() {
     // Only the cargo-run test process itself. A peer the test starts with a cleared
     // environment is not cargo-run; one that inherits keeps its parent's private home.
     if std::env::var_os("CARGO_MANIFEST_DIR").is_none()
         || std::env::var_os("HOME")
-            .is_some_and(|h| h.as_encoded_bytes().starts_with(b"/tmp/cw-test-home-"))
+            .is_some_and(|h| is_private_home(std::path::Path::new(&h)))
     {
         return;
     }
     unsafe {
-        let mut template = *b"/tmp/cw-test-home-XXXXXX\0";
+        let mut template = std::env::temp_dir()
+            .join("cw-test-home-XXXXXX")
+            .into_os_string()
+            .into_encoded_bytes();
+        template.push(0);
         let dir = libc::mkdtemp(template.as_mut_ptr().cast());
         if dir.is_null() {
             libc::abort();

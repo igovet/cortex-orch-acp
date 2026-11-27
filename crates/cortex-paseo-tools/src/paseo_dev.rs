@@ -820,12 +820,66 @@ mod tests {
         assert!(!installs_git_plugin(&args(&["plugin", "ls"])));
     }
 
+    // Xvfb uses fixed X11 paths, independently of TMPDIR. Probe the same
+    // filesystem operations (not mode bits, which cannot detect Landlock).
+    fn xvfb_path_denial() -> Option<String> {
+        use std::io::ErrorKind::{PermissionDenied, ReadOnlyFilesystem};
+        use std::os::unix::net::UnixListener;
+
+        let name = format!(".cortex-xvfb-probe-{}", std::process::id());
+        let lock = Path::new("/tmp").join(&name);
+        match fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+            Ok(file) => {
+                drop(file);
+                fs::remove_file(&lock).unwrap();
+            }
+            Err(e) if matches!(e.kind(), PermissionDenied | ReadOnlyFilesystem) => {
+                return Some(format!("cannot create X11 lock in /tmp: {e}"));
+            }
+            Err(_) => {}
+        }
+        let socket = Path::new("/tmp/.X11-unix").join(name);
+        match UnixListener::bind(&socket) {
+            Ok(listener) => {
+                drop(listener);
+                fs::remove_file(&socket).unwrap();
+                None
+            }
+            Err(e) if matches!(e.kind(), PermissionDenied | ReadOnlyFilesystem) => {
+                Some(format!("cannot bind filesystem X11 socket in /tmp/.X11-unix: {e}"))
+            }
+            Err(_) => None,
+        }
+    }
+
     #[test]
     fn a_private_xvfb_display_starts_and_stops_when_xvfb_is_installed() {
+        use std::io::Write;
+
+        // Write directly to stderr so libtest's capture cannot hide this diagnostic.
+        let not_applicable = |reason: &str| {
+            writeln!(
+                std::io::stderr().lock(),
+                "paseo_dev::tests::a_private_xvfb_display_starts_and_stops_when_xvfb_is_installed: not_applicable: {reason}"
+            )
+            .unwrap();
+        };
         if which("Xvfb").is_none() {
+            not_applicable("Xvfb is not installed");
             return;
         }
-        let (mut child, display) = start_xvfb().unwrap();
+        let (mut child, display) = match start_xvfb() {
+            Ok(started) => started,
+            Err(error) => {
+                if error.starts_with("Xvfb did not report") {
+                    if let Some(denial) = xvfb_path_denial() {
+                        not_applicable(&denial);
+                        return;
+                    }
+                }
+                panic!("Xvfb startup failed: {error}");
+            }
+        };
         assert!(display.starts_with(':') && display[1..].bytes().all(|b| b.is_ascii_digit()));
         stop_process(&mut child);
         assert!(child.try_wait().unwrap().is_some());

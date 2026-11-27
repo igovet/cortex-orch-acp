@@ -1,5 +1,5 @@
 import { render } from "solid-js/web";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { emptyWorkspace, LOCAL_MACHINE_ID, type FileRead } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { FilePreview, parseDelimited, safeHtml, viewKind, viewPlan } from "../src/file-view";
@@ -192,9 +192,11 @@ describe("opening a file in Code", () => {
     expect(document.querySelector(".fv-doc h1")?.textContent).toBe("Cedar");
     expect(button("Preview").getAttribute("aria-pressed")).toBe("true");
     button("Source").click();
-    for (let i = 0; i < 40 && !document.querySelector(".cm-content"); i++) await settled();
+    // CodeMirror can attach an empty editor before the asynchronous source is visible.
+    await vi.waitFor(() => {
+      expect(document.querySelector(".cm-content")?.textContent).toContain("# Cedar");
+    }, { timeout: 5000 });
     expect(document.querySelector(".fv-doc")).toBeNull();
-    expect(document.querySelector(".cm-content")?.textContent).toContain("# Cedar");
     button("Preview").click();
     await settled();
     expect(document.querySelector(".fv-doc h1")?.textContent).toBe("Cedar");

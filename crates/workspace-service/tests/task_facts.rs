@@ -20,7 +20,7 @@ impl Fixture {
     async fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         // Keep this service fixture's socket root short even under a long TMPDIR.
-        let base = Path::new("/tmp").join(format!(
+        let base = std::env::temp_dir().join(format!(
             "cortex-facts-test-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)

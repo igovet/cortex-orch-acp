@@ -85,8 +85,8 @@ fn install_engine_captures_match_natively() {
     assert_eq!(cases.len(), 38);
     for case in cases {
         let name = case["name"].as_str().unwrap();
-        let base = PathBuf::from(format!(
-            "/tmp/cw-inst-{}-{}",
+        let base = std::env::temp_dir().join(format!(
+            "cw-inst-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -189,7 +189,7 @@ fn install_engine_captures_match_natively() {
 
 #[test]
 fn opencode_candidates_markers_and_registries_keep_the_retained_provider() {
-    let base = PathBuf::from(format!("/tmp/cw-inst-r-{}", std::process::id()));
+    let base = std::env::temp_dir().join(format!("cw-inst-r-{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(base.join("home/.opencode/bin")).unwrap();
     fs::create_dir_all(base.join("config/cortex")).unwrap();
@@ -236,7 +236,7 @@ fn opencode_candidates_markers_and_registries_keep_the_retained_provider() {
 
 #[test]
 fn npm_is_killed_at_its_bound_and_leaves_staging_for_the_next_pass() {
-    let base = PathBuf::from(format!("/tmp/cw-inst-t-{}", std::process::id()));
+    let base = std::env::temp_dir().join(format!("cw-inst-t-{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     for leaf in ["home", "config", "bin"] {
         fs::create_dir_all(base.join(leaf)).unwrap();
@@ -387,7 +387,7 @@ fn opencode_is_discovered_onboarded_and_observed_natively_without_the_owners_bin
         eprintln!("Landlock is unavailable: OpenCode onboarding not run");
         return;
     }
-    let base = PathBuf::from(format!("/tmp/cw-inst-oc-{}", std::process::id()));
+    let base = std::env::temp_dir().join(format!("cw-inst-oc-{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     let host = opencode_host(&base);
     let folder = base.join("config/cortex").canonicalize().unwrap();

@@ -938,11 +938,14 @@ pub fn review_packet_tx(
                 .any(|s| crate::scheduler::policy::overlaps(s, p))
         })
         .collect();
-    Ok(
-        json!({"changed_files":changed,"change_boundary":boundary,"predecessor_reports":reports,"read_scope":scope,
+    let mut packet = json!({"changed_files":changed,"change_boundary":boundary,"predecessor_reports":reports,"read_scope":scope,
         "read_scope_covers_change":outside.is_empty(),"outside_read_scope":outside,"review_binding":binding,
-        "goal":review_goal(db, task)?}),
-    )
+        "goal":review_goal(db, task)?});
+    let outstanding = super::completion::unaccepted_commands(db, task)?;
+    if !outstanding.is_empty() {
+        packet["outstanding_verification_commands"] = json!(outstanding);
+    }
+    Ok(packet)
 }
 /// Most characters of the goal and of each owner message in a review packet.
 const GOAL_CHARS: usize = 12_000;

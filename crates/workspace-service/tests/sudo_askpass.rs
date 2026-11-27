@@ -2,7 +2,7 @@
 //! No real sudo runs and no real password exists.
 use std::{
     ffi::OsStr,
-    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+    os::{fd::AsRawFd, unix::{ffi::OsStrExt, fs::PermissionsExt}},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -81,13 +81,19 @@ fn the_helper_fails_closed_without_its_route() {
     let out = run(&[]);
     assert!(!out.status.success());
     assert!(out.stdout.is_empty());
-    // Unix socket addresses have a short length limit, independent of how
-    // deeply the runner nests TMPDIR. mkdtemp creates the directory privately.
-    let mut template = *b"/tmp/cortex-askpass-XXXXXX\0";
+    // mkdtemp creates the directory privately, within the writable test scratch.
+    let mut template = std::env::temp_dir()
+        .join("aXXXXXX")
+        .into_os_string()
+        .into_encoded_bytes();
+    template.push(0);
     // SAFETY: a writable, NUL-terminated template with six trailing Xs.
     assert!(!unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) }.is_null());
     let base = Path::new(OsStr::from_bytes(&template[..template.len() - 1]));
-    let socket = base.join("socket");
+    // A procfs alias keeps sun_path short even with a deeply nested TMPDIR.
+    // Keep the directory descriptor alive while the helper connects.
+    let dir = std::fs::File::open(base).unwrap();
+    let socket = PathBuf::from(format!("/proc/{}/fd/{}/s", std::process::id(), dir.as_raw_fd()));
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let server = std::thread::spawn(move || {
         use std::io::Write;

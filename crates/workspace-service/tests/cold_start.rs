@@ -20,8 +20,8 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = PathBuf::from(format!(
-            "/tmp/cw-pf-{}-{}",
+        let root = std::env::temp_dir().join(format!(
+            "cw-pf-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -85,6 +85,7 @@ impl Fixture {
             .arg(self.root.join("assets"))
             .env_clear()
             .env("HOME", self.root.join("home"))
+            .env("TMPDIR", std::env::temp_dir())
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("XDG_STATE_HOME", self.root.join("state"))
             .env("XDG_RUNTIME_DIR", self.root.join("runtime"))

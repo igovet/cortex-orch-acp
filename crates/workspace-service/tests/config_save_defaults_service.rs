@@ -18,8 +18,8 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let root = PathBuf::from(format!(
-            "/tmp/cw-mds-{}-{}",
+        let root = std::env::temp_dir().join(format!(
+            "cw-mds-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
@@ -86,6 +86,7 @@ impl Fixture {
                 )
                 .env_clear()
                 .env("HOME", self.root.join("home"))
+                .env("TMPDIR", std::env::temp_dir())
                 .envs(routing_override.map(|path| ("CORTEX_ROUTING", path)))
                 .env("PATH", self.root.join("bin"))
                 .env("XDG_CONFIG_HOME", self.root.join("config"))

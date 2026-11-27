@@ -1211,10 +1211,9 @@ async fn channel_source_project_and_commands() {
                 .contains(&json!("new-unreserved")),
             "{record}"
         );
-        // /tmp is intentionally shared/writable even in Guarded. Use the
-        // literal host /var/tmp to distinguish the host-writable profile.
-        let outside = Project(PathBuf::from("/var/tmp").join(p.0.file_name().unwrap()));
-        std::fs::create_dir(&outside.0).unwrap();
+        // A sibling outside the project and the command's private scratch
+        // distinguishes the host-writable route from the Guarded profile.
+        let outside = Project::new();
         check(&w,"command_run",json!({"argv":["/usr/bin/touch",outside.0.join("host-effect")],"request_key":"host-effect"}),json!({"/result/structuredContent/exit_code":0})).await;
         assert!(outside.0.join("host-effect").exists());
         std::fs::write(p.0.join("src/denied"), "owner-protected").unwrap();
@@ -1932,10 +1931,9 @@ async fn sudo_prompts_and_host_reroute() {
     // through the same consent route and runs as the owner.
     // no consent card opens and nothing outside the project is written.
     let r = Project::new();
-    // Not in /tmp, which every sandbox shares writable: the read-only sandbox has a
-    // private /var/tmp, so only a host run could create this.
-    let marker = PathBuf::from(format!(
-        "/var/tmp/cw-reader-sudo-{}-{}",
+    // The marker is outside the read-only command's private scratch and checkout.
+    let marker = std::env::temp_dir().join(format!(
+        "cw-reader-sudo-{}-{}",
         std::process::id(),
         digest(&format!("{:?}", std::time::SystemTime::now()))[..12].to_owned()
     ));
@@ -7753,7 +7751,7 @@ async fn linked_checkout_command_journey() {
     route.launch.native_home = home.0.clone();
     route.launch.credential_directory = home.0.join(".claude");
     route.launch.base_environment.insert("PATH".into(), "/usr/bin:/bin".into());
-    let driver = host.dispatch(task.clone(), owner.clone(), SessionRole::Worker { assignment }, route).await.unwrap();
+    let driver = host.dispatch(task.clone(), owner.clone(), SessionRole::Worker { assignment }, route.clone()).await.unwrap();
     async fn probe(driver: &workspace_service::native_sessions::SessionDriver, name: &str, args: Value, expected: Value) {
         let key = args["request_key"].as_str().unwrap_or("-").to_owned();
         let prompt = format!("call:{}", json!({"name":name,"arguments":args,"__fixture_expect":expected}));
@@ -7805,6 +7803,75 @@ async fn linked_checkout_command_journey() {
     p.store().write(|db| cortex_core::access::switch_tx(db, &task, "auto", "fixture-auto", "acp_set_mode")).unwrap();
     probe(&driver, "outside_command", json!({"argv":["/usr/bin/cat","docs/tmp/doc.txt"],"cwd":p.0,"request_key":"outside-read"}),
         json!({"/result/structuredContent/exit_code":0,"/result/structuredContent/output":"host doc\n"})).await;
+    // Administrative host commands in Auto still require a fresh owner decision.
+    // Use a harmless fixture whose basename is `systemctl`; it only creates a
+    // marker, so this exercises the consent route without touching a service.
+    let admin_dir = p.0.join("admin-fixture");
+    std::fs::create_dir(&admin_dir).unwrap();
+    let marker = admin_dir.join("ran");
+    let admin_program = admin_dir.join("systemctl");
+    std::fs::write(&admin_program, format!("#!/bin/sh\nprintf ran > '{}'\n", marker.display())).unwrap();
+    std::fs::set_permissions(&admin_program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let execution = p.store().read(|db| Ok(db.query_row(
+        "SELECT execution_id FROM workspace_executions WHERE runtime_task_id=?", [&task], |r| r.get::<_, String>(0))?)).unwrap();
+    let session = p.store().read(|db| Ok(db.query_row(
+        "SELECT session_id FROM acp_host_sessions WHERE task_id=?", [&task], |r| r.get::<_, String>(0))?)).unwrap();
+    let admin_store = p.store();
+    async fn answer_admin(
+        store: &Store, execution: &str, session: &str, request_id: &str, label: &str,
+    ) {
+        use cortex_core::workspace::control;
+        let item = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let items = control::decisions(store, "p", "owner", &json!({
+                    "operation":"decisions.list","target":execution,"limit":100,
+                })).unwrap()["items"].as_array().cloned().unwrap_or_default();
+                if let Some(item) = items.into_iter().find(|d| d["status"] == "pending" && d["kind"] == "permission") {
+                    break item;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap_or_else(|_| panic!("administrative permission card did not open: {:?}", control::decisions(store, "p", "owner", &json!({"operation":"decisions.list","target":execution,"limit":100}))));
+        assert_eq!(item["permission"]["operation"], "run");
+        assert_eq!(item["permission"]["access"], "auto");
+        assert!(item["prompt"].as_str().unwrap().contains("administrative access"));
+        assert_eq!(item["permission"]["rule"], "administrative_command");
+        let option = item["options"].as_array().unwrap().iter()
+            .find(|o| o["label"] == label).unwrap()["optionId"].clone();
+        control::answer(store, "p", "owner", &json!({
+            "protocol":{"major":1,"minor":8},"projectId":"p","actorId":"owner",
+            "requestId":request_id,"operation":"decisions.answer","target":item["decisionId"],
+            "expectedVersion":item["version"],"ownerEpoch":item["ownerEpoch"],
+            "payload":{"executionId":execution,"acpSessionId":session,"batchId":null,"answers":[{
+                "decisionId":item["decisionId"],"questionId":item["questionId"],"expectedVersion":item["version"],"optionId":option,"text":null,
+            }]}
+        })).unwrap();
+    }
+    let denied_call = call("outside_command", json!({
+        "argv":[admin_program,"restart","fixture"],"cwd":p.0,"request_key":"admin-deny"
+    }));
+    let denied = driver.prompt(&denied_call);
+    let deny_answer = answer_admin(&admin_store, &execution, &session, "admin-deny-answer", "Deny");
+    let (denied, ()) = tokio::join!(denied, deny_answer);
+    assert_eq!(denied.unwrap().stop_reason, "end_turn");
+    assert!(!marker.exists(), "denied administrative command ran");
+    let allowed_call = call("outside_command", json!({
+        "argv":[admin_program,"restart","fixture"],"cwd":p.0,"request_key":"admin-allow"
+    }));
+    let allowed = driver.prompt(&allowed_call);
+    let allow_answer = answer_admin(&admin_store, &execution, &session, "admin-allow-answer", "Allow once");
+    let (allowed, ()) = tokio::join!(allowed, allow_answer);
+    assert_eq!(allowed.unwrap().stop_reason, "end_turn");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "ran");
+    std::fs::remove_file(&marker).unwrap();
+    let allowed_again_call = call("outside_command", json!({
+        "argv":[admin_program,"restart","fixture"],"cwd":p.0,"request_key":"admin-allow-again"
+    }));
+    let allowed_again = driver.prompt(&allowed_again_call);
+    let allow_again_answer = answer_admin(&admin_store, &execution, &session, "admin-allow-again-answer", "Deny");
+    let (allowed_again, ()) = tokio::join!(allowed_again, allow_again_answer);
+    assert_eq!(allowed_again.unwrap().stop_reason, "end_turn");
+    assert!(!marker.exists(), "Allow once token was reused");
     p.store().write(|db| cortex_core::access::switch_tx(db, &task, "development", "fixture-dev-again", "acp_set_mode")).unwrap();
     probe(&driver, "project_git", json!({"kind":"status","request_key":"linked-git"}),
         json!({"/result/structuredContent/exit_code":0,"/result/structuredContent/cwd":checkout.path,
@@ -7852,6 +7919,50 @@ async fn linked_checkout_command_journey() {
     assert_eq!(std::fs::read_to_string(p.0.join("fixture.txt")).unwrap(), "main bytes\n");
     assert_eq!(std::fs::read_to_string(checkout.path.join("fixture.txt")).unwrap(), "checkout bytes\n");
     assert_eq!(std::fs::read_to_string(sibling.path.join("fixture.txt")).unwrap(), "checkout bytes\n");
+
+    let reader = store.write(|db| {
+        db.execute("UPDATE runtime_nodes SET role='worker-explorer' WHERE task_id=?", [&sibling_task])?;
+        cortex_core::access::switch_tx(db, &sibling_task, "auto", "fixture-auto", "acp_set_mode")?;
+        Ok(db.query_row("SELECT assignment_ref FROM runtime_nodes WHERE task_id=?", [&sibling_task], |r| r.get(0))?)
+    }).unwrap();
+    let reader = host.dispatch(sibling_task, sibling_owner, SessionRole::Worker { assignment: reader }, route).await.unwrap();
+    // Install a locked local dependency with no registry, credentials or lifecycle scripts.
+    let dependency = sibling.path.join("fixture-dep");
+    std::fs::create_dir(&dependency).unwrap();
+    std::fs::write(dependency.join("package.json"), r#"{"name":"fixture-dep","version":"1.0.0"}"#).unwrap();
+    std::fs::write(sibling.path.join("package.json"), r#"{"name":"fixture","dependencies":{"fixture-dep":"file:fixture-dep"}}"#).unwrap();
+    std::fs::write(sibling.path.join("package-lock.json"), r#"{"name":"fixture","lockfileVersion":3,"packages":{"":{"name":"fixture","dependencies":{"fixture-dep":"file:fixture-dep"}},"fixture-dep":{"version":"1.0.0"},"node_modules/fixture-dep":{"resolved":"fixture-dep","link":true}}}"#).unwrap();
+    probe(&reader, "command_run", json!({"argv":["/bin/sh","-ec",
+        r#"printf '%s' "$CORTEX_COMMAND_TMPDIR" > scratch-path; npm ci --offline --ignore-scripts --no-audit --no-fund --cache "$CORTEX_COMMAND_TMPDIR/npm" > "$CORTEX_COMMAND_TMPDIR/install.log"; test -f node_modules/fixture-dep/package.json"#],
+        "request_key":"reader-install"}), json!({"/result/structuredContent/exit_code":0})).await;
+    assert!(sibling.path.join("node_modules/fixture-dep/package.json").is_file());
+    let scratch_path = std::fs::read_to_string(sibling.path.join("scratch-path")).unwrap();
+    assert!(!scratch_path.is_empty() && !std::path::Path::new(&scratch_path).exists());
+    reader.shutdown().await.unwrap();
+}
+
+// The sudo shims use a filesystem socket in XDG_RUNTIME_DIR. Keep it in the
+// hermetic runtime directory even when TMPDIR makes its normal address too
+// long. The fixture's child processes also need to resolve the short path.
+fn short_askpass_runtime() -> Option<std::fs::File> {
+    use std::os::fd::AsRawFd;
+
+    let dir = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?);
+    if !dir.parent().is_some_and(hermetic::is_private_home)
+        || dir
+            .join("cw-askpass-0123456789abcdef/socket")
+            .as_os_str()
+            .len()
+            < 108
+    {
+        return None;
+    }
+    let runtime = std::fs::File::open(dir).unwrap();
+    std::env::set_var(
+        "XDG_RUNTIME_DIR",
+        format!("/proc/{}/fd/{}", std::process::id(), runtime.as_raw_fd()),
+    );
+    Some(runtime)
 }
 
 fn main() {
@@ -7893,6 +8004,7 @@ fn main() {
         peer::main();
         return;
     }
+    let _askpass_runtime = short_askpass_runtime();
     let containment = matches!(
         mode.as_str(),
         "broker-command-acceptance" | "managed-command-acceptance"
@@ -8069,47 +8181,53 @@ fn main() {
         }
         // This executable serially exercises all scenarios, including full
         // before/after project observations for evidence-bearing commands.
+        macro_rules! run_case {
+            ($case:expr) => {{
+                eprintln!("native session case: {}", stringify!($case));
+                $case.await;
+            }};
+        }
         tokio::time::timeout(Duration::from_secs(90), async {
-            channel_source_project_and_commands().await;
-            attachments_reach_the_engine_as_readable_blocks().await;
-            claude_permission_requests_follow_runtime_policy().await;
-            owner_cards_stay_pending_and_record_the_owner().await;
-            desktop_permission_decisions().await;
-            read_only_channels_start_restricted_in_every_access_mode().await;
-            reopened_synthesis_feedback().await;
-            access_modes_and_outside_routes().await;
-            sudo_prompts_and_host_reroute().await;
-            route_effort_starts_codex_and_claude_coordinators().await;
-            document_tools_through_engine_and_relay().await;
-            configured_external_worker_grants().await;
-            optional_external_failures_withhold_only_that_server().await;
-            uncontained_external_server_runs_with_owner_authority().await;
-            native_workspace_binding_projects_activity_and_scoped_skills().await;
-            project_skills_read_through_the_channel().await;
-            recovery_project_operations_and_structured_tool_errors().await;
-            legacy_task_admission_and_session_lifetime_fence().await;
-            coordinator_tools_not_chat_and_lease().await;
-            engine_model_name_is_recorded_with_the_configured_session().await;
-            worker_question_answer_exact_delivery_and_native_denial().await;
-            answer_turn_replan_settles_the_answer_delivery().await;
-            pause_resume_does_not_revive_old_coordinator_and_cancel_is_not_completion().await;
-            startup_failure_settles_only_owned_reaped_process().await;
-            launch_refusal_before_spawn_is_a_confirmed_absence().await;
-            codex_launcher_sessions_hand_relays_to_app_server_not_acp().await;
-            claude_update_behind_session_new_reply_never_fails_configure().await;
-            configure_transport_loss_starts_once_more_and_records_both_attempts().await;
-            repeated_configure_transport_loss_stops_with_the_roles_blocker().await;
-            inline_result_is_published_once_bound_to_attempt_and_reconciled_after_restart().await;
-            result_failure_and_review_refusal_are_not_acceptance().await;
-            prompt_usage_follows_real_native_dispatches().await;
-            native_plan_review_verification_journey(false, false, false, false, None).await;
-            native_plan_review_verification_journey(true, false, false, false, None).await;
-            native_plan_review_verification_journey(false, true, false, false, None).await;
-            native_plan_review_verification_journey(false, false, true, false, None).await;
-            native_plan_review_verification_journey(false, false, false, true, None).await;
-            plain_folder_task_runs_its_whole_lifecycle().await;
-            shared_checkout_writer_waits_until_review_and_both_verify().await;
-            verification_drift_blocks_the_pass().await;
+            run_case!(channel_source_project_and_commands());
+            run_case!(attachments_reach_the_engine_as_readable_blocks());
+            run_case!(claude_permission_requests_follow_runtime_policy());
+            run_case!(owner_cards_stay_pending_and_record_the_owner());
+            run_case!(desktop_permission_decisions());
+            run_case!(read_only_channels_start_restricted_in_every_access_mode());
+            run_case!(reopened_synthesis_feedback());
+            run_case!(access_modes_and_outside_routes());
+            run_case!(sudo_prompts_and_host_reroute());
+            run_case!(route_effort_starts_codex_and_claude_coordinators());
+            run_case!(document_tools_through_engine_and_relay());
+            run_case!(configured_external_worker_grants());
+            run_case!(optional_external_failures_withhold_only_that_server());
+            run_case!(uncontained_external_server_runs_with_owner_authority());
+            run_case!(native_workspace_binding_projects_activity_and_scoped_skills());
+            run_case!(project_skills_read_through_the_channel());
+            run_case!(recovery_project_operations_and_structured_tool_errors());
+            run_case!(legacy_task_admission_and_session_lifetime_fence());
+            run_case!(coordinator_tools_not_chat_and_lease());
+            run_case!(engine_model_name_is_recorded_with_the_configured_session());
+            run_case!(worker_question_answer_exact_delivery_and_native_denial());
+            run_case!(answer_turn_replan_settles_the_answer_delivery());
+            run_case!(pause_resume_does_not_revive_old_coordinator_and_cancel_is_not_completion());
+            run_case!(startup_failure_settles_only_owned_reaped_process());
+            run_case!(launch_refusal_before_spawn_is_a_confirmed_absence());
+            run_case!(codex_launcher_sessions_hand_relays_to_app_server_not_acp());
+            run_case!(claude_update_behind_session_new_reply_never_fails_configure());
+            run_case!(configure_transport_loss_starts_once_more_and_records_both_attempts());
+            run_case!(repeated_configure_transport_loss_stops_with_the_roles_blocker());
+            run_case!(inline_result_is_published_once_bound_to_attempt_and_reconciled_after_restart());
+            run_case!(result_failure_and_review_refusal_are_not_acceptance());
+            run_case!(prompt_usage_follows_real_native_dispatches());
+            run_case!(native_plan_review_verification_journey(false, false, false, false, None));
+            run_case!(native_plan_review_verification_journey(true, false, false, false, None));
+            run_case!(native_plan_review_verification_journey(false, true, false, false, None));
+            run_case!(native_plan_review_verification_journey(false, false, true, false, None));
+            run_case!(native_plan_review_verification_journey(false, false, false, true, None));
+            run_case!(plain_folder_task_runs_its_whole_lifecycle());
+            run_case!(shared_checkout_writer_waits_until_review_and_both_verify());
+            run_case!(verification_drift_blocks_the_pass());
         })
         .await
         .expect("native session scenarios exceeded deadline");

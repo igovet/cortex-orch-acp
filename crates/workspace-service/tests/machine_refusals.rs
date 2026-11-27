@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
@@ -54,8 +54,8 @@ async fn retained_refusals_match_the_oracle_without_a_provider() {
     let cases = fixture["cases"].as_array().unwrap();
     assert_eq!(cases.len(), 55);
     for case in cases {
-        let base = PathBuf::from(format!(
-            "/tmp/cw-refuse-{}-{}",
+        let base = std::env::temp_dir().join(format!(
+            "cw-refuse-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

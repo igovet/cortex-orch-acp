@@ -23,7 +23,7 @@ impl Fixture {
         Self::named("cas")
     }
     fn named(tag: &str) -> Self {
-        let root = PathBuf::from(format!("/tmp/cw-{tag}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("cw-{tag}-{}", std::process::id()));
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         for name in [
@@ -102,6 +102,7 @@ impl Fixture {
                 .arg(assets)
                 .env_clear()
                 .env("HOME", self.root.join("home"))
+                .env("TMPDIR", std::env::temp_dir())
                 .env("PATH", self.root.join("bin"))
                 .env("XDG_CONFIG_HOME", self.root.join("config"))
                 .env("XDG_STATE_HOME", self.root.join("state"))

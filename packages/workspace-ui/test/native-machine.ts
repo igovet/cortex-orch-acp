@@ -2,11 +2,18 @@
 // disposable HOME and XDG tree, and a client for its length-prefixed JSON-RPC socket. No engine or account exists in it.
 import { spawn, type ChildProcess } from "node:child_process";
 import { createConnection, type Socket } from "node:net";
-import { existsSync, mkdirSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "../../..");
 const BINARY = process.env.WORKSPACE_TEST_SERVICE_BINARY ?? resolve(ROOT, "target/debug/workspace-service");
+
+const SOCKET = "cortex-workspace-dev/service.sock";
+
+export function nativeServiceHome(): string {
+  return mkdtempSync(resolve(tmpdir(), "cw-"));
+}
 
 export type Reply = { ok?: boolean; result?: unknown; code?: string; message?: string; [key: string]: unknown };
 
@@ -65,18 +72,31 @@ export class NativeService {
     for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true, mode: 0o700 });
     const clean: Record<string, string> = {};
     for (const key of ["PATH", "LANG", "LC_ALL"]) if (process.env[key] !== undefined) clean[key] = process.env[key]!;
-    Object.assign(clean, { HOME: home, XDG_CONFIG_HOME: dirs.config, XDG_STATE_HOME: dirs.state, XDG_CACHE_HOME: dirs.cache, XDG_RUNTIME_DIR: dirs.runtime }, env);
+    Object.assign(clean, { HOME: home, TMPDIR: home, XDG_CONFIG_HOME: dirs.config, XDG_STATE_HOME: dirs.state, XDG_CACHE_HOME: dirs.cache, XDG_RUNTIME_DIR: dirs.runtime }, env);
     const child = spawn(BINARY, [projects, ROOT], { env: clean, stdio: "ignore" });
     const exited = new Promise<number>(resolveExit => child.on("exit", (code, signal) => resolveExit(code ?? (signal ? 1 : 0))));
     // The service socket lives under the channel's runtime namespace; the debug build is the dev channel.
-    const socket = resolve(dirs.runtime, "cortex-workspace-dev/service.sock");
+    const socket = resolve(dirs.runtime, SOCKET);
     const deadline = Date.now() + 15000;
     while (!existsSync(socket) && Date.now() < deadline) {
       if (child.exitCode !== null) throw new Error("service exited");
       await new Promise(r => setTimeout(r, 20));
     }
     if (!existsSync(socket)) { child.kill("SIGKILL"); throw new Error("service socket did not appear"); }
-    return new NativeService(child, new Client(socket), exited);
+    // The service binds through a directory FD on Linux. Use the same method
+    // to connect when TMPDIR makes the full pathname too long for sun_path.
+    if (Buffer.byteLength(socket) < 108) return new NativeService(child, new Client(socket), exited);
+    const dir = openSync(dirname(socket), "r");
+    try {
+      const client = new Client(`/proc/self/fd/${dir}/${basename(socket)}`);
+      await client.ready;
+      return new NativeService(child, client, exited);
+    } catch (error) {
+      child.kill("SIGKILL");
+      throw error;
+    } finally {
+      closeSync(dir);
+    }
   }
 
   call(method: string, params: unknown) { return this.client.call(method, params); }

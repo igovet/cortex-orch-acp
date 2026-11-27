@@ -431,10 +431,23 @@ mod tests {
     };
     use tokio::process::Command;
 
+    fn socket_root(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("cw-{tag}-{}", std::process::id()))
+    }
+
+    fn bind_socket(path: &Path) -> tokio::net::UnixListener {
+        use std::os::fd::AsRawFd;
+        // Match the service: a directory FD keeps the socket in TMPDIR without
+        // counting the full directory path against the Unix address length.
+        let dir = std::fs::File::open(path.parent().unwrap()).unwrap();
+        let address = std::path::PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()))
+            .join(path.file_name().unwrap());
+        tokio::net::UnixListener::bind(address).unwrap()
+    }
+
     #[tokio::test]
     async fn first_subscription_waits_for_a_late_socket_without_reporting_offline() {
-        // The runner's TMPDIR can be too long for a filesystem Unix socket.
-        let root = Path::new("/tmp").join(format!("cw-late-ready-{}", std::process::id()));
+        let root = socket_root("late");
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&root)
@@ -451,7 +464,7 @@ mod tests {
         tokio::pin!(subscription);
         let server = async {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let listener = bind_socket(&path);
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
             // Incoming fake subscription/status requests use the real authenticated framing.
             loop {
@@ -503,14 +516,14 @@ mod tests {
 
     #[tokio::test]
     async fn extracted_dev_connects_only_to_its_socket_and_never_starts_the_installed_unit() {
-        let root = Path::new("/tmp").join(format!("cw-isolated-{}", std::process::id()));
+        let root = socket_root("iso");
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&root)
             .unwrap();
         let path = root.join("service.sock");
         let bridge = Bridge::with(path.clone(), Startup::Extracted);
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let listener = bind_socket(&path);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let no_systemctl = || panic!("an extracted desktop must not invoke systemctl");
         bridge.unix.connection_with(no_systemctl).await.unwrap();

@@ -268,9 +268,7 @@ settled at the next start only when the process table shows no engine adapter,
 Codex App Server or session relay of this user working in the project (an
 unreadable entry counts as one); the task is then held for the owner, never
 relaunched by itself. This is not detached unsandboxed descendant settlement
-or engine-session recovery. Auto runs every role's command directly on the host as the owner (deletions wait
-for the owner's permission card; an argv that deletes or overwrites a live store
-file is refused). Brokered worker commands in Guarded and Development, read-only
+or engine-session recovery. Auto runs every role's ordinary command in a private host namespace as the owner, with the task checkout writable and Cortex store directories read-only (deletions wait for the owner's permission card). Administrative commands require a separate owner confirmation and then run with the owner's full host access; an argv that deletes or overwrites a live store file is refused. Brokered worker commands in Guarded and Development, read-only
 roles and runtime verification run on the host at their real paths, with the
 owner's tools, PATH, HOME and the shared network, under a Landlock ruleset the
 per-command supervisor enters just before exec; no namespace, mount, overlay or
@@ -2918,15 +2916,20 @@ locks on those files and commits every state transition through the database and
 its WAL, so a write from another process can corrupt the running store or drop
 its locks, and no owner answer can make such a write safe. Reads of them follow
 the private-state row.
-**Auto is full, unsandboxed host access (owner decision 2026-11-26).** In Auto every
+Workspace Auto host commands can use a fresh private directory per invocation through `CORTEX_COMMAND_TMPDIR`. The runtime cleans that directory after the command. A shared `/var/tmp` path, even with a shell PID in its name, does not establish file ownership for an explicit deletion.
+
+The Workspace session prompt derives host-command guidance from the served channel catalogue. A linked checkout selects the working directory. The runtime evaluates access on each call.
+
+**Auto uses a private host namespace for ordinary commands.** In Auto every
 role and stage, the coordinator, consultant, reviewers, explorers, read-only and
-worktree assignments included, runs `command_run` and `outside_command` directly on
-the host as the owner: the owner's real HOME, PATH, environment, devices, network,
-ssh-agent and docker, with no Landlock ruleset, sparse view or snapshot
-copy; `sudo`, `pkexec` and `doas` go through the owner-password route. A read-only
-role gets no read-only capture and no "writing worker required" refusal, and a
-read-only task is never told that SSH or host commands are forbidden. The command's
-working directory is its own checkout or worktree. Two guards remain in Auto: a
+worktree assignments included, can run ordinary `command_run` and
+`outside_command` requests with the task checkout writable and the Cortex store
+directories read-only. Each invocation gets its own temporary directory. A command
+that requests `sudo`, `pkexec`, `doas`, Docker or service control requires a separate
+owner confirmation and then runs through the full-host route. A read-only role gets
+the same command route without a "writing worker required" refusal, and a read-only
+task is never told that SSH or host commands are forbidden. The command's working
+directory is its own checkout or worktree. Two guards remain in Auto: a
 command whose argv deletes or overwrites a live Cortex store file
 (`.cortex/*.sqlite3*`) is refused (`cortex_live_store`), and a deletion (the
 recognizer for `rm`, `unlink`, `rmdir`, `shred`, `find -delete`, `git clean`/`rm`,

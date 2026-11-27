@@ -586,6 +586,7 @@ dependencies = [
  "cortex-engine",
  "libc",
  "regex",
+ "rusqlite",
  "serde_json",
  "tokio",
  "workspace-protocol",

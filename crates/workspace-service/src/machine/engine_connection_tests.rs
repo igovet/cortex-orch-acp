@@ -12,8 +12,8 @@ struct Fixture {
 impl Fixture {
     fn new(engine: &str, bundled: bool) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = PathBuf::from(format!(
-            "/tmp/cw-el-{}-{}",
+        let root = std::env::temp_dir().join(format!(
+            "cw-el-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

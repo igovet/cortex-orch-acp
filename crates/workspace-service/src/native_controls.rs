@@ -322,10 +322,13 @@ mod stop_continuation_tests {
         let root = std::env::temp_dir().join(format!("late-engine-{}", crate::identity().unwrap()));
         std::fs::create_dir(&root).unwrap();
         let late = root.join("late-engine");
+        let staged = root.join("staged-engine");
+        std::fs::copy("/bin/false", &staged).unwrap();
         let target = late.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(2));
-            std::fs::copy("/bin/false", &target).unwrap();
+            // Publish a complete executable, as a package upgrade does.
+            std::fs::rename(staged, target).unwrap();
         });
         let path = root.clone();
         let routes = Arc::new(Late(late));
@@ -2655,14 +2658,13 @@ impl Runtime {
             runtime.wake.notify_waiters();
             // Python hands a committed answer to the next coordinator turn. A
             // runtime stop question has no live driver left to wake.
-            let result = match result {
-                Ok(receipt) => match runtime.continue_owed_tasks().await {
-                    Ok(()) => Ok(receipt),
-                    Err(_) => Err(failure("answer_continuation_unconfirmed")),
-                },
-                Err(error) => Err(error),
-            };
+            let committed = result.is_ok();
             let _ = send.send(result);
+            if committed {
+                // The answer already has a durable receipt. Continuing other tasks
+                // may take longer than the client deadline; the safety tick retries it.
+                let _ = runtime.continue_owed_tasks().await;
+            }
         });
         reply
             .await

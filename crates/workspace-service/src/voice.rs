@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn native_assets_without_a_retained_provider() {
         use std::{fs, os::unix::fs::PermissionsExt};
-        let root = PathBuf::from(format!("/tmp/cw-native-assets-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("cw-native-assets-{}", std::process::id()));
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         struct Cleanup(PathBuf);

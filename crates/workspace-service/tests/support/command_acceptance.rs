@@ -3,6 +3,7 @@ use super::{call, close, Project};
 use serde_json::{json, Value};
 use std::{
     fs,
+    os::fd::AsRawFd,
     os::unix::{
         fs::{DirBuilderExt, PermissionsExt},
         net::UnixListener,
@@ -35,6 +36,10 @@ pub(super) const OUTPUT: &str = "contained-compiler-ran\n";
 // arbitrary project or host inputs.
 const PRIVATE: &[&str] = &[".cortex/fixture-private", ".cortex-dev/fixture-private", ".env"];
 
+fn agent_address(directory: &fs::File) -> std::path::PathBuf {
+    format!("/proc/self/fd/{}/agent", directory.as_raw_fd()).into()
+}
+
 pub(super) struct Inputs {
     outside: Project,
     socket: UnixListener,
@@ -43,11 +48,11 @@ pub(super) struct Inputs {
 impl Inputs {
     // Called before the harness creates any threads.
     pub(super) fn new() -> Self {
-        // Use a short path independent of the test runner's TMPDIR for the socket.
-        let outside = Project::new_at(Path::new("/var/tmp"), "cw-command-inputs");
+        let outside = Project::new_at(&std::env::temp_dir(), "cw-command-inputs");
         fs::write(outside.0.join("secret"), SENTINEL).unwrap();
         let path = outside.0.join("agent");
-        let socket = UnixListener::bind(&path).unwrap();
+        let directory = fs::File::open(&outside.0).unwrap();
+        let socket = UnixListener::bind(agent_address(&directory)).unwrap();
         std::env::set_var("SSH_AUTH_SOCK", path);
         Self { outside, socket }
     }
@@ -75,7 +80,8 @@ impl Inputs {
         // Falsification control: the denied files are readable and the socket
         // is connectable from the fixture host before entering containment.
         self.unchanged(root);
-        std::os::unix::net::UnixStream::connect(self.outside.0.join("agent")).unwrap();
+        let directory = fs::File::open(&self.outside.0).unwrap();
+        std::os::unix::net::UnixStream::connect(agent_address(&directory)).unwrap();
         self.socket.accept().unwrap();
     }
 
@@ -122,7 +128,7 @@ pub(super) struct VerifierInputs {
 
 impl VerifierInputs {
     pub(super) fn new() -> Self {
-        let outside = Project::new_at(Path::new("/tmp"), "cw-live-verifier-input");
+        let outside = Project::new_at(&std::env::temp_dir(), "cw-live-verifier-input");
         fs::write(outside.0.join("input"), "benign-host-input").unwrap();
         Self { outside }
     }
@@ -317,13 +323,9 @@ pub(super) async fn role_mode_matrix(allow_live: bool) {
             }
             let p = Project::new();
             let outside = Project::new();
-            // The ordinary read-only profile shares /tmp, including projects there,
-            // but masks host /var/tmp. Use a disposable host target to test that limit.
-            let host_target = (profile == "worker-explorer" && mode != "guarded").then(|| {
-                let path = std::path::Path::new("/var/tmp").join(outside.0.file_name().unwrap());
-                fs::create_dir(&path).unwrap();
-                Project(path)
-            });
+            // This sibling is outside the command checkout and the command's
+            // own private scratch. Only the host route may write there.
+            let host_target = (profile == "worker-explorer" && mode != "guarded").then(Project::new);
             let output = host_target
                 .as_ref()
                 .map_or_else(|| p.0.join("src/output"), |target| target.0.join("output"));
@@ -399,7 +401,7 @@ pub(super) async fn role_mode_matrix(allow_live: bool) {
                 if allowed {
                     assert_eq!(fs::read_to_string(&output).unwrap(), SENTINEL, "{scenario}");
                 } else {
-                    assert!(!output.exists(), "{scenario}: read-only command wrote to host /var/tmp");
+                    assert!(!output.exists(), "{scenario}: read-only command wrote outside its checkout and scratch");
                 }
 
                 // An exact retry after settlement must return the retained

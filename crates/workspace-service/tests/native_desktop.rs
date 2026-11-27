@@ -3802,10 +3802,13 @@ async fn binary_journey(scenario: &str) {
         )
         .unwrap();
     }
+    let scratch = f.0.join("tmp");
+    std::fs::create_dir(&scratch).unwrap();
     let spawn_service = || {
         tokio::process::Command::new(env!("CARGO_BIN_EXE_workspace-service"))
             .args([f.0.as_os_str(), checkout.as_os_str()])
             .env_clear()
+            .env("TMPDIR", &scratch)
             .env("HOME", f.0.join("home"))
             .env("XDG_CONFIG_HOME", &config_base)
             .env("XDG_STATE_HOME", &state_base)
@@ -4588,7 +4591,20 @@ async fn binary_journey(scenario: &str) {
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            }).await.expect("safe restart did not provision a replacement worker automatically");
+            }).await.unwrap_or_else(|_| {
+                let transitions = store.read(|db| {
+                    Ok(db.query_row(
+                        "SELECT json_group_array(json_object('type',type,
+                            'code',json_extract(payload_json,'$.code'),
+                            'reason',json_extract(payload_json,'$.reason'),
+                            'phase',json_extract(payload_json,'$.phase')))
+                         FROM (SELECT type,payload_json FROM runtime_events
+                               WHERE type GLOB 'NATIVE_*' ORDER BY id DESC LIMIT 12)",
+                        [], |row| row.get::<_, String>(0),
+                    )?)
+                });
+                panic!("safe restart did not provision a replacement worker automatically: {transitions:?}");
+            });
             // Release only the fixture peer. No owner Resume/Retry RPC was sent.
             std::fs::write(f.0.join("project/scenario.txt"), "complete").unwrap();
             restart_signal(

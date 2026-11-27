@@ -14,8 +14,8 @@ impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         // A long caller TMPDIR must never lengthen the Unix socket.
-        let base = PathBuf::from(format!(
-            "/tmp/cw-pcfg-{}-{}",
+        let base = std::env::temp_dir().join(format!(
+            "cw-pcfg-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

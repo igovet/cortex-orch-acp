@@ -91,7 +91,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn the_service_starts_its_catalogue_helper_with_the_owners_native_account() {
-    let root = PathBuf::from(format!("/tmp/cw-ev-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("cw-ev-{}", std::process::id()));
     fs::create_dir(&root).unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let mut f = Fixture { root, child: None };
@@ -145,6 +145,7 @@ async fn the_service_starts_its_catalogue_helper_with_the_owners_native_account(
             .arg(f.root.join("assets"))
             .env_clear()
             .env("HOME", f.root.join("home"))
+            .env("TMPDIR", std::env::temp_dir())
             .env("XDG_CONFIG_HOME", f.root.join("config"))
             .env("XDG_STATE_HOME", f.root.join("state"))
             .env("XDG_RUNTIME_DIR", f.root.join("runtime"))

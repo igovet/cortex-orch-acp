@@ -177,8 +177,8 @@ fn discovery_reads_the_version_inside_the_sandbox_and_skips_untrusted_candidates
     assert_eq!(found.version, "2.0.19");
     assert_eq!(found.binary, fake.canonicalize().unwrap());
     assert!(qualified(&found.version));
-    // /tmp is shared by the existing probe; /var/tmp is private to it.
-    let host = Temp::new_at(Path::new("/var/tmp"));
+    // Keep the sentinel outside the version probe’s own writable scratch.
+    let host = Temp::new();
     let sentinel = host.0.join("owner-sentinel");
     fs::write(&sentinel, "owner").unwrap();
     fs::write(

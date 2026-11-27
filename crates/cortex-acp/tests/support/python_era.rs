@@ -7,7 +7,7 @@ use std::{
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
 };
 
-const ROOT: &str = "/tmp/cortex-python-era-fixture-v1";
+const ARCHIVED_ROOT: &str = "/tmp/cortex-python-era-fixture-v1";
 const SESSION: &str = "9b40b9a3-1de9-4a1f-a7ba-444af198d95c";
 const ARCHIVE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -28,11 +28,10 @@ struct PrivateRoot(PathBuf);
 
 impl PrivateRoot {
     fn new() -> Self {
-        let root = PathBuf::from(ROOT);
-        // Never reuse or remove a preexisting path. Only one run can own this
-        // exact DB identity per filesystem namespace.
+        let root = std::env::temp_dir()
+            .join(format!("cortex-python-era-{}", std::process::id()));
         private_dir(&root);
-        Self(root)
+        Self(root.canonicalize().unwrap())
     }
 
     fn install(&self, version: u32, store: &str) -> PathBuf {
@@ -46,6 +45,7 @@ impl PrivateRoot {
             private_dir(parent);
         }
         copy_tree(&source(version), &destination);
+        relocate(version, &root, &destination);
         root
     }
 }
@@ -99,8 +99,62 @@ fn expected(version: u32) -> Value {
     .unwrap()
 }
 
+// The original archive is immutable. Change only project-bound paths in
+// the disposable copy, leaving its format, schema and unrelated rows alone.
+fn relocate(version: u32, root: &Path, destination: &Path) {
+    use rusqlite::{config::DbConfig, Connection, OpenFlags};
+    let mut db = Connection::open_with_flags(
+        destination.join("cortex.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .unwrap();
+    db.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)
+        .unwrap();
+    let archived = format!("{ARCHIVED_ROOT}/format-{version}");
+    let root = root.to_str().unwrap();
+    let tx = db.transaction().unwrap();
+    for (table, count) in [
+        ("tasks", 2),
+        ("project_configuration_defaults", 1),
+        ("acp_host_sessions", 1),
+    ] {
+        assert_eq!(
+            tx.execute(
+                &format!("UPDATE {table} SET project_root=?1 WHERE project_root=?2"),
+                [root, &archived],
+            )
+            .unwrap(),
+            count,
+            "{table} archive binding"
+        );
+    }
+    let prefix = format!("{archived}/.cortex/");
+    assert_eq!(
+        tx.execute(
+            "UPDATE drafts SET path=?1 || substr(path, length(?2) + 1) WHERE instr(path, ?2)=1",
+            [format!("{root}/.cortex/"), prefix],
+        )
+        .unwrap(),
+        expected(version)["drafts"].as_array().unwrap().len(),
+        "archive draft paths"
+    );
+    tx.commit().unwrap();
+}
+
 fn verify_store(store: &Store, version: u32, after_acp: bool) {
-    let expected = expected(version);
+    let mut expected = expected(version);
+    let archived = PathBuf::from(ARCHIVED_ROOT).join(format!("format-{version}"));
+    for (table, column) in [("tasks", 1), ("defaults", 0), ("sessions", 1), ("drafts", 5)] {
+        for row in expected[table].as_array_mut().unwrap() {
+            let path = Path::new(row[column].as_str().unwrap());
+            let relative = path.strip_prefix(&archived).unwrap();
+            row[column] = if relative.as_os_str().is_empty() {
+                json!(store.key().root())
+            } else {
+                json!(store.key().root().join(relative))
+            };
+        }
+    }
     let recovering_task = expected["runtime_tasks"]
         .as_array()
         .into_iter()

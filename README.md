@@ -215,7 +215,9 @@ final result reports every goal outcome of the plan done; an approved stage that
 misses the goal returns to planning without verification, and an INCOMPLETE review
 reaches verification only on the owner's close-as-is decision. Native source,
 project-file and Git tools now retain channel-local read coverage and full command
-output. Auto runs every command on the host as the owner. In Guarded and Development,
+output. Auto runs ordinary commands in a private host namespace as the owner, with
+the task checkout writable and Cortex store directories read-only. Administrative
+commands use a separately confirmed full-host route. In Guarded and Development,
 for read-only roles and for runtime verification, brokered worker commands run on
 the host at their real paths, with the owner's tools, PATH, HOME and network,
 under a Landlock ruleset: writes only to the writer's checkout, a private scratch
@@ -427,6 +429,10 @@ Sprint draft creation and active-task model or effort changes share eight
 reserved writer slots. Settings also use a separate per-project lane. If the
 writer reserve is full, the service returns `owner_queue_busy` without enqueueing
 the write (see [storage](docs/project/storage.md)).
+For temporary logs in Workspace Auto, write under `"$CORTEX_COMMAND_TMPDIR"` and let the runtime clean the directory when the command ends.
+
+Workspace sessions with an advertised `outside_command` can request an in-scope host operation from a linked checkout. Repair reviews list verification commands still owed from earlier attempts.
+
 Commands default to 1800 seconds (`outside_command` 600), overridable per call.
 The production service now binds the configured native route provider by default.
 Projects whose stores contain tasks written by the former Python runtime are not adopted automatically (see [native recovery](docs/cortex-workspace/local-task-execution.md#legacy-task-adoption)); the retained controller and the `CORTEX_WORKSPACE_NATIVE=0` opt-out were removed.
@@ -950,8 +956,9 @@ flowchart LR
   limited to the project, and native engine processes do not run in a general
   filesystem jail. That engines read what you can read and use the host network is
   your decision, not a gap. Cortex's own `.cortex`/`.cortex-dev` state, Git
-  control files and credential files are changed on request: Auto allows it,
-  Guarded and Development ask you; only the live store database and lock files
+  control files and credential files are changed on request: Auto allows ordinary
+  changes, while deletions and administrative commands ask you separately,
+  Guarded and Development ask you for the action; only the live store database and lock files
   are never written. A writing Codex worker runs in a Cortex permission profile
   that keeps those Cortex paths and common root credential files read-only in its
   sandbox, so its patch there asks instead of writing silently (a credential file
@@ -1386,8 +1393,9 @@ boundaries and [PRIVACY.md](PRIVACY.md) for data handling. Report vulnerabilitie
 privately as described in SECURITY.md.
 
 In every access mode, eligible writing workers in the main checkout can
-request `outside_command`. It runs outside the command sandbox, with the
-owner's host access. Workspace-linked writers, coordinators and read-only roles
+request `outside_command`. Ordinary Auto requests use the private host namespace;
+an administrative request runs with the owner's full host access after a separate
+confirmation. Workspace-linked writers, coordinators and read-only roles
 cannot use it. Recognized privilege requests (`sudo`, `pkexec` or `doas`) use
 this route, too. A sandbox launch can be retried once through that route only
 if the supervisor proves the payload never started. Started or uncertain commands are not

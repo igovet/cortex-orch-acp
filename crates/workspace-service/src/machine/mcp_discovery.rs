@@ -202,7 +202,7 @@ fn timeout_reply() -> Value {
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> std::io::Result<Self> {
-        let p = PathBuf::from("/tmp").join(format!(
+        let p = std::env::temp_dir().join(format!(
             "cw-mcp-{}",
             crate::native_effects::identity().map_err(|_| std::io::Error::other("identity"))?
         ));

@@ -71,6 +71,8 @@ async fn output(program: &str, args: &[&str]) -> Result<Option<String>> {
     let mut cmd = Command::new(program);
     cmd.args(args)
         .env_clear()
+        // dpkg-deb extracts control metadata into temporary files even for --field.
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
@@ -996,6 +998,7 @@ mod tests {
             .arg(&package)
             .arg(&source)
             .env_clear()
+            .env("TMPDIR", &t.0)
             .env("HOME", &home)
             .env("PATH", "/usr/bin:/bin")
             .stdout(Stdio::null())

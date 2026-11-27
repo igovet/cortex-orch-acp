@@ -146,11 +146,11 @@ fn runtime_root(
 #[cfg(test)]
 mod tests {
     use super::runtime_root;
-    use std::{fs, os::unix::fs::DirBuilderExt, path::PathBuf};
+    use std::{fs, os::unix::fs::DirBuilderExt};
 
     #[test]
     fn an_extracted_runtime_without_opt_in_is_not_an_installed_bundle() {
-        let path = PathBuf::from("/tmp").join(format!("cw-no-relocation-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("cw-no-relocation-{}", std::process::id()));
         fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
         fs::write(path.join("runtime-payload.json"), b"{}").unwrap();
         let denied = runtime_root(path.clone(), None);

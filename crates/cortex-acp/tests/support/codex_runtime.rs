@@ -128,8 +128,8 @@ pub struct Fixture(pub PathBuf);
 impl Fixture {
     pub fn new(tag: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = PathBuf::from(format!(
-            "/var/tmp/cortex-codex-runtime-{tag}-{}-{}",
+        let root = std::env::temp_dir().join(format!(
+            "cortex-codex-runtime-{tag}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -229,6 +229,7 @@ impl Fixture {
         let mut cmd = Command::new(exe);
         cmd.env_clear()
             .env("HOME", self.0.join("home"))
+            .env("TMPDIR", &self.0)
             .env("XDG_CONFIG_HOME", self.0.join("home/config"))
             .env("XDG_STATE_HOME", self.0.join("home/state"))
             .env("XDG_DATA_HOME", self.0.join("data"))

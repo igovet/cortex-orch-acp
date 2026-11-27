@@ -1,10 +1,9 @@
 // @vitest-environment jsdom
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { NativeService } from "./native-machine";
+import { nativeServiceHome, NativeService } from "./native-machine";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import { Workspace } from "../src";
@@ -33,9 +32,7 @@ const input = (label: string, text: string) => { const el = document.querySelect
 
 /** The real native service (configuration, product store, Git), but no account, network, engine or native shell bridge. */
 async function machine() {
-  // The service socket sits below this folder; a long TMPDIR (a sandbox's) would put it past the Unix socket path limit.
-  const base=resolve(tmpdir(),"cw-first-use-XXXXXX/runtime/cortex-workspace-dev/service.sock").length>100 ? "/tmp" : tmpdir();
-  const home=mkdtempSync(resolve(base,"cw-first-use-")); folders.push(home);
+  const home=nativeServiceHome(); folders.push(home);
   // The service keeps its state under the dev channel's namespace in XDG_STATE_HOME; its worktrees default is below it.
   const repo=resolve(home,"projects/project"), state=resolve(home,"xdg-state/cortex-workspace-dev");
   mkdirSync(repo,{recursive:true});

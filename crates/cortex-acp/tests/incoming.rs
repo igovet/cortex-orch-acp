@@ -1408,7 +1408,10 @@ async fn separate_task_cancel_preserves_parent() {
         "SELECT count(*) FROM capacity_reservations WHERE task_id='{parent}' AND state='reserved'"
     ));
     assert!(reserved > 0);
-    std::fs::write(f.0.join("scenario.txt"), "separate-task-hold").unwrap();
+    // The parent polls scenario.txt; an in-place truncate would briefly release it.
+    let next_scenario = f.0.join("scenario-next.txt");
+    std::fs::write(&next_scenario, "separate-task-hold").unwrap();
+    std::fs::rename(&next_scenario, f.0.join("scenario.txt")).unwrap();
     c.send(6, "session/prompt", json!({"sessionId":sid,"prompt":[{"type":"text","text":"/cortex-new-task Separate fixture"}]})).await;
     // Disjoint scopes keep both real worker processes running until cancellation.
     tokio::time::timeout(Duration::from_secs(15), async {

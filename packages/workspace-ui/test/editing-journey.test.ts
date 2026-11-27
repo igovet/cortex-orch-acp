@@ -1,11 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { capabilities } from "@cortex/workspace-contract";
 import { applyFacts, applyProjection, emptyWorkspace, taskEditable, type WorkspaceCommand } from "@cortex/workspace-domain";
 import { createRealPort, type RealTransport } from "../src/port/real";
 import { buildIndex } from "../src/selectors";
-import { NativeService } from "./native-machine";
+import { nativeServiceHome, NativeService } from "./native-machine";
 
 let home: string | undefined, service: NativeService | undefined;
 afterEach(async () => {
@@ -15,7 +15,7 @@ afterEach(async () => {
 
 it("archives and restores a queued draft through the real port without starting it", async () => {
   // No provider accounts or engine routes. Only the local service and a scratch project.
-  home = mkdtempSync("/tmp/cw-edit-");
+  home = nativeServiceHome();
   const root = join(home, "projects"), repo = join(root, "project");
   mkdirSync(repo, { recursive:true });
   const native = service = await NativeService.start(home, root);

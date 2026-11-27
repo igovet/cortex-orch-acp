@@ -1139,7 +1139,7 @@ fn permission_item(
         "allowedOperations":if shown=="pending"&&state!=TaskState::Paused{vec!["decisions.answer"]}else{vec![]},
         "createdAt":created,"answeredAt":answered,"answerText":answer,
         "permission":{"operation":details["operation"],"paths":details["paths"],"reason":details["reason"],
-            "reasonText":details["reason_text"],"access":details["access"],"rule":details["rule"]}});
+            "reasonText":details["reason_text"],"command":details["command"],"cwd":details["cwd"],"why":details["why"],"access":details["access"],"rule":details["rule"]}});
     if let Some(role) = asked_by {
         value["askedBy"] = json!(role);
     }

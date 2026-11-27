@@ -416,13 +416,12 @@ fn only_project_changes_wake_the_notifier() {
 fn the_service_raises_and_receives_the_click_on_a_private_bus() {
     use std::os::unix::fs::DirBuilderExt;
 
-    // The runner's TMPDIR can already exceed the Unix socket pathname limit.
-    // Use a short, exclusively created directory accessible only to this user.
+    // Keep the private socket leaf short within the caller’s writable scratch.
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = PathBuf::from(format!("/tmp/cw-notify-bus-{}-{nonce}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cwn-{}-{nonce:x}", std::process::id()));
     std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
     let socket = dir.join("bus");
     let config = dir.join("bus.conf");

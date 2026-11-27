@@ -156,13 +156,30 @@ fn genuine_python_format11_migrates_without_losing_data() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../tests/fixtures/python-era/format-11/store"
     ));
-    let root = PathBuf::from("/tmp/cortex-python-era-fixture-v1");
+    let root = std::env::temp_dir().join(format!("cortex-migration-{}", std::process::id()));
     fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
     let fixture = PythonFixture(root);
     let project = fixture.0.join("format-11");
     fs::DirBuilder::new().mode(0o700).create(&project).unwrap();
     let key = ProjectKey::new(&project, StoreChannel::Release).unwrap();
     copy_private_tree(archive, &key.directory());
+    const ARCHIVED_ROOT: &str = "/tmp/cortex-python-era-fixture-v1/format-11";
+    let relocated = key.root().to_str().unwrap();
+    // Relocate only the binding on the private copy; compare every other
+    // value, including retained path strings, against the untouched archive.
+    let copy =
+        Connection::open_with_flags(key.database(), OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+    copy.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)
+        .unwrap();
+    assert_eq!(
+        copy.execute(
+            "UPDATE tasks SET project_root=?1 WHERE project_root=?2",
+            [relocated, ARCHIVED_ROOT],
+        )
+        .unwrap(),
+        2,
+    );
+    drop(copy);
 
     let original = Connection::open_with_flags(
         format!(
@@ -172,6 +189,20 @@ fn genuine_python_format11_migrates_without_losing_data() {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )
     .unwrap();
+    let original_rows = |table: &str, columns: &[String]| {
+        let mut expected = rows(&original, table, columns);
+        if table == "tasks" {
+            let index = columns
+                .iter()
+                .position(|name| name == "project_root")
+                .unwrap();
+            for row in &mut expected {
+                assert_eq!(row[index], Value::Text(ARCHIVED_ROOT.into()));
+                row[index] = Value::Text(relocated.into());
+            }
+        }
+        expected
+    };
     let original_bytes = fs::read(key.database()).unwrap();
     for mode in [OpenMode::InspectImmutable, OpenMode::LiveReadOnly] {
         assert_eq!(
@@ -200,7 +231,7 @@ fn genuine_python_format11_migrates_without_losing_data() {
                     assert!(!migrated_tables.contains(table), "retired table {table}");
                 } else if table != "format_history" {
                     let columns = columns(&original, table);
-                    assert_eq!(rows(db, table, &columns), rows(&original, table, &columns), "{table}");
+                    assert_eq!(rows(db, table, &columns), original_rows(table, &columns), "{table}");
                 }
             }
             assert_eq!(
@@ -228,7 +259,7 @@ fn genuine_python_format11_migrates_without_losing_data() {
         let columns = columns(&original, &table);
         assert_eq!(
             rows(&backup, &table, &columns),
-            rows(&original, &table, &columns),
+            original_rows(&table, &columns),
             "{table}"
         );
     }

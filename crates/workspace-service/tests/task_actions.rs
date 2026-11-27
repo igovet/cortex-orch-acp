@@ -28,7 +28,7 @@ impl Fixture {
     async fn with_routes(routes: Option<std::sync::Arc<dyn workspace_service::native_runtime::NativeRoutes>>) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         // Unix socket limits must not depend on the caller's TMPDIR.
-        let base = Path::new("/tmp").join(format!(
+        let base = std::env::temp_dir().join(format!(
             "cw-act-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -442,6 +442,7 @@ async fn close_commit_and_task_draft_do_not_copy_french_task_prose() {
             ])
             .env_clear()
             .env("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"))
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env(CHILD, "1")
             .output()
@@ -455,7 +456,7 @@ async fn close_commit_and_task_draft_do_not_copy_french_task_prose() {
         return;
     }
     let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-    assert!(home.as_os_str().as_encoded_bytes().starts_with(b"/tmp/cw-test-home-"));
+    assert!(hermetic::is_private_home(&home));
     for (key, leaf) in [("XDG_CONFIG_HOME", "config"), ("XDG_STATE_HOME", "state")] {
         let directory = PathBuf::from(std::env::var_os(key).unwrap());
         assert_eq!(directory, home.join(leaf));

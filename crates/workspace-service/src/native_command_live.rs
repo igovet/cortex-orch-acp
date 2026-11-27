@@ -54,6 +54,8 @@ fn unavailable(reason: &str) -> io::Error {
     io::Error::other(format!("native_command_sandbox_unavailable: {reason}"))
 }
 
+const SHARED_TEMP_DIRS: &[&str] = &["/tmp", "/var/tmp"];
+
 impl Sandbox {
     pub(crate) fn prepare(
         root: &Path,
@@ -138,13 +140,16 @@ impl Sandbox {
         let _ = network;
         let started = Instant::now();
         let result =
-            Self::build(root, profile, writes, protected, environment, secrets, before_write, timings);
+            Self::build(
+                root, profile, writes, protected, environment, secrets, before_write, timings,
+                SHARED_TEMP_DIRS.iter().map(Path::new),
+            );
         timings.insert("preparation_ms", started.elapsed().as_millis() as u64);
         result
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build(
+    fn build<'a>(
         root: &Path,
         profile: Profile,
         writes: &[PathBuf],
@@ -153,6 +158,7 @@ impl Sandbox {
         secrets: Option<&[PathBuf]>,
         before_write: &mut dyn FnMut() -> io::Result<()>,
         timings: &mut BTreeMap<&'static str, u64>,
+        shared_temp_dirs: impl IntoIterator<Item = &'a Path>,
     ) -> io::Result<Self> {
         let millis = |since: Instant| since.elapsed().as_millis() as u64;
         let root = root.canonicalize()?;
@@ -187,7 +193,7 @@ impl Sandbox {
         }));
         grants.extend(policy::tool_caches(&environment, &root, profile)?);
         if profile.wide() {
-            grants.extend(["/tmp", "/var/tmp"].map(PathBuf::from));
+            grants.extend(shared_temp_dirs.into_iter().map(Path::to_path_buf));
         }
         grants.extend(native_sandbox::devices());
         let mut hidden = native_sandbox::live_stores(&root);
@@ -760,10 +766,30 @@ cat "$1/source" >/dev/null"#,
     }
 
     #[test]
-    fn development_writes_the_whole_checkout_and_shares_var_tmp() {
+    fn development_writes_the_whole_checkout_and_shares_system_temp_dirs() {
+        assert_eq!(SHARED_TEMP_DIRS, ["/tmp", "/var/tmp"]);
         let f = Fixture::new();
         let root = f.root();
-        let Ok(s) = f.prepare(Profile::Development, &[root.clone()], &[]) else {
+        // Model both system temp roots without requiring writes to the real ones.
+        let shared = [f.0.join("shared-tmp"), f.0.join("shared-var-tmp")];
+        for dir in &shared {
+            fs::create_dir(dir).unwrap();
+        }
+        let environment = BTreeMap::from([
+            ("HOME".into(), f.0.join("home").into_os_string()),
+            ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
+        ]);
+        let Ok(s) = Sandbox::build(
+            &root,
+            Profile::Development,
+            &[root.clone()],
+            &[],
+            environment,
+            None,
+            &mut || Ok(()),
+            &mut BTreeMap::new(),
+            shared.iter().map(PathBuf::as_path),
+        ) else {
             assert!(!capability());
             eprintln!("Landlock unavailable: Development rule check not run");
             return;
@@ -774,8 +800,11 @@ cat "$1/source" >/dev/null"#,
 put "$1/new-top-level"; cat "$1/new-top-level" >/dev/null
 mkdir "$1/newdir"; put "$1/newdir/x"
 cat "$1/.env" "$2/.ssh/id_ed25519" >/dev/null
-t=$(mktemp -p /var/tmp cortex-dev-probe.XXXXXX); rm -f "$t""#,
-            &[&root, &f.0.join("home")],
+for d in "$3" "$4"; do
+    t=$(mktemp -p "$d" cortex-dev-probe.XXXXXX)
+    rm -f "$t"
+done"#,
+            &[&root, &f.0.join("home"), &shared[0], &shared[1]],
         );
     }
 
