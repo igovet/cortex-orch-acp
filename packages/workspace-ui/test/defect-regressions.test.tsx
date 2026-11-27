@@ -103,6 +103,7 @@ const sidebarSprint = (id: string, queueState: Sprint["queueState"], taskIds: st
   ({ id, projectId: "p", title: `${id} sprint`, description: "", runMode: "manual", targetBranch: null, planning: "created", conversation: [],
     plan: null, materializedVersion: 1, taskIds, queueState, pauseReason: null });
 const workBlock = () => document.querySelector<HTMLElement>(".sb-work");
+const showActiveWork = async () => { document.querySelector<HTMLButtonElement>(".sb-view-head .seg button:last-child")!.click(); await settle(); };
 const sideLinks = (parent: ParentNode, selector = ".task-row") => [...parent.querySelectorAll<HTMLAnchorElement>(selector)];
 
 it("lists uncapped work across projects with project names and separate status words", async () => {
@@ -119,9 +120,10 @@ it("lists uncapped work across projects with project names and separate status w
     { ...base, id: "needs", title: "Needs an answer", status: "needs_you" },
   ];
   await mount(s, `/m/${LOCAL_MACHINE_ID}`);
+  await showActiveWork();
   const block = workBlock()!;
-  expect(block.nextElementSibling?.textContent).toBe("Projects");
-  expect([...block.querySelectorAll("h3")].map(h => h.textContent)).toEqual(["Working", "Review", "Ready to merge"]);
+  expect(document.querySelector(".sidebar .proj")).toBeNull();
+  expect([...block.querySelectorAll(".sb-work-group")].map(h => h.textContent)).toEqual(["Working", "Review", "Ready to merge"]);
   expect(sideLinks(block)).toHaveLength(8);
   const links = sideLinks(block);
   expect(links.filter(r => r.querySelector(".sb-row-project")?.textContent === "First project")).toHaveLength(6);
@@ -131,12 +133,14 @@ it("lists uncapped work across projects with project names and separate status w
   expect(merge.getAttribute("aria-label")).toBe(`Land the change — Other project — ${merge.querySelector(".sig")?.textContent}`);
 });
 
-it("omits the active work block when there are no matching rows", async () => {
+it("shows an empty Active work view when there are no matching rows", async () => {
   const s = world();
   s.tasks[0].status = "needs_you";
   s.sprints = [sidebarSprint("idle", "idle"), sidebarSprint("complete", "complete")];
   await mount(s, `/m/${LOCAL_MACHINE_ID}`);
-  expect(workBlock()).toBeNull();
+  await showActiveWork();
+  expect(workBlock()?.textContent).toBe("No active work on this machine.");
+  expect(sideLinks(workBlock()!)).toHaveLength(0);
 });
 
 it("shows running and paused sprint trees without repeating their tasks within Active work", async () => {
@@ -147,27 +151,28 @@ it("shows running and paused sprint trees without repeating their tasks within A
   ];
   s.sprints = [sidebarSprint("running", "running", ["t"]), sidebarSprint("paused", "paused", ["r"]), sidebarSprint("idle", "idle"), sidebarSprint("complete", "complete")];
   await mount(s, sprintPath + "/board");
-  const block = workBlock()!;
-  expect(sideLinks(block).map(row => row.getAttribute("href"))).toEqual([
-    sprintPath + "/board", taskPath, sprintPath.replace("running", "paused") + "/board", taskPath.replace(/t$/, "r"),
-  ]);
-  expect(sideLinks(block, ".in-sprint").map(row => row.querySelector(".trunc")?.textContent)).toEqual(["Sprint child", "Paused sprint child"]);
   const projectRows = sideLinks(document, ".sidebar .tasks .task-row:not(.all)");
   expect(projectRows).toHaveLength(5);
   const child = projectRows.find(row => row.getAttribute("href") === taskPath)!;
   expect(child.classList.contains("in-sprint")).toBe(true);
   expect(child.closest(".task-row-actions")?.previousElementSibling?.getAttribute("href")).toBe(sprintPath + "/board");
+  await showActiveWork();
+  const block = workBlock()!;
+  expect(sideLinks(block).map(row => row.getAttribute("href"))).toEqual([
+    sprintPath + "/board", taskPath, sprintPath.replace("running", "paused") + "/board", taskPath.replace(/t$/, "r"),
+  ]);
+  expect(sideLinks(block, ".in-sprint").map(row => row.querySelector(".trunc")?.textContent)).toEqual(["Sprint child", "Paused sprint child"]);
   expect(block.querySelector(".task-row .sb-row-project")?.textContent).toBe(s.projects[0].name);
   const current = () => sideLinks(document, '.sidebar a[aria-current="page"]').map(a => a.getAttribute("href"));
-  expect(current()).toEqual([sprintPath + "/board", sprintPath + "/board"]);
+  expect(current()).toEqual([sprintPath + "/board"]);
 
   document.querySelector<HTMLAnchorElement>('[role="tab"][href$="/code"]')!.click();
   await settle();
   expect(location.pathname).toBe(sprintPath + "/code");
-  expect(current()).toEqual([sprintPath + "/board", sprintPath + "/board"]);
+  expect(current()).toEqual([sprintPath + "/board"]);
   sideLinks(block, ".in-sprint")[0].click();
   await settle();
-  expect(current()).toEqual([taskPath, taskPath]);
+  expect(current()).toEqual([taskPath]);
 });
 
 it("highlights the sprint on a dedicated sprint route instead of its project", async () => {

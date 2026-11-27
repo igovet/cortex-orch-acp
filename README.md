@@ -1178,6 +1178,10 @@ Cortex-owned roots, your project files, or Git history. See
 
 ## Cortex Workspace desktop (in development)
 
+Switch the sidebar between **Projects** and **Active work**. Active work puts
+**Needs you** first and marks tasks inside in-progress sprint trees instead of
+listing those tasks twice. See [Sidebar views](docs/cortex-workspace/SCREENS.md#sidebar-views).
+
 Local desktop [Code](docs/cortex-workspace/ide-and-git.md#code-editing-and-write-leases)
 opens read-only until you select **Edit**. Saves require a file lease and a
 matching disk revision. The lease coordinates with this project's structured

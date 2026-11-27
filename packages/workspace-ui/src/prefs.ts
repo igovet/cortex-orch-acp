@@ -26,6 +26,7 @@ const mediaQuery = (px: number) => typeof window.matchMedia === "function" ? win
  */
 export function createPanels() {
   const [sidebarHidden, setSidebarHidden] = persisted<boolean>("cw.ws.sidebarHidden", false, isBool);
+  const [sidebarView, setSidebarView] = persisted<"projects" | "active">("cw.ws.sidebarView", "projects", v => v === "projects" || v === "active");
   const [sidebarWidth, storeWidth] = persisted<number>("cw.ws.sidebarWidth", SIDEBAR_DEFAULT, v => typeof v === "number" && v >= SIDEBAR_MIN && v <= SIDEBAR_MAX);
   const [inspectorHidden, setInspectorHidden] = persisted<boolean>("cw.ws.inspectorHidden", false, isBool);
   const [terminalOpen, setTerminalOpen] = persisted<boolean>("cw.ws.terminalOpen", false, isBool);
@@ -59,7 +60,7 @@ export function createPanels() {
   query?.addEventListener?.("change", onWidth);
   onCleanup(() => query?.removeEventListener?.("change", onWidth));
   return {
-    sidebarHidden, sidebarWidth, inspectorHidden, overlayOpen, terminalOpen, expanded, pins, sort, setSort, lastMachine, setLastMachine, wide,
+    sidebarHidden, sidebarView, setSidebarView, sidebarWidth, inspectorHidden, overlayOpen, terminalOpen, expanded, pins, sort, setSort, lastMachine, setLastMachine, wide,
     notifications, setNotifications, autosave, setAutosave, showAllTools, setShowAllTools, voice, setVoice, advanced,
     planView, setPlanView, convHidden, setConvHidden, minimap, setMinimap, links, setLinks, graph,
     sideChat, setSideChat,

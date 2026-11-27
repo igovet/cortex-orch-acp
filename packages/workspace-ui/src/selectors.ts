@@ -216,7 +216,7 @@ export type TaskView = {
   column: ColumnId | "archive"; unknown: boolean; fact: Fact; at: number | null;
   target: string; workers: Worker[]; running: number;
   filesWait?: { text: string; link?: { taskId: string; title: string; before: string; after: string } };
-  automaticFact?: Fact; ownerDecision?: TaskDecision; ownerIntegration?: NonNullable<Sprint["automaticQueue"]>;
+  automaticFact?: Fact; liveDecision?: TaskDecision; ownerDecision?: TaskDecision; ownerIntegration?: NonNullable<Sprint["automaticQueue"]>;
 };
 export type ProjectSummary = {
   project: Project; machine: Machine; offline: boolean; views: TaskView[];
@@ -479,8 +479,9 @@ export function buildIndex(state: WorkspaceState, now: number, orders: ReadonlyM
     const queue = automaticQueueOf(sprint);
     const ownerIntegration = !unknown && phase !== "archive" && task.status === "ready_to_merge" && queue?.kind === "owner_integration" && queue.taskId === task.id ? queue : undefined;
     // Only a real pending question or permission is actionable, not a recovery's text or coarse native "waiting" phase.
-    const ownerDecision = sprint?.runMode === "automatic" && !ended && !unknown && phase !== "archive" && task.status !== "stopping"
+    const liveDecision = !ended && !unknown && phase !== "archive" && phase !== "closed_unverified" && task.status !== "stopping"
       ? sessions.get(task.id)?.decisions.find(d => isOpen(d) && !d.suspended && !d.unavailable) : undefined;
+    const ownerDecision = sprint?.runMode === "automatic" ? liveDecision : undefined;
     const automaticFact = !unknown && !ownerIntegration && !ownerDecision ? automaticStatusFact(task, sprint) : undefined;
     const acceptanceHold = automaticAcceptanceHold({ id: task.id, sprint, task, unknown });
     const column = phase === "archive" || phase === "closed_unverified" ? phase : ownerIntegration ? "merge" : ownerDecision || acceptanceHold ? "needs"
@@ -494,7 +495,7 @@ export function buildIndex(state: WorkspaceState, now: number, orders: ReadonlyM
       : replanStopping(task) ? { text: replanStopping(task)!.replace(/\..*$/, ""), tone: "st-warn", icon: "hourglass" }
       : { text: "Process state unknown", tone: "st-idle", icon: "help" };
     const seen = last.get(task.id);
-    return { id: task.id, task, project, machine, sprint, column, unknown, fact, filesWait, automaticFact, ownerDecision, ownerIntegration, at: task.doneAt ?? (seen ? Date.parse(seen) : task.lastConfirmedAt ?? null), target, workers: own, running };
+    return { id: task.id, task, project, machine, sprint, column, unknown, fact, filesWait, automaticFact, liveDecision, ownerDecision, ownerIntegration, at: task.doneAt ?? (seen ? Date.parse(seen) : task.lastConfirmedAt ?? null), target, workers: own, running };
   });
 
   // A sprint's planning task reads only on its sprint: no list, count, badge or search below sees it.
@@ -743,7 +744,7 @@ export function planningPlace(machine: string, sprint: Sprint, route: { tab?: st
     ? { name: "sprint" as const, machine, project: sprint.projectId, sprint: sprint.id, tab: "workers" as const, ...(route.worker ? { worker: route.worker } : {}) }
     : { name: "sprint" as const, machine, project: sprint.projectId, sprint: sprint.id, tab: "planning" as const };
 }
-type SideTask = { kind: "task"; view: TaskView; nested: boolean };
+type SideTask = { kind: "task"; view: TaskView; nested: boolean; needsYou?: boolean };
 type SideSprint = { kind: "sprint"; sprint: Sprint; started: number; total: number };
 export type SideRow = SideTask | SideSprint;
 const sideColumns = COLUMNS.filter(c => c.id === "work" || c.id === "review" || c.id === "merge");
@@ -793,6 +794,16 @@ export function sideRows(index: WorkspaceIndex, summary: ProjectSummary, keep?: 
 
 export type TopWorkGroup = { id: string; label: string; rows: (SideRow & { projectName: string })[] };
 
+/** Active work prioritizes actionable waits and unsuccessful ends, not all tasks in the board's Needs you column. */
+function needsYouInActiveWork(view: TaskView) {
+  const { task } = view;
+  if (view.unknown || view.column === "archive" || finishedColumn(view) || task.status === "stopping") return false;
+  if (view.liveDecision || task.status === "failed" || task.status === "cancelled") return true;
+  const hold = automaticQueueOf(view.sprint);
+  return (task.status === "paused" && !task.automaticContinuation?.pause)
+    || (hold?.kind === "continuation" && hold.taskId === view.id && hold.needsOwner);
+}
+
 /** Uncapped machine-wide status groups. Running and paused sprints have one tree each;
  *  their children are not repeated in the standalone status groups. With `keep`, a Finished group
  *  holds the finished tasks and sprints it keeps, each sprint with its kept tasks under it. */
@@ -803,23 +814,28 @@ export function topWorkRows(index: WorkspaceIndex, machine: string, keep?: SideK
     .map(sprint => ({ sprint, projectName: project.name })));
   const ids = new Set(sprints.map(({ sprint }) => sprint.id));
   const views = projects.flatMap(p => p.views);
-  const groups = sideColumns.map(c => ({ ...c, views: views.filter(v => v.column === c.id) }));
+  const needs = views.filter(needsYouInActiveWork);
+  const needsIds = new Set(needs.map(v => v.id));
+  const groups = sideColumns.map(c => ({ ...c, views: views.filter(v => v.column === c.id && !needsIds.has(v.id)) }));
   const finished = keep ? views.filter(v => finishedColumn(v) && keep.task(v)) : [];
   const done = keep ? projects.flatMap(({ project, sprints }) => sprints.filter(s => !ids.has(s.id) && keep.sprint(s)).map(sprint => ({ sprint, projectName: project.name }))) : [];
   // Every sprint with a tree here, in progress or finished, holds its tasks: none of them is listed again on its own.
   const parents = new Set([...ids, ...done.map(({ sprint }) => sprint.id)]);
   // A sprint in progress lists only the tasks that ask or work: its Done tasks are not rows of its tree, opened or not.
   // Only a finished sprint's tree holds its kept finished tasks.
-  const inProgress = ids;
-  const keptFinished = finished.filter(v => !v.sprint || !inProgress.has(v.sprint.id));
+  const keptFinished = finished.filter(v => !v.sprint || !ids.has(v.sprint.id));
+  const needsChildren = sprintChildren(needs, ids);
   const children = sprintChildren([...groups.flatMap(c => c.views), ...keptFinished], parents);
   const result: TopWorkGroup[] = groups.map(({ id, label, views }) => ({
     id, label, rows: views.filter(v => !v.sprint || !parents.has(v.sprint.id)).map(v => ({ ...sideTask(v), projectName: v.project.name })),
   }));
   const tree = (list: { sprint: Sprint; projectName: string }[]) => list.flatMap(({ sprint, projectName }) => [
     { ...sideSprint(index, sprint), projectName },
+    ...(needsChildren.get(sprint.id) ?? []).map(row => ({ ...row, needsYou: true, projectName })),
     ...(children.get(sprint.id) ?? []).map(row => ({ ...row, projectName })),
   ]);
+  result.unshift({ id: "needs", label: "Needs you", rows: needs.filter(v => !v.sprint || !ids.has(v.sprint.id))
+    .map(v => ({ ...sideTask(v), needsYou: true, projectName: v.project.name })) });
   result.push({ id: "sprints", label: "Sprints in progress", rows: tree(sprints) });
   result.push({ id: "finished", label: "Finished", rows: [
     ...keptFinished.filter(v => !v.sprint || !parents.has(v.sprint.id)).map(v => ({ ...sideTask(v), projectName: v.project.name })),

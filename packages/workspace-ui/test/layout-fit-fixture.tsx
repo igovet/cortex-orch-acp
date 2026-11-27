@@ -147,6 +147,7 @@ const extraTasks = (projectId: string) => Array.from({ length: 6 }, (_, i) => bo
 const tasksOf = (projectId?: string) => !projectId || projectId === "p" ? (query.has("sidebarRows") ? boardTasks.filter(t => t.taskId === "auto-cont" || t.taskId === "auto-files") : allTasks()) : extraTasks(projectId);
 if (scroll) localStorage.setItem("cw.ws.expanded", JSON.stringify(Object.fromEntries(["p", ...EXTRA].map(id => [id, true]))));
 if (query.has("sidebarRows")) localStorage.setItem("cw.ws.expanded", JSON.stringify({ p: true }));
+localStorage.setItem("cw.ws.sidebarView", JSON.stringify(query.has("sidebarActive") ? "active" : "projects"));
 const s = scriptedTransport({
   "service.capabilities": async () => { await startupGate(); return { methods: ["machine.call", "native.open_editor"], machine: true }; },
   "projects.list": () => [{ projectId: "p", displayName: "A project with a rather long display name", canonicalRoot: "/home/owner/projects/a-repository-with-a-long-name", activation: {} },

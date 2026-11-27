@@ -215,7 +215,7 @@ function SideRows(props: { rows: (SideRow & { projectName?: string })[]; machine
   return <Keyed each={props.rows} by={r => r.kind === "task" ? `t:${r.view.id}` : `s:${r.sprint.id}`}>{row => {
     const task = () => row() as Extract<SideRow, { kind: "task" }>;
     const sprint = () => row() as Extract<SideRow, { kind: "sprint" }>;
-    return row().kind === "task" ? <TaskRow view={task().view} nested={task().nested} projectName={row().projectName} />
+    return row().kind === "task" ? <TaskRow view={task().view} nested={task().nested} needsYou={task().needsYou} projectName={row().projectName} />
       : <SprintSideRow row={sprint()} machine={props.machine} projectName={row().projectName} members={members(sprint().sprint)} />;
   }}</Keyed>;
 }
@@ -245,14 +245,16 @@ function SprintSideRow(props: { row: Extract<SideRow, { kind: "sprint" }>; machi
   </A>;
 }
 
-function TaskRow(props: { view: TaskView; nested?: boolean; projectName?: string }) {
+function TaskRow(props: { view: TaskView; nested?: boolean; needsYou?: boolean; projectName?: string }) {
   const ws = useWs();
   const current = () => { const r = ws.router.route(); return r.name === "task" && r.machine === props.view.machine.id && r.task === props.view.id; };
-  const word = () => sideWord(props.view);
+  const word = () => props.needsYou ? "Needs you" : sideWord(props.view);
+  const attention = () => props.needsYou || awaitsOwner(props.view);
+  const icon = () => props.needsYou && props.view.liveDecision ? (props.view.liveDecision.kind === "permission" ? "shield" : "question") : rowIcon(props.view);
   const fresh = () => ws.unseen?.task(props.view) ?? false;
   const label = () => [taskTitle(props.view.task), props.projectName, word(), fresh() ? "new update" : ""].filter(Boolean).join(" — ");
   return <div class="task-row-actions" {...taskContextMenu(() => props.view.id)}><A class={`task-row${props.nested ? " in-sprint" : ""}${fresh() ? " unseen" : ""}`} aria-label={label()} to={{ name: "task", machine: props.view.machine.id, task: props.view.id }} aria-current={current() ? "page" : undefined}>
-    <I n={rowIcon(props.view)} s={14} class={awaitsOwner(props.view) ? "st-warn" : props.view.fact.tone} /><SideTitle title={taskTitle(props.view.task)} projectName={props.projectName} /><span class={`sig${awaitsOwner(props.view) ? " st-warn" : ""}`}>{word()}</span>
+    <I n={icon()} s={14} class={attention() ? "st-warn" : props.view.fact.tone} /><SideTitle title={taskTitle(props.view.task)} projectName={props.projectName} /><span class={`sig${attention() ? " st-warn" : ""}`}>{word()}</span>
     <Show when={fresh()}><span class="sb-new" aria-hidden="true"></span></Show>
   </A><TaskMenuButton view={props.view} /></div>;
 }
@@ -323,7 +325,8 @@ function Sidebar() {
     if (mode === "activity") return [...list].sort((a, b) => (b.at ?? -1) - (a.at ?? -1));
     return list;
   });
-  const work = createMemo(() => topWorkRows(index(), m(), ws.unseen?.keep));
+  const activeView = () => ws.panels.sidebarView() === "active";
+  const work = createMemo(() => activeView() ? topWorkRows(index(), m(), ws.unseen?.keep) : []);
   const firstLive = createMemo(() => projects().find(s => sideRows(index(), s, ws.unseen?.keep).length > 0)?.project.id);
   const pinned = createMemo(() => ws.panels.pins().flatMap(id => { const v = index().byId.get(id); return v && v.machine.id === m() ? [v] : []; }));
   const settled = createMemo(() => ws.store.mode !== "real" || unreachable(ws) || (ws.store.ready() && projectsOn(index(), m()).every(s => ws.store.projectSettled(s.project))));
@@ -341,15 +344,6 @@ function Sidebar() {
     <div class="sb-scroll">
       {/* Until every project's board and facts have been read, no part of the list shows: rows appearing project by project reshuffled. */}
       <Show when={settled()} fallback={<div class="ws-skel-pane" aria-busy="true"><Skeleton kind="list" label="Loading projects and tasks…" /></div>}>
-      <Show when={work().length}>
-        <section class="sb-work" aria-label="Active work">
-          <h2 class="sb-h">Active work</h2>
-          <Keyed each={work()} by={group => group.id}>{group => <>
-            <h3 class="sb-work-group">{group().label}</h3>
-            <SideRows rows={group().rows} machine={m()} />
-          </>}</Keyed>
-        </section>
-      </Show>
       <Show when={pinned().length > 0}>
         <div class="sb-h"><span>Pinned</span></div>
         <Keyed each={pinned()} by={v => v.id}>{v => {
@@ -360,9 +354,26 @@ function Sidebar() {
           </div>;
         }}</Keyed>
       </Show>
-      <div class="sb-h"><span>Projects</span><button data-tooltip="" class="ib" style={{ width: "22px", height: "22px" }} popovertarget="m-sort" aria-label="Sort projects"><I n="chevrons-v" s={14} /></button></div>
-      <Show when={projects().length > 0} fallback={<p class="cap faint ws-side-empty">{ws.store.ready() ? "No projects on this machine." : "Not loaded yet."}</p>}>
-        <Keyed each={projects()} by={s => s.project.id}>{(s, i) => <ProjectRow summary={s()} n={i()} openByDefault={s().project.id === firstLive()} />}</Keyed>
+      <div class="sb-h sb-view-head">
+        <div class="seg" role="group" aria-label="Sidebar view">
+          <button type="button" aria-pressed={!activeView()} onClick={() => ws.panels.setSidebarView("projects")}>Projects</button>
+          <button type="button" aria-pressed={activeView()} onClick={() => ws.panels.setSidebarView("active")}>Active work</button>
+        </div>
+        <Show when={!activeView()}><button data-tooltip="" class="ib" style={{ width: "22px", height: "22px" }} popovertarget="m-sort" aria-label="Sort projects"><I n="chevrons-v" s={14} /></button></Show>
+      </div>
+      <Show when={!activeView()} fallback={
+        <section class="sb-work" aria-label="Active work">
+          <Show when={work().length} fallback={<p class="cap faint ws-side-empty">No active work on this machine.</p>}>
+            <Keyed each={work()} by={group => group.id}>{group => <>
+              <h2 class="sb-work-group">{group().label}</h2>
+              <SideRows rows={group().rows} machine={m()} />
+            </>}</Keyed>
+          </Show>
+        </section>
+      }>
+        <Show when={projects().length > 0} fallback={<p class="cap faint ws-side-empty">{ws.store.ready() ? "No projects on this machine." : "Not loaded yet."}</p>}>
+          <Keyed each={projects()} by={s => s.project.id}>{(s, i) => <ProjectRow summary={s()} n={i()} openByDefault={s().project.id === firstLive()} />}</Keyed>
+        </Show>
       </Show>
       </Show>
     </div>

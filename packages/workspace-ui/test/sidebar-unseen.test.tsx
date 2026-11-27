@@ -34,7 +34,10 @@ async function mount(state: WorkspaceState, path = HOME) {
   await settle(); s.emit(projection(String(version++), state)); await settle();
   return { push: async (next: WorkspaceState) => { s.emit(projection(String(version++), next)); await settle(); } };
 }
-/** Every sidebar row whose title is `title`: a task can be in Active work and in its project at once. */
+/** Every visible sidebar row whose title is `title`. */
+const pickView = async (name: string) => {
+  [...document.querySelectorAll<HTMLButtonElement>(".sb-view-head .seg button")].find(b => b.textContent === name)!.click(); await settle();
+};
 const rows = (title: string, within = ".sidebar") => [...document.querySelectorAll<HTMLElement>(`${within} .task-row`)].filter(r => r.querySelector(".trunc")?.textContent === title);
 const fresh = (title: string) => rows(title).some(r => r.classList.contains("unseen"));
 const open = async (title: string) => { rows(title)[0].click(); await settle(); };
@@ -110,6 +113,7 @@ describe("sidebar unseen changes", () => {
     expect(rows("Alpha").length).toBeGreaterThan(0);
     expect(fresh("Alpha")).toBe(true);
     expect(rows("Alpha")[0].querySelector(".sig")?.textContent).toBe("Done");
+    await pickView("Active work");
     expect(document.querySelector(".sb-work")?.textContent).toContain("Finished");
     await open("Alpha");
     expect(rows("Alpha").length).toBeGreaterThan(0);
@@ -122,6 +126,7 @@ describe("sidebar unseen changes", () => {
     const app = await mount(world([task("t", "Alpha")]));
     await app.push(world([task("t", "Alpha", { status: "done", closedAs: "as_is", doneAt: 1_700_000_000_000 })]));
     expect(fresh("Alpha")).toBe(true);
+    await pickView("Active work");
     expect(rows("Alpha", ".sb-work")).toHaveLength(1);
     await open("Alpha"); await goHome();
     expect(rows("Alpha")).toHaveLength(0);
@@ -166,6 +171,7 @@ describe("sidebar unseen changes", () => {
     const app = await mount(world([task("w", "Wren"), task("x", "Lark")], [hybrid()]));
     await app.push(world([task("w", "Wren", { status: "ready_to_merge" }), task("x", "Lark", { status: "done", doneAt: 1 })], [hybrid({ queueState: "complete" })]));
     expect(fresh("Sprint: Launch")).toBe(true);
+    await pickView("Active work");
     expect(rows("Sprint: Launch", ".sb-work")).toHaveLength(1);
     expect(rows("Wren", ".sb-work")).toHaveLength(1);
     expect(rows("Lark", ".sb-work")).toHaveLength(1);
@@ -225,7 +231,9 @@ describe("sidebar unseen changes", () => {
     expect(fresh("Alpha")).toBe(false);
     expect(fresh("Beta")).toBe(true);
     expect(fresh("Gamma")).toBe(true);
+    await pickView("Active work");
     expect(rows("Gamma", ".sb-work")).toHaveLength(1);
+    await pickView("Projects");
     expect(fresh("Delta")).toBe(true);
     expect(fresh("Quiet")).toBe(false);
     await open("Beta"); await goHome();

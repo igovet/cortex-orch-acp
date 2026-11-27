@@ -1,6 +1,8 @@
 # Security policy
 
-Workspace task menus and the command palette expose the same existing controls. Opening them does not grant permission to run a command or bypass service checks. Actions that require confirmation still ask before dispatch.
+Workspace task menus and the command palette expose the same existing controls. Opening them does not grant permission to run a command or bypass service checks. Actions that require confirmation still ask before dispatch. The Active work sidebar lists
+open, available decisions without granting or changing any permission; opening a row
+does not answer a question or approve a request.
 
 Coordinator effort defaults are resolved against the levels advertised for the selected route. Removing the legacy effort sentinel does not change model eligibility, ceilings or provider authorization; explicitly unsupported concrete choices are still refused.
 

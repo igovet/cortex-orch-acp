@@ -699,10 +699,10 @@ input, textarea, [contenteditable="true"] { -webkit-user-select: text; user-sele
 .proj, .task-row { padding-right: 8px; }
 .task-row > .trunc, .sb-row-title { flex: 1 1 0; min-width: 0; }
 .task-row.in-sprint { padding-inline-start: 30px; }
-.sb-work { border-bottom: 1px solid var(--line); padding-bottom: 6px; }
-.sb-work h2, .sb-work h3 { margin: 0; }
-.sb-work h2 { color: var(--fg); font-weight: 500; }
-.sb-work-group { padding: 4px 8px; color: var(--fg-2); font-size: var(--t-cap); font-weight: 400; }
+.sb-view-head { height: auto; min-height: 36px; padding-bottom: 4px; gap: 8px; }
+.sb-view-head .seg { white-space: nowrap; }
+.sb-view-head .seg > [aria-pressed="true"] { background: var(--bg-canvas); color: var(--fg); box-shadow: 0 0 0 1px var(--line-strong); }
+.sb-work-group { margin: 0; padding: 4px 8px; color: var(--fg-2); font-size: var(--t-cap); font-weight: 400; }
 .sb-work .task-row { min-height: 40px; height: auto; padding-block: 4px; }
 .sb-row-title { display: grid; line-height: 16px; }
 .sb-row-project { color: var(--fg-2); font-size: var(--t-cap); }

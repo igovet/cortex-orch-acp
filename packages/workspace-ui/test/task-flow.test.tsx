@@ -531,6 +531,7 @@ describe("what needs the owner", () => {
     expect(card("w").classList.contains("need-you")).toBe(false);
     expect(card("d").classList.contains("need-you")).toBe(false);
     expect(all(".sidebar .tasks .task-row .sig.st-warn").map(x => x.textContent).sort()).toEqual(["Needs you", "Review"]);
+    $(".sb-view-head .seg button:last-child")!.click(); await settled();
     expect(all(".sb-work .task-row .sig.st-warn").map(x => x.textContent)).toEqual(["Review"]);
     all('[role="tab"]').find(t => t.textContent === "List")!.click(); await settled();
     expect(all(".lrow.need-you").length).toBe(2);
