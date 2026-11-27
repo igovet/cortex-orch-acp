@@ -217,6 +217,8 @@ when the service clears the diagnostic, and the warning strip disappears on reco
 
 A task whose sprint is running or paused appears only under its sprint in **Sprints in progress**, with a **Needs you** label if it needs attention. A standalone task or a task whose sprint has no in-progress tree appears once in **Needs you**, with its project name, and is not repeated in another status group. The remaining groups keep their order: **Working**, **Review**, **Ready to merge**, **Sprints in progress**, and **Finished** for completions not yet opened. Empty groups are omitted; when none remain the view says **No active work on this machine.**
 
+When a sprint is created, a member never appears as a standalone row while its sprint is being read. Both sidebar views keep their last confirmed rows until new tasks can be placed with the saved sprint membership. A standalone task is shown in its normal group on its first confirmed update; it does not wait for conversation or worker details.
+
 ### Responsive layout
 
 | Window | Default composition | Detail |

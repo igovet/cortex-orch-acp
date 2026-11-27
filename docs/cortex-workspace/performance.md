@@ -51,8 +51,10 @@ content rendering and cold startup were not timed. Native task-page byte budgeti
 is additive, avoiding repeated serialization of each growing page prefix.
 These direct reads did not measure the gap between a commit and its delta. See the
 [service broadcast diagnostic](#native-delta-broadcast-diagnostic) for that separate
-measurement. Delta handling avoids a task-list or machine-facts refetch but
-still rereads related bounded history/decision/result pages for changed tasks.
+measurement. A delta for a known task avoids a task-list or machine-facts
+refetch but still rereads related bounded history/decision/result pages. A delta
+that introduces a task uses the paired native and product board reads to place it
+with its saved membership before publication.
 No installed desktop, rendered GUI, paid live run or zero-Python qualification
 is established by these measurements.
 

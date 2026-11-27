@@ -1,3 +1,4 @@
+import { batch } from "solid-js";
 import { wireAttachments as checkedAttachments } from "../attachments";
 import { capabilities as localCapabilities, decodeResponse, negotiate, PROTOCOL, validate } from "@cortex/workspace-contract";
 import type { Answer as WireAnswer, Decision as WireDecision, Receipt as WireReceipt, Result as WireResult, Task as WireTask, HistoryRow, WireTypes } from "@cortex/workspace-contract";
@@ -548,6 +549,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     const id = project.projectId;
     if (serviceMethods.includes("native.board")) await presentations.get(id);
     const readOrder = ++factsBegun;
+    const before = boardTasks.get(id);
     const started = [...tasks].filter(([, t]) => t.projectId === id && t.executionId).map(([taskId]) => taskId);
     const cachedRepo = repoReads.get(id);
     const scope = project.activated === false ? [] : workerScope(id, started);
@@ -563,10 +565,12 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     // About the same result that is no news: the last settled facts stay until a settled answer or another version comes.
     const product = keepSettled(bundle.product, sent.get(id));
     factsReadAt.set(id, Date.now());
-    // Polls and explicit facts reads must obey the same membership fence as the first board.
+    const issue = await issueOf(project);
+    // A facts read started before a newly presented task cannot use the absence of a link to reclassify it.
+    // The newer board already has the saved facts it needs; the next enrichment can start from that board.
     if (serviceMethods.includes("native.board")) {
       const confirmed = boardTasks.get(id);
-      if (!confirmed) throw new BoardPending();
+      if (!confirmed || (confirmed !== before && [...confirmed].some(taskId => !before?.has(taskId)))) throw new BoardPending();
       // A member the service already deleted is never on the board again; only the members that still exist must be.
       if (product.sprints.some(s => liveMembers(product.tasks, s).some(taskId => !confirmed.has(taskId)))) {
         invalidated.add(id);
@@ -596,7 +600,6 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     };
     const reviewed = (taskId: string) => product.tasks[taskId]?.status !== "done" || (product.tasks[taskId]?.closedAs === "as_is" && (!!repo?.taskDiffs?.[taskId] || recorded(taskId).size > 0));
     const reviews: TaskChanges[] = started.filter(reviewed).map(taskId => ({ taskId, sha: "", unavailableReason: repo?.taskDiffs?.[taskId]?.reason ?? (!repo || repository.error ? (repository.error && repository.reason) || "Repository details are updating or unavailable. Refresh Code or inspect Git before reviewing changes." : undefined), files: repo?.taskDiffs?.[taskId]?.files ?? (product.tasks[taskId]?.status === "done" ? keptFiles(taskId) : changesOf(repo, taskId, product.tasks[taskId])), scopes: [], comments: product.comments?.[taskId] ?? [] }));
-    const issue = await issueOf(project);
     // After this read is published: a settling read of the same project follows it (`settleFacts`).
     if (unsettledRead) queueMicrotask(() => settleFacts(project));
     return { projectId: id, hasGit: product.hasGit, issue, openBranch: repo?.openBranch ?? "", defaultBranch: repo?.defaultBranch ?? "", repo, workers, reviews, overlays: product.tasks, sprints: product.sprints.map(s => withPlanning(presentSprint(product.tasks, s))), messages: messages.filter(m => tasks.get(m.taskId)?.projectId === id),
@@ -1000,10 +1003,18 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     });
     historyWork.set(project.projectId, work);
   }
+  // History and detail updates can take their task rows from a newer native snapshot while its saved board is pending.
+  function publishEnrichment(update: ProjectionUpdate) {
+    if (machineOn && serviceMethods.includes("native.board") && update.scope === "project") {
+      const confirmed = boardTasks.get(update.slice.project.id);
+      if (update.slice.tasks.some(t => !confirmed?.has(t.id))) return;
+    }
+    for (const notify of observers) notify({ kind: "enrichment", update });
+  }
   /** What the conversation on screen now holds, published as an update of its project. */
   async function publishHistory(project: ProjectLocator) {
     const update = await snapshotOf(project, new Set()).catch(() => null);
-    if (update && observers.size) for (const notify of observers) notify({kind:"enrichment", update});
+    if (update) publishEnrichment(update);
   }
   /** One earlier read per conversation. Keep the starting cursor until the whole prepend can be published. */
   const earlierReads = new Map<string, { state: "loading" } | { state: "failed"; reason: string }>();
@@ -1227,7 +1238,8 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
         readFailures.delete(`${project.projectId}:${scope}`);
         clearTimeout(projectRetries.get(`${project.projectId}:${scope}`));
         projectRetries.delete(`${project.projectId}:${scope}`);
-        if (deferred) { const update = publish(value); for (const notify of observers) notify(update); }
+        // A late board's publisher sends its facts, then its projection. The sidebar must see both at once.
+        if (deferred) batch(() => { const update = publish(value); for (const notify of observers) notify(update); });
         else values.push(value);
       } catch (error) {
         const key = `${project.projectId}:${scope}`;
@@ -1265,11 +1277,11 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     void next.finally(() => { if (factReads.get(key) === next) factReads.delete(key); }).catch(() => {});
     return next;
   }
-  /** `read`: the product board, asked for beside the native board read; it is checked against the board only once both are in. */
-  async function boardFacts(project: ProjectLocator, read = machine<Product>("product.board", project.projectId)): Promise<ProjectFacts> {
-    const product = await read;
-    rememberSprints(project.projectId, product);
+  /** Read membership after the native board. An earlier product read can omit newly committed members. */
+  async function boardFacts(project: ProjectLocator): Promise<ProjectFacts> {
     const snapshot = nativeSnapshots.get(project.projectId);
+    const product = await machine<Product>("product.board", project.projectId);
+    rememberSprints(project.projectId, product);
     // A member the service already deleted (a sprint deletion that stopped part-way) is never on the board again.
     const unread = project.activated === false ? null : unreadMembers(product.tasks, product.sprints, id => !!snapshot?.items.some(t => t.taskId === id));
     if (unread) throw new Error(`Sprint membership could not be read completely. ${unread}`);
@@ -1298,6 +1310,8 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
       readOrder:previous?.readOrder ?? 0};
   }
   function queueEnrichment(project: ProjectLocator) {
+    const base = nativeSnapshots.get(project.projectId), confirmed = boardTasks.get(project.projectId);
+    if (machineOn && base?.items.some(t => !confirmed?.has(t.taskId))) return;
     queueHistories(project);
     // The questions of the task on screen are read first, on their own; the board's own read of every task's follows them.
     for (const taskId of shownTasks.get(project.projectId)?.keys() ?? []) readShownDecisions(project, taskId);
@@ -1305,7 +1319,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     // already in flight does not hold back the facts of a task whose state just moved.
     if (machineOn) streamFacts(project);
     if (enrichments.has(project.projectId)) return;
-    const epoch = commandEpoch, base = nativeSnapshots.get(project.projectId);
+    const epoch = commandEpoch;
     // A running task moves the watermark continuously. Requests made while this read
     // was in flight were not queued, so an obsolete read rereads the newer snapshot.
     let superseded = false;
@@ -1317,7 +1331,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
       if (!base || !current || current.generation !== base.generation || !observers.size || epoch !== commandEpoch) return;
       const update = await snapshotOf(project, new Set(current.items.map(t => t.taskId))).catch(() => null);
       if (!update || !observers.size || epoch !== commandEpoch || nativeSnapshots.get(project.projectId)?.generation !== base.generation) return;
-      for (const notify of observers) notify({kind:"enrichment",update});
+      publishEnrichment(update);
     };
     // Run after the coherent board has had an opportunity to paint. Detail reads
     // have their own lifetime and cannot hold sprint membership or task placement.
@@ -1326,7 +1340,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
       const current = nativeSnapshots.get(project.projectId);
       if (!observers.size || epoch !== commandEpoch) return;
       if (current?.generation !== base?.generation || current?.highWatermark !== base?.highWatermark) { superseded = true; return publishCurrent(); }
-      for (const notify of observers) notify({kind:"enrichment",update});
+      publishEnrichment(update);
       readFailures.delete(project.projectId+":details");
       projectState(project,"details",null);
     }).catch(error => {
@@ -2160,13 +2174,10 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
       const epoch = commandEpoch;
       return projectReads(projects.filter(wanted), "snapshot", p => {
         const work = (async () => {
-        // The product board and the native board are read at once; membership is checked once both are in (`boardFacts`).
-        const board = machineOn && serviceMethods.includes("native.board") ? machine<Product>("product.board", p.projectId) : undefined;
-        void board?.catch(() => {});
         const update = await snapshotOf(p);
-        // Do not expose planning/purged rows without their owner overlays.
+        // Do not expose newly visible tasks with product facts read before those tasks were observed.
         if (machineOn) {
-          const facts = board ? await boardFacts(p, board) : await factsRead(p, false, showsGit(p.projectId));
+          const facts = serviceMethods.includes("native.board") ? await boardFacts(p) : await factsRead(p, false, showsGit(p.projectId));
           if (epoch === commandEpoch) presentationFacts.set(p.projectId, facts);
         }
         if (serviceMethods.includes("native.board")) {
@@ -2547,6 +2558,14 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
             const changed = new Set(checked.batch.changes.filter(c => c.kind === "task").map(c => c.id));
             for (const id of changed) historyChanged(id);
             if (!changed.size) return;
+            const confirmed = boardTasks.get(project.projectId);
+            if (machineOn && serviceMethods.includes("native.board") && next.items.some(t => !confirmed?.has(t.taskId))) {
+              // A stream insertion has no saved membership. Present the newly seen rows via the same paired
+              // board read as a refresh, without waiting for the independent conversation or worker readers.
+              invalidated.add(project.projectId);
+              if (active) listener({ kind: "refresh", projectId: project.projectId });
+              return;
+            }
             const update = await snapshotOf(project, changed);
             if (active && (nativeEpoch.get(project.projectId) ?? 0) === epoch) {
               if (update.scope === "project") boardTasks.set(project.projectId,new Set(update.slice.tasks.map(t => t.id)));

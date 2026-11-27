@@ -89,8 +89,13 @@ Storage denial or quota exhaustion falls back to live reads. A fresh profile wit
 no prior snapshot must obtain real data; no rows or success states are invented.
 
 With `native.board`, one bounded `tasks.board` request reads up to 1,000 tasks in
-one SQLite snapshot (768 KiB reply ceiling). Saved owner overlays and sprint
-membership use the native `product.board` reader. Conversations, decisions,
+one SQLite snapshot (768 KiB reply ceiling). The client then reads saved owner
+overlays and sprint membership with `product.board` and publishes them with the
+task rows, even if the board answers after the presentation deadline. A native
+delta that introduces a task triggers this paired read; a delta that only
+changes known rows can still apply directly. Older background reads cannot
+introduce or reclassify a newly observed row ahead of its paired board.
+Conversations, decisions,
 results, workers and repository details enrich that board separately and cannot
 hold task placement behind full conversation replay. Generation/watermark and
 owner-command fences discard obsolete enrichment. A details read overtaken by
