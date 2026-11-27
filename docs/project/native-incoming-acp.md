@@ -1465,6 +1465,41 @@ pending/unknown effects never dispatch again. Channel revocation stops the proxy
 The configured environment stays in memory; private call receipts can contain tool
 results, but public history does not expose those bodies.
 
+## Workspace conversation order
+
+For a bound Workspace execution, `history.page` and `history.earlier` return the
+session's display rows with their existing decimal-string `sequence` and stable
+`historyId`. Decision cards from `decisions.list` and `decisions.get` have
+`conversationSequence` on that same scale. A card belongs **after** the row at
+an equal position and **before** the next greater position. Position `0` means
+before the first row. Compare positions numerically without losing integer
+precision; break ties between rows by `historyId` and between cards by
+`conversationTieBreaker` in ascending ordinal string order. Use the existing
+identities for rendering and deduplication. For grouped history, use its first
+visible source row for placement.
+
+The transaction that records a native question or permission opening captures
+the last retained display position. Consecutive openings at one position are
+ordered by their opening events, and members of one question batch by form order.
+Answers and withdrawals update their cards without giving them new positions.
+Older decisions without an opening anchor are placed using the display rows'
+retained timestamps as best-effort evidence; no exact historical interleaving
+can be reconstructed when those timestamps are ambiguous or missing.
+
+Each history page, including a tail or an earlier page, carries
+`decisionRevision` for the cards observed in its own read transaction. A
+`decisions.list` page carries the revision of its **complete** decision set,
+even for an empty page. Within one project and execution, publish a history
+and decision update together only when the revision on the history page matches
+the revision on every decision page used. The token is opaque: it changes when
+a card's display or actionable answer preconditions change, not just when
+text streams into history. If a decision cursor becomes stale, restart the
+decision read; do not merge partial sets. The token does not bind history rows
+to one common page boundary: use the existing history cursors and row identities
+to page or extend the loaded range. All new fields are additive in Workspace wire 1.12. An older peer or a
+history without a verified execution binding may omit the revision; absence
+does not establish agreement.
+
 ## Attachment retention
 
 Bodies are stored in private task source-block files, not SQLite or base64 prose.

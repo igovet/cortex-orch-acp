@@ -1,5 +1,7 @@
 # Security policy
 
+Use the [current ACP boundary](#current-acp-boundary-106) and [Workspace service boundary](#cortex-workspace-local-service-in-development) for the Rust product. The notes before the current ACP boundary include pre-cutover observations. Descriptions of a retained provider, legacy launcher or pending Python-to-Rust cutover apply only to that earlier implementation. The former runtime was removed on 2026-11-16.
+
 Workspace task menus and the command palette expose the same existing controls. Opening them does not grant permission to run a command or bypass service checks. Actions that require confirmation still ask before dispatch. The Active work sidebar lists
 open, available decisions without granting or changing any permission; opening a row
 does not answer a question or approve a request.
@@ -39,6 +41,8 @@ are not requeued, and a recorded removal is reported without deleting again.
 
 Ordinary Workspace Git Commit does not rerun or replace verification. For an accepted native result in the project folder, the service can retain the original result identity only when the commit is a direct child on the accepted branch, its full Git tree matches the accepted deliverable paths, bytes and Git file modes, and the resulting index and checkout are still current. The proof compares raw file bytes rather than relying on Git status or running filters. Incomplete observations, changed files and every unproven checkout keep the existing stale-result checks. Creating a pull request still needs owner confirmation and a separate push. Commit and squash generation sends bounded Git diffs and file lists, and Push generation sends bounded outgoing commit prose and aggregate change counts, to the configured provider. Git drafts do not send task prose. Owner-entered text is not translated, and the confirmation boundary is unchanged.
 
+Workspace acceptance requires a complete source witness and revalidates native result evidence after collecting it. A bounded retry uses the same observation rules. A failed sandboxed Git listing can use the bounded filesystem scan. If that scan fails, only the reason codes are retained and the queue waits for a successful observation.
+
 The extracted Workspace Dev `smoke` and `drive` launchers check only the active GitHub CLI account on `github.com`, under a timeout. They retain the exit code, not authentication output. Broader host diagnostics, including other provider, Docker and sudo checks, run only when `probe` is explicitly invoked.
 
 A skipped check in Workspace result facts records its reason in `detail`, including when paid qualification was not requested. The row is not execution evidence and grants no permission to rerun a prohibited command.
@@ -46,6 +50,8 @@ A skipped check in Workspace result facts records its reason in `detail`, includ
 Automatic prefetch of earlier Workspace conversation uses the same authorized history read as **Show
 earlier**. The task, session and page-size cursor bindings, service display filters and remote
 operation allowlist are unchanged. Paging does not send messages or start an engine.
+The conversation's decision revision links two authorized display projections;
+neither it nor a card's ordering keys can answer a question or grant permission.
 
 Coordinator language reminders are prompt guidance, not output filtering or authorization. They do not change who may ask or answer a decision or how the runtime validates an answer.
 
@@ -96,6 +102,12 @@ which never delivers the image, grants none. Creation requires the absent-conten
 precondition. Exact edits may use a current partial text read but reject missing
 or ambiguous anchors, including overlapping Unicode matches, atomically.
 Actual private-path, role, channel and write-denial decisions remain final.
+
+Source-backed fact memory stores typed observations, source identities, code
+paths and SHA-256 values from authenticated receipts. It excludes private and
+credential paths, report and file contents, command output and free-form
+failure details. Brief selection is scoped and rechecks the current checkout
+through no-follow, bounded file reads. Fact memory carries no authority.
 
 Native incoming ACP now persists client-owned Development/Guarded/Auto access
 separately from display history. Worker engine modes must be actually offered
@@ -515,8 +527,7 @@ no roots/modes/ignore files are repaired. Post-rename durability errors remain
 This is cooperative same-user arbitration, not hostile-code isolation or account
 validation, and it creates no scheduler/store owner.
 
-The additive `cortex-core` Rust library is not yet the active orchestration
-runtime. Its publication API requires transport-verified task/thread identity;
+The Rust `cortex-core` library owns the orchestration state and storage. Its publication API requires transport-verified task/thread identity;
 public in-process Rust methods are not authentication. Pipeline drafts have a
 separate runtime-only entry point. Private report/draft files, SHA-256 checks,
 request receipts and persisted publication intents coordinate SQLite commits
@@ -525,9 +536,7 @@ requires stopped access, explicit confirmation, a private verified backup and
 exclusive cooperative locks, including a fence against live Rust connections.
 These locks do not contain arbitrary same-user code or uncooperative legacy
 writers. Inspection does not reconcile, migrate, checkpoint or create files.
-The existing Python runtime and its safety boundaries remain in force until
-service integration, independent review and release qualification establish a
-cutover. See [Rust Core storage](docs/project/storage.md#rust-core-storage-domain).
+See [Rust Core storage](docs/project/storage.md#rust-core-storage-domain).
 
 Workspace native desktop reads use a service-owned, project/channel-scoped Rust
 Core reader with SQLite read-only access to committed WAL. It does not initialize,
@@ -545,6 +554,9 @@ when its write path recorded row changes, not from a SQLite commit hook. A wake
 is not proof of a change in the outbox. Each subscribed project still reads the
 committed WAL at its durable cursor; another process cannot send this wake and
 its committed changes are picked up by periodic read-only checks.
+Deferred display fragments use a 40 ms batching window while the stream stays
+active. The first fragment after idle is due immediately. Display-only batches
+commit at SQLite NORMAL, while authoritative mutations commit at FULL.
 A confirmed draft rename returns its committed version for the next Start;
 older in-flight reads cannot replace that command version. This does not bypass
 server-side version checks, retry a refused Start or authorize a started-task edit.
@@ -577,8 +589,9 @@ return the retained receipt without dispatch; payload changes conflict.
 The live steering turn that handles a Send now message during execution has only
 read tools and the two scoped steering tools; steering text never grants an
 assignment, route, approval or write reservation, `steer_plan` is validated against
-the retained plan, role/scope policy and `deny-write` rules, and targeted guidance
-reaches only an exact live attempt. A live delivery is confirmed only for the
+the retained plan digest, full dependency graph, role/scope policy and `deny-write`
+rules, while previously claimed nodes, results and review and verification
+obligations stay binding. Targeted guidance reaches only an exact live attempt. A live delivery is confirmed only for the
 exact handoff's normal turn end and a committed nonblank owner transcript row.
 On reply expiry the service revokes that channel before waiting for shutdown;
 capacity is released only after process exit is observed.
@@ -668,6 +681,12 @@ failed command retained as a completion obligation. An omitted command is
 refused, and only a later exact complete passing receipt can close it. Repair
 continuation does not release unknown capacity, waive review or verification, or
 convert incomplete evidence into success.
+
+Duration measurements rank dependency-ready work within its task. Capacity at
+claim and reservation stays within the runtime's four-worker ceiling. Owner
+configuration and the selected connection's observed quota can lower that
+capacity. Scheduler decisions leave engine authorization with the routing policy
+and retain the existing scope and review fences.
 
 Two waits keep a worker from failing, and neither widens authority. A claimed
 worker whose engine connection has no free slot waits locally
@@ -1331,6 +1350,8 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.6)
 
+Execution mode and review risk change runtime strategy, review scope and cycle budgets. They grant no additional access or acceptance authority. Fast retains the existing independent-review gate for changed work. The runtime checks review evidence and verification separately. See [execution modes and review risk](docs/features/task-lifecycle/index.md#execution-modes-and-review-risk).
+
 The additive `cortex-acp` Rust stdio binary uses the service's native host, not a
 second orchestration implementation. Core acquires the project/channel scheduler
 and owner fences before writable initialization; a busy owner refuses with
@@ -1358,10 +1379,7 @@ records the staged Rust entry. Whoever can write that checkout's build directory
 replace the launched binary: this is a same-user boundary.
 Zed writes retain explicit settings-path/consent/replacement checks; Paseo retains
 its private profile-local launch record and load shim. An unbuilt default and
-invalid explicit binaries refuse and do not fall back to Python. The public runtime-root override is trusted host configuration,
-not a permission grant. Rust ordinary startup refuses pinned-contract/Python-floor
-mismatches before configuration/protocol output, observing only the local Python
-version. First-run seeding covers absent public routing/default/MCP files and an
+invalid explicit binaries refuse. The public runtime-root override is trusted host configuration. Startup refuses a mismatched pinned portable contract version before serving ACP. See the [startup check](crates/cortex-acp/src/startup.rs). First-run seeding covers absent public routing/default/MCP files and an
 absent default profile. Approved-adapter following only advances existing
 connections to a newer, exactly registered Cortex-owned or verified bundled adapter. It never
 downgrades or executes an adapter. Under `connections.lock` it refuses a changed
@@ -2221,15 +2239,7 @@ Markdown (optional `report_title`). When a draft was published through
 any other identifier-shaped value is refused before anything is published, and a
 unique own-report suggestion is only a
 correction hint and does not bind a report. Check blockers and command evidence
-are distinct. Rejected submissions retain only a safe error code and bounded
-field-path diagnostics in observability events; rejected values and report bodies
-are not retained there. Submission rejections contribute to the
-`schema_validation_errors` diagnostic alongside argument-validation failures. The loop and write measurement records are metadata only: `project_read` rows keep the path, kind and file digest; gateway and external refusals keep the operation or server, tool and error code; write rows keep byte counts. External calls record an unkeyed SHA-256 of their arguments for repeat detection, which is not redaction. External reply content (`EXTERNAL_TOOL_RESULT`) and worker-activity raw fields remain content-bearing, as documented in [observability](docs/features/observability/index.md#4-redaction-observabilityredact).
-Aggregate decisions read metadata only and retain the guarded checkpointed-store
-boundary. Missing or ambiguous identities, phase boundaries and native-tool
-classification are unavailable, not inferred success; ACP gateway echoes are not
-native command receipts. These measurements do not relax authorization, independent
-review or final verification.
+are distinct. External MCP reply records remain content-bearing. See [observability](docs/features/observability/index.md#redaction) and the [external MCP broker](crates/cortex-core/src/external.rs).
 A well-shaped `tool_call_ref` alone never verifies a check.
 Copy the exact reference from the completed command response; do not infer its
 prefix. The gateway rejects unknown fields such as `artifacts` in `result_submit`
@@ -2637,7 +2647,9 @@ The Cortex Workspace desktop slice has a user-level machine service that owns th
 - Retention uses the machine wall clock. Deterministic tests inject a callable into maintenance only; there is no wire field, environment override or packaged fixture for advancing it. The host clock and product timestamps are not rewritten.
 - Pre-save MCP discovery is an explicit owner action, not a model tool. It uses the existing gateway sandbox with an empty project and the owner's draft read/write/network grants. It sends initialize and paginated tools/list only, never tools/call; a failed sandbox is not retried outside containment. The listing deadline is 15 seconds, with bounded frames/pages/tools, process-group termination and private runtime-directory cleanup. Stored environment secrets are resolved internally and never returned; stderr and exception messages are discarded. Tool descriptions are untrusted, bounded and redacted. Discovery neither saves nor widens tool access; the editable matrix retains configured grants.
 - An engine session that fails to start keeps secret-free start diagnostics. The engine host retains the
-  last 8 KiB of the engine process's stderr in memory (every byte is counted), its exit status and why the
+  static field and reason for an invalid pre-spawn configuration without recording the supplied values.
+  Confirmed invalid launches wait on infrastructure backoff without escalating the model route.
+  For a spawned process, the host retains the last 8 KiB of stderr in memory (every byte is counted), its exit status and why the
   ACP transport closed (for example `eof`, `update_for_unknown_session`, `invalid_frame`,
   `authority_refused`). The failure event (`NATIVE_SESSION_START_RETRIED` or
   `NATIVE_SESSION_START_FAILED`) records the exit status, close reason and stderr size; the tail is
@@ -2749,7 +2761,7 @@ Remote access is built and checked only by no-paid automated tests (loopback end
 - **Device registry and failure behavior.** Allow stores the device in the registry file, and the phone is told `allowed` only after the save succeeded. If the save fails, nothing is added in memory, the owner's decision returns the error (`remote_state_unavailable`), the phone is told `cancelled` and the device gains no RPC access. Before the device is written to the registry, the host records a private grant-intent file (`remote-grant.json`, 0600) naming the provisional device, and removes it once the registry save is confirmed. If the save is uncertain (for example the rename or the directory sync fails after the new registry may already be on disk), the phone is told `cancelled`; on the next start the host removes that provisional device from the registry before binding any endpoint. If that rollback also fails, remote access stays off, with no endpoint bound, until storage is repaired. A decision after the offer expired grants nothing. A registry or key file that cannot be parsed (damaged JSON, wrong key length) is reported as damaged (`remote_state_corrupt`), not as a permissions problem: remote access stays off with the reason "Remote access could not start: its saved state is damaged. It stays off until the file is fixed.", no endpoint is bound and the file is not overwritten.
 - **Accept-time rejection.** An application RPC connection from an identity not in the registry is refused with `device_rejected` before application data is exchanged. When remote access is enabled, unlisted identities can still use pairing and the constants-only version probe (`cortex-workspace/version/1`). The probe reveals no device or machine data, and neither exchange grants RPC access on its own.
 - **Revoke and its limits.** Revoking removes the device from memory and closes all of its connections first, then rewrites the registry. If the write fails, the error is returned and access is not restored: the device cannot reconnect for RPC during this session, and it stays visible to the owner as a disconnected row that grants no access. Repair storage (for example the file permissions) and press Revoke again for the same device: that persists the removal and clears the row. Until a retry succeeds the registry file may still list the device, so restarting first can lose the revocation and the device can regain RPC access after the restart. Requests already handed to the local service are not rolled back or replayed, so an in-flight request of a revoked phone has an unknown outcome; frames buffered or sent after the revoke are not forwarded. Turning remote access off closes every connection and cancels pairing.
-- **Version model.** The endpoint serves three ALPNs: `cortex-workspace/pair/1`, `cortex-workspace/rpc/1` and the version probe `cortex-workspace/version/1`. Over rpc the client and service negotiate the workspace wire version (currently 1.11, the generated wire constant): the major must match and the minor is the intersection of the two sides. `service.status` reports the real wire major and minor. The probe is not an authorization: one request byte is answered with one bounded JSON reply of protocol constants only (the supported ALPNs and the wire string, for example `{"supported":[...],"wire":"1.11"}`) and the stream closes. It reveals no machine name, identity-derived data, device list, pairing state or relay address; it holds one of the 32 handshake slots and obeys the 10-second handshake and exchange limits. A client uses it only after a failed pairing or rpc dial: if the probe answers and does not list the ALPN the client asked for, the client reports `remote_incompatible_version`; if the probe fails or still lists the ALPN, the machine is reported unreachable. A pairing link in an unknown format is refused locally as `unsupported_pairing_link_version`, distinct from `invalid_pairing_link`. The phone shows "update needed" for the first, "This pairing link is from another Cortex version" for the second and "no longer paired" (`device_rejected`) for a revoked phone; the desktop bridge shows reinstall guidance for `version_mismatch`, `service_protocol_mismatch`, `bridge_invalid_capabilities` and `unsupported_protocol`.
+- **Version model.** The endpoint serves three ALPNs: `cortex-workspace/pair/1`, `cortex-workspace/rpc/1` and the version probe `cortex-workspace/version/1`. Over rpc the client and service negotiate the workspace wire version (currently 1.12, the generated wire constant): the major must match and the minor is the intersection of the two sides. `service.status` reports the real wire major and minor. The probe is not an authorization: one request byte is answered with one bounded JSON reply of protocol constants only (the supported ALPNs and the wire string, for example `{"supported":[...],"wire":"1.12"}`) and the stream closes. It reveals no machine name, identity-derived data, device list, pairing state or relay address; it holds one of the 32 handshake slots and obeys the 10-second handshake and exchange limits. A client uses it only after a failed pairing or rpc dial: if the probe answers and does not list the ALPN the client asked for, the client reports `remote_incompatible_version`; if the probe fails or still lists the ALPN, the machine is reported unreachable. A pairing link in an unknown format is refused locally as `unsupported_pairing_link_version`, distinct from `invalid_pairing_link`. The phone shows "update needed" for the first, "This pairing link is from another Cortex version" for the second and "no longer paired" (`device_rejected`) for a revoked phone; the desktop bridge shows reinstall guidance for `version_mismatch`, `service_protocol_mismatch`, `bridge_invalid_capabilities` and `unsupported_protocol`.
 - **Relay.** There is either no relay or exactly one configured relay, never an n0 relay. Traffic is end-to-end encrypted between the two devices. A relay sees endpoint identities, timing, volume and client IP addresses; it cannot read content, impersonate a device or decide which device may control a machine. Device authorization rests on the computer's registry only. Anyone who can send UDP to the bound port can reach the handshake, the probe and pairing; these are bounded (32 handshakes, 4 pairing connections, 8 connected devices, 2 connections and 16 streams per device).
 
 See [remote access security](docs/cortex-workspace/security.md#remote-access-built-not-qualified) for the allowlist and the honest limits.
@@ -3829,6 +3841,12 @@ report publication. A report submitted inline with `result_submit` is published
 through the same owned-draft and `write_report` checks under delivery keys derived
 from the channel and the result's request key, before any result is recorded; it
 grants no other authority. Delivery keys retain exact receipts; conflicting reuse fails.
+Native plan admission rechecks project file evidence through the confined checkout
+descriptor. It checks only the coordinator's retained observations for the
+current checkout and returns changed paths to the authenticated channel. Those
+paths grant no access or write authority. An owner-requested answer deferral uses
+the regular pause and channel-revocation lifecycle and grants no permissions.
+
 Plan objective bounds are enforced before plan persistence and exposed in both
 JSON Schema and the advertised property description. Length counts Unicode code
 points, not encoded bytes or UTF-16 units. Preflight guidance never raises bounds,
@@ -3988,3 +4006,13 @@ without changing result acceptance, termination, or replay policy. See
 [usage attribution](docs/features/observability/index.md#2-usagecost-attribution).
 
 Cortex supplies trusted role and route instructions through Claude's session system prompt and a per-session private Codex model instructions file. Task input, project skill listings and recovery context travel in user turns. A pending command reference is scoped to its issuing task and channel. It carries no acceptance authority. A completed command still requires a durable runtime result. Command diagnostics retain the failure class and registration stage without command arguments or paths.
+
+### Worker instruction composition
+
+Base profiles and competencies provide bundled guidance. The runtime loads
+selected module IDs from the accepted plan for the exact execution assignment
+and current revision. A module grants no tool, project, report, or engine access.
+The authenticated role and stage retain their command, write, consultation and
+review boundaries. Complexity supplies the automatic tier starting point for
+work with selected competencies. Owner routing rules, consent and observed
+availability still govern route admission. See [adaptive worker profiles](docs/project/adaptive-profiles.md).

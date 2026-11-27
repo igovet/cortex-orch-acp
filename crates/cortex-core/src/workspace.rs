@@ -102,6 +102,30 @@ fn bind_native_execution_tx(
     Ok(execution)
 }
 
+/// Capture the display frontier in the question's own transaction. An opening
+/// sorts after this session position, even when several decisions share it.
+pub(crate) fn anchor_conversation_decision_tx(
+    db: &rusqlite::Connection,
+    task: &str,
+    payload: &mut Value,
+) -> CoreResult<()> {
+    let anchor: Option<(String, i64)> = db
+        .query_row(
+            "SELECT e.acp_session_id, 1 + max(
+            coalesce((SELECT max(seq) FROM host_transcript WHERE session_id=e.acp_session_id),-1),
+            coalesce((SELECT max(seq) FROM host_updates WHERE session_id=e.acp_session_id),-1))
+         FROM workspace_executions e JOIN workspace_tasks t USING(task_id)
+         WHERE e.runtime_task_id=? AND t.execution_id=e.execution_id",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((session, position)) = anchor {
+        payload["workspace_conversation_anchor"] = json!({"session":session,"sequence":position});
+    }
+    Ok(())
+}
+
 /// Reconcile a previously committed Start even if route qualification/capacity changed.
 pub fn replay_native_start(
     store: &Store,

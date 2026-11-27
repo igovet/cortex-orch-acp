@@ -93,7 +93,7 @@
         "minor": 0
       },
       "buildIdentity": "1.0.6+test",
-      "schemaFingerprint": "fd26eab7d29b063b508dc2117619fb29bdb02c3f4fa4bb187132fcc52a199d37",
+      "schemaFingerprint": "045938c9dd4304cf4d5b1c0ba754ffd706efdb92f4d07e8f98d911a71d12771c",
       "mappingVersion": "1",
       "operations": [
         "capabilities.get",
@@ -1369,7 +1369,7 @@
         "futureField": true
       },
       "buildIdentity": "1.0.6+test",
-      "schemaFingerprint": "fd26eab7d29b063b508dc2117619fb29bdb02c3f4fa4bb187132fcc52a199d37",
+      "schemaFingerprint": "045938c9dd4304cf4d5b1c0ba754ffd706efdb92f4d07e8f98d911a71d12771c",
       "mappingVersion": "1",
       "operations": [
         "capabilities.get",

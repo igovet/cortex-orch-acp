@@ -3,6 +3,48 @@
 mod coordinator_card_tests {
     use super::*;
     #[test]
+    fn deferred_owner_answer_preserves_the_question_and_resumes_planning() {
+        let root = std::env::temp_dir().join(format!("deferred-answer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let key = crate::ProjectKey::new(&root, crate::StoreChannel::Dev).unwrap();
+        let store = Store::open(key, crate::OpenMode::Initialize).unwrap();
+        let machine = lifecycle::TaskMachine::new(&store);
+        let owner = machine.create("t", "g", "o").unwrap();
+        machine.transition("t", &owner, "plan", TaskState::Planning, None, &lifecycle::FoundationGuards).unwrap();
+        store.write(|db| {
+            let q = lifecycle::skill_proposals::request(
+                db, &root, "t", "c", "ask",
+                &json!({"question":"When should we finish?","recommended":1,"options":["Now","When processing finishes"]}),
+            )?;
+            let id = q["question_id"].as_str().unwrap();
+            let text = "Завершим, сообщу, когда обработка закончится.";
+            assert!(defer_answer(text));
+            assert!(!defer_answer("When processing finishes"));
+            assert!(!defer_answer("Не жди, пока обработка закончится"));
+            assert!(waits::answer_tx(db, "t", id, text, "text", None)?);
+            let binding = Binding {
+                task: "t".into(), draft: "d".into(), session: "s".into(),
+                owner: owner.clone(), version: 1, execution_version: 1, goal: "g".into(),
+            };
+            pause_after_answer_tx(db, &binding, "defer", &[id.to_owned()])?;
+            assert_eq!(domain::task_tx(db, "t")?.0, TaskState::Paused);
+            assert_eq!(decisions_tx(db, &binding)?[0]["answerText"], text);
+            let failed: i64 = db.query_row(
+                "SELECT count(*) FROM runtime_events WHERE task_id='t' AND type IN
+                 ('ASSIGNMENT_FAILED','OWNER_DECISION_REQUESTED','USER_FORCE_FINISHED')",
+                [], |r| r.get(0),
+            )?;
+            assert_eq!(failed, 0);
+            let version = domain::pause_version_tx(db, "t")?;
+            domain::owner_pause_tx(db, "t", &owner, "continue", true, version)?;
+            assert_eq!(domain::task_tx(db, "t")?.0, TaskState::Planning);
+            Ok(())
+        }).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn activity_does_not_stale_a_pending_coordinator_card() {
         let root = std::env::temp_dir().join(format!("coordinator-card-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
@@ -1372,27 +1414,170 @@ fn decisions_tx(db: &Transaction<'_>, b: &Binding) -> CoreResult<Vec<Value>> {
         Ok(value)
     }).collect()
 }
+// Earliest opening wins, even if the wait is later republished. An opening
+// without an anchor is legacy evidence; never substitute a later wait's position.
+fn opening_orders(
+    db: &Connection,
+    b: &Binding,
+) -> CoreResult<std::collections::HashMap<String, Option<(i64, String)>>> {
+    let mut stmt = db.prepare(
+        "SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type IN
+         ('USER_QUESTION_REQUESTED','NATIVE_PERMISSION_DECISION_OPENED','WORKER_WAIT_CHANGED')
+         ORDER BY id",
+    )?;
+    let mut rows = stmt.query([&b.task])?;
+    let mut orders = std::collections::HashMap::new();
+    while let Some(row) = rows.next()? {
+        let event: i64 = row.get(0)?;
+        let payload: Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
+        let anchor = &payload["workspace_conversation_anchor"];
+        let sequence = anchor["sequence"]
+            .as_i64()
+            .filter(|n| *n >= 0 && anchor["session"] == b.session);
+        let batch = payload["questions"].as_array().into_iter().flatten();
+        for (index, id) in batch
+            .filter_map(|q| q["question_id"].as_str())
+            .chain(payload["question_id"].as_str())
+            .enumerate()
+        {
+            orders
+                .entry(id.to_owned())
+                .or_insert_with(|| sequence.map(|n| (n, format!("1:{event:019}:{index:03}:{id}"))));
+        }
+    }
+    Ok(orders)
+}
+
+fn legacy_order(
+    db: &Connection,
+    session: &str,
+    created: &str,
+    id: &str,
+) -> CoreResult<(i64, String)> {
+    // Imported decisions predate the durable opening anchor. Their display
+    // position can only be reconstructed from the original recorded time.
+    let position = db.query_row(
+        "SELECT 1 + max(
+            coalesce((SELECT max(seq) FROM host_transcript WHERE session_id=?1 AND julianday(created_at)<=julianday(?2)),-1),
+            coalesce((SELECT max(seq) FROM host_updates WHERE session_id=?1 AND julianday(created_at)<=julianday(?2)),-1))",
+        (session, created),
+        |row| row.get(0),
+    )?;
+    Ok((position, format!("0:{created}:{id}")))
+}
+
+fn conversation_decisions(
+    db: &Transaction<'_>,
+    root: &str,
+    project: &str,
+    actor: &str,
+    execution: &str,
+    b: &Binding,
+) -> CoreResult<(Vec<Value>, String)> {
+    let mut items = decisions_tx(db, b)?;
+    if items.is_empty() {
+        return Ok((
+            items,
+            decision_revision(project, execution, &b.session, &[])?,
+        ));
+    }
+    let native = binding(db, root, project, actor, execution).is_ok();
+    let orders = opening_orders(db, b)?;
+    for item in &mut items {
+        let id = item["questionId"].as_str().unwrap_or_default();
+        let (sequence, tie) = match orders.get(id).and_then(Option::as_ref) {
+            Some(order) => order.clone(),
+            None => legacy_order(
+                db,
+                &b.session,
+                item["createdAt"].as_str().unwrap_or_default(),
+                id,
+            )?,
+        };
+        item["conversationSequence"] = json!(sequence.to_string());
+        item["conversationTieBreaker"] = json!(tie);
+        item["executionId"] = json!(execution);
+        // A task the Rust host does not own is shown, never answered here.
+        if !native {
+            item["allowedOperations"] = json!([]);
+        }
+    }
+    let revision = decision_revision(project, execution, &b.session, &items)?;
+    Ok((items, revision))
+}
+
+fn decision_revision(
+    project: &str,
+    execution: &str,
+    session: &str,
+    items: &[Value],
+) -> CoreResult<String> {
+    let display: Vec<_> = items
+        .iter()
+        .map(|item| {
+            // A legacy closed card can inherit a changing execution version.
+            // Only an actionable card uses its version as an answer precondition.
+            if item["allowedOperations"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+            {
+                let mut card = item.as_object().cloned().unwrap_or_default();
+                card.remove("version");
+                std::borrow::Cow::Owned(Value::Object(card))
+            } else {
+                std::borrow::Cow::Borrowed(item)
+            }
+        })
+        .collect();
+    Ok(crate::digest(&serde_json::to_vec(&(
+        project, execution, session, display,
+    ))?))
+}
+
+/// Read the same decision projection as the paged endpoint, in the history transaction.
+/// No new decision bodies leave the history endpoint; an unbound history has no revision.
+pub(crate) fn history_decision_revision(
+    db: &Transaction<'_>,
+    root: &str,
+    project: &str,
+    actor: &str,
+    draft: &str,
+) -> CoreResult<Option<String>> {
+    let execution: Option<String> = db.query_row(
+        "SELECT execution_id FROM workspace_tasks WHERE project_id=? AND task_id=?",
+        (project, draft),
+        |row| row.get(0),
+    )?;
+    let Some(execution) = execution else {
+        return Ok(None);
+    };
+    let b = match read_binding(db, root, project, actor, &execution) {
+        Ok(b) if b.draft == draft => b,
+        Ok(_) | Err(CoreError::Refused("native_execution_binding_invalid")) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let (_, revision) = conversation_decisions(db, root, project, actor, &execution, &b)?;
+    Ok(Some(revision))
+}
+
 pub fn decisions(store: &Store, project: &str, actor: &str, request: &Value) -> CoreResult<Value> {
-    store.write(|db|{
+    let root = store.key().root().to_string_lossy();
+    store.read_transaction(|db|{
         let target=request["target"].as_str().ok_or(CoreError::Refused("invalid_target"))?;
         let execution=if request["operation"]=="decisions.get" {
             db.query_row("SELECT e.execution_id FROM pending_questions q JOIN workspace_executions e ON e.runtime_task_id=q.task_id WHERE q.id=?",
                 [target.strip_prefix("wd_").ok_or(CoreError::Refused("not_found"))?],|r|r.get::<_,String>(0)).optional()?.ok_or(CoreError::Refused("not_found"))?
         }else{target.to_owned()};
-        let b=read_binding(db,&store.key().root().to_string_lossy(),project,actor,&execution)?;
-        let native=binding(db,&store.key().root().to_string_lossy(),project,actor,&execution).is_ok();
-        let mut items=decisions_tx(db,&b)?;
-        // A task the Rust host does not own is shown, never answered here.
-        if !native { for item in &mut items { item["allowedOperations"]=json!([]); } }
-        for item in &mut items {item["executionId"]=json!(execution);}
+        let b=read_binding(db,&root,project,actor,&execution)?;
+        let (items,revision)=conversation_decisions(db,&root,project,actor,&execution,&b)?;
         if request["operation"]=="decisions.get" {return items.into_iter().find(|i|i["decisionId"]==target).ok_or(CoreError::Refused("not_found"));}
         let limit=request["limit"].as_u64().unwrap_or(100) as usize;
-        let token=crate::digest(format!("{project}:{execution}:{}:{limit}",b.execution_version).as_bytes());
+        let token=crate::digest(format!("{revision}:{limit}").as_bytes());
         let after=if let Some(c)=request["cursor"].as_str() {c.strip_prefix(&format!("{token}.")).and_then(|s|s.parse::<usize>().ok()).ok_or(CoreError::Refused("invalid_cursor"))?}else{0};
         if after>items.len(){return refuse("invalid_cursor");}
         let next=(after+limit).min(items.len());
         let watermark:i64=db.query_row("SELECT coalesce((SELECT high_watermark FROM workspace_outbox_state WHERE project_id=?),0)",[project],|r|r.get(0))?;
-        let result=json!({"items":items[after..next],"nextCursor":if next<items.len(){Some(format!("{token}.{next}"))}else{None},"highWatermark":watermark.to_string()});
+        let result=json!({"items":items[after..next],"nextCursor":if next<items.len(){Some(format!("{token}.{next}"))}else{None},"highWatermark":watermark.to_string(),"decisionRevision":revision});
         workspace_protocol::validate("DecisionPage",&result).map_err(|_|CoreError::Refused("native_decision_page_unavailable"))?;
         Ok(result)
     })
@@ -1511,6 +1696,7 @@ fn answer_in_transaction(
                     return refuse("invalid_request");
                 }
                 let mut converted = Vec::new();
+                let mut deferred = Vec::new();
                 for d in members {
                     let matching: Vec<_> = answers
                         .iter()
@@ -1575,6 +1761,11 @@ fn answer_in_transaction(
                     if comment && d["optionsOnly"] == true {
                         return refuse("option_comment_unavailable");
                     }
+                    if !permission && a["optionId"].is_null() && d["optionsOnly"] != true
+                        && defer_answer(&text)
+                    {
+                        deferred.push(d["questionId"].as_str().unwrap().to_owned());
+                    }
                     converted.push((
                         d["questionId"].as_str().unwrap().to_owned(),
                         text,
@@ -1637,6 +1828,9 @@ fn answer_in_transaction(
                     }
                     lifecycle::event_tx(db, &b.task, "USER_ANSWER_ATTACHMENTS", payload)?;
                 }
+                if !deferred.is_empty() {
+                    pause_after_answer_tx(db, &b, key(command)?, &deferred)?;
+                }
                 Ok(super::receipt(
                     command,
                     "recorded",
@@ -1646,4 +1840,60 @@ fn answer_in_transaction(
             },
         )
     })
+}
+
+/// An explicit future owner callback or defer directive can pause the task.
+/// Ordinary options and open-ended answers still follow the question's route.
+fn defer_answer(text: &str) -> bool {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    [
+        "/cortex-defer",
+        "завершим, сообщу, когда обработка закончится",
+        "сообщу, когда обработка закончится",
+        "i'll let you know when processing finishes",
+        "i’ll let you know when processing finishes",
+    ]
+    .contains(&normalized.trim_end_matches(['.', '!', '…']))
+}
+
+fn pause_after_answer_tx(
+    db: &rusqlite::Transaction<'_>,
+    binding: &Binding,
+    key: &str,
+    questions: &[String],
+) -> CoreResult<()> {
+    // Use the same durable pause and wait-preservation path as the Pause control.
+    // A separate idempotency key keeps the answer and pause receipts distinct.
+    let pause_key = format!("answer-defer:{}", crate::digest(key.as_bytes()));
+    domain::owner_pause_tx(db, &binding.task, &binding.owner, &pause_key, false, 0)?;
+    db.execute(
+        "UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND revoked_at IS NULL",
+        (crate::now(), &binding.task),
+    )?;
+    lifecycle::event_tx(
+        db, &binding.task, "OWNER_ANSWER_DEFERRED",
+        json!({"question_ids":questions,"request_key":key}),
+    )?;
+    Ok(())
+}
+
+/// An answer that requested Pause still needs native process settlement. Look
+/// it up by the exact owner request, and never settle a task already resumed.
+pub fn deferred_answer_task(
+    db: &rusqlite::Connection,
+    project: &str,
+    execution: &str,
+    key: &str,
+) -> CoreResult<Option<String>> {
+    Ok(db.query_row(
+        "SELECT t.task_id FROM workspace_executions e
+         JOIN workspace_tasks w USING(task_id)
+         JOIN runtime_tasks t ON t.task_id=e.runtime_task_id
+         WHERE w.project_id=?1 AND e.execution_id=?2 AND w.execution_id=e.execution_id
+         AND t.state='PAUSED' AND EXISTS(
+             SELECT 1 FROM runtime_events r WHERE r.task_id=t.task_id AND r.type='OWNER_ANSWER_DEFERRED'
+             AND json_extract(r.payload_json,'$.request_key')=?3
+         )",
+        (project, execution, key), |r| r.get(0),
+    ).optional()?)
 }

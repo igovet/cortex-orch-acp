@@ -53,6 +53,34 @@ fn unknown_is_not_success_and_response_is_additive() {
 }
 
 #[test]
+fn conversation_order_and_snapshot_fields_are_optional_and_validated() {
+    let revision = "a".repeat(64);
+    for name in ["DecisionPage", "HistoryPage"] {
+        let mut page = json!({"items":[],"nextCursor":null,"highWatermark":"0"});
+        assert!(validate(name, &page).is_ok());
+        page["decisionRevision"] = json!(revision);
+        assert_eq!(decode_typed(name, page.clone()).unwrap().0, page);
+        page["decisionRevision"] = json!("not-a-revision");
+        assert!(validate(name, &page).is_err());
+    }
+    let mut card = json!({"acpSessionId":"s","allowedOperations":[],"batchId":null,
+        "decisionId":"d","executionId":"e","kind":"question","options":[],"ownerEpoch":"1",
+        "prompt":"Which?","questionId":"q","requirementRevision":"0","scope":"task",
+        "status":"answered","version":"2"});
+    assert!(validate("Decision", &card).is_ok());
+    card["conversationSequence"] = json!("9007199254740993");
+    card["conversationTieBreaker"] = json!("1:0000000000000000010:000:q");
+    assert_eq!(decode_typed("Decision", card.clone()).unwrap().0, card);
+    card["conversationSequence"] = json!("0");
+    assert!(validate("Decision", &card).is_ok());
+    card["conversationTieBreaker"] = json!("");
+    assert!(validate("Decision", &card).is_err());
+    card["conversationSequence"] = json!(1);
+    card["conversationTieBreaker"] = json!("tie");
+    assert!(validate("Decision", &card).is_err());
+}
+
+#[test]
 fn json_schema_numbers_and_unicode_boundaries() {
     assert!(validate("Protocol", &json!({"major":1.0,"minor":0})).is_ok());
     assert!(validate("Protocol", &json!({"major":1.5,"minor":0})).is_err());

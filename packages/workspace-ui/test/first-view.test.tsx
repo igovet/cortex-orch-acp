@@ -5,12 +5,16 @@ import type { Decision as WireDecision } from "@cortex/workspace-contract";
 import { emptyConfig, emptySession, emptyWorkspace, LOCAL_MACHINE_ID, type ProjectFacts, type Worker, type WorkspacePort } from "@cortex/workspace-domain";
 import { mountPhone, Workspace, type PhoneShell } from "../src";
 import { createRealPort } from "../src/port/real";
-import { createFirstView, FIRST_VIEW_MS, firstWindowEntries, type FirstRead } from "../src/first-view";
+import { readBoards, writeBoards } from "../src/port/board-cache";
+import { createFirstView, firstWindowEntries, type FirstRead } from "../src/first-view";
 import { capabilitiesWire, flush, projection, scriptedPort, scriptedTransport, wireDecision, wireTask, withTask } from "./support";
 
 /** A read held until the test lets it go. */
 function hold() { let release!: () => void; const done = new Promise<void>(resolve => { release = resolve; }); return { done, release }; }
 const at = (n: number) => new Date(Date.UTC(2026, 10, 20, 10) + n * 1000).toISOString();
+const baseline = "1".repeat(64), newer = "2".repeat(64);
+const FORMER_FIRST_VIEW_MS = 5_000;
+const position = (n: number) => String(9007199254740992n + BigInt(n));
 
 /**
  * A native machine with `count` running tasks. Each conversation holds an owner message, an answered question and the
@@ -19,34 +23,36 @@ const at = (n: number) => new Date(Date.UTC(2026, 10, 20, 10) + n * 1000).toISOS
 function machine(count = 1, options: { open?: boolean } = {}) {
   const tasks = Array.from({ length: count }, (_, i) => wireTask({ taskId: `task-${i + 1}`, description: `Task ${i + 1}`, version: "1", executionId: `exec-${i + 1}`,
     phase: "execution", executionState: "running", runtimeState: "EXECUTING" }));
-  const row = (task: string, n: number, kind: string, text: string) => ({ historyId: `${task}-h${n}`, sequence: String(n + 1), revision: "1", kind, text, toolStatus: null, recordedAt: at(n * 2 + 1), availability: "available" });
-  const rows = (task: string) => [row(task, 0, "user", `Owner words for ${task}`), row(task, 1, "assistant", `Coordinator reply for ${task}.`)];
-  const answered = (exec: string) => options.open
-    ? wireDecision({ decisionId: `d-${exec}`, executionId: exec, prompt: `Which branch for ${exec}?`, createdAt: at(2) } as Partial<WireDecision>)
+  const row = (task: string, n: number, kind: string, text: string) => ({ historyId: `${task}-h${n}`, sequence: position(n), revision: "1", kind, text, toolStatus: null, recordedAt: at(9 - n), availability: "available" });
+  const rows = (task: string) => [row(task, 0, "user", `Owner words for ${task}`),
+    row(task, 1, "assistant", `Before the question for ${task}.`), row(task, 2, "assistant", `Coordinator reply for ${task}.`)];
+  const question = (exec: string) => options.open
+    ? wireDecision({ decisionId: `d-${exec}`, executionId: exec, prompt: `Which branch for ${exec}?`, createdAt: at(2), conversationSequence: position(1), conversationTieBreaker: "01" } as Partial<WireDecision>)
     : wireDecision({ decisionId: `d-${exec}`, executionId: exec, prompt: `Which branch for ${exec}?`, status: "answered", answerText: "main",
-      createdAt: at(2), answeredAt: at(2), allowedOperations: [] } as Partial<WireDecision>);
-  const holds: { history?: Promise<void>; decisions?: Promise<void>; facts?: Promise<void> } = {};
+      createdAt: at(2), answeredAt: at(2), conversationSequence: position(1), conversationTieBreaker: "01", allowedOperations: [] } as Partial<WireDecision>);
+  const holds: { history?: Promise<void>; decisions?: Promise<void>; facts?: Promise<void>; board?: Promise<void> } = {};
+  const snapshot = { history: baseline as string | undefined, decisions: baseline };
   const decisionCalls: string[] = [];
   const envelope = (data: unknown) => ({ protocol: { major: 2, mapping: 2 }, projectId: "p", generation: "g", version: "2", highWatermark: "3", data });
   const s = scriptedTransport({
     "service.capabilities": () => ({ methods: ["native.query", "native.board"], machine: true }),
     "projects.list": () => [{ projectId: "p", displayName: "Project", canonicalRoot: "/p", activation: {} }],
-    "capabilities.get": () => capabilitiesWire(["capabilities.get", "project.snapshot", "tasks.create", "tasks.start", "decisions.list", "decisions.answer", "history.page"]),
-    "native.board": () => envelope({ type: "board", value: { items: tasks, nextCursor: null, highWatermark: "3" } }),
+    "capabilities.get": () => capabilitiesWire(["capabilities.get", "project.snapshot", "tasks.create", "tasks.start", "decisions.list", "decisions.answer", "history.page"], 12),
+    "native.board": async () => { await holds.board; return envelope({ type: "board", value: { items: tasks, nextCursor: null, highWatermark: "3" } }); },
     "native.query": async raw => {
       const { operation, payload } = raw as { operation: string; payload: { target: string; cursor: string | null } };
       if (operation === "history.earlier") {
         await holds.history;
-        return envelope({ type: "history", value: { items: rows(payload.target), nextCursor: null, highWatermark: "2", tailCursor: "nt1.1" } });
+        return envelope({ type: "history", value: { items: rows(payload.target), nextCursor: null, highWatermark: "2", tailCursor: "nt1.1", ...(snapshot.history === undefined ? {} : { decisionRevision: snapshot.history }) } });
       }
-      return envelope({ type: "history", value: { items: [], nextCursor: null, highWatermark: "2", tailCursor: "nt1.1" } });
+      return envelope({ type: "history", value: { items: [], nextCursor: null, highWatermark: "2", tailCursor: "nt1.1", ...(snapshot.history === undefined ? {} : { decisionRevision: snapshot.history }) } });
     },
     "decisions.list": async raw => {
       const target = (raw as { target: string }).target;
       decisionCalls.push(target);
       await holds.decisions;
       await new Promise(resolve => setTimeout(resolve, 2));
-      return { items: [answered(target)], nextCursor: null, highWatermark: "1" };
+      return { items: [question(target)], nextCursor: null, highWatermark: "1", decisionRevision: snapshot.decisions };
     },
     "machine.call": async raw => {
       const op = (raw as { op: string }).op;
@@ -57,7 +63,7 @@ function machine(count = 1, options: { open?: boolean } = {}) {
       return { ok: true, result: op === "repo.snapshot" ? null : { tasks: {}, sprints: [] } };
     },
   });
-  return { s, holds, decisionCalls };
+  return { s, holds, decisionCalls, snapshot, tasks, question };
 }
 
 let dispose: (() => void) | undefined;
@@ -67,13 +73,13 @@ const settle = async (n = 12) => { for (let i = 0; i < n; i++) await flush(); };
 const feed = () => document.querySelector<HTMLElement>(".task-panel .timeline");
 
 /** Opens a task's conversation and records every state of the feed it ever showed. */
-function open(svc: ReturnType<typeof machine>, task = "task-1") {
+function open(svc: ReturnType<typeof machine>, task = "task-1", boardStorage?: Storage) {
   history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}/t/${task}`);
   const root = document.createElement("div"); document.body.append(root);
   const seen: string[] = [];
   const watch = new MutationObserver(() => { const f = feed(); if (f && !f.querySelector(".ws-skel")) seen.push(f.textContent ?? ""); });
   watch.observe(root, { childList: true, subtree: true, characterData: true });
-  dispose = render(() => <Workspace port={createRealPort({ transport: svc.s.transport, actorId: "owner", registry: true })} />, root);
+  dispose = render(() => <Workspace port={createRealPort({ transport: svc.s.transport, actorId: "owner", registry: true, boardStorage })} />, root);
   return { root, seen, stop: () => watch.disconnect() };
 }
 
@@ -104,10 +110,79 @@ it.each(["history", "decisions", "facts"] as const)("shows the conversation skel
   expect(seen.length).toBeGreaterThan(0);
   for (const text of seen) {
     expect(text).toContain("Owner words for task-1");
-    expect(text).toContain("Which branch for exec-1?");
+    const before = text.indexOf("Before the question for task-1.");
+    const card = text.indexOf("Which branch for exec-1?");
+    expect(before).toBeGreaterThanOrEqual(0);
+    expect(card).toBeGreaterThan(before);
+    expect(text.indexOf("Coordinator reply for task-1.")).toBeGreaterThan(card);
   }
   expect(feed()!.hasAttribute("aria-busy")).toBe(false);
   expect(root.querySelector(".ws-first-notice")).toBeNull();
+});
+
+it("does not reveal a cached-board conversation or combine mismatched native revisions", async () => {
+  const svc = machine(1, { open: true });
+  const board = hold(), history = hold();
+  svc.holds.board = board.done;
+  svc.holds.history = history.done;
+  svc.snapshot.history = newer;
+  writeBoards(localStorage, "owner", [{ project: { projectId: "p", name: "Project", repository: "/p",
+    openBranch: "", defaultBranch: "", activated: true }, items: svc.tasks, product: { tasks: {}, sprints: [] } }]);
+  expect(readBoards(localStorage, "owner")[0]?.items[0]?.executionId).toBe("exec-1");
+  const { root, seen, stop } = open(svc, "task-1", localStorage);
+  await vi.waitFor(() => expect(feed()?.getAttribute("aria-busy"), root.textContent ?? "").toBe("true"));
+  expect(seen).toEqual([]);
+  board.release();
+  await vi.waitFor(() => expect(svc.decisionCalls).toContain("exec-1"));
+  expect(feed()?.textContent).not.toContain("Which branch");
+  history.release();
+  // The first returned decision revision is not the transcript revision. Wait for a restarted history read.
+  await vi.waitFor(() => expect(svc.s.calls.filter(c => c.operation === "native.query" && (c.message as { operation: string }).operation === "history.earlier").length).toBeGreaterThanOrEqual(2));
+  expect(feed()?.getAttribute("aria-busy")).toBe("true");
+  expect(seen).toEqual([]);
+  svc.snapshot.decisions = newer;
+  await vi.waitFor(() => expect(feed()?.textContent).toContain("Coordinator reply for task-1."), {timeout:4000});
+  stop();
+  expect(seen.length).toBeGreaterThan(0);
+  for (const text of seen) {
+    expect(text).toMatch(/Before the question for task-1\.[\s\S]*Which branch for exec-1\?[\s\S]*Coordinator reply for task-1\./);
+  }
+});
+
+it("restarts a stale decision walk without showing cards from its partial pages", async () => {
+  const svc = machine();
+  const finish = hold();
+  let refused = false;
+  svc.s.answers["decisions.list"] = async raw => {
+    const { cursor, target } = raw as { cursor: string | null; target: string };
+    if (cursor === "stale") { refused = true; throw new Error("invalid_cursor"); }
+    const decision = svc.question(target);
+    if (!refused) return { items: [{ ...decision, prompt: "Stale page card" }], nextCursor: "stale", highWatermark: "1", decisionRevision: baseline };
+    await finish.done;
+    return { items: [decision], nextCursor: null, highWatermark: "2", decisionRevision: baseline };
+  };
+  const { seen, stop } = open(svc);
+  await vi.waitFor(() => expect(refused).toBe(true));
+  expect(feed()?.getAttribute("aria-busy")).toBe("true");
+  expect(seen).toEqual([]);
+  finish.release();
+  await vi.waitFor(() => expect(feed()?.textContent).toContain("Which branch for exec-1?"));
+  stop();
+  expect(seen.length).toBeGreaterThan(0);
+  expect(seen.every(text => !text.includes("Stale page card") && text.includes("Coordinator reply for task-1."))).toBe(true);
+});
+
+it("does not settle a 1.12 feed whose history omitted the decision revision", async () => {
+  const svc = machine();
+  svc.snapshot.history = undefined;
+  const { stop } = open(svc);
+  await vi.waitFor(() => expect(feed()?.querySelector('[role="alert"]')?.textContent).toContain("did not confirm"));
+  expect(feed()?.textContent).not.toContain("Coordinator reply");
+  expect(feed()?.textContent).not.toContain("Which branch");
+  svc.snapshot.history = baseline;
+  feed()?.querySelector<HTMLButtonElement>('[role="alert"] button')?.click();
+  await vi.waitFor(() => expect(feed()?.textContent).toContain("Coordinator reply for task-1."));
+  stop();
 });
 
 it("keeps the conversation skeleton, with no error, for as long as a slow read takes, then shows all of it at once", async () => {
@@ -119,7 +194,7 @@ it("keeps the conversation skeleton, with no error, for as long as a slow read t
   await vi.waitFor(() => expect(feed()?.querySelector(".ws-skel")).not.toBeNull(), { timeout: 4000 });
   await settle();
   // Far past the old five-second budget and every former request deadline: still the skeleton, and nothing says it failed.
-  for (const step of [FIRST_VIEW_MS + 100, 30_000, 60_000, 120_000]) {
+  for (const step of [FORMER_FIRST_VIEW_MS + 100, 30_000, 60_000, 120_000]) {
     vi.advanceTimersByTime(step);
     await settle(2);
     expect(feed()?.querySelector(".ws-skel")).not.toBeNull();
@@ -311,7 +386,7 @@ it("gates the coordinator's own activity: the skeleton for as long as its read i
   const notice = () => pane().querySelector<HTMLElement>(".ws-first-notice");
   await vi.waitFor(() => expect(held.reads.length).toBeGreaterThan(0));
   expect(pane().querySelector(".ws-skel [role=status]")?.textContent).toBe("Loading activity…");
-  vi.advanceTimersByTime(FIRST_VIEW_MS + 100); await settle(4);
+  vi.advanceTimersByTime(FORMER_FIRST_VIEW_MS + 100); await settle(4);
   // Slow is not failed: the skeleton stays and no notice comes.
   expect(pane().querySelector(".ws-skel")).not.toBeNull();
   expect(notice()).toBeNull();
@@ -384,7 +459,7 @@ it("keeps naming what a view was shown without, with Retry, when it is opened ag
   // Online and only slow, it is never marked incomplete: closed and opened again before the reply, it is still loading.
   shown = mount("b");
   expect(shown.view.loading()).toBe(true);
-  vi.advanceTimersByTime(FIRST_VIEW_MS * 20);
+  vi.advanceTimersByTime(FORMER_FIRST_VIEW_MS * 20);
   expect(shown.view.loading()).toBe(true);
   expect(shown.view.missing()).toEqual([]);
   shown.done();
@@ -427,7 +502,7 @@ it("holds the skeleton for as long as a first read is pending, never on a timer,
   const [id, setId] = createSignal("a");
   const { view, done } = createRoot(done => ({ view: createFirstView({ scope: {}, identity: id, reads, offline: () => false }), done }));
   expect(view.loading()).toBe(true);
-  vi.advanceTimersByTime(FIRST_VIEW_MS * 100);
+  vi.advanceTimersByTime(FORMER_FIRST_VIEW_MS * 100);
   setReads([{ section: "the conversation", state: "pending" }, { section: "questions", state: "settled" }]);
   expect(view.loading()).toBe(true);
   expect(view.missing()).toEqual([]);
@@ -441,7 +516,7 @@ it("holds the skeleton for as long as a first read is pending, never on a timer,
   setReads([{ section: "the conversation", state: "pending" }]);
   setId("b");
   expect(view.loading()).toBe(true);
-  vi.advanceTimersByTime(FIRST_VIEW_MS * 100);
+  vi.advanceTimersByTime(FORMER_FIRST_VIEW_MS * 100);
   expect(view.loading()).toBe(true);
   expect(view.missing()).toEqual([]);
   done();

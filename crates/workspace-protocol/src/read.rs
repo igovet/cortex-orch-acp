@@ -71,6 +71,9 @@ pub struct ReadPage<T> {
     /// first one. Absent when the page reaches the session's first row, and on every other page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev_cursor: Option<String>,
+    /// History only: content revision of the display decisions read in the same transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_revision: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(

@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://cortex.local/workspace/wire-1.11.schema.json",
+  "$id": "https://cortex.local/workspace/wire-1.12.schema.json",
   "title": "Cortex Workspace wire subset",
   "x-wire-version": {
     "major": 1,
-    "minor": 11
+    "minor": 12
   },
   "x-mapping-version": "1",
   "x-limits": {
@@ -1628,6 +1628,8 @@
     "Decision": {
       "type": "object",
       "properties": {
+        "conversationSequence": {"$ref": "#/$defs/Decimal"},
+        "conversationTieBreaker": {"type": "string", "minLength": 1, "maxLength": 512},
         "decisionId": {
           "$ref": "#/$defs/Identity"
         },
@@ -2020,6 +2022,7 @@
     "HistoryPage": {
       "type": "object",
       "properties": {
+        "decisionRevision": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "items": {
           "type": "array",
           "items": {
@@ -2052,6 +2055,7 @@
     "DecisionPage": {
       "type": "object",
       "properties": {
+        "decisionRevision": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "items": {
           "type": "array",
           "items": {

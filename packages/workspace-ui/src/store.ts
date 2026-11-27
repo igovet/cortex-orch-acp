@@ -705,8 +705,11 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
      * Whether a facts read for this task's screen has arrived: its workers, result and messages are then what the machine
      * says, and an empty list means none. Null when this port does not say which tasks a facts read was for, so nothing waits.
      */
+    expectsConversationRead: firstViewPort.readsConversation === true,
     factsShown: (projectId: string, taskId: string): boolean | null => {
-      if (!firstViewPort.scopesFacts?.()) return null;
+      const scoped = firstViewPort.scopesFacts?.();
+      if (scoped === null) return false; // Capabilities haven't been negotiated yet.
+      if (!scoped) return null;
       const read = factsScoped().get(projectId);
       // Read for this execution: readiness never carries over into a new one.
       return !!read?.has(taskId) && read.get(taskId) === (projected().tasks.find(t => t.id === taskId)?.executionId ?? null);

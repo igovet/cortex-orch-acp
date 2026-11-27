@@ -1,12 +1,6 @@
 import { createEffect, createMemo, createSignal, type Accessor } from "solid-js";
 import type { TaskSession } from "@cortex/workspace-domain";
 
-/**
- * How long the board's own reads let a screen's first reads go first (`shownFirst` in the real port). It is not a deadline
- * of the view: a slow first read is waited for, with the skeleton, however long it takes (`createFirstView`).
- */
-export const FIRST_VIEW_MS = 5_000;
-
 /** Codes and words of a read that only took long (an older service's deadline, a busy lane), never a failure. */
 const SLOW_CODES = /^(service_timeout|machine_busy|machine_tool_timeout|git_timeout|busy)$/;
 /** The store diagnostic for a store held by another Cortex operation (a migration, an initialization): it is waited out. */
@@ -24,10 +18,10 @@ export function slowRead(error: unknown) {
 
 /** A read the port has begun for a view and not yet confirmed (`loading`), or one that did not complete (`failed`). */
 export type ReadState = { state: "loading" } | { state: "failed"; reason: string };
-/** What the real port adds to a conversation's session: whether its execution's questions have been read. Absent: they have,
- *  or this port does not read them on their own. Empty decisions before this read are not a confirmed "no questions". */
-export type SessionReads = { decisionsRead?: ReadState };
-export const decisionsReadOf = (session: TaskSession): ReadState | undefined => (session as TaskSession & SessionReads).decisionsRead;
+/** The real port attests to the conversation read, never merely to a task from the saved board. */
+export type SessionReads = { conversationRead?: ReadState | { state: "ready" }; orderedConversation?: boolean };
+export const conversationReadOf = (session: TaskSession) => (session as TaskSession & SessionReads).conversationRead;
+export const orderedConversationOf = (session: TaskSession) => (session as TaskSession & SessionReads).orderedConversation === true;
 
 /**
  * About one screen of a feed: how many entries to read and show first, from the window's height and a short entry's height.

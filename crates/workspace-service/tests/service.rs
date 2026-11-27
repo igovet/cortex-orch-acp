@@ -62,6 +62,266 @@ async fn activated() -> (Fixture, std::sync::Arc<Service>, String) {
     (f, s, id)
 }
 #[tokio::test]
+async fn conversation_order_uses_opening_sequence_and_matches_decision_pages() {
+    use cortex_core::{
+        lifecycle::{event_tx, TaskMachine},
+        permission_decisions, OpenMode, ProjectKey, Store, StoreChannel,
+    };
+
+    let (f, service, project) = activated().await;
+    let root = f.0.join("projects/one");
+    let channel = if workspace_protocol::channel::current().is_dev() {
+        StoreChannel::Dev
+    } else {
+        StoreChannel::Release
+    };
+    let store = Store::open(
+        ProjectKey::new(&root, channel).unwrap(),
+        OpenMode::RuntimeValidate,
+    )
+    .unwrap();
+    let created = service.workspace(json!({"protocol":{"major":1,"minor":8},"projectId":project,
+        "actorId":"fixture","requestId":"create-conversation","operation":"tasks.create","target":project,
+        "expectedVersion":"0","ownerEpoch":null,
+        "payload":{"description":"Conversation order","checkout":{"kind":"main"}}})).await.unwrap();
+    let draft = created["target"].as_str().unwrap();
+    let runtime = "conversation-runtime";
+    let owner = TaskMachine::new(&store)
+        .create(runtime, "Conversation order", "fixture")
+        .unwrap();
+    store
+        .write(|db| {
+            event_tx(
+                db,
+                runtime,
+                "TASK_CREATED",
+                json!({"execution_host":"rust"}),
+            )?;
+            db.execute(
+                "UPDATE runtime_tasks SET state='PAUSED' WHERE task_id=?",
+                [runtime],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let actor = format!("uid:{}", unsafe { libc::getuid() });
+    let execution = cortex_core::workspace::bind_native_execution(
+        &store, &project, &actor, draft, runtime, &owner,
+    )
+    .unwrap();
+    let session: String = store
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT acp_session_id FROM workspace_executions WHERE execution_id=?",
+                [&execution],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+
+    let transcript = |db: &rusqlite::Connection, seq: i64, text: &str, at: &str| {
+        db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,created_at) VALUES (?,?,'agent_message',?,?)",
+            (&session, seq, text, at))
+    };
+    let permission = store.write(|db| {
+        // The wall clock is intentionally wrong for the exact anchored decisions.
+        transcript(db, 0, "Before the question", "2030-01-01T00:00:00Z")?;
+        db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,options_json,status,created_at)
+            VALUES ('legacy',?,'legacy','Imported question','[]','answered','2000-01-01T00:00:00Z'),
+                   ('q-z',?,'fixture-first','Which option?','[\"Yes\",\"No\"]','open','2000-01-01T00:00:00Z'),
+                   ('q-a',?,'fixture-second','Which format?','[\"Text\",\"HTML\"]','open','2000-01-01T00:00:00Z')",
+            (runtime, runtime, runtime))?;
+        event_tx(db, runtime, "USER_QUESTION_REQUESTED",
+            json!({"question_id":"q-z","batch_id":"fixture-batch","questions":[{"question_id":"q-z"},{"question_id":"q-a"}]}))?;
+        db.execute("INSERT INTO host_updates(session_id,seq,update_json,created_at) VALUES (?,1,?,'2030-01-01T00:00:00Z')",
+            (&session, json!({"sessionUpdate":"tool_call","toolCallId":"call","title":"Read a.txt",
+                "kind":"read","status":"in_progress","rawInput":{"path":"a.txt"}}).to_string()))?;
+        let id = permission_decisions::open_tx(db, runtime, None, "fixture-channel", "request",
+            "Allow this operation?", &json!({"operation":"project_write"}))?;
+        transcript(db, 2, "After the permission", "2030-01-01T00:00:00Z")?;
+        Ok(id)
+    }).unwrap();
+
+    let decisions = |cursor: Value, limit: u16| {
+        service.workspace(json!({"protocol":{"major":1,"minor":8},
+        "projectId":project,"requestId":"decisions","operation":"decisions.list","target":execution,"cursor":cursor,"limit":limit}))
+    };
+    let history = |op: &'static str, cursor: Value, limit: u16| {
+        service.native_query(json!({"protocol":{"major":2,"mapping":2},
+        "projectId":project,"requestId":"history","operation":op,"payload":{"target":draft,"cursor":cursor,"limit":limit}}))
+    };
+    let first = history("history.page", Value::Null, 1).await.unwrap()["data"]["value"].clone();
+    let last = history("history.earlier", Value::Null, 1).await.unwrap()["data"]["value"].clone();
+    let middle = history("history.earlier", last["prevCursor"].clone(), 1)
+        .await
+        .unwrap()["data"]["value"]
+        .clone();
+    let listed = decisions(Value::Null, 4).await.unwrap();
+    let revision = &listed["decisionRevision"];
+    assert!(revision.is_string());
+    for page in [&first, &last, &middle] {
+        assert_eq!(page["decisionRevision"], *revision);
+    }
+    assert_eq!(first["items"][0]["text"], "Before the question");
+    assert_eq!(middle["items"][0]["kind"], "tool");
+    assert_eq!(last["items"][0]["text"], "After the permission");
+    assert_eq!(listed["items"][0]["conversationSequence"], "0");
+    assert_eq!(
+        listed["items"][1]["conversationSequence"],
+        first["items"][0]["sequence"]
+    );
+    assert_eq!(
+        listed["items"][2]["conversationSequence"],
+        first["items"][0]["sequence"]
+    );
+    assert!(
+        listed["items"][1]["conversationTieBreaker"]
+            .as_str()
+            .unwrap()
+            < listed["items"][2]["conversationTieBreaker"]
+                .as_str()
+                .unwrap()
+    );
+    assert_eq!(
+        listed["items"][3]["conversationSequence"],
+        middle["items"][0]["sequence"]
+    );
+    let one = service
+        .workspace(json!({"protocol":{"major":1,"minor":8},
+        "projectId":project,"requestId":"decision","operation":"decisions.get","target":"wd_q-z"}))
+        .await
+        .unwrap();
+    assert_eq!(one, listed["items"][1]);
+    let wire_one = service
+        .workspace(json!({"protocol":{"major":1,"minor":8},"projectId":project,
+        "requestId":"history-compat","operation":"history.page","target":draft,"limit":1}))
+        .await
+        .unwrap();
+    assert_eq!(wire_one, first);
+    assert_eq!(last["items"][0]["sequence"], "3");
+    assert_eq!(
+        history("history.page", first["nextCursor"].clone(), 1)
+            .await
+            .unwrap()["data"]["value"]["items"],
+        middle["items"]
+    );
+    let card = |page: &Value, i: usize| {
+        (
+            page["items"][i]["conversationSequence"].clone(),
+            page["items"][i]["conversationTieBreaker"].clone(),
+        )
+    };
+    let prefix = decisions(Value::Null, 1).await.unwrap();
+    let second = decisions(prefix["nextCursor"].clone(), 1).await.unwrap();
+    assert_eq!(second["decisionRevision"], *revision);
+    assert_eq!(card(&second, 0), card(&listed, 1));
+    assert_eq!(decisions(Value::Null, 4).await.unwrap(), listed);
+
+    store
+        .write(|db| {
+            transcript(
+                db,
+                3,
+                "Text streamed before the answer",
+                "2030-01-01T00:00:00Z",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let tail = history("history.page", last["tailCursor"].clone(), 1)
+        .await
+        .unwrap()["data"]["value"]
+        .clone();
+    assert_eq!(tail["items"][0]["sequence"], "4");
+    let streamed_decisions = decisions(Value::Null, 4).await.unwrap();
+    assert_eq!(streamed_decisions["decisionRevision"], *revision);
+    assert_eq!(card(&streamed_decisions, 0), card(&listed, 0));
+    assert_eq!(
+        decisions(prefix["nextCursor"].clone(), 1).await.unwrap()["items"],
+        second["items"]
+    );
+    assert_eq!(tail["decisionRevision"], *revision);
+
+    store
+        .write(|db| {
+            assert!(permission_decisions::answer_tx(
+                db,
+                runtime,
+                &permission,
+                true
+            )?);
+            transcript(db, 4, "Answer received", "2030-01-01T00:00:00Z")?;
+            Ok(())
+        })
+        .unwrap();
+    let after = decisions(Value::Null, 4).await.unwrap();
+    assert_eq!(after["items"][3]["status"], "answered");
+    assert_eq!(card(&after, 3), card(&listed, 3));
+    assert_ne!(after["decisionRevision"], *revision);
+    let answer_tail = history("history.page", tail["tailCursor"].clone(), 1)
+        .await
+        .unwrap()["data"]["value"]
+        .clone();
+    assert_eq!(answer_tail["items"][0]["text"], "Answer received");
+    assert_eq!(answer_tail["decisionRevision"], after["decisionRevision"]);
+    assert!(decisions(prefix["nextCursor"].clone(), 1).await.is_err());
+
+    // A contradictory pointer may still have retained history, but it cannot
+    // bind that history to a different draft's decisions.
+    let other = service
+        .workspace(json!({"protocol":{"major":1,"minor":8},"projectId":project,
+        "actorId":"fixture","requestId":"create-other","operation":"tasks.create","target":project,
+        "expectedVersion":"0","ownerEpoch":null,
+        "payload":{"description":"Other conversation","checkout":{"kind":"main"}}}))
+        .await
+        .unwrap();
+    let other_draft = other["target"].as_str().unwrap();
+    let other_owner = TaskMachine::new(&store)
+        .create("other-runtime", "Other conversation", "fixture")
+        .unwrap();
+    store
+        .write(|db| {
+            event_tx(
+                db,
+                "other-runtime",
+                "TASK_CREATED",
+                json!({"execution_host":"rust"}),
+            )?;
+            db.execute(
+                "UPDATE runtime_tasks SET state='PAUSED' WHERE task_id='other-runtime'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let other_execution = cortex_core::workspace::bind_native_execution(
+        &store,
+        &project,
+        &actor,
+        other_draft,
+        "other-runtime",
+        &other_owner,
+    )
+    .unwrap();
+    let set_pointer = |target: &str| {
+        store.write(|db| {
+            db.execute(
+                "UPDATE workspace_tasks SET execution_id=? WHERE task_id=?",
+                (target, draft),
+            )?;
+            Ok(())
+        })
+    };
+    set_pointer(&other_execution).unwrap();
+    let unbound =
+        history("history.earlier", Value::Null, 1).await.unwrap()["data"]["value"].clone();
+    assert_eq!(unbound["items"][0]["text"], "Answer received");
+    assert!(unbound.get("decisionRevision").is_none());
+    set_pointer(&execution).unwrap();
+    service.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn storage_refusal_keeps_project_registered_and_explains_reads_and_activation() {
     use cortex_core::{OpenMode, ProjectKey, Store, StoreChannel};
 

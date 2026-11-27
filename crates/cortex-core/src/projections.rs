@@ -876,7 +876,7 @@ impl ProjectionReader {
             .map_err(|_| CoreError::Refused("storage_unavailable"))?;
         self.poll_model(&mut model)?;
         let generation = model.stream.generation().to_owned();
-        self.store.read(|db| {
+        self.store.read_transaction(|db| {
             let p=project_row(db,&self.project,&self.actor,self.store.key().root().to_str().unwrap_or(""))?;
             let (high,_)=position(db,&self.project)?;
             if high!=model.stream.high_watermark() {return refuse("snapshot_expired");}
@@ -889,7 +889,7 @@ impl ProjectionReader {
                     if ids.len()>1000 {return refuse("board_too_large");}
                     let items=ids.iter().map(|id|task(db,&self.project,self.store.key().root().to_str().unwrap_or(""),id)?
                         .ok_or(CoreError::Refused("snapshot_expired"))).collect::<CoreResult<Vec<_>>>()?;
-                    QueryReply::Board(ReadPage {items,next_cursor:None,high_watermark:high,tail_cursor:None,prev_cursor:None})
+                    QueryReply::Board(ReadPage {items,next_cursor:None,high_watermark:high,tail_cursor:None,prev_cursor:None,decision_revision:None})
                 },
                 CoreQuery::ProjectSnapshot(page)|CoreQuery::TasksPage(page)=>{
                     if page.target!=self.project {return refuse("invalid_project");}
@@ -907,15 +907,24 @@ impl ProjectionReader {
                         items.push(t); consumed=*seq;
                     }
                     let next_cursor=if rows.len()>items.len(){Some(format!("nt2.{binding}.{consumed}"))}else{None};
-                    QueryReply::Tasks(ReadPage {items,next_cursor,high_watermark:high,tail_cursor:None,prev_cursor:None})
+                    QueryReply::Tasks(ReadPage {items,next_cursor,high_watermark:high,tail_cursor:None,prev_cursor:None,decision_revision:None})
                 },
                 CoreQuery::TaskGet(t)=>{
                     let value=task(db,&self.project,self.store.key().root().to_str().unwrap_or(""),&t.id)?.ok_or(CoreError::Refused("not_found"))?;
                     QueryReply::Task(value)
                 },
                 CoreQuery::TaskState(t)=>QueryReply::State(task(db,&self.project,self.store.key().root().to_str().unwrap_or(""),&t.id)?.ok_or(CoreError::Refused("not_found"))?),
-                CoreQuery::History(p)=>QueryReply::History(history::page(db,&self.project,&p)?),
-                CoreQuery::HistoryEarlier(p)=>QueryReply::History(history::earlier(db,&self.project,&p)?),
+                op @ (CoreQuery::History(_) | CoreQuery::HistoryEarlier(_)) => {
+                    let (mut page, target) = match op {
+                        CoreQuery::History(p) => (history::page(db, &self.project, &p)?, p.target),
+                        CoreQuery::HistoryEarlier(p) => (history::earlier(db, &self.project, &p)?, p.target),
+                        _ => unreachable!(),
+                    };
+                    page.decision_revision = crate::workspace::control::history_decision_revision(
+                        db, &self.store.key().root().to_string_lossy(), &self.project, &self.actor, &target,
+                    )?;
+                    QueryReply::History(page)
+                },
                 _=>return refuse("unsupported_operation"),
             };
             let reply=ReadReply {protocol:Protocol::default(),generation,project_id:self.project.clone(),version,high_watermark:high,data};

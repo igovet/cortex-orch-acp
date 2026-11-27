@@ -29,7 +29,7 @@ import { SentMessages } from "./sent";
 import { viewOfText } from "./tool-names";
 import { shownFold } from "./port/history";
 import { usePlanningSprint, useTaskRoutes } from "./task-place";
-import { createFirstView, decisionsReadOf, type FirstRead } from "./first-view";
+import { conversationReadOf, createFirstView, orderedConversationOf, type FirstRead } from "./first-view";
 import { EdgeStrip, ReserveSkeleton, FirstViewNotice, LoadingStrip, Skeleton, unreachable } from "./skeleton";
 import { firstCard, revealIntent, revealKey, settleReveal } from "./reveal-intent";
 import { scrollIntoFeed } from "./follow";
@@ -326,7 +326,7 @@ function PermissionPaths(props: { paths: string[] }) {
   </Show>;
 }
 
-/** Every open question of the task, as one form with one button that sends all of their answers. */
+/** A question or batch of questions, with one button that sends all answers in the form. */
 function Questions(props: { m: SessionModel; asks: Decision[]; now: number }) {
   const ws = useWs();
   const decision = (ask: Ask) => props.asks.find(d => d.id === ask.id)!;
@@ -615,16 +615,12 @@ export function createPrepended(ids: Accessor<string[]>) {
 /** The workers, results and messages of a started task on screen: not in yet until a facts read for it has arrived. */
 const factsRead = (ws: Ws, m: SessionModel): FirstRead => ({ section: "workers and results",
   state: m.view.task.executionId !== null && ws.store.factsShown(m.view.project.id, m.view.id) === false ? "pending" : "settled" });
-/**
- * What a conversation's first reveal waits for: the latest window of its transcript (or that it is empty), the questions of
- * its execution, and the first facts read for its team, messages and result. A transcript read that failed says so in its own
- * line, so it does not hold the conversation back; questions that could not be read are named.
- */
+/** The first reveal waits for both the retained conversation and the scoped facts read. */
 export function conversationReads(ws: Ws, m: SessionModel): FirstRead[] {
-  const questions = decisionsReadOf(m.session);
+  const read = conversationReadOf(m.session);
+  const unconfirmed = m.view.task.executionId !== null && ws.store.expectsConversationRead && !read;
   return [
-    { section: "the conversation", state: m.session.historyRead?.state === "loading" ? "pending" : "settled" },
-    { section: "questions", state: !questions ? "settled" : questions.state === "loading" ? "pending" : "failed", ...(questions?.state === "failed" ? { reason: questions.reason } : {}) },
+    { section: "the conversation", state: unconfirmed || read?.state === "loading" || m.session.historyRead?.state === "loading" ? "pending" : "settled" },
     factsRead(ws, m),
   ];
 }
@@ -634,7 +630,8 @@ function createTaskFirstView(ws: Ws, model: Accessor<SessionModel | null>, part:
   return createFirstView({
     scope: ws.store,
     identity: () => { const v = current(); return v ? `${part}|${v.machine.id}|${v.project.id}|${v.id}|${v.task.executionId ?? ""}` : null; },
-    keep: () => { const v = current(); return v ? `${part}|${v.machine.id}|${v.id}` : ""; },
+    keep: part === "conversation" && ws.store.expectsConversationRead ? undefined
+      : () => { const v = current(); return v ? `${part}|${v.machine.id}|${v.id}` : ""; },
     reads: () => { const m = model(); return m ? reads(m) : []; }, offline: () => unreachable(ws),
     retry: () => { const v = current(); if (v) ws.store.retryFirstView(v.project.id, v.id); },
   });
@@ -702,7 +699,13 @@ export function Conversation(props: {
   onCleanup(() => { disposed = true; });
   // The first-read gate applies to the runtime feed, not to the sprint's already available content.
   const first = createTaskFirstView(ws, props.model, "conversation", model => conversationReads(ws, model));
-  const runtimeVisible = () => !!props.model() && !first.loading();
+  const attested = () => {
+    const model = props.model();
+    return !!model && (!ws.store.expectsConversationRead || model.view.task.executionId === null || conversationReadOf(model.session)?.state === "ready");
+  };
+  // The first-view cache avoids flashing a skeleton on refresh. It cannot authorize feed content for a different execution.
+  const loading = () => first.loading() || (!!props.model() && !attested() && !unreachable(ws) && conversationReadOf(m().session)?.state !== "failed");
+  const runtimeVisible = () => attested() && !loading();
   // The first row drawn is taken once the conversation is first shown: what its first reveal holds is drawn whole.
   createComputed(() => { const all = allIds(), f = from(); if (runtimeVisible() && all.length && (f === null || !all.includes(f))) setFrom(all[0]); });
   const saved = props.sprintFeed?.saved(runtimeVisible);
@@ -748,16 +751,16 @@ export function Conversation(props: {
   let pressedSeen = pressed();
   createEffect(() => { const n = pressed(); if (n > pressedSeen) follow.jump(); pressedSeen = n; });
   createEffect((was: boolean) => {
-    const loading = first.loading();
-    if (was && !loading) queueMicrotask(() => { if (!disposed) props.sprintFeed ? follow.sync() : follow.jump(); });
-    return loading;
-  }, first.loading());
+    const busy = loading();
+    if (was && !busy) queueMicrotask(() => { if (!disposed) props.sprintFeed ? follow.sync() : follow.jump(); });
+    return busy;
+  }, loading());
   // Answer or See what is needed pressed before this conversation showed the card it brings into view: applied once the card
   // is on the page, after the pin to the end above, and dropped once every first read is in and the card is still not there.
   const asked = () => { const v = props.model()?.view; return v ? revealIntent(revealKey(v.machine.id, v.id, v.task.executionId)) : undefined; };
   createEffect(() => {
     const intent = asked();
-    if (!intent || first.loading() || props.hidden) return;
+    if (!intent || !runtimeVisible() || props.hidden) return;
     const settled = first.pending().length === 0;
     // Tried again as the conversation changes: the card may come with the next update.
     void m().open; void m().session.timeline;
@@ -776,20 +779,30 @@ export function Conversation(props: {
     const model = props.model();
     return !model || model.view.task.closedAs === "unconfirmed" ? [] : model.session.decisions.filter(d => d.kind === "question" && (isOpen(d) || d.held));
   });
-  const inAsks = (id: string) => asks().some(d => d.id === id);
+  const askGroup = (d: Decision) => {
+    if (!asks().some(q => q.id === d.id)) return [];
+    if (!orderedConversationOf(m().session)) return asks();
+    // Only siblings from the same native opening share a form. Unrelated questions stay at their own positions.
+    if (d.batchId === null) return [d];
+    const order = m().session.timeline.flatMap(e => e.kind === "decision" ? [e.decisionId] : []);
+    const group = new Map(asks().filter(q => q.batchId === d.batchId).map(q => [q.id, q]));
+    return order.flatMap(id => group.get(id) ?? []);
+  };
   // While a decision waits or work runs, no completed result and no Accept stand beside it: the last one stays as history.
   const held = () => m().view.task.result ? resultHeld(m(), asks().length > 0) : null;
   const changesAt = (): Route => ({ name: "task", machine: m().view.machine.id, task: m().view.id, tab: "changes" });
   const team = () => <Show when={runtimeVisible()}><TeamBar m={m()} now={props.now} pick={props.pick} onPick={props.onPick} /></Show>;
   return <section class="task-panel" classList={{ "sp-conv": !!props.sprintFeed }} aria-label="Conversation" hidden={props.hidden}>
-    <div class="timeline" classList={{ "ws-history-end": partialTail() !== undefined }} ref={scroller} aria-busy={first.loading() ? "true" : undefined} onScroll={() => { follow.onScroll(); checkEarlier(true); }}>
+    <div class="timeline" classList={{ "ws-history-end": partialTail() !== undefined }} ref={scroller} aria-busy={loading() ? "true" : undefined} onScroll={() => { follow.onScroll(); checkEarlier(true); }}>
       <div class="tl-in">
         {/* The sprint's brief and saved answers are part of the conversation: while its first reads are out, only the skeleton shows. */}
-        <Show when={!first.loading()}>{props.sprintFeed?.brief}</Show>
-        <Show when={first.loading()}><Skeleton kind="conversation" label="Loading the conversation…" /></Show>
+        <Show when={!loading()}>{props.sprintFeed?.brief}</Show>
+        <Show when={loading()}><Skeleton kind="conversation" label="Loading the conversation…" /></Show>
+        <Show when={props.model() && !loading()}>
+          <Show when={!props.sprintFeed}><Brief m={m()} /></Show>
+          <HistoryState m={m()} />
+        </Show>
         <Show when={runtimeVisible()}>
-        <Show when={!props.sprintFeed}><Brief m={m()} /></Show>
-        <HistoryState m={m()} />
         <Show when={follow.reserving()}><ReserveSkeleton ref={el => (reserve = el)} /></Show>
         <Earlier m={m()} onShow={() => { showPressed = true; }} />
         <For each={ids()}>{id => <Switch>
@@ -825,7 +838,8 @@ export function Conversation(props: {
           })()}</Match>
           <Match when={entry(id).kind === "decision"}>{(() => {
             const d = () => decision((entry(id) as Extract<TimelineEntry, { kind: "decision" }>).decisionId);
-            return <Show when={inAsks(d().id)} fallback={<DecisionCard m={m()} d={d()} now={props.now} />}><Show when={asks()[0]?.id === d().id}><Questions m={m()} asks={asks()} now={props.now} /></Show></Show>;
+            const group = createMemo(() => askGroup(d()));
+            return <Show when={group().length} fallback={<DecisionCard m={m()} d={d()} now={props.now} />}><Show when={group()[0]?.id === d().id}><Questions m={m()} asks={group()} now={props.now} /></Show></Show>;
           })()}</Match>
           <Match when={entry(id).kind === "line"}>{(() => {
             const l = () => entry(id) as Extract<TimelineEntry, { kind: "line" }>;
@@ -845,7 +859,7 @@ export function Conversation(props: {
           <div class="answered ws-prev-result" role="note"><I n="eye" s={14} /><span>Previous result v{m().view.task.result!.version}, read-only. {held()}.</span> <A class="lnk ws-ml4" to={changesAt()}>Open</A></div>
         </Show>
         </Show>
-        <Show when={!first.loading()}>{saved?.tail}</Show>
+        <Show when={!loading()}>{saved?.tail}</Show>
         {/* The last line says what the task is doing now, as its header does: waiting for an answer is not working. */}
         <Show when={runtimeVisible() && m().mode === "live" && m().view.task.observedPhase !== "recovery"}>
           <Show when={workingNow(m())} fallback={<Show when={!stranded()}><WaitingIndicator /></Show>}><WorkingIndicator text={coordinatorLine(m())} /></Show>

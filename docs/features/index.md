@@ -4,7 +4,7 @@ Every product feature has one page below. Each page names its source area; proje
 
 | Feature | Owner | Mechanism |
 | --- | --- | --- |
-| Task lifecycle and scheduling | Runtime | Transactional state machine and DAG; four concurrent workers per chat session across engines, with per-connection limits able only to lower that session's share |
+| Task lifecycle and scheduling | Runtime | Transactional state machine and DAG; observed critical-path durations with a chain-length fallback, a configurable ceiling of up to four workers per task and capacity limits per engine connection |
 | Worker questions and access waits | Runtime | Assignment-local waits; same healthy worker session continues after an answer or validated access decision |
 | Project actions | Runtime gateway | Channel authority, scoped files, contained commands and external MCP |
 | Reports and pipeline | Runtime store | Immutable reports, runtime-owned newest-first pipeline |
@@ -53,6 +53,7 @@ Access, commands and observability:
 
 Workspace:
 
+- [Conversation loading and order](../cortex-workspace/local-task-execution.md#conversation-loading-and-order)
 - [Task side chat](side-chat/index.md)
 
 Engines and client integrations:
@@ -67,6 +68,6 @@ Engines and client integrations:
 
 Packaging and project operations (project pages): [packaging](../project/packaging.md), [dev Paseo environment](../project/dev-environment.md), [verification](../project/verification.md), [test matrix](../project/test-matrix.md).
 
-All 23 worker profiles remain available. Models have no delegation, route-selection or acceptance API. The optional model-owned Rubber Duck lane has been removed. [Verification status](../project/verification.md) records the available automated evidence.
+Five instruction bases and optional competency modules support the 23 stable worker role identities. [Adaptive worker profiles](../project/adaptive-profiles.md). Models have no delegation, route-selection or acceptance API. The optional model-owned Rubber Duck lane has been removed. [Verification status](../project/verification.md) records the available automated evidence.
 
 Paseo uses the same tool presentation in coordinator chat and worker panels: Read/Read skill retain only target/status in display history, never expand, and never persist the returned body in new display events. Raw protocol data is hidden everywhere; opaque-only calls are static rows. Command output and diffs still expand; a shell row always opens to its full command, even without output. Explicit `execute`/`terminal` kind classifies shell calls even before command input arrives, so split updates do not turn a shell into a read; a shell call titled with its own command line (Claude's Bash, e.g. `cat a | grep b`) is a shell, not a read; only the engine's own `read` kind makes a command a read. Claude Edit/Write `file_path`/`old_string`/`new_string`/`content` input is aliased for the host's edit row so its diff opens in chat; the alias affects presentation only.

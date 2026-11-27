@@ -1,13 +1,25 @@
 # Local task execution
 
-Conversation waits explain when decision details are unavailable and point to Answer in the header. Open decisions also render before their timeline reference arrives. Sent attachment chips tolerate the whitespace normalization used by runtime history.
-
 **Status: implemented source slice, not full product or installed-package qualification.**
 See the [protocol](protocol.md#local-desktop-slice-built) for the current local wire version, and
 [IDE and Git](ide-and-git.md) for the wider contract.
 
 For update, native/API-key connection, voice-settings and command-control behavior,
 see [desktop maintenance and controls](maintenance-and-controls.md).
+
+## Conversation loading and order
+
+With Workspace wire 1.12, opening a started task shows a loading state until
+the latest history window and its complete decision set agree. A cached board
+or a header that already knows about a question is not a conversation read.
+Replies, tool groups, questions and permissions appear together in the order
+recorded by the service. Streaming updates keep the last confirmed feed visible
+while newer reads settle. Loading earlier history keeps the reader's place.
+If a read cannot be confirmed, the feed offers a retry instead of displaying
+an unmatched decision card. See the [native ordering contract](../project/native-incoming-acp.md#workspace-conversation-order)
+for ordering limits on older records and peers.
+
+Sent attachment chips tolerate the whitespace normalization used by runtime history.
 
 ## Python-independent native service startup
 
@@ -51,7 +63,7 @@ bounded no-follow/nonblocking regular-file opens, and refuse oversized settings
 rather than delegate or return partial data. Each configuration file is bounded
 by the existing native frame budget; stored settings rows share that bound.
 
-The 125 current-Python offline cases in
+The 125 offline captures from the former runtime in
 [`project-config-python.json`](../../crates/workspace-service/tests/fixtures/project-config-python.json)
 are captured by
 the former generator `generate_project_config_fixture` (removed with the Python runtime).
@@ -154,7 +166,7 @@ per reply, 20 pages and 1,000 tools. Unix/runtime scratch roots remain short
 independently of TMPDIR.
 
 [`mcp-discovery-python.json`](../../crates/workspace-service/tests/fixtures/mcp-discovery-python.json)
-contains 77 offline current-Python operation replies and 110 redaction cases,
+contains 77 offline operation replies from the former runtime and 110 redaction cases,
 captured by
 the former generator `generate_mcp_discovery_fixture` (removed with the Python runtime).
 Capture substitutes only sandbox argv construction for a disposable toy stdio
@@ -381,7 +393,7 @@ The registered-root and single-owner fences are unchanged. External same-user
 Git processes can race this cooperative lock; Git and overlay writes are not
 one atomic transaction.
 
-The 38 offline current-Python real-Git cases in
+The 38 offline real-Git cases from the former runtime in
 [`task-merge-python.json`](../../crates/workspace-service/tests/fixtures/task-merge-python.json),
 captured by
 the former generator `generate_task_merge_fixture` (removed with the Python runtime),
@@ -402,22 +414,7 @@ of TMPDIR. Process-kill crash timing and real-client GUI behavior are unqualifie
 Shared unmaterialized legacy options/absent option-table projections still
 are refused before effects, as are the existing unsupported evidence paths.
 There is no merge-action-specific Python branch on the native boundary.
-The machine operations that were directly delegated to the former Python provider, and are now refused natively, are `config.action` variants
-other than connection rename/session limits, filesystem-reference validation,
-removal with supported defaults (including canonical secret-file unlink), qualified
-preset apply, default-preset reset, profile read/create/save/update/delete/deactivate
-and qualified format-1/2 four-section activation, and `engine.connection` actions other
-than native `login_command`/`recheck`; config.read
-is passive native display and config.save uses the native all-surface writer without
-fallback. Unqualified profile materialization documents and wider modeled/backing-file
-numbers are refused natively; ignored wider profile-document metadata
-is now native. Current routing activation requires model-policy version 2 in both
-providers; missing/other-version refusal shapes are native; there is no additional MCP-management config.action verb to migrate:
-MCP add/edit/remove/enable/validation already use native config.save, with explicit
-discovery on native config.mcp.discover. See [per-action providers](../configuration.md#native-machine-actions).
-Project saves use the native boundary above. Integration
-outside the committed-source local squash slice, unsupported legacy facts,
-receipt-backed worker actions still need migration. The retained mode and its Python launcher were removed.
+The [native machine dispatcher](../../crates/workspace-service/src/machine/native.rs) routes Settings, setup, Git and other local owner operations. Read-only configuration views use the passive reader. Explicit pre-save MCP discovery starts the server for discovery only. Unsupported shapes receive a native refusal. See [per-action handling](../configuration.md#native-machine-actions).
 
 ### Native owner deletion
 
@@ -485,13 +482,10 @@ and confirmed route DTOs retain the 100-row scan and 60,000-byte page budget. `w
 project, task, session, page size and a fixed high watermark; later inserts cannot enter older pages, and
 session replacement invalidates old cursors. Sparse tool updates enrich retained input across page
 boundaries, with the original 100-update clipping notice. Hidden bookkeeping and thoughts stay out of the display; every other call keeps its bounded, credential-redacted input and
-result (a file read or edit keeps its path link and diff only). Malformed retained updates retain an unavailable-content row;
-unsupported request/display shapes, private report diff blocks, noncanonical timestamps and intermediate
-reads above 1,000 rows or 8 MiB still use the retained interpreter. Offline Python DTOs in
+result (a file read or edit keeps its path link and diff only). Malformed or unsupported retained display content is represented as unavailable. See [the native coordinator reader](../../crates/workspace-service/src/machine/coordinator.rs). Offline Python DTOs in
 `fixtures/coordinator-facts.json` are captured by the former generator `generate_coordinator_fixture`
 (removed with the Python runtime) under `crates/workspace-service/tests/`; tests run with no Python helper
-or engine. The full receipt/closure validator remains on the migration provider; native Git source
-observations do not substitute for its receipt checks.
+or engine. Native Git source observations cannot substitute for a command receipt.
 
 Native `product.read` attachment requests read the registered task's saved options
 through Core, including before activation, returning a validated array of file
@@ -1502,6 +1496,19 @@ planner, auditors and the other read-only roles). The runtime refuses a plan
 with a writing role (`read_only_task_writer_refused`) and refuses every project
 write of the task. Its study plan names no verification commands (`[]`, refused
 for every other plan); the runtime verifies the deliverable itself.
+
+The advertised question and sprint-plan tools direct the coordinator to read
+the applicable project rules and inspect the relevant implementation or
+evidence before asking the owner. Questions address choices the study leaves
+open. Every proposed option must respect the project's rules, including its
+required profiles and independent review.
+
+Before recording a native plan or the final part of a sprint plan, the service
+rechecks the coordinator's retained project file reads in the current checkout.
+A changed or unreadable input returns its project-relative path and asks for a
+fresh read before a revised proposal. Unrelated files do not affect this check.
+Directory contents, command output and older receipts that retained only a
+path hash do not establish file freshness.
 
 The deliverable is the sprint plan, submitted with the `sprint_plan_submit` tool,
 whose schema states the item fields and limits. A plan may have any number of

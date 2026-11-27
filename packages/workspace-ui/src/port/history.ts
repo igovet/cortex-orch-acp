@@ -2,8 +2,12 @@ import type { TimelineEntry } from "@cortex/workspace-domain";
 import { displayStep, STEP_PREFIX, isHiddenStep, isPlumbingStep, isToolName, tookText, toolLabel, viewOfText, workedText } from "../tool-names";
 
 /** What the runtime's display feed holds for one task, in order. */
-export type FeedRow = { historyId: string; revision: string; kind: string; text?: string | null; toolStatus?: string | null; recordedAt?: string | null; availability?: string };
-export type Dated = { at: string; entry: TimelineEntry };
+export type FeedRow = { historyId: string; sequence?: string; revision: string; kind: string; text?: string | null; toolStatus?: string | null; recordedAt?: string | null; availability?: string };
+export type Dated = { at: string; entry: TimelineEntry; sequence?: string; orderId: string };
+export const ordinal = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+/** Wire decimals are canonical and may exceed Number.MAX_SAFE_INTEGER. */
+export const sequenceOrder = (a: string, b: string) => a.length - b.length || ordinal(a, b);
+const position = (row: FeedRow) => ({ at: row.recordedAt ?? "", sequence: row.sequence, orderId: row.historyId });
 
 export function shownFold(fold: Extract<TimelineEntry, { kind: "fold" }>, showAllTools: boolean) {
   return (showAllTools && fold.all) || fold;
@@ -65,7 +69,7 @@ function fold(run: Steps): Dated | null {
   const simple = run.names.length ? foldOf(run) : { text: "", steps: [] as string[] };
   const all = foldOf(run.all);
   // A turn of only the runtime's own steps is an empty fold: the page draws it only when every tool call is asked for.
-  return { at: run.all.first.recordedAt ?? "", entry: { id: `history:${run.all.first.historyId}:${run.all.first.revision}`, kind: "fold", ...simple,
+  return { ...position(run.first), entry: { id: `history:${run.all.first.historyId}:${run.all.first.revision}`, kind: "fold", ...simple,
     ...(all.text !== simple.text || all.steps.length !== simple.steps.length ? { all } : {}) } };
 }
 
@@ -74,7 +78,7 @@ function fold(run: Steps): Dated | null {
  * call is several. Text joins back into the message it was, tool events fold into one line per turn, and a machine identifier
  * or a display update is never shown. Nothing here invents an event: every entry comes from the rows it replaces.
  */
-export function conversationOf(rows: FeedRow[], known: { description: string; answers: string[]; partial?: boolean }): Dated[] {
+export function conversationOf(rows: FeedRow[], known: { description: string; answers: string[]; partial?: boolean; breaks?: readonly string[] }): Dated[] {
   // Split ACP updates have one call id. Merge fields without losing the initial input.
   const calls = new Map<string, FeedRow>(), ordered: FeedRow[] = [];
   for (const row of rows) {
@@ -99,24 +103,29 @@ export function conversationOf(rows: FeedRow[], known: { description: string; an
   const endText = () => {
     if (text && leading) leading = false;
     else if (text) {
-      const body = text.parts.join("").trim(), id = `history:${text.row.historyId}:${text.row.revision}`, at = text.row.recordedAt ?? "";
-      if (echoed(body)) out.push({ at, entry: { id, kind: "line", icon: "archive", text: CAPSULE_ECHO, at: null, rule: false } });
-      else if (body) out.push({ at, entry: { id, kind: "cortex", text: body } });
+      const body = text.parts.join("").trim(), id = `history:${text.row.historyId}:${text.row.revision}`;
+      if (echoed(body)) out.push({ ...position(text.row), entry: { id, kind: "line", icon: "archive", text: CAPSULE_ECHO, at: null, rule: false } });
+      else if (body) out.push({ ...position(text.row), entry: { id, kind: "cortex", text: body } });
     }
     text = null;
   };
   const endSteps = () => { if (steps && leading) leading = false; else if (steps) { const entry = fold(steps); if (entry) out.push(entry); } steps = null; };
+  let boundary = 0;
   for (const row of ordered) {
+    // A question belongs after rows at its own sequence. It ends the preceding reply or step group.
+    while (row.sequence !== undefined && known.breaks?.[boundary] !== undefined && sequenceOrder(known.breaks[boundary], row.sequence) < 0) {
+      endText(); endSteps(); leading = false; boundary++;
+    }
     const body = row.text ?? "";
     if (row.kind === "user" && row.text != null) {
       endText(); endSteps(); leading = false;
       const said = body.trim(), answered = answers.indexOf(said);
       // The task's own description heads the page, and an answer reads with its question.
       if (answered >= 0) answers.splice(answered, 1);
-      else if (said && said !== known.description.trim()) out.push({ at: row.recordedAt ?? "", entry: { id: `history:${row.historyId}:${row.revision}`, kind: "said", text: said } });
+      else if (said && said !== known.description.trim()) out.push({ ...position(row), entry: { id: `history:${row.historyId}:${row.revision}`, kind: "said", text: said } });
     } else if (row.kind === "system" && body === COMPACTED) {
       endText(); endSteps(); leading = false;
-      out.push({ at: row.recordedAt ?? "", entry: { id: `history:${row.historyId}:${row.revision}`, kind: "divider", text: COMPACTED } });
+      out.push({ ...position(row), entry: { id: `history:${row.historyId}:${row.revision}`, kind: "divider", text: COMPACTED } });
     } else if (row.kind === "tool" || row.kind === "system") {
       const detail = displayStep(body);
       if (row.text == null || body.startsWith(NOISE) || WORKER_LAUNCH.test(body) || isHiddenStep(detail?.title ?? body.replace(STATUS, ""))) continue;
@@ -138,7 +147,7 @@ export function conversationOf(rows: FeedRow[], known: { description: string; an
       (text ??= { row, parts: [] }).parts.push(body);
     } else {
       endText(); endSteps(); leading = false;
-      out.push({ at: row.recordedAt ?? "", entry: { id: `history:${row.historyId}:${row.revision}`, kind: "line", icon: "help", text: "Part of this conversation could not be read", at: null, rule: false } });
+      out.push({ ...position(row), entry: { id: `history:${row.historyId}:${row.revision}`, kind: "line", icon: "help", text: "Part of this conversation could not be read", at: null, rule: false } });
     }
   }
   endText(); endSteps();

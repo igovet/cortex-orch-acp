@@ -1,10 +1,14 @@
-//! Reusable blocking connections. Never opens a home/global store or another channel.
+//! Reusable blocking connections for one logical project and channel.
 mod commit_signal;
 pub use commit_signal::CommitSignal;
 mod diagnostic;
 pub use diagnostic::StorageDiagnostic;
 pub mod documents;
 pub mod executor;
+mod location;
+pub use location::StoreRoot;
+pub mod fact_memory;
+pub mod administration;
 pub mod locks;
 pub mod migration;
 mod compaction;
@@ -131,6 +135,7 @@ impl Store {
         sqlite_wait: Duration,
         acp_session: Option<&str>,
     ) -> CoreResult<Option<Self>> {
+        let key = location::resolve(key, mode, access_wait)?;
         let initialize = mode == OpenMode::Initialize;
         let directory = key.directory();
         let release = key.channel() == StoreChannel::Release;
@@ -335,6 +340,13 @@ impl Store {
     }
     /// Query-only snapshot on the process-lifetime connection.
     pub fn read<T>(&self, body: impl FnOnce(&Connection) -> CoreResult<T>) -> CoreResult<T> {
+        self.read_transaction(|tx| body(tx))
+    }
+
+    pub(crate) fn read_transaction<T>(
+        &self,
+        body: impl FnOnce(&Transaction<'_>) -> CoreResult<T>,
+    ) -> CoreResult<T> {
         let _lock = self.access()?;
         let db = self
             .connection

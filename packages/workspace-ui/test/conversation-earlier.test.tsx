@@ -20,7 +20,10 @@ import { capabilitiesWire, flush, scriptedTransport, wireDecision, wireTask } fr
  * (`np1.<limit>.<row>`, `nt1.<limit>.<row>`, `nh.<limit>.<top>.<consumed>`), and a read that names a cursor with another
  * page size is refused with `invalid_cursor`.
  */
-function service(options: { backward?: boolean; earlierDelay?: number; decisions?: WireDecision[] } = {}) {
+function service(options: { backward?: boolean; earlierDelay?: number; decisions?: WireDecision[]; decisionRevision?: string } = {}) {
+  const revisions = { history: options.decisionRevision, decisions: options.decisionRevision };
+  const cards = options.decisions ?? [];
+  const stamped = (revision: string | undefined) => revision === undefined ? {} : { decisionRevision: revision };
   let version = 1, high = 3, failNext = false, resetNext = false, repeatNext = false, heldReply: Promise<void> | undefined, heldForward: Promise<void> | undefined;
   const task = () => wireTask({ version: String(version), description: "Index the repository", executionId: "execution", phase: "execution", executionState: "running", runtimeState: "EXECUTING" });
   const rows: Record<string, unknown>[] = [];
@@ -59,7 +62,7 @@ function service(options: { backward?: boolean; earlierDelay?: number; decisions
   const s = scriptedTransport({
     "service.capabilities": () => ({ methods: ["native.query", "native.board"], machine: true }),
     "projects.list": () => [{ projectId: "p", displayName: "Project", canonicalRoot: "/p", activation: {} }],
-    "capabilities.get": () => capabilitiesWire(["capabilities.get", "project.snapshot", "tasks.create", "tasks.start", "decisions.list", "decisions.answer", "history.page"]),
+    "capabilities.get": () => capabilitiesWire(["capabilities.get", "project.snapshot", "tasks.create", "tasks.start", "decisions.list", "decisions.answer", "history.page"], options.decisionRevision ? 12 : 11),
     "native.board": () => envelope({ type: "board", value: { items: [task()], nextCursor: null, highWatermark: String(high) } }),
     "native.query": async raw => {
       const { operation, payload } = raw as { operation: string; payload: { cursor: string | null; limit: number } };
@@ -68,16 +71,16 @@ function service(options: { backward?: boolean; earlierDelay?: number; decisions
       if (operation === "history.page") {
         forwardLimits.push(payload.limit);
         if (payload.cursor && heldForward) { const reply = heldForward; heldForward = undefined; await reply; }
-        return envelope({ type: "history", value: forward(payload) });
+        return envelope({ type: "history", value: { ...forward(payload), ...stamped(revisions.history) } });
       }
       if (options.backward === false) throw new Error("Refused: invalid_request");
       if (payload.cursor && resetNext) { resetNext = false; throw new Error("Refused: history_reset"); }
       if (payload.cursor && heldReply) { const reply = heldReply; heldReply = undefined; await reply; }
       if (payload.cursor && options.earlierDelay) await new Promise(resolve => setTimeout(resolve, options.earlierDelay));
       if (payload.cursor && failNext) { failNext = false; throw new Error("Refused: storage_unavailable"); }
-      return envelope({ type: "history", value: earlier(payload) });
+      return envelope({ type: "history", value: { ...earlier(payload), ...stamped(revisions.history) } });
     },
-    "decisions.list": () => ({ items: options.decisions ?? [], nextCursor: null, highWatermark: "1" }),
+    "decisions.list": () => ({ items: cards, nextCursor: null, highWatermark: "1", ...stamped(revisions.decisions) }),
     "machine.call": raw => {
       const op = (raw as { op: string }).op;
       if (op === "overview") return { ok: true, result: { name: "This machine" } };
@@ -104,7 +107,7 @@ function service(options: { backward?: boolean; earlierDelay?: number; decisions
     heldForward = new Promise<void>(resolve => { release = resolve; });
     return release;
   };
-  return { s, rows, add, at, changed, reads, limits, forwardLimits, refused, holdNext, holdForward, fail: () => { failNext = true; }, reset: () => { resetNext = true; },
+  return { s, rows, add, at, changed, reads, limits, forwardLimits, refused, holdNext, holdForward, revisions, cards, fail: () => { failNext = true; }, reset: () => { resetNext = true; },
     /** The next earlier read with a cursor names that same cursor as the one before it. */
     repeat: () => { repeatNext = true; } };
 }
@@ -301,6 +304,43 @@ it("puts each earlier part before the rows held, keeps every entry already shown
   const reference = open(whole.s);
   await vi.waitFor(() => expect(reference.texts().at(-1)).toBe("Streaming on."), { timeout: 4000 });
   expect(texts()).toEqual(reference.texts());
+});
+
+it("keeps the last matched native window through a crossed update and preserves card positions on prepend", async () => {
+  const question = wireDecision({ decisionId: "q", executionId: "execution", prompt: "Older question",
+    conversationSequence: "3", conversationTieBreaker: "01" });
+  const permission = wireDecision({ decisionId: "perm", executionId: "execution", kind: "permission", status: "answered",
+    allowedOperations: [], conversationSequence: "120", conversationTieBreaker: "02", createdAt: "2021-01-01T00:00:00Z" });
+  const svc = service({ decisions: [permission, question], decisionRevision: "a".repeat(64) });
+  for (let n = 1; n <= 150; n++) svc.add("user", `Message ${n}`);
+  const { store, session, timeline } = open(svc.s, PAGE_SCREEN);
+  await vi.waitFor(() => expect(session()?.historyEarlier?.state).toBe("available"));
+  const ids = () => timeline().map(e => e.id);
+  const held = ids();
+  expect(held[0]).toBe("decision:q");
+  expect(held.indexOf("decision:perm")).toBe(held.indexOf("history:h119:1") + 1);
+
+  // The native decision answer is already readable, but the corresponding history response is still from before it.
+  svc.cards[1] = { ...question, status: "answered", allowedOperations: [], answerText: "Yes" };
+  svc.revisions.decisions = "b".repeat(64);
+  const release = svc.holdForward();
+  svc.add("user", "New transcript row");
+  svc.changed();
+  await vi.waitFor(() => expect(svc.reads.some(r => r.operation === "history.page")).toBe(true));
+  expect(ids()).toEqual(held);
+  expect(session()?.decisions.find(d => d.id === "q")?.answer).toBeNull();
+  // Once the tail attests to the new decision revision, both changes can be published with the old IDs in place.
+  svc.revisions.history = svc.revisions.decisions;
+  release();
+  await vi.waitFor(() => expect(session()?.decisions.find(d => d.id === "q")?.answer?.text).toBe("Yes"));
+  expect(ids()).toEqual([...held, "history:h150:1"]);
+
+  store.loadEarlierHistory("task-1");
+  await vi.waitFor(() => expect(session()?.historyEarlier).toBeUndefined());
+  const final = ids();
+  expect(final.indexOf("decision:q")).toBe(final.indexOf("history:h2:1") + 1);
+  expect(final.filter(id => held.includes(id))).toEqual(held);
+  expect(new Set(final).size).toBe(final.length);
 });
 
 it("never shows a message whose beginning lies in the part not read, nor a settled question or answer from it", async () => {

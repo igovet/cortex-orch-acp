@@ -61,8 +61,9 @@ export const projection = (version: string, state: WorkspaceState): ProjectionUp
 export const initial = () => emptyWorkspace();
 export { applyProjection };
 
-export const capabilitiesWire = (operations: string[]) => ({
-  protocol: PROTOCOL, buildIdentity: "1.0.6+test", schemaFingerprint: SCHEMA_FINGERPRINT, mappingVersion: "1", operations,
+// Existing fixtures without a shared decision revision model a pre-1.12 peer.
+export const capabilitiesWire = (operations: string[], minor = 11) => ({
+  protocol: { ...PROTOCOL, minor }, buildIdentity: "1.0.6+test", schemaFingerprint: SCHEMA_FINGERPRINT, mappingVersion: "1", operations,
   limits: LIMITS,
   generation: "1", acpCapabilities: {},
 });

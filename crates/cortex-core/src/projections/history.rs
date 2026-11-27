@@ -748,6 +748,7 @@ pub(super) fn page(db: &Connection, project: &str, p: &Page) -> CoreResult<ReadP
         high_watermark: ver(high + 1)?,
         tail_cursor,
         prev_cursor: None,
+        decision_revision: None,
     })
 }
 /// The conversation read from its end backwards (`history.earlier`). Without a cursor: the newest `limit` source rows
@@ -826,6 +827,7 @@ pub(super) fn earlier(
         high_watermark: ver(maximum + 1)?,
         tail_cursor,
         prev_cursor,
+        decision_revision: None,
     })
 }
 /// The newest display position of a session: each table's own maximum through its (session, seq) index.

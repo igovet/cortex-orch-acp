@@ -78,7 +78,16 @@ pub fn attempt_allowed(source: AssignmentState, target: AssignmentState) -> bool
         _ => false,
     }
 }
-pub fn event_tx(db: &Connection, task: &str, kind: &str, payload: Value) -> CoreResult<i64> {
+pub fn event_tx(db: &Connection, task: &str, kind: &str, mut payload: Value) -> CoreResult<i64> {
+    if matches!(
+        kind,
+        "USER_QUESTION_REQUESTED" | "NATIVE_PERMISSION_DECISION_OPENED"
+    ) || (kind == "WORKER_WAIT_CHANGED"
+        && payload["status"] == "open"
+        && payload["question_id"].is_string())
+    {
+        crate::workspace::anchor_conversation_decision_tx(db, task, &mut payload)?;
+    }
     db.execute("INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES (?,?,'runtime',?,?)",
         (task,kind,serde_json::to_string(&payload)?,crate::now()))?;
     let id = db.last_insert_rowid();
