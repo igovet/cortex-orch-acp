@@ -53,6 +53,7 @@ fn directory(store: &Store, task: &str) -> PathBuf {
 
 /// Whether a lease-backed command keeps its authority after one check: a definite
 /// refusal revokes it; an unanswered check (busy store) holds for a bounded grace.
+#[cfg(test)]
 fn lease_valid(outcome: &Result<CoreResult<()>, tokio::time::error::Elapsed>, since_confirmed: Duration) -> bool {
     match outcome {
         Ok(result) => result.is_ok(),
@@ -60,6 +61,7 @@ fn lease_valid(outcome: &Result<CoreResult<()>, tokio::time::error::Elapsed>, si
     }
 }
 /// How long an unanswered (not refused) authority check may keep a lease alive.
+#[cfg(test)]
 const LEASE_GRACE: Duration = Duration::from_secs(20);
 /// Only this evidence permits automatic host routing after a sandbox attempt.
 /// It is written after an explicit launcher failure on the supervisor's private

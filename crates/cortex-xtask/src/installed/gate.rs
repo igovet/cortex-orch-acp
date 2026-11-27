@@ -243,6 +243,7 @@ fn run_inner(cli: &Cli, channel: &Channel, close_cycles: u32) -> Res<()> {
             // invalidate Docker's otherwise reusable image layer on every run.
             let status = Command::new("dpkg-deb")
                 .args([
+                    "--root-owner-group",
                     "--build",
                     &stage.to_string_lossy(),
                     &context.join("shim.deb").to_string_lossy(),

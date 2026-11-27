@@ -119,7 +119,7 @@ pub(crate) async fn woken() {
 enum Seen {
     Ready,
     Needs(Option<String>),
-    Ended(Option<Option<String>>),
+    Ended,
     Quiet,
 }
 async fn watch(probe: &SignInProbe, wait: Duration) -> Seen {
@@ -138,7 +138,7 @@ async fn watch(probe: &SignInProbe, wait: Duration) -> Seen {
             }
         }
         if probe.exited() {
-            return Seen::Ended(None);
+            return Seen::Ended;
         }
         if Instant::now() >= until {
             return Seen::Quiet;
@@ -200,7 +200,7 @@ pub(crate) async fn pass(targets: &mut Vec<ProbeTarget>, discover_wait: Duration
                         Seen::Quiet => {
                             probes.insert(fp.clone(), probe);
                         }
-                        Seen::Ended(_) => probe.shutdown().await,
+                        Seen::Ended => probe.shutdown().await,
                     }
                 }
             }
@@ -238,7 +238,7 @@ pub(crate) async fn pass(targets: &mut Vec<ProbeTarget>, discover_wait: Duration
                 probes.insert(fp, probe);
                 changed = true;
             }
-            Seen::Ended(_) => {
+            Seen::Ended => {
                 // Gone without a word about signing in, or with one: the text decides.
                 probe.shutdown().await;
             }

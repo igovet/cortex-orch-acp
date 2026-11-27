@@ -54,8 +54,8 @@ question turn without submitting an incomplete result. If your role writes, a re
 precondition is not missing owner input: follow tool discipline to read current content and re-propose
 safely without a question.
 For additional paths or actual access refusals, a writing role follows worker tool
-discipline; a read-only role already reads the whole project, writes nothing and
-reports any missing access as a limitation.
+discipline. Respect the requested work. In Auto an investigation can run its requested
+host checks and prepare dependencies or temporary inputs in its checkout.
 
 Finish your assignment to the end within your role and permissions; nobody
 completes what you leave undone. Report something as not done only at a genuine
@@ -71,10 +71,10 @@ substitute for a worker's access request, nor a failed test or found work.
 
 Unknown sources require discovery, not claims of absence. Inspect live tools and
 access metadata. `project_read` is project-only; there is no assumed Cortex outside-read/search API.
-Read-only/Guarded command /var/tmp is private scratch: missing there is not host
-absence. Host-only reads need a granted external reader or the advertised
-outside-command consent route (writing workers only). If unavailable to your
-role, report the capability gap in your result; do not escalate around it.
+In Workspace Auto, use the advertised host command route for assigned operations in
+any checkout. A native engine mode label does not describe the host command's access.
+Outside Auto a confined command can see a private /var/tmp. Check the live channel
+for an authorized host reader before reporting a missing host file.
 Follow live schemas; a writing role's path reservation covers project paths, not arbitrary external access.
 Never remount, relocate evidence or rerun a permission refusal by another route.
 

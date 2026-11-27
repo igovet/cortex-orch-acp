@@ -1,7 +1,7 @@
 import { wireAttachments as checkedAttachments } from "../attachments";
 import { capabilities as localCapabilities, decodeResponse, negotiate, PROTOCOL, validate } from "@cortex/workspace-contract";
 import type { Answer as WireAnswer, Decision as WireDecision, Receipt as WireReceipt, Result as WireResult, Task as WireTask, HistoryRow, WireTypes } from "@cortex/workspace-contract";
-import { ACCESS_MODES, readRemoteStatus, readSudoPrompts, capabilityOf, checksPassed, coordinatorAllowed, DomainError, effortLabel, ENGINE_KEYS, engineLabel, FEATURES, LANGUAGES, LOCAL_MACHINE_ID, MACHINE_COMMANDS, mapProjectSlice, orderedEfforts, parseLiveSprintGraph, readableCheckReason, routeIdOf, emptySession, overlayTask, validatePlan, WIRE_OPERATIONS } from "@cortex/workspace-domain";
+import { ACCESS_MODES, readRemoteStatus, readSudoPrompts, capabilityOf, checksPassed, coordinatorAllowed, DomainError, effortLabel, ENGINE_KEYS, engineLabel, FEATURES, LANGUAGES, LOCAL_MACHINE_ID, MACHINE_COMMANDS, mapDecision, mapProjectSlice, orderedEfforts, parseLiveSprintGraph, readableCheckReason, routeIdOf, emptySession, overlayTask, validatePlan, WIRE_OPERATIONS } from "@cortex/workspace-domain";
 import { nativeDelta, nativeVersion } from "./native";
 import { readOwnerActionReply, readOwnerActions, type OwnerActionRequests } from "@cortex/workspace-domain";
 import { applyNativeTaskDelta, weeklyUsage } from "@cortex/workspace-domain";
@@ -2003,7 +2003,23 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     if (sentBatch) held.delete(sentBatch);
     let reply: unknown;
     try { reply = await transport.request(wire.operation, wire.message); }
-    catch (error) { return refusalOf(envelope.requestId, error); }
+    catch (error) {
+      const command = envelope.payload;
+      const decision = command.type === "answer_decision" ? decisions.get(command.decisionId) : undefined;
+      if (command.type === "answer_decision" && decision && mapDecision(decision.wire).kind === "permission" && offered.includes("decisions.get")) {
+        const { projectId, wire: original } = decision;
+        const observed = await read("Decision", "decisions.get", request(projectId, "decisions.get", { target: original.decisionId })).catch(() => null);
+        const answer = command.answer === "Allow once" ? "Allowed once" : command.answer === "Deny" ? "Denied" : undefined;
+        if (answer && observed?.decisionId === original.decisionId && observed.questionId === original.questionId
+            && observed.executionId === original.executionId && observed.ownerEpoch === original.ownerEpoch
+            && observed.status === "answered" && observed.answerText === answer) {
+          decisions.set(original.decisionId, { ...decision, wire: observed });
+          return done(envelope.requestId, original.decisionId);
+        }
+        if (!observed) return { requestId: envelope.requestId, ok: false, outcome: "unknown_outcome", message: "Could not confirm the answer. Refresh the task to check its status." };
+      }
+      return refusalOf(envelope.requestId, error);
+    }
     const receipt = decodeResponse("Receipt", reply).value;
     if (receipt.requestId !== envelope.requestId) return {requestId:envelope.requestId,ok:false,outcome:"unknown_outcome",message:OUTCOME_WORDS.unknown_outcome};
     const result = toReceipt(envelope.requestId, receipt, wire.operation);

@@ -1,4 +1,6 @@
 //! Reusable blocking connections. Never opens a home/global store or another channel.
+mod commit_signal;
+pub use commit_signal::CommitSignal;
 mod diagnostic;
 pub use diagnostic::StorageDiagnostic;
 pub mod documents;
@@ -382,10 +384,25 @@ impl Store {
     ) -> CoreResult<T> {
         self.write_with(false, body)
     }
+
     fn write_with<T>(
         &self,
         durable: bool,
         body: impl FnOnce(&Transaction<'_>) -> CoreResult<T>,
+    ) -> CoreResult<T> {
+        self.write_tracked(durable, |tx| {
+            let before = tx.total_changes();
+            let value = body(tx)?;
+            Ok((value, tx.total_changes() != before))
+        })
+    }
+
+    /// The executor supplies its own change tracking because SQLite's lifetime
+    /// row counter includes changes subsequently undone by a savepoint rollback.
+    fn write_tracked<T>(
+        &self,
+        durable: bool,
+        body: impl FnOnce(&Transaction<'_>) -> CoreResult<(T, bool)>,
     ) -> CoreResult<T> {
         use std::sync::atomic::Ordering;
         if matches!(
@@ -408,11 +425,11 @@ impl Store {
             db.pragma_update(None, "synchronous", if durable { "FULL" } else { "NORMAL" })?;
             self.relaxed.store(!durable, Ordering::SeqCst);
         }
-        let result = (|| {
+        let result = (|| -> CoreResult<_> {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             #[cfg(feature = "test-observations")]
             let marks = crate::test_observations::before_write(&self.key, &tx);
-            let result = body(&tx)?;
+            let (value, changed) = body(&tx)?;
             #[cfg(feature = "test-observations")]
             let observation = marks.map(|before| before.finish(&tx));
             tx.commit()?;
@@ -420,11 +437,17 @@ impl Store {
             if let Some(observation) = observation {
                 crate::test_observations::committed(observation, std::time::Instant::now());
             }
-            Ok(result)
+            Ok((value, changed))
         })();
         if !durable && db.pragma_update(None, "synchronous", "FULL").is_ok() {
             self.relaxed.store(false, Ordering::SeqCst);
         }
-        result
+        drop(db);
+        drop(_lock);
+        let (value, changed) = result?;
+        if changed {
+            self.key.notify_committed();
+        }
+        Ok(value)
     }
 }

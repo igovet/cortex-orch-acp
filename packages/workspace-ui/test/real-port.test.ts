@@ -22,6 +22,20 @@ const port = (s: ReturnType<typeof service>) => createRealPort({ transport: s.tr
 const loaded = async (s: ReturnType<typeof service>) => { const p = port(s); await p.query("capabilities.get", {}); await p.query("project.snapshot", {}); return p; };
 
 describe("real port", () => {
+  it.each([["e", "Allowed once", true], ["other", "Allowed once", false], ["e", "Denied", false]] as const)(
+    "checks the exact permission after a lost reply (%s, %s)", async (executionId, answerText, ok) => {
+      const decision = wireDecision({ kind: "permission", permission: { operation: "run" }, options: [{ optionId: "allow", label: "Allow once" }] });
+      const s = service([wireTask({ executionId: "e" })], [decision]);
+      s.answers["capabilities.get"] = () => capabilitiesWire([...ALL, "decisions.get"]);
+      s.answers["decisions.answer"] = () => { throw new Error("service_request_failed"); };
+      s.answers["decisions.get"] = () => ({ ...decision, executionId, status: "answered", answerText, allowedOperations: [] });
+      const p = await loaded(s);
+      const result = await p.command(envelope({ type: "answer_decision", taskId: "task-1", decisionId: "d", answer: "Allow once", optionId: "allow" }));
+      expect(result.ok).toBe(ok);
+      expect(s.calls.filter(call => call.operation === "decisions.answer")).toHaveLength(1);
+    },
+  );
+
   it("does not replay unchanged task history on another project's or Git refresh", async () => {
     let version = "1", executionId = "e", reads = 0, watermark = "4", appended = false;
     const s = scriptedTransport({

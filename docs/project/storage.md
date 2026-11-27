@@ -197,6 +197,13 @@ and the [release gates](verification.md).
 
 The Cortex Workspace adapter adds an optional, additive table group to the project store: `workspace_projects`, `workspace_tasks`, `workspace_executions`, `workspace_starts`, `workspace_requests`, `workspace_outbox_state` and `workspace_outbox`. The group is installed only by a normal writable open, with the other schema groups, and the store format stays 12. A store without these tables remains valid. A partial group fails closed. Splitting a project copies only that project's adapter rows and counters. Public invalidation hooks are TEMP triggers installed per Store connection only when the adapter tables are available, not persistent dependencies on Workspace code for independent or older SQLite writers. Writable initialization removes the previous persistent outbox hooks in the schema transaction; non-initializing opens leave main unchanged, including any legacy hooks awaiting a writable repair. Legacy hooks are not duplicated by TEMP hooks. The connection-local hooks and transactional guarantees are described in [consistency and recovery](../cortex-workspace/consistency-and-recovery.md).
 
+A successful Core write that recorded row changes can wake the active Workspace
+reader for the same logical project and channel in the same process. Each key
+keeps at most one pending wake, not a list of commits. A wake itself does not
+assert a new outbox row. It is separate from the SQLite hooks and
+has no effect on durable ordering or the storage format. Writes from other
+processes are observed by the [reader's periodic fallback](../cortex-workspace/consistency-and-recovery.md#native-desktop-reads).
+
 ## Attempt tree listings
 
 Each worker attempt records a project observation when it starts and when it

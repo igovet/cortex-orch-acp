@@ -306,6 +306,173 @@ async fn native_queries_and_small_deltas_use_one_core_generation_without_a_child
     s.stop().await.unwrap();
     serving.await.unwrap().unwrap();
 }
+fn native_poller_store(root: &Path) -> cortex_core::Store {
+    use cortex_core::{OpenMode, ProjectKey, Store, StoreChannel};
+    let channel = if workspace_protocol::channel::current().is_dev() {
+        StoreChannel::Dev
+    } else {
+        StoreChannel::Release
+    };
+    Store::open(ProjectKey::new(root, channel).unwrap(), OpenMode::RuntimeValidate).unwrap()
+}
+
+fn native_poller_commit(store: &cortex_core::Store, project: &str, version: i64) {
+    store
+        .write(|db| {
+            db.execute(
+                "UPDATE workspace_tasks SET description = ?, version = ? WHERE task_id = 'poll-task'",
+                (format!("version-{version}"), version),
+            )?;
+            cortex_core::store::append_public_tx(db, project, "poll-task", "task", version)?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+#[ignore = "child process only; requires the actual disposable fixture identity"]
+fn native_poller_external_writer_child() {
+    let root = std::env::var_os("CORTEX_TEST_POLLER_ROOT").unwrap();
+    let project = std::env::var("CORTEX_TEST_POLLER_PROJECT").unwrap();
+    native_poller_commit(&native_poller_store(Path::new(&root)), &project, 3);
+}
+
+#[tokio::test]
+async fn native_poller_external_fallback_and_reactivation_keep_the_right_generation() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    config.event_capacity = 32;
+    let s = Native::bind(config).await.unwrap();
+    let root = f.0.join("projects/one");
+    let p = s.register(&root, "One").await.unwrap();
+    let id = p["projectId"].as_str().unwrap();
+    s.activate(id).await.unwrap();
+    let store = native_poller_store(&root);
+    store
+        .write(|db| {
+            db.execute(
+                "INSERT INTO workspace_tasks(task_id, project_id, description, created_at)
+                 VALUES ('poll-task', ?, 'initial', 'now')",
+                [id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let query = json!({"protocol":{"major":2,"mapping":2},"requestId":"poller-read","projectId":id,
+        "operation":"tasks.page","payload":{"target":id,"cursor":null,"limit":50}});
+    let mut events = s.subscribe();
+    let snapshot = s.native_query(query.clone()).await.unwrap();
+    let watermark = |value: &Value| value.as_str().unwrap().parse::<i64>().unwrap();
+    let delta = |event: &Value, after: i64, version: i64, generation: &Value| {
+        assert_eq!(event["type"], "native_delta", "{event}");
+        assert_eq!(event["projectId"], id);
+        assert_eq!(event["batch"]["generation"], *generation);
+        assert_eq!(watermark(&event["batch"]["fromSequence"]), after + 1);
+        assert_eq!(watermark(&event["batch"]["throughSequence"]), after + 1);
+        assert_eq!(event["batch"]["changes"][0]["newVersion"], version.to_string());
+        assert_eq!(
+            event["batch"]["changes"][0]["operation"]["data"]["data"]["description"],
+            format!("version-{version}")
+        );
+    };
+
+    native_poller_commit(&store, id, 2);
+    let high = watermark(&snapshot["highWatermark"]);
+    let local = tokio::time::timeout(Duration::from_secs(3), native_poller_event(&mut events))
+        .await
+        .unwrap();
+    delta(&local, high, 2, &snapshot["generation"]);
+
+    // No query or same-process write can wake the parent now. Run the writer in
+    // a distinct process of this test executable against the exact same store.
+    let project = id.to_owned();
+    let child_root = root.clone();
+    let child = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "native_poller_external_writer_child", "--ignored"])
+            .env("CORTEX_TEST_POLLER_ROOT", child_root)
+            .env("CORTEX_TEST_POLLER_PROJECT", project)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stdout));
+    assert!(
+        String::from_utf8_lossy(&child.stdout).contains("1 passed"),
+        "exact external writer did not run"
+    );
+    let external = tokio::time::timeout(Duration::from_secs(3), native_poller_event(&mut events))
+        .await
+        .unwrap();
+    delta(&external, high + 1, 3, &snapshot["generation"]);
+
+    s.remove(id).await.unwrap();
+    assert_eq!(
+        s.native_query(query.clone()).await.unwrap_err().to_string(),
+        "project_not_found"
+    );
+    native_poller_commit(&store, id, 4);
+    assert!(tokio::time::timeout(Duration::from_millis(300), native_poller_event(&mut events))
+        .await
+        .is_err());
+
+    let added_back = s.register(&root, "One again").await.unwrap();
+    assert_eq!(added_back["projectId"], id);
+    assert_eq!(
+        s.native_query(query.clone()).await.unwrap_err().to_string(),
+        "project_inactive"
+    );
+    s.activate(id).await.unwrap();
+    let reactivated = s.native_query(query.clone()).await.unwrap();
+    assert_ne!(reactivated["generation"], snapshot["generation"]);
+    assert_eq!(watermark(&reactivated["highWatermark"]), high + 3);
+    native_poller_commit(&store, id, 5);
+    let rejoined = tokio::time::timeout(Duration::from_secs(3), native_poller_event(&mut events))
+        .await
+        .unwrap();
+    delta(&rejoined, high + 3, 5, &reactivated["generation"]);
+
+    // A real cursor gap still emits a recovery frame and the next read starts afresh.
+    store
+        .write(|db| {
+            db.execute("UPDATE workspace_tasks SET version = 7 WHERE task_id = 'poll-task'", [])?;
+            cortex_core::store::append_public_tx(db, id, "poll-task", "task", 6)?;
+            cortex_core::store::append_public_tx(db, id, "poll-task", "task", 7)?;
+            assert_eq!(
+                db.execute(
+                    "DELETE FROM workspace_outbox WHERE project_id = ? AND sequence = ?",
+                    (id, high + 5),
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+    let resync = tokio::time::timeout(Duration::from_secs(3), native_poller_event(&mut events))
+        .await
+        .unwrap();
+    assert_eq!(
+        resync,
+        json!({"type":"native_resync","projectId":id,"reason":"resync_required"})
+    );
+    let recovered = s.native_query(query).await.unwrap();
+    assert_ne!(recovered["generation"], reactivated["generation"]);
+    assert_eq!(watermark(&recovered["highWatermark"]), high + 6);
+    s.stop().await.unwrap();
+}
+
+async fn native_poller_event(events: &mut tokio::sync::broadcast::Receiver<Value>) -> Value {
+    loop {
+        let event = events.recv().await.unwrap();
+        match event["type"].as_str() {
+            Some("native_delta" | "native_resync") => return event,
+            _ => (),
+        }
+    }
+}
+
 #[tokio::test]
 async fn dev_refuses_unowned_dev_store_and_rechecks_activation_without_writes() {
     let f = Fixture::new();

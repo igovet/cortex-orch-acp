@@ -67,7 +67,10 @@ must be a published `report` of a runtime task bound to a workspace execution of
 project; any other id (another task's draft, a pipeline, an unbound task) is `not_found`.
 
 The existing `service.subscribe` connection delivers `native_delta` batches after
-an opened reader's snapshot. Batches identify a project stream, generation,
+an opened reader's snapshot. A same-process commit can wake that project's reader;
+a separate writer process relies on periodic outbox reads unless another read
+picks up its changes first. The wake changes scheduling, not the wire format or
+recovery rules. Batches identify a project stream, generation,
 from/through decimal sequences and versioned task upserts/removals. Native
 resynchronization is explicit; disconnect recovery starts a new snapshot and does
 not replay actions. See [consistency and recovery](consistency-and-recovery.md).

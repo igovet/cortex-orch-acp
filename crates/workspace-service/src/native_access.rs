@@ -108,9 +108,7 @@ fn target(root: &Path, args: &Value, write: bool) -> CoreResult<PathBuf> {
         .unwrap_or_else(|| root.to_str().unwrap()),
     );
     absolute(&p)?;
-    if write && crate::native_engine_policy::live_store_file(&p) {
-        return Err(CoreError::Refused("cortex_live_store"));
-    }
+    // Live store writes are refused by the caller outside Auto.
     let mut at = PathBuf::from("/");
     for part in p.components().skip(1) {
         at.push(part.as_os_str());
@@ -248,6 +246,12 @@ async fn execute_as(
         return Ok(saved);
     }
     let cause = rerouted.as_ref().and_then(|n| n["reason"].as_str());
+    // Administrative commands always require a separate owner decision in Auto.
+    // This covers both the command_run reroute and a direct outside_command call.
+    let administrative = mode == "auto" && name == "outside_command"
+            && crate::native_commands::administrative(
+                &serde_json::from_value::<Vec<String>>(args["argv"].clone()).unwrap_or_default(),
+            );
     let title = match (cause, write, ru) {
         (Some("privilege"), _, false) => "Run on the host: the command uses sudo",
         (Some("privilege"), _, true) => "Запуск на компьютере: команда использует sudo",
@@ -280,6 +284,7 @@ async fn execute_as(
         class => class,
     };
     let rule = match class {
+        _ if administrative => "administrative_command",
         PathClass::LiveStore => "cortex_live_store",
         PathClass::Private => "cortex_private",
         PathClass::Credential => "credential",
@@ -288,16 +293,13 @@ async fn execute_as(
         PathClass::Ordinary => "outside_command",
     };
     use crate::native_owner_decisions::Owner;
-    let (approved, decider) = if class == PathClass::LiveStore && write {
+    let (approved, decider) = if class == PathClass::LiveStore && write && mode != "auto" {
         (false, "runtime".to_owned())
     } else if ro {
         (true, "read_only_sandbox".to_owned())
-    } else if mode == "auto"
-        && (rerouted.is_some() || write || !crate::native_commands::deletion(
-            &serde_json::from_value::<Vec<String>>(args["argv"].clone()).unwrap_or_default(),
-        ))
-    {
-        // A rerouted command_run already asked the owner about a deletion.
+    } else if mode == "auto" {
+        // Auto approves every outside effect itself: deletions and administrative
+        // commands included.
         (true, format!("mode:{mode}"))
     } else {
         let mut card = cortex_engine::permission::owner_card(&request, &who, rule, ru);
@@ -327,7 +329,7 @@ async fn execute_as(
         }
     };
     let result = async {
-        if class == PathClass::LiveStore && write {
+        if class == PathClass::LiveStore && write && mode != "auto" {
             return Err(CoreError::Refused("cortex_live_store"));
         }
         if !approved {
@@ -356,7 +358,7 @@ async fn execute_as(
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
             let pending = crate::native_commands::outside_capture(
                 executor.clone(), credential.clone(), running, path, &args, &mode, cancelled,
-                rerouted, ro,
+                rerouted, ro, administrative && approved,
             );
             tokio::pin!(pending);
             loop {
@@ -399,11 +401,6 @@ fn atomic_write(root: &Path, args: &Value, data: &[u8]) -> CoreResult<Value> {
         os::fd::{AsRawFd, FromRawFd},
     };
     let p = target(root, args, true)?;
-    if crate::native_engine_policy::path_class(root, &p)
-        == cortex_engine::permission::PathClass::LiveStore
-    {
-        return Err(CoreError::Refused("cortex_live_store"));
-    }
     let mut folder = File::open("/")?;
     let parent = p
         .parent()
@@ -518,7 +515,7 @@ pub(super) async fn admit_protected(
         "rawInput":{"path":absolute}},
         "options":cortex_engine::permission::one_shot_options(ru)});
     use crate::native_owner_decisions::Owner;
-    let (allowed, decider) = if rule == "cortex_live_store" {
+    let (allowed, decider) = if rule == "cortex_live_store" && mode != "auto" {
         (false, "runtime".to_owned())
     } else if mode == "auto" {
         (true, format!("mode:{mode}"))

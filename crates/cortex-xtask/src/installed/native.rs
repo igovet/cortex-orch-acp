@@ -120,6 +120,13 @@ pub fn prepare_with(
                     obj(vec![
                         ("auto", arr(vec![s("fixture-model")])),
                         (
+                            "policy",
+                            obj(vec![(
+                                "fixture-model",
+                                obj(vec![("preferred_for", arr(vec![s("review")]))]),
+                            )]),
+                        ),
+                        (
                             "tiers",
                             obj(vec![(
                                 "fixture-model",

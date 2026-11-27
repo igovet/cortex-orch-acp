@@ -352,6 +352,13 @@ pub(super) fn read_output(
 }
 /// A private scratch directory removed when the host command ends.
 struct ScratchDir(PathBuf);
+impl ScratchDir {
+    fn create() -> CoreResult<Self> {
+        let path = std::env::temp_dir().join(format!("cortex-outside-{}", crate::native_effects::identity()?));
+        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+        Ok(Self(path))
+    }
+}
 impl Drop for ScratchDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -367,7 +374,10 @@ fn seals_live_store(argv: &[String]) -> bool {
     };
     let destructive = |t: &str| {
         let base = t.rsplit('/').next().unwrap_or(t);
-        matches!(base, "rm" | "unlink" | "shred" | "truncate" | "dd" | "mv" | "tee" | "rsync" | "install" | "ln")
+        // These programs can modify a named store directly.  Interpreters and
+        // external services remain outside lexical inspection and are handled
+        // by the documented command boundary.
+        matches!(base, "rm" | "unlink" | "shred" | "truncate" | "dd" | "mv" | "cp" | "tee" | "rsync" | "install" | "ln" | "sqlite3")
     };
     argv.iter().any(|t| names_store(t))
         && (argv.iter().any(|t| destructive(t) || t.contains(" rm ") || t.contains(">") || t.starts_with("rm "))
@@ -383,6 +393,7 @@ pub(super) async fn outside_capture(
     mut cancel: watch::Receiver<bool>,
     rerouted: Option<Value>,
     read_only: bool,
+    administrative_confirmed: bool,
 ) -> CoreResult<Value> {
     let confirmed_mode_auto = confirmed_mode == "auto";
     let c = credential.clone();
@@ -408,7 +419,7 @@ pub(super) async fn outside_capture(
     })?)
     .await?;
     let argv: Vec<String> = serde_json::from_value(args["argv"].clone())?;
-    if seals_live_store(&argv) {
+    if !confirmed_mode_auto && seals_live_store(&argv) {
         return Err(CoreError::Refused("cortex_live_store"));
     }
     let reference = format!(
@@ -485,13 +496,14 @@ pub(super) async fn outside_capture(
     };
     let mut c = Command::new(&launched[0]);
     c.args(&launched[1..]);
+    // Auto commands run directly on the host: no namespace, overlay or seal.
+    let _ = administrative_confirmed;
     // Reads only: the real host readable at its real paths under Landlock, writes only
     // to a private scratch (TMPDIR) and devices, the live Cortex stores hidden.
     let scratch = if read_only {
-        let scratch = std::env::temp_dir().join(format!("cortex-outside-{}", crate::native_effects::identity()?));
-        std::fs::DirBuilder::new().mode(0o700).create(&scratch)?;
+        let scratch = ScratchDir::create()?;
         let mut writes = crate::native_sandbox::devices();
-        writes.push(scratch.clone());
+        writes.push(scratch.0.clone());
         let rules = crate::native_sandbox::Sandbox::host(&crate::native_sandbox::HostPolicy {
             writes,
             hidden: crate::native_sandbox::live_stores(&project_root),
@@ -503,13 +515,17 @@ pub(super) async fn outside_capture(
             c.pre_exec(move || rules.enter());
         }
         for key in ["TMPDIR", "TMP", "TEMP"] {
-            c.env(key, &scratch);
+            c.env(key, &scratch.0);
         }
+        Some(scratch)
+    } else if confirmed_mode_auto {
+        let scratch = ScratchDir::create()?;
+        c.env("CORTEX_COMMAND_TMPDIR", &scratch.0);
         Some(scratch)
     } else {
         None
     };
-    let _scratch = scratch.map(ScratchDir);
+    let _scratch = scratch;
     let mut cmd = c;
     if let Some(channel) = &askpass {
         cmd.envs(channel.env());
@@ -778,23 +794,167 @@ pub(super) fn denials(db: &rusqlite::Connection, task: &str) -> CoreResult<Vec<S
     }
     Ok(paths)
 }
+/// Whether a command is a recognised local file deletion (`rm`, `unlink`, `rmdir`,
+/// `shred`, `find -delete`, `--delete`, `git clean|rm`) in a command position, directly,
+/// past wrappers, or inside a shell script (`sh -c`). Text that only mentions such a
+/// word is not a deletion: a remote command string of `ssh`/`scp`, the code of an
+/// interpreter (`python -c`, `node -e`), SQL or any quoted argument. A conservative
+/// consent detector, never a hostile-code parser.
 pub(super) fn deletion(argv: &[String]) -> bool {
-    if regex::Regex::new(r"\b(rm|unlink|rmdir|shred)\b|--delete|-delete|\bgit\b.*\b(clean|rm)\b")
-        .unwrap()
-        .is_match(&argv.join(" "))
-    {
-        return true;
+    let mut i = 0;
+    while let Some(word) = argv.get(i).map(String::as_str) {
+        let name = program(word);
+        let assignment = word.split_once('=').is_some_and(|(k, _)| {
+            !k.is_empty() && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        });
+        if WRAPPERS.contains(&name)
+            || PRIVILEGED.contains(&name)
+            || matches!(word, "{" | "}")
+            || word.starts_with('-')
+            || assignment
+            || word.trim_end_matches(['s', 'm', 'h', 'd']).parse::<f64>().is_ok()
+        {
+            i += 1;
+        } else {
+            break;
+        }
     }
-    // Conservative consent detector, never a hostile-code parser.
-    argv.iter().any(|a| {
-        a.split(|c: char| c.is_whitespace() || ";|&()".contains(c))
-            .any(|s| {
-                ["rm", "unlink", "rmdir", "shred", "-delete", "--delete"].contains(&s)
-                    || s.ends_with("/rm")
-            })
-    }) || argv
-        .windows(2)
-        .any(|p| p[0] == "git" && ["clean", "rm"].contains(&p[1].as_str()))
+    let Some(first) = argv.get(i) else {
+        return false;
+    };
+    let name = program(first);
+    let rest = &argv[i + 1..];
+    match name {
+        "rm" | "unlink" | "rmdir" | "shred" => true,
+        // A deletion on a remote host is not a local file deletion.
+        "ssh" | "scp" | "sftp" | "mosh" | "autossh" => false,
+        "git" => rest.iter().any(|a| matches!(a.as_str(), "clean" | "rm")),
+        "sh" | "bash" | "dash" | "zsh" => rest
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .any(|script| shell_commands(script).iter().any(|c| deletion(c))),
+        _ => {
+            if name.starts_with("python")
+                || matches!(name, "node" | "nodejs" | "perl" | "ruby" | "php" | "deno" | "bun")
+            {
+                return false;
+            }
+            if rest.iter().any(|a| a == "-delete" || a == "--delete") {
+                return true;
+            }
+            // `docker exec ... sh -c '...'` and similar.
+            rest.iter()
+                .position(|a| matches!(program(a), "sh" | "bash" | "dash" | "zsh"))
+                .is_some_and(|p| deletion(&rest[p..]))
+        }
+    }
+}
+/// The simple commands of a shell script as words, quote-aware: `;|&()` and newlines
+/// separate commands outside quotes, here-document bodies are skipped.
+pub(super) fn shell_commands(script: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    let (mut cmd, mut word): (Vec<String>, Option<String>) = (Vec::new(), None);
+    let (mut single, mut double) = (false, false);
+    let mut heredocs: Vec<String> = Vec::new();
+    let chars: Vec<char> = script.chars().collect();
+    let mut i = 0;
+    macro_rules! end_word {
+        () => {
+            if let Some(w) = word.take() {
+                cmd.push(w);
+            }
+        };
+    }
+    macro_rules! end_cmd {
+        () => {
+            end_word!();
+            if !cmd.is_empty() {
+                out.push(std::mem::take(&mut cmd));
+            }
+        };
+    }
+    while i < chars.len() {
+        let c = chars[i];
+        if single {
+            if c == '\'' {
+                single = false;
+            } else {
+                word.get_or_insert_with(String::new).push(c);
+            }
+        } else if double {
+            match c {
+                '"' => double = false,
+                '\\' if i + 1 < chars.len() => {
+                    i += 1;
+                    word.get_or_insert_with(String::new).push(chars[i]);
+                }
+                _ => word.get_or_insert_with(String::new).push(c),
+            }
+        } else {
+            match c {
+                '\'' => {
+                    single = true;
+                    word.get_or_insert_with(String::new);
+                }
+                '"' => {
+                    double = true;
+                    word.get_or_insert_with(String::new);
+                }
+                '\\' if i + 1 < chars.len() => {
+                    i += 1;
+                    word.get_or_insert_with(String::new).push(chars[i]);
+                }
+                '<' if chars.get(i + 1) == Some(&'<') && chars.get(i + 2) != Some(&'<') => {
+                    i += 2;
+                    if chars.get(i) == Some(&'-') {
+                        i += 1;
+                    }
+                    while chars.get(i).is_some_and(|c| *c == ' ' || *c == '\t') {
+                        i += 1;
+                    }
+                    let mut tag = String::new();
+                    while let Some(&t) = chars.get(i) {
+                        if t.is_whitespace() || ";|&()<>".contains(t) {
+                            break;
+                        }
+                        if !"'\"\\".contains(t) {
+                            tag.push(t);
+                        }
+                        i += 1;
+                    }
+                    heredocs.push(tag);
+                    end_word!();
+                    continue;
+                }
+                '\n' => {
+                    end_cmd!();
+                    for tag in heredocs.drain(..) {
+                        i += 1;
+                        while i < chars.len() {
+                            let end = chars[i..]
+                                .iter()
+                                .position(|c| *c == '\n')
+                                .map_or(chars.len(), |p| i + p);
+                            let line: String = chars[i..end].iter().collect();
+                            i = end + 1;
+                            if line.trim() == tag {
+                                break;
+                            }
+                        }
+                        i = i.min(chars.len() + 1) - 1;
+                    }
+                }
+                ';' | '|' | '&' | '(' | ')' | '`' => {
+                    end_cmd!();
+                }
+                c if c.is_whitespace() => end_word!(),
+                c => word.get_or_insert_with(String::new).push(c),
+            }
+        }
+        i += 1;
+    }
+    end_cmd!();
+    out
 }
 /// Programs that gain root: they cannot work in the command sandbox (no_new_privs).
 const PRIVILEGED: &[&str] = &["sudo", "pkexec", "doas"];
@@ -859,6 +1019,37 @@ pub(super) fn privileged(argv: &[String]) -> bool {
                     )
                 })
         })
+}
+
+/// Commands that can change host services, containers, mounts, networking, or
+/// accounts. These require an explicit owner decision in Auto. The classifier is
+/// deliberately conservative and is only used to choose the consent route.
+pub(super) fn administrative(argv: &[String]) -> bool {
+    let mut words = argv.iter().map(String::as_str);
+    let command = words.find(|word| {
+        let duration = word.trim_end_matches(['s', 'm', 'h', 'd']).parse::<f64>().is_ok();
+        !WRAPPERS.contains(&program(word)) && !word.starts_with('-') && !duration
+            && !word.split_once('=').is_some_and(|(key, _)| {
+                !key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            })
+    });
+    match command.map(program) {
+        Some("sudo" | "pkexec" | "doas" | "systemd-run" | "mount" | "umount" | "udisksctl"
+            | "iptables" | "ip6tables" | "nft" | "firewall-cmd" | "nmcli" | "useradd"
+            | "userdel" | "usermod" | "groupadd" | "groupdel" | "groupmod" | "reboot"
+            | "shutdown" | "poweroff" | "halt") => true,
+        Some("docker" | "podman" | "nerdctl") =>
+            !matches!(words.next(), None | Some("--version" | "-v" | "--help" | "help")),
+        Some("systemctl" | "service" | "rc-service") => words.any(|arg| matches!(arg,
+            "start" | "stop" | "restart" | "reload" | "enable" | "disable" | "mask"
+            | "unmask" | "daemon-reload" | "reset-failed")),
+        Some("sh" | "bash" | "dash" | "zsh") => {
+            // Only the argument to -c (including -lc) contains shell commands.
+            words.any(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c'))
+                && words.next().is_some_and(|script| shell_commands(script).iter().any(|cmd| administrative(cmd)))
+        }
+        _ => false,
+    }
 }
 /// The store must contain trusted supervisor evidence for this exact attempt.
 fn eligible_prestart_receipt(receipt: &Value) -> bool {
@@ -1143,13 +1334,13 @@ pub(super) async fn execute(
         }
     } else if (linked && mode != "auto") || scoped {
         return Err(CoreError::Refused(if linked { "worktree_command_cwd_refused" } else { "scoped_command_cwd_refused" }));
-    } else if mode == "guarded"
+    } else if mode != "auto" && (mode == "guarded"
         || crate::native_access::protected(&cwd)
         || crate::native_command_live::policy::protected_target(&root, &cwd)
         || crate::native_command_sandbox::policy::protected_target(&root, &cwd)
         || protected_roots
             .iter()
-            .any(|path| path.canonicalize().map(|p| cwd.starts_with(p)).unwrap_or(true))
+            .any(|path| path.canonicalize().map(|p| cwd.starts_with(p)).unwrap_or(true)))
     {
         return Err(CoreError::Refused("outside_cwd_denied"));
     }
@@ -1159,13 +1350,13 @@ pub(super) async fn execute(
     // A writing worker's sudo, pkexec or doas cannot work in the sandbox: the runtime
     // runs it on the host at once. Read-only roles are never rerouted (they stay in
     // their read-only sandbox, where the privileged program fails).
-    if linked && privileged(&argv) {
+    if linked && mode != "auto" && privileged(&argv) {
         return Err(CoreError::Refused("worktree_host_effect_unavailable"));
     }
     if scoped && privileged(&argv) {
         return Err(CoreError::Refused("managed_codex_host_command_refused"));
     }
-    if name == "command_run" && !readonly && privileged(&argv) {
+    if name == "command_run" && mode != "auto" && !readonly && privileged(&argv) {
         let (outside, note) = reroute_request(&args, &argv, &cwd, "privilege", None)?;
         return reroute(
             executor,
@@ -1192,7 +1383,8 @@ pub(super) async fn execute(
     if is_delete && readonly && mode != "auto" {
         return Err(CoreError::Refused("readonly_delete_refused"));
     }
-    if is_delete {
+    // Auto runs deletions without an owner card.
+    if is_delete && mode != "auto" {
         let c = credential.clone();
         let task = i.task.clone();
         let (session, ru) = recv(executor.read(move |db| {
@@ -1229,7 +1421,7 @@ pub(super) async fn execute(
     }
     // Landlock leaves a writer's whole checkout writable, including the live store
     // files beside it: the same argv seal as the host route applies.
-    if name == "command_run" && seals_live_store(&argv) {
+    if name == "command_run" && mode != "auto" && seals_live_store(&argv) {
         return Err(CoreError::Refused("cortex_live_store"));
     }
     let reference = format!(
@@ -1526,7 +1718,7 @@ pub(super) async fn execute(
 
 #[cfg(test)]
 mod reroute_tests {
-    use super::{eligible_prestart_receipt, privileged, reroute_request};
+    use super::{administrative, eligible_prestart_receipt, privileged, reroute_request};
     use crate::native_command_handles::PRESTART_LAUNCHER_FAILURE;
     use serde_json::json;
 
@@ -1558,6 +1750,22 @@ mod reroute_tests {
         ] {
             assert!(!privileged(&argv(no)), "{no:?}");
         }
+    }
+
+    #[test]
+    fn administrative_commands_require_consent_for_privileged_host_access() {
+        assert!(administrative(&argv(&["docker", "run", "alpine"])));
+        assert!(administrative(&argv(&["timeout", "30", "docker", "ps"])));
+        assert!(administrative(&argv(&["docker", "ps"])));
+        assert!(administrative(&argv(&["systemd-run", "--unit", "x", "true"])));
+        assert!(administrative(&argv(&["systemctl", "restart", "cortex-workspace"])));
+        assert!(administrative(&argv(&["sh", "-c", "docker exec c sh -c true"])));
+        assert!(!administrative(&argv(&["docker", "--version"])));
+        assert!(!administrative(&argv(&["docker", "--help"])));
+        assert!(!administrative(&argv(&["echo", "bash", "-c", "docker run image"])));
+        assert!(!administrative(&argv(&["bash", "-c", "echo ok", "ignored", "docker run image"])));
+        assert!(!administrative(&argv(&["systemctl", "status", "cortex-workspace"])));
+        assert!(!administrative(&argv(&["echo", "docker"])));
     }
 
     #[test]
@@ -1758,4 +1966,51 @@ fn host_ssh_agent() -> Option<PathBuf> {
         .iter()
         .map(|n| runtime.join(n))
         .find(|p| is_socket(p))
+}
+#[cfg(test)]
+mod deletion_recognizer_tests {
+    use super::{deletion, seals_live_store};
+    fn d(a: &[&str]) -> bool {
+        deletion(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    #[test]
+    fn local_deletions_are_recognised() {
+        assert!(d(&["rm", "-rf", "x"]));
+        assert!(d(&["/bin/rm", "x"]));
+        assert!(d(&["env", "A=1", "nice", "rmdir", "x"]));
+        assert!(d(&["find", ".", "-delete"]));
+        assert!(d(&["rsync", "--delete", "a", "b"]));
+        assert!(d(&["git", "clean", "-fd"]));
+        assert!(d(&["git", "-C", "x", "rm", "f"]));
+        assert!(d(&["bash", "-lc", "set -eu\ncleanup() {\n  rm -rf -- \"$d\"\n}\ntrap cleanup EXIT"]));
+        assert!(d(&["sh", "-c", "echo a && rm x"]));
+        assert!(d(&["docker", "exec", "c", "sh", "-c", "rm /tmp/x"]));
+    }
+    #[test]
+    fn remote_sql_and_interpreter_text_is_not_a_local_deletion() {
+        assert!(!d(&["ssh", "host", "rm -rf /srv/x"]));
+        assert!(!d(&["bash", "-c", "ssh host 'rm -rf /x; unlink y' | mariadb db"]));
+        assert!(!d(&["bash", "-c", "mysqldump db | ssh host \"mariadb -e 'DELETE FROM t'; rm /tmp/a\""]));
+        assert!(!d(&["mariadb", "-e", "DELETE FROM t; -- rm x"]));
+        assert!(!d(&["python3", "-c", "import os\nos.unlink('x')\nsubprocess.run(['rm','y'])"]));
+        assert!(!d(&["node", "-e", "fs.rmSync('x'); // rm"]));
+        assert!(!d(&["bash", "-c", "cat <<'EOF' | python3\nos.unlink(x)\nrm y\nEOF\necho done"]));
+        assert!(!d(&["echo", "rm", "unlink"]));
+        assert!(!d(&["grep", "-r", "rm -rf", "."]));
+    }
+    #[test]
+    fn a_deletion_after_a_here_document_is_still_recognised() {
+        assert!(d(&["bash", "-c", "cat <<EOF\nhi\nEOF\nrm x"]));
+    }
+
+    #[test]
+    fn direct_store_writers_are_sealed_before_launch() {
+        for argv in [
+            vec!["sqlite3", "/work/.cortex/cortex.sqlite3", "UPDATE t SET x=1"],
+            vec!["cp", "replacement", "/work/.cortex-dev/cortex.sqlite3-wal"],
+            vec!["mv", "replacement", "/work/.cortex/cortex.sqlite3-shm"],
+        ] {
+            assert!(seals_live_store(&argv.into_iter().map(str::to_owned).collect::<Vec<_>>()));
+        }
+    }
 }

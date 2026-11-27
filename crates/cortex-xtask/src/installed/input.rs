@@ -172,7 +172,6 @@ impl Input {
         if self.backend == "x11" {
             Self::xdotool(&[
                 "mousemove",
-                "--sync",
                 &(x as i64).to_string(),
                 &(y as i64).to_string(),
             ])?;

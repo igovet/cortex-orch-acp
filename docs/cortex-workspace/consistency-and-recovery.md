@@ -262,9 +262,21 @@ page size; a concurrent write expires continuation with `snapshot_expired` rathe
 than mixing pages. These are expiring keyset pages, not a retained immutable
 30-second projection-root implementation.
 
-The service tails committed public outbox metadata every 250 ms for opened readers
-and publishes selected task DTOs through Core's bounded, generation-local event
-stream. The existing socket subscription forwards validated `native_delta` and
+A successful native snapshot starts an independent reader loop for its active
+project. A commit with outbox changes in the same process wakes that reader;
+the first change after idle is read without a debounce, and a burst leaves one
+pending wake with at least 25 ms between poll starts. A commit during a read can
+still trigger a follow-up. Each reader has its own 250 ms fallback after its
+last attempt, so committed outbox rows from a separate writer process (including
+an independent incoming ACP agent) remain visible without a local wake. This is
+a scheduling interval, not a delivery deadline: storage or a concurrent query
+can delay that project's reader without holding back other projects. Removing a
+project or stopping the service retires its loop and prevents late publication;
+a blocking SQLite call already in progress can finish on its own.
+
+The reader tails committed public outbox metadata and publishes selected task
+DTOs through Core's bounded, generation-local event stream. The existing socket
+subscription forwards validated `native_delta` and
 `native_resync` messages. Contiguous small task changes update the window cache;
 only changed tasks reread related history/decisions/results, not the task list or
 machine facts. History for a changed task is still read in bounded complete pages,

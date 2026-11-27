@@ -629,7 +629,7 @@ pub(super) async fn execute(
     let outcome: CoreResult<Value> = async {
         let planned = plan(&root, &name, &args)?;
         let confirm = matches!(planned, Plan::Delete | Plan::Link { replace: Some(_) });
-        if confirm && (mode != "auto" || matches!(planned, Plan::Delete)) {
+        if confirm && mode != "auto" {
             let (title, kind) = match (name.as_str(), ru) {
                 ("project_delete", false) => (format!("Delete {path}"), "delete"),
                 ("project_delete", true) => (format!("Удалить {path}"), "delete"),

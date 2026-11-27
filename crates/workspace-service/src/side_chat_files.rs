@@ -216,7 +216,7 @@ pub fn resolve(root: &Path, relative: &str) -> Result<PathBuf, String> {
     }
 }
 fn text_of(path: &Path, max: u64) -> Result<String, String> {
-    let mut file = fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)

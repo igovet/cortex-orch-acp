@@ -172,9 +172,46 @@ pub(crate) async fn ask(
     }
 }
 
+/// A concrete reason for a command request: what it deletes when it is a recognised
+/// local deletion, else nothing (the rule's generic reason applies).
+fn command_why(request: &Value, command: Option<&str>, ru: bool) -> Option<String> {
+    let argv: Vec<String> = request["toolCall"]["rawInput"]["argv"]
+        .as_array()?
+        .iter()
+        .filter_map(|w| w.as_str().map(str::to_owned))
+        .collect();
+    command?;
+    if !crate::native_commands::deletion(&argv) {
+        return None;
+    }
+    let commands = match argv.as_slice() {
+        [shell, flag, script, ..] if matches!(shell.rsplit('/').next(), Some("sh" | "bash" | "dash" | "zsh")) && flag == "-c" =>
+            crate::native_commands::shell_commands(script),
+        _ => vec![argv],
+    };
+    let targets: Vec<String> = commands.iter()
+        .filter(|words| words.first().is_some_and(|w| w.rsplit('/').next() == Some("rm")))
+        .flat_map(|words| words.iter().skip(1))
+        .filter(|w| !w.starts_with('-'))
+        .take(5)
+        .map(|w| cortex_engine::engine::redact(w).chars().take(200).collect())
+        .collect();
+    Some(match (targets.is_empty(), ru) {
+        (false, true) => format!("Удаляет файлы: {}", targets.join(", ")),
+        (false, false) => format!("Deletes files: {}", targets.join(", ")),
+        (true, true) => "Удаляет файлы (см. команду)".to_owned(),
+        (true, false) => "Deletes files (see the command)".to_owned(),
+    })
+}
+
 /// The decision details for an asked native request.
 pub(crate) fn details(request: &Value, role: &str, rule: &str, access: &str, ru: bool) -> Value {
+    let command = permission::command_line(request);
+    let why = command_why(request, command.as_deref(), ru);
     serde_json::json!({
+        "command": command,
+        "cwd": permission::cwd(request),
+        "why": why,
         "role": role,
         "operation": permission::operation(request),
         "paths": permission::paths(request),
@@ -191,6 +228,14 @@ pub(crate) fn details(request: &Value, role: &str, rule: &str, access: &str, ru:
 mod tests {
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[test]
+    fn deletion_reason_names_the_log_from_a_shell_command() {
+        let request = json!({"toolCall":{"rawInput":{"argv":["bash", "-c",
+            "test -f Cargo.toml > /var/tmp/ui-rerun-$$.log; rm -f /var/tmp/ui-rerun-$$.log; echo done"]}}});
+        assert_eq!(super::command_why(&request, Some("bash -c"), true).as_deref(),
+            Some("Удаляет файлы: /var/tmp/ui-rerun-$$.log"));
+    }
 
     /// A pending permission decision raises the notifier's `question`
     /// notification, whose click opens that decision in its task.

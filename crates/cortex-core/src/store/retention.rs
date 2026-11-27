@@ -384,6 +384,25 @@ impl Store {
         reclaim: bool,
         scheduled: Option<(&Value, u64, u64)>,
     ) -> CoreResult<Value> {
+        let mut committed = false;
+        let result =
+            self.purge_workspace_task_fenced(project, task, reclaim, scheduled, &mut committed);
+        // Keep the exclusive fence across teardown and reclamation. Wake only
+        // after it is released, even if a later step failed after committing intent.
+        if committed {
+            self.key.notify_committed();
+        }
+        result
+    }
+
+    fn purge_workspace_task_fenced(
+        &self,
+        project: &str,
+        task: &str,
+        reclaim: bool,
+        scheduled: Option<(&Value, u64, u64)>,
+        committed: &mut bool,
+    ) -> CoreResult<Value> {
         if matches!(
             self.mode,
             OpenMode::LiveReadOnly | OpenMode::InspectImmutable
@@ -458,16 +477,18 @@ impl Store {
                 return refuse("unauthorized");
             }
             quiet(&tx, runtime)?;
-            tx.execute(
+            let inserted = tx.execute(
                 "INSERT OR IGNORE INTO pending_deletions VALUES (?)",
                 [runtime],
             )?;
+            tx.commit()?;
+            *committed = inserted != 0;
         } else {
             adapter(&tx, project, task)?;
             tx.commit()?;
+            *committed = true;
             return Ok(reclamation(self, &db, reclaim));
         }
-        tx.commit()?;
         let runtime = runtime.unwrap();
         // Intent is durable before the first file removal. The exclusive access fence stays
         // held over both transactions; other cooperative stores cannot resume this task.
@@ -546,6 +567,7 @@ impl Store {
             }
         }
         tx.commit()?;
+        *committed = true;
         Ok(reclamation(self, &db, reclaim))
     }
 }

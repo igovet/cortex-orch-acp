@@ -635,7 +635,7 @@ impl Service {
     }
     pub async fn remove(&self, id: &str) -> io::Result<Value> {
         self.accepting()?;
-        {
+        let pollers = {
             let mut state = self.state.lock().await;
             if !state.projects.iter().any(|p| p.project_id == id) {
                 return Err(failure("project_not_found"));
@@ -665,6 +665,10 @@ impl Service {
             local::save_registry(&self.config.state_dir.join("projects.json"), &updated)?;
             state.projects = updated;
             state.failures.remove(id);
+            self.core.remove(id)
+        };
+        for poller in pollers {
+            let _ = poller.await;
         }
         self.code_lsp.close(Some(id)).await;
         self.terminals.lock().await.remove(id).await;
@@ -693,7 +697,8 @@ impl Service {
                 &state.projects[index].canonical_root,
             )?;
             project_guard::check(&root)?;
-            if state.native.contains_key(id) {
+            let already_active = state.native.contains_key(id);
+            if already_active && state.projects[index].activation.is_some() {
                 return Ok(Err(json!({"projectId":id,"alreadyActive":true})));
             }
             project_guard::activate(&root)?;
@@ -709,6 +714,11 @@ impl Service {
                 });
                 local::save_registry(&self.config.state_dir.join("projects.json"), &updated)?;
                 state.projects = updated;
+            }
+            // Removal detaches the registry entry, not live work in the runtime.
+            // Re-adding it must still restore the activation flag the read API uses.
+            if already_active {
+                return Ok(Err(json!({"projectId":id,"alreadyActive":true})));
             }
             Ok(Ok(root))
         };
@@ -1045,6 +1055,7 @@ impl Service {
         if let Some(remote::Remote::Running(host)) = self.remote.get() {
             host.shutdown().await;
         }
+        self.core.shutdown().await;
         self.code_lsp.close(None).await;
         self.voice.lock().await.stop().await;
         self.terminals.lock().await.stop().await;
@@ -1067,7 +1078,6 @@ impl Service {
         let mut shutdown = self.shutdown.subscribe();
         let mut connections = JoinSet::new();
         let supervisor = tokio::spawn(self.clone().supervise());
-        let native_events = tokio::spawn(self.clone().native_events());
         // Native projects have no child queue loop; this plans and runs their sprints.
         let native_sprints = tokio::spawn(self.clone().native_sprints());
         let (retention_stop, stop_retention) = watch::channel(());
@@ -1095,15 +1105,14 @@ impl Service {
         };
         drop(retention_stop);
         supervisor.abort();
-        native_events.abort();
         native_sprints.abort();
         connections.abort_all();
         while connections.join_next().await.is_some() {}
         self.code_lsp.close(None).await;
+        self.core.shutdown().await;
         // Abort requests alone do not drop task-owned Arcs or the endpoint lock.
-        // Observe both background owners before reporting the server settled.
+        // Observe the background owners before reporting the server settled.
         let _ = supervisor.await;
-        let _ = native_events.await;
         let _ = native_sprints.await;
         let _ = retention.await;
         result

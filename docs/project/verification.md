@@ -952,6 +952,45 @@ scripts/cortex-xtask.sh package check
 scripts/cortex-xtask.sh profiles check
 ```
 
+### Native delta notification checks
+
+Run these focused no-paid checks in the checkout, sequentially. They cover
+post-commit notifications and quiet failures, per-project burst, isolation and
+stop behavior, and the independent writer's timer fallback including normal
+delivery without `native_resync` and recovery from a real gap.
+
+```sh
+umask 022
+timeout --kill-after=5s 900s "$HOME/.cargo/bin/cargo" test --locked --offline -p cortex-core --features test-observations --test commit_signal
+timeout --kill-after=5s 900s "$HOME/.cargo/bin/cargo" test --locked --offline -p workspace-service --features test-observations --lib core_host::
+timeout --kill-after=5s 900s "$HOME/.cargo/bin/cargo" test --locked --offline -p workspace-service --test service native_poller_external_fallback_and_reactivation_keep_the_right_generation
+```
+
+For the [service broadcast diagnostic](../cortex-workspace/performance.md#native-delta-broadcast-diagnostic),
+repeat the following once per medium. Set `scratch` to a private, empty,
+disposable directory physically on that medium. Check the backing device with
+`lsblk`; the probe checks that its SQLite database and WAL use the expected
+device. The fake-engine fixture requires working local bubblewrap and
+namespaces; missing isolation fails the probe. Use no installed service,
+production project or paid engine.
+
+```sh
+umask 022
+: "${scratch:?Set scratch to the disposable directory on the measured device}"
+device="$(findmnt -T "$scratch" -nro MAJ:MIN)" && test -n "$device" &&
+  TMPDIR="$scratch" CORTEX_BASELINE_DEVICE="$device" \
+  timeout --kill-after=5s 900s "$HOME/.cargo/bin/cargo" test --locked --offline \
+    -p workspace-service --features test-observations --test native_desktop -- native-baseline-probe
+```
+
+Keep the complete exit status and output, binary SHA-256, process identity and
+device mapping for each run. Compare like percentiles and sample populations:
+`commit_return_to_task_dto_broadcast` is per emitted task change;
+`commit_return_to_covering_broadcast` is per source outbox row. Neither measures
+the separate-process fallback or the time until a window paints.
+
+### Additional Workspace checks
+
 Remote access and the Android app add these no-paid targeted checks (loopback only: no relay, no device, no emulator):
 
 ```

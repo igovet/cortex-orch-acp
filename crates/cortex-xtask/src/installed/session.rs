@@ -791,7 +791,7 @@ fn journey_phase(
     })?;
     let worker = wait_with("worker link", 30, || input.find(&settled, &["link"], false))?;
     input.stable(&worker.name)?;
-    input.click("1 Explain and finish", &[], false)?;
+    input.click("Explain and finish Recommended", &["radio button"], false)?;
     require(
         answers(root)? == 0,
         "choosing an option alone delivered an answer",

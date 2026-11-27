@@ -255,7 +255,7 @@ pub fn inner(cli: &Cli) -> Res<()> {
             };
             let (x, y) = (x0 + w / 2, y0 + h / 2);
             let click = Command::new("xdotool")
-                .args(["mousemove", "--sync", &x.to_string(), &y.to_string()])
+                .args(["mousemove", &x.to_string(), &y.to_string()])
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false)

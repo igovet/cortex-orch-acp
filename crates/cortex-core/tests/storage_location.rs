@@ -81,6 +81,10 @@ fn a_linked_worktree_shares_the_one_store_of_its_logical_project() {
         let other = ProjectKey::new(&linked, channel).unwrap();
         assert_eq!(other.root(), main.root());
         assert_eq!(other.database(), main.database());
+        assert!(std::sync::Arc::ptr_eq(
+            &other.commit_signal(),
+            &main.commit_signal()
+        ));
         drop(Store::open(main, OpenMode::Initialize).unwrap());
         drop(Store::open(other, OpenMode::LiveReadOnly).unwrap());
     }

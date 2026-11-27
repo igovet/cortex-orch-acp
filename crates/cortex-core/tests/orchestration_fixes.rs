@@ -1006,6 +1006,15 @@ fn attributed_review_with(
     .unwrap();
     (p, s, e, owner, packet)
 }
+#[test]
+fn review_packet_retains_only_still_outstanding_verification_commands() {
+    let (_, _, _, _, packet) = attributed_review_with(generated(), &[
+        ("VERIFICATION_FAILED", json!({"unresolved_commands":[["make","test"],["make","lint"]]})),
+        ("VERIFICATION_PASSED", json!({"checks":[{"argv":["make","lint"],"complete":true,"exit_code":0}]})),
+    ]);
+    assert_eq!(packet["outstanding_verification_commands"], json!([["make","test"]]));
+}
+
 fn generated() -> Value {
     json!({"changed_paths":["src/generated.rs"],"changed_paths_complete":true,"changed_paths_source":"listing"})
 }

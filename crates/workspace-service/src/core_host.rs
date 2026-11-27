@@ -1,14 +1,21 @@
 //! Reusable Core projections served to owner reads, one reader per logical project/channel.
 use crate::{actor, failure, local::core_failure as err, project_guard, Service};
 use cortex_core::{
-    events::StreamFrame, projections::ProjectionReader, OpenMode, ProjectKey, Store, StoreChannel,
+    events::StreamFrame, projections::ProjectionReader, store::CommitSignal, OpenMode, ProjectKey,
+    Store, StoreChannel,
 };
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     io,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
+    time::Duration,
+};
+use tokio::{
+    sync::{broadcast, watch, Mutex as AsyncMutex},
+    task::JoinHandle,
+    time::{sleep_until, Instant},
 };
 use workspace_protocol::core::RequestEnvelope;
 
@@ -47,10 +54,74 @@ struct Entry {
     reader: ProjectionReader,
     subscription: cortex_core::events::Subscription,
 }
+type ReaderSlot = Arc<AsyncMutex<Option<Entry>>>;
+
 #[derive(Default)]
 pub(crate) struct Registry {
-    slots: Mutex<BTreeMap<PathBuf, Arc<Mutex<Option<Entry>>>>>,
+    readers: Mutex<Readers>,
 }
+
+#[derive(Default)]
+struct Readers {
+    closed: bool,
+    registrations: BTreeMap<String, Arc<()>>,
+    slots: BTreeMap<ProjectKey, Slot>,
+}
+
+#[derive(Default)]
+struct Slot {
+    // The poller owns the reusable reader. Retiring a slot under the registry
+    // lock cannot close SQLite or drop a blocked read's access guard there.
+    entry: Weak<AsyncMutex<Option<Entry>>>,
+    running: Option<Running>,
+}
+
+impl Slot {
+    fn entry(&mut self) -> ReaderSlot {
+        if let Some(entry) = self.entry.upgrade() {
+            return entry;
+        }
+        if let Some(running) = self.running.take() {
+            running.stop();
+        }
+        let entry = Arc::default();
+        self.entry = Arc::downgrade(&entry);
+        entry
+    }
+}
+
+struct Running {
+    project: String,
+    stop: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+impl Running {
+    fn stop(self) -> JoinHandle<()> {
+        self.stop.send_replace(true);
+        self.task
+    }
+}
+
+impl Readers {
+    fn check(&self, project: &str, registration: &Arc<()>) -> io::Result<()> {
+        if self.closed {
+            return Err(failure("service_stopping"));
+        }
+        if !self
+            .registrations
+            .get(project)
+            .is_some_and(|current| Arc::ptr_eq(current, registration))
+        {
+            return Err(failure("project_inactive"));
+        }
+        Ok(())
+    }
+}
+
+const FALLBACK: Duration = Duration::from_millis(250);
+const COALESCE: Duration = Duration::from_millis(25);
+
 // A writer can advance the outbox between poll_model and its read transaction.
 fn consistent_read<T>(
     mut read: impl FnMut() -> cortex_core::CoreResult<T>,
@@ -75,81 +146,302 @@ fn key(root: &std::path::Path) -> io::Result<ProjectKey> {
     .map_err(err)
 }
 impl Registry {
-    fn slot(&self, key: &ProjectKey) -> io::Result<Arc<Mutex<Option<Entry>>>> {
-        let mut slots = self
-            .slots
-            .lock()
-            .map_err(|_| failure("storage_unavailable"))?;
-        Ok(slots.entry(key.root().to_path_buf()).or_default().clone())
+    // Call under Service::state so removal invalidates even a queued initial query.
+    fn registration(&self, project: &str) -> io::Result<Arc<()>> {
+        let mut readers = self.readers.lock().unwrap();
+        if readers.closed {
+            return Err(failure("service_stopping"));
+        }
+        Ok(readers
+            .registrations
+            .entry(project.into())
+            .or_default()
+            .clone())
     }
+
+    pub(crate) fn remove(&self, project: &str) -> Vec<JoinHandle<()>> {
+        let mut readers = self.readers.lock().unwrap();
+        readers.registrations.remove(project);
+        let mut stopped = Vec::new();
+        readers.slots.retain(|_, slot| {
+            if slot.running.as_ref().is_some_and(|r| r.project == project) {
+                stopped.push(slot.running.take().unwrap().stop());
+                false
+            } else {
+                true
+            }
+        });
+        stopped
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        let stopped = {
+            let mut readers = self.readers.lock().unwrap();
+            readers.closed = true;
+            readers.registrations.clear();
+            std::mem::take(&mut readers.slots)
+                .into_values()
+                .filter_map(|slot| slot.running.map(Running::stop))
+                .collect::<Vec<_>>()
+        };
+        for task in stopped {
+            let _ = task.await;
+        }
+    }
+
     fn query(
         &self,
         root: PathBuf,
         project: String,
+        registration: Arc<()>,
         request: RequestEnvelope<workspace_protocol::core::CoreQuery>,
+        events: broadcast::Sender<Value>,
     ) -> io::Result<Value> {
         // Conversation pages and task facts answer the owner's screen: read at the session's
         // disk priority, not the level the service unit gives task processes (`io_priority`).
         let _disk = cortex_core::io_priority::raised();
         project_guard::check(&root)?;
         let key = key(&root)?;
-        let slot = self.slot(&key)?;
-        let mut entry = slot.lock().map_err(|_| failure("storage_unavailable"))?;
-        if entry.is_none() {
+        let slot = {
+            let mut readers = self.readers.lock().unwrap();
+            readers.check(&project, &registration)?;
+            readers.slots.entry(key.clone()).or_default().entry()
+        };
+        let result = (|| {
+            let mut entry = slot.blocking_lock();
+            self.readers.lock().unwrap().check(&project, &registration)?;
+            if let Some(current) = entry.as_ref() {
+                if current.project != project {
+                    return Err(failure("project_context_conflict"));
+                }
+                let reply =
+                    consistent_read(|| current.reader.query(request.body.clone())).map_err(err)?;
+                self.readers.lock().unwrap().check(&project, &registration)?;
+                return serde_json::to_value(reply).map_err(|_| failure("invalid_reply"));
+            }
+
             // The owner waits for this read: queue behind an exclusive migration, never `busy`.
-            let store = Store::open_waiting(key, OpenMode::LiveReadOnly).map_err(err)?;
+            let store = Store::open_waiting(key.clone(), OpenMode::LiveReadOnly).map_err(err)?;
             let reader = ProjectionReader::new(store, project.clone(), actor()).map_err(err)?;
             let reply = consistent_read(|| reader.query(request.body.clone())).map_err(err)?;
             let subscription = reader
                 .subscribe(&reply.generation, reply.high_watermark)
                 .map_err(err)?;
+            let reply = serde_json::to_value(reply).map_err(|_| failure("invalid_reply"))?;
+            let mut readers = self.readers.lock().unwrap();
+            readers.check(&project, &registration)?;
+            // An alias may have owned this slot before a read failure invalidated its entry.
+            // Removal can evict that slot while the replacement snapshot is opening.
+            if !readers
+                .slots
+                .get(&key)
+                .is_some_and(|current| std::ptr::eq(current.entry.as_ptr(), Arc::as_ptr(&slot)))
+            {
+                return Err(failure("snapshot_expired"));
+            }
+            // If the logical store at this path changed, retire the old poller before
+            // installing the new generation. Stop never has to acquire a reader lock.
+            readers.slots.retain(|old_key, old| {
+                if old_key != &key && old.running.as_ref().is_some_and(|r| r.project == project) {
+                    old.running.take().unwrap().stop();
+                    false
+                } else {
+                    true
+                }
+            });
+            let running = &mut readers.slots.get_mut(&key).unwrap().running;
+            if !running.as_ref().is_some_and(|r| r.project == project) {
+                if let Some(previous) = running.take() {
+                    previous.stop();
+                }
+                *running = Some(Poller {
+                    root,
+                    signal: key.commit_signal(),
+                    key: key.clone(),
+                    project: project.clone(),
+                    entry: slot.clone(),
+                    events,
+                }
+                .start());
+            }
             *entry = Some(Entry {
                 project,
                 reader,
                 subscription,
             });
-            return serde_json::to_value(reply).map_err(|_| failure("invalid_reply"));
+            Ok(reply)
+        })();
+        // A failed initial read leaves no subscriber. Last concurrent request prunes the slot.
+        drop(slot);
+        let mut readers = self.readers.lock().unwrap();
+        if readers
+            .slots
+            .get(&key)
+            .is_some_and(|s| s.running.is_none() && s.entry.strong_count() == 0)
+        {
+            readers.slots.remove(&key);
         }
-        if entry.as_ref().unwrap().project != project {
-            return Err(failure("project_context_conflict"));
-        }
-        let reader = &entry.as_ref().unwrap().reader;
-        let reply = consistent_read(|| reader.query(request.body.clone())).map_err(err)?;
-        serde_json::to_value(reply).map_err(|_| failure("invalid_reply"))
-    }
-    fn poll(&self, root: PathBuf, project: String) -> io::Result<Vec<Value>> {
-        // A stalled poll holds this project's reader, which the next page read waits for.
-        let _disk = cortex_core::io_priority::raised();
-        project_guard::check(&root)?;
-        let key = key(&root)?;
-        let slot = self.slot(&key)?;
-        let mut entry = slot.lock().map_err(|_| failure("storage_unavailable"))?;
-        let Some(current) = entry.as_ref() else {
-            return Ok(Vec::new());
-        };
-        if current.project != project {
-            return Ok(Vec::new());
-        }
-        if let Err(error) = current.reader.poll() {
-            // Drop the stale generation; the next snapshot opens a fresh read provider.
-            *entry = None;
-            return Ok(vec![
-                json!({"type":"native_resync","projectId":project,"reason":error.code()}),
-            ]);
-        }
-        Ok(ProjectionReader::drain(&current.subscription)
-            .into_iter()
-            .map(|frame| match frame {
-                StreamFrame::Delta(batch) => {
-                    json!({"type":"native_delta","projectId":project,"batch":batch})
-                }
-                StreamFrame::Resync(r) => {
-                    json!({"type":"native_resync","projectId":project,"reason":r.reason})
-                }
-            })
-            .collect())
+        result
     }
 }
+
+struct Poller {
+    root: PathBuf,
+    key: ProjectKey,
+    project: String,
+    entry: ReaderSlot,
+    signal: Arc<CommitSignal>,
+    events: broadcast::Sender<Value>,
+}
+
+impl Poller {
+    fn start(self) -> Running {
+        self.start_with(poll)
+    }
+
+    fn start_with<F>(self, read_once: F) -> Running
+    where
+        F: Fn(&std::path::Path, &ProjectKey, &str, &mut Option<Entry>) -> io::Result<Vec<Value>>
+            + Clone
+            + Send
+            + 'static,
+    {
+        let (stop, stopped) = watch::channel(false);
+        let project = self.project.clone();
+        let task = tokio::spawn(self.run(stopped, read_once));
+        Running {
+            project,
+            stop,
+            task,
+        }
+    }
+
+    async fn run<F>(self, mut stop: watch::Receiver<bool>, read_once: F)
+    where
+        F: Fn(&std::path::Path, &ProjectKey, &str, &mut Option<Entry>) -> io::Result<Vec<Value>>
+            + Clone
+            + Send
+            + 'static,
+    {
+        // The first poll catches commits between the initial snapshot and registration.
+        let mut timing = None;
+        loop {
+            if let Some((ready, fallback)) = timing {
+                // Leave the single permit untouched during cooldown. A burst through the
+                // current read and the cooldown thus asks for one trailing poll, not a queue.
+                tokio::select! {
+                    biased;
+                    _ = stop.changed() => return,
+                    _ = sleep_until(ready) => (),
+                }
+                tokio::select! {
+                    biased;
+                    _ = stop.changed() => return,
+                    _ = self.signal.notified() => (),
+                    _ = sleep_until(fallback) => (),
+                }
+            }
+            let mut entry = tokio::select! {
+                biased;
+                _ = stop.changed() => return,
+                entry = self.entry.clone().lock_owned() => entry,
+            };
+            let started = Instant::now();
+            let root = self.root.clone();
+            let key = self.key.clone();
+            let project = self.project.clone();
+            let cancelled = stop.clone();
+            let read_once = read_once.clone();
+            let mut read = tokio::task::spawn_blocking(move || {
+                // A running blocking call cannot be aborted. It owns only this slot
+                // and cannot publish, retain the service, or keep the wake registered.
+                let events = if *cancelled.borrow() {
+                    Vec::new()
+                } else {
+                    read_once(&root, &key, &project, &mut entry).unwrap_or_default()
+                };
+                (entry, events)
+            });
+            let result = tokio::select! {
+                biased;
+                _ = stop.changed() => {
+                    read.abort();
+                    return;
+                }
+                result = &mut read => result,
+            };
+            if let Ok((_entry, events)) = result {
+                // Keep the reader guard until its drained frames are delivered, and
+                // serialize the final send with removal's stop. Neither lock spans an await.
+                let stopped = stop.borrow();
+                if *stopped {
+                    return;
+                }
+                for event in events {
+                    broadcast(&self.events, event);
+                }
+            }
+            timing = Some((started + COALESCE, Instant::now() + FALLBACK));
+        }
+    }
+}
+
+fn poll(
+    root: &std::path::Path,
+    expected: &ProjectKey,
+    project: &str,
+    entry: &mut Option<Entry>,
+) -> io::Result<Vec<Value>> {
+    let Some(current) = entry.as_ref().filter(|entry| entry.project == project) else {
+        return Ok(Vec::new());
+    };
+    // A stalled poll holds this project's reader, which the next page read waits for.
+    let _disk = cortex_core::io_priority::raised();
+    project_guard::check(root)?;
+    if &key(root)? != expected {
+        return Ok(Vec::new());
+    }
+    if let Err(error) = current.reader.poll() {
+        // Drop the stale generation; the next snapshot opens a fresh read provider.
+        *entry = None;
+        return Ok(vec![
+            json!({"type":"native_resync","projectId":project,"reason":error.code()}),
+        ]);
+    }
+    Ok(ProjectionReader::drain(&current.subscription)
+        .into_iter()
+        .map(|frame| match frame {
+            StreamFrame::Delta(batch) => {
+                json!({"type":"native_delta","projectId":project,"batch":batch})
+            }
+            StreamFrame::Resync(r) => {
+                json!({"type":"native_resync","projectId":project,"reason":r.reason})
+            }
+        })
+        .collect())
+}
+
+fn broadcast(events: &broadcast::Sender<Value>, event: Value) {
+    #[cfg(feature = "test-observations")]
+    let trace = (event["type"] == "native_delta" && cortex_core::test_observations::observing(None))
+        .then(|| broadcast_identity(&event));
+    let _sent = events.send(event);
+    #[cfg(feature = "test-observations")]
+    if let Some(trace) = trace {
+        use cortex_core::test_observations::{record, Observation};
+        let sent = std::time::Instant::now();
+        record(match (trace, _sent) {
+            (Some((batch, changes)), Ok(receivers)) => {
+                Observation::Broadcast { batch, changes, sent, receivers }
+            }
+            _ => Observation::Missing,
+        });
+    }
+}
+
+#[cfg(test)]
+mod poller_tests;
+
 #[cfg(test)]
 mod startup_reads {
     use super::*;
@@ -192,7 +484,7 @@ impl Service {
             .project_id
             .clone()
             .ok_or_else(|| failure("invalid_project"))?;
-        let root = {
+        let (root, registration) = {
             let state = self.state.lock().await;
             let p = state
                 .projects
@@ -202,51 +494,12 @@ impl Service {
             if p.activation.is_none() {
                 return Err(failure("project_inactive"));
             }
-            p.canonical_root.clone()
+            (p.canonical_root.clone(), self.core.registration(&project)?)
         };
         let host = self.core.clone();
-        tokio::task::spawn_blocking(move || host.query(root, project, request))
+        let events = self.events.clone();
+        tokio::task::spawn_blocking(move || host.query(root, project, registration, request, events))
             .await
             .map_err(|_| failure("storage_unavailable"))?
-    }
-    pub(crate) async fn native_events(self: Arc<Self>) {
-        let mut shutdown = self.shutdown.subscribe();
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
-        loop {
-            tokio::select! {
-                _=shutdown.changed()=>break,
-                _=interval.tick()=>{
-                    if *shutdown.borrow(){break;}
-                    let projects=self.state.lock().await.projects.clone();
-                    let mut reads=tokio::task::JoinSet::new();
-                    for p in projects.into_iter().filter(|p|p.activation.is_some()) {
-                        let host=self.core.clone();
-                        reads.spawn_blocking(move||host.poll(p.canonical_root,p.project_id));
-                    }
-                    while let Some(result)=reads.join_next().await {
-                        if let Ok(Ok(events))=result {
-                            for event in events {
-                                #[cfg(feature = "test-observations")]
-                                let trace = (event["type"] == "native_delta"
-                                    && cortex_core::test_observations::observing(None))
-                                    .then(|| broadcast_identity(&event));
-                                let _sent = self.events.send(event);
-                                #[cfg(feature = "test-observations")]
-                                if let Some(trace) = trace {
-                                    use cortex_core::test_observations::{record, Observation};
-                                    let sent = std::time::Instant::now();
-                                    record(match (trace, _sent) {
-                                        (Some((batch, changes)), Ok(receivers)) => {
-                                            Observation::Broadcast { batch, changes, sent, receivers }
-                                        }
-                                        _ => Observation::Missing,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }

@@ -153,13 +153,16 @@ fn end_savepoint(tx: &rusqlite::Transaction<'_>, kept: bool) -> CoreResult<()> {
     })?)
 }
 /// Run deferred display writes inside the current transaction, each in its own savepoint.
-fn run_deferred(tx: &rusqlite::Transaction<'_>, bodies: Vec<DeferredBody>) -> CoreResult<()> {
+fn run_deferred(tx: &rusqlite::Transaction<'_>, bodies: Vec<DeferredBody>) -> CoreResult<bool> {
+    let mut changed = false;
     for body in bodies {
         tx.execute_batch("SAVEPOINT cortex_group")?;
+        let before = tx.total_changes();
         let kept = body(tx).is_ok();
         end_savepoint(tx, kept)?;
+        changed |= kept && tx.total_changes() != before;
     }
-    Ok(())
+    Ok(changed)
 }
 /// One transaction for a batch of deferred writes alone. Each runs inside its own
 /// savepoint: one that fails is rolled back alone and the rest still commit. Nothing
@@ -167,7 +170,7 @@ fn run_deferred(tx: &rusqlite::Transaction<'_>, bodies: Vec<DeferredBody>) -> Co
 /// does not wait for an fsync, and the next FULL commit makes it durable with its own.
 fn commit_deferred(store: CoreResult<&Store>, bodies: Vec<DeferredBody>) {
     let Ok(store) = store else { return };
-    let _ = store.write_relaxed(|tx| run_deferred(tx, bodies));
+    let _ = store.write_tracked(false, |tx| Ok(((), run_deferred(tx, bodies)?)));
 }
 /// Group commit: `first` and the write bodies queued right behind it (at most
 /// [`GROUP_LIMIT`], for at most [`GROUP_BUDGET`]) run in ONE `BEGIN IMMEDIATE` … `COMMIT`
@@ -187,7 +190,8 @@ fn group(
     let mut first = Some((ticket, first));
     let mut next = None;
     let mut replies: Vec<Reply> = Vec::new();
-    let committed = store.write(|tx| {
+    let committed = store.write_tracked(true, |tx| {
+        let mut changed = false;
         loop {
             let (ticket, job) = match first.take() {
                 Some(job) => job,
@@ -210,9 +214,12 @@ fn group(
             };
             // Never reorder: what was deferred before this body commits first.
             if let Some(deferred) = deferred {
-                if let Err(error) = run_deferred(tx, deferred.take(Some(ticket))) {
-                    replies.push(job(Err(CoreError::Refused(error.code()))).1);
-                    return Err(error);
+                match run_deferred(tx, deferred.take(Some(ticket))) {
+                    Ok(deferred_changed) => changed |= deferred_changed,
+                    Err(error) => {
+                        replies.push(job(Err(CoreError::Refused(error.code()))).1);
+                        return Err(error);
+                    }
                 }
             }
             if let Err(error) = tx.execute_batch("SAVEPOINT cortex_group") {
@@ -220,11 +227,13 @@ fn group(
                 replies.push(job(Err(CoreError::Refused(error.code()))).1);
                 return Err(error);
             }
+            let before = tx.total_changes();
             let (kept, reply) = job(Ok(tx));
             replies.push(reply);
             end_savepoint(tx, kept)?;
+            changed |= kept && tx.total_changes() != before;
         }
-        Ok(())
+        Ok(((), changed))
     });
     match committed {
         // The transaction never began: only the first body was taken, and it never ran.
@@ -380,6 +389,8 @@ impl Lane {
                                     // Never reorder: what was deferred before this job
                                     // commits first.
                                     flush(Some(ticket), &mut lease);
+                                    // A Store job may read, or commit several transactions
+                                    // before an error. Signal from its actual Store writes.
                                     run(job, &mut lease);
                                 }
                                 Work::Tx(job) => match retake(&mut lease) {

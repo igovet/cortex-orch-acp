@@ -71,3 +71,17 @@ it("reads an answered permission as allowed once or denied, and a withdrawn one 
   expect(text).toContain("Withdrawn: The task was paused before you answered.");
 });
 
+
+// A command request shows the command line itself, its working directory and the concrete reason, not only the folder.
+it("shows a command card's command line, directory and concrete reason", async () => {
+  const command = "rm -rf /home/o/cache " + "x".repeat(300);
+  const d = mapDecision(wire({ permission: { operation: "run", paths: ["/home/o/proj"], reason: "uncontained", reasonText: "it runs outside the sandbox", access: "guarded", rule: "outside_command",
+    command, cwd: "/home/o/proj", why: "Deletes files: /home/o/cache" } }) as never);
+  await mount([d]);
+  const card = document.querySelector<HTMLElement>(".task-panel .timeline .dc")!;
+  expect(card.querySelector("code.ws-perm-cmd")!.textContent!.startsWith("rm -rf /home/o/cache")).toBe(true);
+  expect(card.querySelector("details pre")!.textContent).toBe(command);
+  expect(card.textContent).toContain("Directory/home/o/proj");
+  expect(card.textContent).toContain("Deletes files: /home/o/cache");
+  expect(card.querySelector(".ws-perm-paths")).toBeNull();
+});
