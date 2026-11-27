@@ -29,6 +29,9 @@ harness = false
 name = "worker_roles"
 harness = false
 
+[features]
+test-observations = ["cortex-core/test-observations"]
+
 [dependencies]
 ed25519-dalek = "=3.0.0"
 cortex-core = { path = "../cortex-core" }

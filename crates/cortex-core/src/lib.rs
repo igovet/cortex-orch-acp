@@ -18,6 +18,9 @@ pub mod recovery_context;
 pub mod routing;
 pub mod scheduler;
 pub mod store;
+#[cfg(feature = "test-observations")]
+#[doc(hidden)]
+pub mod test_observations;
 pub mod workspace;
 pub use error::{CoreError, CoreResult};
 pub use store::{OpenMode, ProjectKey, Store, StoreChannel};

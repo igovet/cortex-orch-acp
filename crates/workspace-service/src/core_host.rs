@@ -12,6 +12,36 @@ use std::{
 };
 use workspace_protocol::core::RequestEnvelope;
 
+#[cfg(feature = "test-observations")]
+fn broadcast_identity(
+    event: &Value,
+) -> Option<(
+    cortex_core::test_observations::Batch,
+    Vec<cortex_core::test_observations::Change>,
+)> {
+    use cortex_core::test_observations::{Batch, Change};
+    let batch = &event["batch"];
+    Some((
+        Batch {
+            project: event["projectId"].as_str()?.into(),
+            generation: batch["generation"].as_str()?.into(),
+            from: batch["fromSequence"].as_str()?.parse().ok()?,
+            through: batch["throughSequence"].as_str()?.parse().ok()?,
+        },
+        batch["changes"]
+            .as_array()?
+            .iter()
+            .map(|change| {
+                Some(Change {
+                    kind: change["kind"].as_str()?.into(),
+                    id: change["id"].as_str()?.into(),
+                    version: change["newVersion"].as_str()?.parse().ok()?,
+                })
+            })
+            .collect::<Option<_>>()?,
+    ))
+}
+
 struct Entry {
     project: String,
     reader: ProjectionReader,
@@ -194,7 +224,26 @@ impl Service {
                         reads.spawn_blocking(move||host.poll(p.canonical_root,p.project_id));
                     }
                     while let Some(result)=reads.join_next().await {
-                        if let Ok(Ok(events))=result {for event in events {let _=self.events.send(event);}}
+                        if let Ok(Ok(events))=result {
+                            for event in events {
+                                #[cfg(feature = "test-observations")]
+                                let trace = (event["type"] == "native_delta"
+                                    && cortex_core::test_observations::observing(None))
+                                    .then(|| broadcast_identity(&event));
+                                let _sent = self.events.send(event);
+                                #[cfg(feature = "test-observations")]
+                                if let Some(trace) = trace {
+                                    use cortex_core::test_observations::{record, Observation};
+                                    let sent = std::time::Instant::now();
+                                    record(match (trace, _sent) {
+                                        (Some((batch, changes)), Ok(receivers)) => {
+                                            Observation::Broadcast { batch, changes, sent, receivers }
+                                        }
+                                        _ => Observation::Missing,
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
             }

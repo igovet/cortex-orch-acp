@@ -14,6 +14,46 @@ pub(super) const DRAFT_TITLE: &str = "Explain this disposable project";
 const CONSTRAINT: &str = " Never lose constraint α";
 
 impl J {
+    /// The independently runnable baseline does not qualify the unrelated screens
+    /// and follow-up actions of the full lifecycle. Use the same Start/question path.
+    fn baseline_lifecycle(&mut self) -> Res<()> {
+        let project = self.home.join("journey");
+        self.launch("dark")?;
+        self.loaded()?;
+        self.wait_js(
+            "baseline_service_connected",
+            15,
+            "return [...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Add project' && !b.disabled && b.getAttribute('aria-disabled') !== 'true') ? 'yes' : '';",
+        )?;
+        self.add_project(&project)?;
+        self.wait_found("baseline_registered_project", 15, "Activate")?;
+        self.click("Activate")?;
+        self.wait_gone("baseline_activation_finished", 60, "Activate")?;
+        self.nav("New task")?;
+        self.fill("Describe the task", DRAFT_TITLE)?;
+        self.paste(CONSTRAINT)?;
+        self.wait_js("baseline_draft_input", 10, "return [...document.querySelectorAll('textarea')].some(t => t.value.includes('Never lose constraint')) ? 'yes' : '';")?;
+        self.release_clipboards();
+        self.click("Save draft")?;
+        self.wait_text("baseline_draft_visible", 15, DRAFT_TITLE)?;
+        require(
+            self.store_count(&project, "SELECT count(*) FROM runtime_tasks")? == 0,
+            "the baseline draft started without input",
+        )?;
+        self.open_task("baseline_draft_link", DRAFT_TITLE)?;
+        self.start_and_question()?;
+        self.close_window()
+    }
+
+    fn start_and_question(&mut self) -> Res<()> {
+        super::baseline::begin(self)?;
+        self.click_task("Start")?;
+        self.wait_text("runtime_question", 90, "How should we finish?")?;
+        super::baseline::finish(self)?;
+        self.step("start_and_question", vec![]);
+        Ok(())
+    }
+
     pub fn settings_screens(&mut self, label: &str, theme: &str) -> Res<()> {
         self.js("document.querySelector('a[aria-label=\"Settings\"]').click(); return 'yes';")?;
         sleep_ms(300);
@@ -233,6 +273,9 @@ pub(super) fn drive(j: &mut J) -> Res<()> {
     j.st.start_service()?;
     let socket = j.st.socket();
     wait_secs("service socket", 20, || Ok(socket.exists()))?;
+    if j.st.baseline {
+        j.st.observer = Some(super::baseline::Observer::start(&j.st)?);
+    }
     let only = j.only.clone();
     let wanted = |name: &str| only.as_deref().is_none_or(|o| o == name);
     if wanted("common") {
@@ -250,6 +293,9 @@ pub(super) fn drive(j: &mut J) -> Res<()> {
         j.wait_gone("activation_finished", 60, "Activate")?;
         j.worker_controls(&project)?;
         return j.close_window();
+    }
+    if only.as_deref() == Some("baseline") {
+        return j.baseline_lifecycle();
     }
     if wanted("lifecycle") {
         j.lifecycle()?;
@@ -289,7 +335,7 @@ pub(super) fn finish(j: &mut J) -> Res<()> {
     let mut pairs = outcome_pairs(&evidence);
     pairs.retain(|(k, _)| *k != "app");
     pairs.push(("app", Value::Null));
-    // No screenshot is captured or read by this harness; the count is part of the evidence.
+    // No screenshot is retained, including in opt-in baseline mode.
     pairs.push(("screenshots", n(0)));
     outcome(&mut j.run, "run_evidence", "diagnostic", pairs);
     if unexpected {
@@ -432,9 +478,7 @@ impl J {
         sleep_ms(300);
         self.audit("task session draft", "dark")?;
         self.inspector_open("task session draft")?;
-        self.click_task("Start")?;
-        self.wait_text("runtime_question", 90, "How should we finish?")?;
-        self.step("start_and_question", vec![]);
+        self.start_and_question()?;
         self.audit("task session question", "dark")?;
         self.popovers("task session question")?;
         self.resize(960, 540)?;
@@ -564,8 +608,12 @@ impl J {
         self.wait_js("edit_returns_to_the_field", 15, "return !document.querySelector('.queue') && document.querySelector('[aria-label=\"Message\"]').value === 'Queued from the audit' ? 'yes' : ''")?;
         self.step("queue_and_edit", vec![]);
         self.fill("Message", "Focus on durable conversation")?;
-        // Queue is one toggle: pressing it again returns to sending now.
-        self.click("Queue")?;
+        // The queued row survives a restart, but the new composer's delivery selector starts in Send now.
+        self.wait_js(
+            "delivery_defaults_to_send_now_after_reopen",
+            15,
+            "return document.querySelector('.mc-delivery button[aria-label=\"Queue\"][aria-pressed=\"false\"]') ? 'yes' : '';",
+        )?;
         self.click("Send message now")?;
         self.wait_js("steer_recorded_during_turn", 30, "return document.body.innerText.includes('Focus on durable conversation') && document.querySelector('[aria-label=\"Message\"]').value === '' ? 'yes' : ''")?;
         self.step("steer_durable_capture_during_turn", vec![]);

@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+test-observations = []
+
 [dependencies]
 tokio = { version = "=1.54.1", features = ["sync", "time"] }
 workspace-protocol = { path = "../workspace-protocol" }

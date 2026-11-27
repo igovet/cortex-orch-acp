@@ -417,6 +417,9 @@ pub(super) struct Stack {
     pub channel: Value,
     pub xvfb: Option<Child>,
     pub wm: Option<Child>,
+    pub observer: Option<super::baseline::Observer>,
+    pub baseline: bool,
+    pub peer_timing: bool,
     pub service: Option<Child>,
     pub app: Option<Child>,
     pub sequence: u32,
@@ -455,6 +458,9 @@ impl Stack {
             channel,
             xvfb: None,
             wm: None,
+            observer: None,
+            baseline: false,
+            peer_timing: false,
             service: None,
             app: None,
             sequence: 0,
@@ -477,10 +483,12 @@ impl Stack {
     }
 
     pub(super) fn start_display(&mut self) -> Res<()> {
+        let authority = super::baseline::Authority::new(&self.scratch)?;
         let mut fds = [0i32; 2];
         require(unsafe { libc::pipe(fds.as_mut_ptr()) } == 0, "pipe failed")?;
-        let child = Command::new("Xvfb")
-            .args([
+        let mut xvfb = Command::new("Xvfb");
+        xvfb.arg("-auth").arg(&authority.seed);
+        let child = xvfb.args([
                 "-displayfd",
                 &fds[1].to_string(),
                 "-screen",
@@ -503,7 +511,9 @@ impl Stack {
             ":{}",
             String::from_utf8_lossy(&buf[..got.max(0) as usize]).trim()
         );
-        std::env::set_var("DISPLAY", display);
+        std::env::set_var("DISPLAY", &display);
+        std::env::set_var("XAUTHORITY", authority.client(&display)?);
+        super::baseline::verify_authority(&self.scratch)?;
         std::env::set_var("GDK_BACKEND", "x11");
         std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
         std::env::set_var("NO_AT_BRIDGE", "0");
@@ -672,6 +682,11 @@ impl Stack {
             .map_err(|e| e.to_string())?;
         let mut command = Command::new(self.artifacts.join(self.ns("desktop_binary")));
         self.apply_env(&mut command);
+        if self.launches == 1 {
+            if let Some(observer) = &self.observer {
+                command.env("XDG_RUNTIME_DIR", &observer.runtime);
+            }
+        }
         command
             .env("LD_PRELOAD", &self.shim)
             .env("CW_PROBE_DIR", &self.probe_dir)

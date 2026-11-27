@@ -410,8 +410,16 @@ impl Store {
         }
         let result = (|| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            #[cfg(feature = "test-observations")]
+            let marks = crate::test_observations::before_write(&self.key, &tx);
             let result = body(&tx)?;
+            #[cfg(feature = "test-observations")]
+            let observation = marks.map(|before| before.finish(&tx));
             tx.commit()?;
+            #[cfg(feature = "test-observations")]
+            if let Some(observation) = observation {
+                crate::test_observations::committed(observation, std::time::Instant::now());
+            }
             Ok(result)
         })();
         if !durable && db.pragma_update(None, "synchronous", "FULL").is_ok() {

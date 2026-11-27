@@ -215,9 +215,8 @@ final result reports every goal outcome of the plan done; an approved stage that
 misses the goal returns to planning without verification, and an INCOMPLETE review
 reaches verification only on the owner's close-as-is decision. Native source,
 project-file and Git tools now retain channel-local read coverage and full command
-output. Auto runs ordinary commands in a private host namespace as the owner, with
-the task checkout writable and Cortex store directories read-only. Administrative
-commands use a separately confirmed full-host route. In Guarded and Development,
+output. Auto runs every command directly on the full host as the owner with no owner
+card: deletions, administrative commands and the live store files included. In Guarded and Development,
 for read-only roles and for runtime verification, brokered worker commands run on
 the host at their real paths, with the owner's tools, PATH, HOME and network,
 under a Landlock ruleset: writes only to the writer's checkout, a private scratch
@@ -956,10 +955,10 @@ flowchart LR
   limited to the project, and native engine processes do not run in a general
   filesystem jail. That engines read what you can read and use the host network is
   your decision, not a gap. Cortex's own `.cortex`/`.cortex-dev` state, Git
-  control files and credential files are changed on request: Auto allows ordinary
-  changes, while deletions and administrative commands ask you separately,
-  Guarded and Development ask you for the action; only the live store database and lock files
-  are never written. A writing Codex worker runs in a Cortex permission profile
+  control files and credential files are subject to the policy of the tool used.
+  Auto can allow eligible native requests without asking, but native writes to
+  live store files are refused in every mode, as are native write, delete and
+  execute requests from read-only roles. A writing Codex worker runs in a Cortex permission profile
   that keeps those Cortex paths and common root credential files read-only in its
   sandbox, so its patch there asks instead of writing silently (a credential file
   under another name is still written without asking). See [permissions and containment](docs/features/permissions-and-containment/index.md).

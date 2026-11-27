@@ -168,12 +168,13 @@ pub fn classify(request: &Value, facts: &Facts<'_>) -> Verdict {
     };
     let read = matches!(kind, Some("read" | "search"));
     let targets = targets(request, facts);
-    // The live store files are never written natively, in any mode: a write from
-    // outside the runtime can corrupt the running store or drop its locks.
+    let auto = facts.access == "auto";
+    // The live store files are never written natively: a write from outside
+    // the runtime can corrupt the running store or drop its locks.
     if !read && targets.paths.iter().any(|(_, c)| *c == PathClass::LiveStore) {
         return verdict(refuse, "cortex_live_store");
     }
-    // Read-only channels never write, delete or execute natively, in any mode. A web
+    // Read-only channels never write, delete or execute natively. A web
     // fetch only reads (the session keeps WebFetch for exactly that), so it is not
     // refused here: it follows the ordinary fetch rule below (Auto and Development
     // allow it, Guarded asks the owner). Refusing it made every read-only fetch fail
@@ -182,7 +183,6 @@ pub fn classify(request: &Value, facts: &Facts<'_>) -> Verdict {
     if facts.read_only && !read && !fetch {
         return verdict(refuse, "read_only");
     }
-    let auto = facts.access == "auto";
     let deletion = is_deletion(request);
     let credential = targets
         .paths
@@ -195,16 +195,16 @@ pub fn classify(request: &Value, facts: &Facts<'_>) -> Verdict {
         .iter()
         .any(|(_, c)| matches!(c, PathClass::Private | PathClass::LiveStore));
     let outside = targets.unclassified || targets.paths.iter().any(|(inside, _)| !inside);
-    // Auto allows everything else; the rule names what was allowed.
+    // Auto allows the remaining native requests without an owner card.
     if auto {
-        let rule = if private {
+        let rule = if deletion {
+            "auto_deletion"
+        } else if private {
             "auto_private"
         } else if credential {
             "auto_credential"
         } else if control {
             "auto_control"
-        } else if deletion {
-            "auto_deletion"
         } else if outside && read {
             "auto_outside_read"
         } else if outside && !targets.paths.is_empty() {
@@ -379,6 +379,7 @@ pub fn ask_reason(rule: &str, ru: bool) -> &'static str {
             "unclassified_path" => "не удалось определить точный путь",
             "outside_read" => "запрос читает данные за пределами проекта",
             "outside_write" => "запрос записывает данные за пределами проекта",
+            "administrative_command" => "команде нужен административный доступ",
             "outside_command" => "команда запускается вне песочницы",
             "native_fetch" => "запрос обращается к сети",
             "deletion" => "запрос удаляет или перемещает файлы",
@@ -392,6 +393,7 @@ pub fn ask_reason(rule: &str, ru: bool) -> &'static str {
         "unclassified_path" => "its path cannot be resolved",
         "outside_read" => "it reads outside the project",
         "outside_write" => "it writes outside the project",
+        "administrative_command" => "the command needs administrative access",
         "outside_command" => "it runs outside the sandbox",
         "native_fetch" => "it fetches from the network",
         "deletion" => "it deletes or moves files",
@@ -425,6 +427,33 @@ pub fn operation(request: &Value) -> &'static str {
         _ => "run",
     }
 }
+/// The command line of a native command request, redacted and bounded: a runtime
+/// `argv` joined (words with whitespace or quotes quoted) or the engine's own command text.
+pub fn command_line(request: &Value) -> Option<String> {
+    let call = &request["toolCall"];
+    let text = match call["rawInput"]["argv"].as_array() {
+        Some(argv) => argv
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|w| {
+                if w.is_empty() || w.contains(char::is_whitespace) || w.contains(['"', '\'']) {
+                    format!("'{}'", w.replace('\'', "'\\''"))
+                } else {
+                    w.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        None if call["kind"] == "execute" => command_text(call),
+        None => String::new(),
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| crate::engine::redact(text).chars().take(4000).collect())
+}
+/// The working directory a native command request names.
+pub fn cwd(request: &Value) -> Option<String> {
+    request["toolCall"]["rawInput"]["cwd"].as_str().map(str::to_owned)
+}
 /// The exact paths (or URL) a native request names, as the engine declared them.
 pub fn paths(request: &Value) -> Vec<String> {
     let call = &request["toolCall"];
@@ -454,7 +483,14 @@ pub fn owner_card(request: &Value, role: &str, rule: &str, ru: bool) -> Value {
         let mut card = request.clone();
         let call = &request["toolCall"];
         let paths = paths(request);
-        let subject = if paths.is_empty() {
+        let command_subject = (operation(request) == "run").then(|| command_line(request)).flatten();
+        let subject = if let Some(c) = command_subject {
+            let c: String = c.chars().take(200).collect();
+            match cwd(request) {
+                Some(d) => if ru { format!("{c} (в {d})") } else { format!("{c} (in {d})") },
+                None => c,
+            }
+        } else if paths.is_empty() {
             let command = command_text(call);
             let title = call["title"].as_str().unwrap_or("");
             if command.trim().is_empty() {
@@ -764,10 +800,8 @@ mod tests {
                     }
                 );
                 for kind in ["execute", "delete", "move"] {
-                    assert_eq!(
-                        classify(&json!({"toolCall":{"kind":kind}}), &f).rule,
-                        "read_only"
-                    );
+                    let blocked = classify(&json!({"toolCall":{"kind":kind}}), &f);
+                    assert_eq!((blocked.action, blocked.rule), (v.action, "read_only"));
                 }
                 // A web fetch only reads: it follows the fetch rule of the mode.
                 let fetch = json!({"toolCall":{"kind":"fetch","rawInput":{"url":"https://github.com/x/y"}}});
@@ -948,6 +982,14 @@ mod tests {
                 ],
             ),
             (
+                edit(&root.join(".cortex-dev/cortex.sqlite3-journal")),
+                [
+                    (refuse, "cortex_live_store"),
+                    (refuse, "cortex_live_store"),
+                    (refuse, "cortex_live_store"),
+                ],
+            ),
+            (
                 edit(&root.join(".cortex/t_1/pipeline.md")),
                 [
                     (ask, "cortex_private"),
@@ -1108,5 +1150,20 @@ mod tests {
             card["toolCall"]["title"],
             "Removal blocked pending confirmation: rm a"
         );
+    }
+}
+#[cfg(test)]
+mod command_card_tests {
+    use super::*;
+    #[test]
+    fn a_command_card_names_the_command_and_directory() {
+        let request = json!({"toolCall":{"title":"Run outside the sandbox","kind":"execute",
+            "rawInput":{"argv":["mariadb","-e","select 1 password=hunter2abc"],"cwd":"/p"}},"options":[]});
+        let line = command_line(&request).unwrap();
+        assert!(line.starts_with("mariadb -e 'select 1"));
+        assert!(!line.contains("hunter2abc"));
+        assert_eq!(cwd(&request).as_deref(), Some("/p"));
+        let title = owner_card(&request, "worker-x", "outside_command", false)["toolCall"]["title"].as_str().unwrap().to_owned();
+        assert!(title.contains("mariadb -e") && title.contains("(in /p)"), "{title}");
     }
 }

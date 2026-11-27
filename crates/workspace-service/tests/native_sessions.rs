@@ -1272,6 +1272,15 @@ async fn channel_source_project_and_commands() {
         .await;
         assert!(p.0.join("src/effect").is_file());
         check(&w,"command_run",json!({"argv":["/bin/cat",".cortex-dev/cortex.sqlite3"],"request_key":"private"}),json!({"/result/structuredContent/exit_code":0,"/result/structuredContent/cortex_store/code":"cortex_store_read_only_for_commands"})).await;
+        // Exercise nested private-state writes before the existing timeout cases.
+        // Removing the synthetic store changes its parent's ctime; the later
+        // comparison needs a quiet checkout to obtain a revision binding.
+        std::fs::create_dir_all(p.0.join("src/nested/.cortex-dev")).unwrap();
+        check(&w,"command_run",json!({"argv":["/usr/bin/touch","src/private-scope-effect"],"request_key":"private-scope"}),json!({"/result/structuredContent/exit_code":0})).await;
+        assert!(p.0.join("src/private-scope-effect").exists());
+        check(&w,"command_run",json!({"argv":["/usr/bin/touch","src/nested/.cortex-dev/allowed"],"request_key":"private-child"}),json!({"/result/structuredContent/exit_code":0})).await;
+        assert!(p.0.join("src/nested/.cortex-dev/allowed").exists());
+        std::fs::remove_dir_all(p.0.join("src/nested/.cortex-dev")).unwrap();
         check(&w,"command_run",json!({"argv":["/bin/sleep","5"],"timeout_seconds":1,"request_key":"timeout"}),json!({"/result/structuredContent/complete":false,"/result/structuredContent/failure":"timeout"})).await;
         s.read(|db|{
             let process:String=db.query_row("SELECT p.payload_json FROM runtime_requests r JOIN runtime_events p ON p.task_id=r.task_id
@@ -1305,14 +1314,6 @@ async fn channel_source_project_and_commands() {
         .await;
         let receipt=s.read(|db|Ok(db.query_row("SELECT result_json FROM runtime_requests WHERE operation='command_run' AND request_key='cat'",[],|r|r.get::<_,String>(0))?)).unwrap();
         let receipt: Value = serde_json::from_str(&receipt).unwrap();
-        std::fs::create_dir_all(p.0.join("src/nested/.cortex-dev")).unwrap();
-        check(&w,"command_run",json!({"argv":["/usr/bin/touch","src/private-scope-effect"],"request_key":"private-scope"}),json!({"/result/structuredContent/exit_code":0})).await;
-        assert!(p.0.join("src/private-scope-effect").exists());
-        // Auto: the owner allowed model writes to Cortex store directories; only live store files stay sealed.
-        check(&w,"command_run",json!({"argv":["/usr/bin/touch","src/nested/.cortex-dev/allowed"],"request_key":"private-child"}),json!({"/result/structuredContent/exit_code":0})).await;
-        assert!(p.0.join("src/nested/.cortex-dev/allowed").exists());
-        // A nested store keeps the project unobservable for the result; the fixture removes it again.
-        std::fs::remove_dir_all(p.0.join("src/nested/.cortex-dev")).unwrap();
         let trivial_ref = receipt["tool_call_ref"].clone();
         check(
             &w,
@@ -1808,8 +1809,8 @@ async fn sudo_prompts_and_host_reroute() {
         .await
         .unwrap();
     // 1. A writing worker's command_run with sudo runs on the host at once (Auto
-    // answers the consent card); sudo gets `-A` and the owner's answer, and the
-    // receipt says why it was rerouted and how the prompt ended.
+    // requires no consent card); sudo gets `-A` and the owner's answer, and the
+    // receipt names the Auto host route and how the password prompt ended.
     let answered = answer_next(Some(SECRET));
     let run = json!({"argv":[fake,"install-fixture"],"request_key":"sudo-run"});
     checked(
@@ -1822,7 +1823,7 @@ async fn sudo_prompts_and_host_reroute() {
             "/result/structuredContent/exit_code":0,
             "/result/structuredContent/output":format!("hash={}\n", digest(SECRET)),
             "/result/structuredContent/rerouted/from":"command_run",
-            "/result/structuredContent/rerouted/reason":"privilege",
+            "/result/structuredContent/rerouted/reason":"auto_host",
             "/result/structuredContent/sudo_prompts":["answered"],
         }),
     )
@@ -1842,7 +1843,7 @@ async fn sudo_prompts_and_host_reroute() {
         "command_run",
         run,
         json!({
-            "/result/structuredContent/rerouted/reason":"privilege",
+            "/result/structuredContent/rerouted/reason":"auto_host",
             "/result/structuredContent/sudo_prompts":["answered"],
         }),
     )
@@ -2166,8 +2167,9 @@ async fn access_modes_and_outside_routes() {
             } else {
                 assert!(!outside.0.join("count").exists());
             }
-            // Another project's Cortex state is allowed on request (Auto allows; with
-            // no owner client here an ask is refused); its live database never.
+            // Auto allows the outside write, including store-class filenames.
+            // Guarded and Development ask for private state and refuse store files.
+            // The outside project is never opened as a store; these are plain text files.
             for store in [".cortex", ".cortex-dev"] {
                 std::fs::create_dir(outside.0.join(store)).unwrap();
                 let target = outside.0.join(store).join("db");
@@ -2183,9 +2185,18 @@ async fn access_modes_and_outside_routes() {
                 }
                 let live = outside.0.join(store).join("cortex.sqlite3");
                 std::fs::write(&live, "fixture").unwrap();
-                checked(&d,"outside_write",json!({"path":live,"content":"no","request_key":format!("{store}-live")}),
-                    json!({"/result/isError":true,"/result/structuredContent/code":"cortex_live_store"}),"end_turn").await;
-                assert_eq!(std::fs::read_to_string(live).unwrap(), "fixture");
+                let live_reply = if mode == "auto" {
+                    json!({"/result/isError":false})
+                } else {
+                    json!({"/result/isError":true,"/result/content/0/text":"cortex_live_store"})
+                };
+                checked(&d,"outside_write",json!({"path":live,"content":"updated","request_key":format!("{store}-live")}),
+                    live_reply,"end_turn").await;
+                assert_eq!(
+                    std::fs::read_to_string(live).unwrap(),
+                    if mode == "auto" { "updated" } else { "fixture" },
+                    "{engine:?} {mode} {store}"
+                );
             }
             checked(
                 &d,
@@ -3328,7 +3339,7 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
         }
         // The gateway reaches the same paths only through a runtime decision: Cortex
         // state on request (missing parents included), Git reads without one, and
-        // the live store files never.
+        // live-store-class writes only in Auto.
         async fn call(d: &workspace_service::native_sessions::SessionDriver, name: &str, args: Value, expected: Value) {
             let prompt = format!("call:{}", json!({"name":name,"arguments":args,"__fixture_expect":expected}));
             assert_eq!(d.prompt(&prompt).await.unwrap().stop_reason, "end_turn", "{name} {args}");
@@ -3342,9 +3353,22 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
         call(&d, "project_read", json!({"path":".cortex/gateway/note.md"}),
             if auto { json!({"/result/isError":false}) } else { refused.clone() }).await;
         call(&d, "project_read", json!({"path":".git/HEAD"}), json!({"/result/isError":false})).await;
-        call(&d, "project_write", json!({"path":".cortex/cortex.sqlite3-journal","content":"x","expected_sha256":"absent","request_key":"gw-live"}),
-            json!({"/result/isError":true,"/result/structuredContent/code":"cortex_live_store"})).await;
-        assert!(!p.0.join(".cortex/cortex.sqlite3-journal").exists());
+        // The fixture uses the Dev store; this release-channel path has no
+        // database. Exercise the filename policy without touching an open store.
+        assert!(!p.0.join(".cortex/cortex.sqlite3").exists());
+        let journal = ".cortex/cortex.sqlite3-journal";
+        let journal_reply = if auto {
+            json!({"/result/isError":false})
+        } else {
+            json!({"/result/isError":true,"/result/structuredContent/code":"cortex_live_store"})
+        };
+        call(&d, "project_write", json!({"path":journal,"content":"x","expected_sha256":"absent","request_key":"gw-live"}),
+            journal_reply).await;
+        if auto {
+            assert_eq!(std::fs::read_to_string(p.0.join(journal)).unwrap(), "x");
+        } else {
+            assert!(!p.0.join(journal).exists());
+        }
         // A Git control file and credential files (by name, in any directory) are
         // decided the same way for gateway writes; reading a credential file and
         // writing ordinary source that merely mentions a token need no decision.
@@ -3371,7 +3395,12 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
         let asked = if auto { ("cortex_private".to_owned(), true, "mode:auto".to_owned()) }
             else { ("cortex_private".to_owned(), false, "no_owner_client".to_owned()) };
         let rule = |rule: &str| (rule.to_owned(), asked.1, asked.2.clone());
-        assert_eq!(decided, vec![asked.clone(), asked.clone(), ("cortex_live_store".into(), false, "runtime".into()),
+        let journal_decision = (
+            "cortex_live_store".into(),
+            auto,
+            if auto { "mode:auto" } else { "runtime" }.into(),
+        );
+        assert_eq!(decided, vec![asked.clone(), asked.clone(), journal_decision,
             rule("control_target"), rule("credential"), rule("credential")], "{access}");
         d.shutdown().await.unwrap();
         drop(s);
@@ -5513,6 +5542,122 @@ async fn project_skills_read_through_the_channel() {
     w.shutdown().await.unwrap();
     close(h).await;
 }
+async fn coordinator_owner_decision_tools_bind_the_exact_failed_worker() {
+    use cortex_core::lifecycle::{event_tx, obstacles, steering, waits};
+
+    async fn checked(
+        driver: &workspace_service::native_sessions::SessionDriver,
+        name: &str, args: Value, expected: Value, stop: &str,
+    ) {
+        let prompt = format!("call:{}", json!({"name":name,"arguments":args,"__fixture_expect":expected}));
+        let turn = tokio::time::timeout(Duration::from_secs(8), driver.prompt(&prompt)).await
+            .unwrap_or_else(|_| panic!("decision fixture tool {name} did not settle")).unwrap();
+        assert_eq!(turn.stop_reason, stop);
+    }
+
+    for (language, action) in [("en", "retry"), ("en", "paged"), ("en", "ask"), ("ru", "ask")] {
+        let p = Project::new();
+        let h = p.host().await;
+        let s = p.store();
+        let owner = h.create("decision".into(), "Fixture".into(), "owner".into()).await.unwrap();
+        let obstacle = s.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='decision'", [])?;
+            let failed = json!({"blocker":{"kind":"owner_decision","detail":"Keep the existing API?"}});
+            db.execute("INSERT INTO runtime_nodes VALUES ('decision',1,'blocked','worker-backend-dev','Keep API compatible','[]','[]','execution','failed','failed-worker',?)",
+                [failed.to_string()])?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('decision',1,'other','worker-backend-dev','Unrelated','[]','[]','execution','completed','other-worker','{}')", [])?;
+            event_tx(db, "decision", "NATIVE_TASK_SETTINGS", json!({"settings":{"language":language}}))?;
+            event_tx(db, "decision", "USER_STEERING", json!({"deny_write":["protected.txt"]}))?;
+            db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,answer_text,answer_source,status,created_at)
+                VALUES ('prior','decision','prior','Keep the existing API?','Keep it','text','answered','now')", [])?;
+            if action == "paged" {
+                let long = format!("{}only after the migration.", "x".repeat(4096));
+                db.execute("UPDATE pending_questions SET answer_text=? WHERE id='prior'",[long])?;
+                for n in 0..8 {
+                    let id=format!("q{n}");
+                    db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,answer_text,answer_source,status,created_at)
+                        VALUES (?1,'decision',?1,'Other question','Other answer','text','answered','now')",[id])?;
+                }
+                db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,answer_text,answer_source,status,created_at)
+                    VALUES ('permission','decision','native_permission:private','Allow?','Yes','text','answered','now')",[])?;
+            }
+            obstacles::classify_failed_tx(db, "decision")?;
+            Ok(obstacles::decision_trigger(db, "decision", None)?.unwrap().obstacle)
+        }).unwrap();
+        let driver = tokio::time::timeout(Duration::from_secs(12), h.dispatch(
+            "decision".into(), owner, SessionRole::OwnerDecision { obstacle: obstacle.clone() }, p.route()
+        )).await.unwrap_or_else(|_| panic!("could not dispatch {language} decision session for {action}")).unwrap();
+        let count = |kind: &str| s.read(|db| Ok(db.query_row(
+            "SELECT count(*) FROM runtime_events WHERE task_id='decision' AND type=?", [kind], |r| r.get::<_, i64>(0),
+        )?)).unwrap();
+        if action == "retry" || action == "paged" {
+            if action == "paged" {
+                let retry = json!({"obstacle":obstacle,"owner_question_id":"prior","refined_brief":"Keep it until migration.","request_key":"before"});
+                let incomplete = json!({"/result/structuredContent/code":"owner_decision_prior_answer_incomplete"});
+                checked(&driver,"list_sources",json!({"answered_after":0,"limit":1}),
+                    json!({"/result/structuredContent/answered_questions/0/question_source_ref":"prior:question"}),"end_turn").await;
+                checked(&driver,"read_source",json!({"source_ref":"permission:answer"}),
+                    json!({"/result/structuredContent/code":"unknown_source_ref"}),"end_turn").await;
+                checked(&driver,"owner_decision_retry",retry.clone(),incomplete.clone(),"end_turn").await;
+                for (offset,expected) in [(0,json!({"/result/structuredContent/next_offset":2048})),
+                    (4096,json!({"/result/structuredContent/chunk":"only after the migration."}))] {
+                    checked(&driver,"read_source",json!({"source_ref":"prior:answer","offset":offset}),expected,"end_turn").await;
+                }
+                checked(&driver,"read_source",json!({"source_ref":"prior:question","limit":4}),
+                    json!({"/result/structuredContent/chunk":"Keep"}),"end_turn").await;
+                checked(&driver,"owner_decision_retry",retry.clone(),incomplete.clone(),"end_turn").await;
+                checked(&driver,"read_source",json!({"source_ref":"prior:answer","offset":2048}),
+                    json!({"/result/structuredContent/next_offset":4096}),"end_turn").await;
+                checked(&driver,"owner_decision_retry",retry,incomplete,"end_turn").await;
+                checked(&driver,"read_source",json!({"source_ref":"prior:question","offset":4}),
+                    json!({"/result/structuredContent/chunk":" the existing API?"}),"end_turn").await;
+            }
+            checked(&driver, "owner_decision_retry", json!({
+                "obstacle":obstacle,"owner_question_id":"prior","refined_brief":"Keep the existing API. No release.",
+                "request_key":"retry"
+            }), json!({"/result/isError":false,"/result/structuredContent/decided_by":"coordinator",
+                "/result/structuredContent/node":"blocked"}), "end_turn").await;
+            assert_eq!(count("USER_QUESTION_REQUESTED"),0);
+            assert_eq!(count("OWNER_DECISION_ANSWERED"),0);
+        } else {
+            let (question, options) = if language == "ru" {
+                ("Сохранить прежний API?", ["Сохранить", "Удалить"])
+            } else {
+                ("Keep the existing API?", ["Keep it", "Remove it"])
+            };
+            let args = json!({"question":question,"options":options,"recommended":1,"request_key":"ask"});
+            checked(&driver, "user_question_request", args.clone(), json!({
+                "/result/isError":false, "/result/structuredContent/language":language,
+                "/result/structuredContent/question":question, "/result/structuredContent/options/0/label":options[0],
+                "/result/structuredContent/options/1":options[1],
+            }), "end_turn").await;
+            checked(&driver, "user_question_request", args, json!({
+                "/result/isError":false, "/result/structuredContent/obstacle":obstacle,
+            }), "end_turn").await;
+            assert_eq!(count("USER_QUESTION_REQUESTED"),1);
+            s.write(|db| {
+                let id: String = db.query_row("SELECT id FROM pending_questions WHERE task_id='decision' AND dedup_key=? AND assignment_ref='failed-worker'",
+                    [format!("obstacle:{obstacle}")], |r| r.get(0))?;
+                assert!(waits::answer_tx(db, "decision", &id, options[0], "text", None)?);
+                assert!(!waits::answer_tx(db, "decision", &id, options[1], "text", None)?);
+                Ok(())
+            }).unwrap();
+        }
+        assert_eq!(count("OWNER_DECISION_COORDINATOR_STARTED"), 1);
+        assert_eq!(count("ASSIGNMENT_RETRIED"), 1);
+        s.read(|db| {
+            assert_eq!(steering::write_denials(db, "decision")?, ["protected.txt"]);
+            let rows: String = db.query_row("SELECT group_concat(node_id||':'||status, ',') FROM
+                (SELECT * FROM runtime_nodes WHERE task_id='decision' ORDER BY node_id)", [], |r| r.get(0))?;
+            assert_eq!(rows,"blocked:pending,other:completed");
+            Ok(())
+        }).unwrap();
+        tokio::time::timeout(Duration::from_secs(8), driver.shutdown()).await
+            .unwrap_or_else(|_| panic!("could not settle {language} decision session after {action}")).unwrap();
+        close(h).await;
+    }
+}
+
 async fn native_workspace_binding_projects_activity_and_scoped_skills() {
     use cortex_core::projections::ProjectionReader;
     use workspace_protocol::{
@@ -7620,7 +7765,7 @@ async fn recovery_project_operations_and_structured_tool_errors() {
     assert!(topic_kept >= 1, "the wait record keeps the topic");
     w.shutdown().await.unwrap();
 
-    // Auto still asks the owner about deletions.
+    // Auto deletes without asking the owner.
     s.write(|db| {
         db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n2','worker-backend-dev','More work','[]','[\"src\",\".claude\",\".gitignore\"]','execution','running','b',NULL)", [])?;
         cortex_core::access::switch_tx(db, "t", "auto", "fixture", "acp_set_mode")
@@ -7637,33 +7782,25 @@ async fn recovery_project_operations_and_structured_tool_errors() {
         )
         .await
         .unwrap();
-    // Auto asks the owner for every deletion; with no owner client connected the
-    // request is refused and nothing is deleted. Replacement cards stay answered by Auto.
+    // With no owner client connected the deletion still runs. Replacement cards stay answered by Auto.
     checked(
         &w,
         "project_delete",
         json!({"path":"src/file.txt","expected_sha256":file_sha,"request_key":"del"}),
-        json!({"/error/data/code":"deletion_not_confirmed"}),
-        "refusal",
+        json!({"/result/isError":false,"/result/structuredContent/deleted":true}),
+        "end_turn",
     )
     .await;
-    assert!(p.0.join("src/file.txt").exists());
-    // The retained refusal answers an identical retry; the owner is not asked again.
-    checked(
-        &w,
-        "project_delete",
-        json!({"path":"src/file.txt","expected_sha256":file_sha,"request_key":"del"}),
-        json!({"/error/data/code":"deletion_not_confirmed"}),
-        "refusal",
-    )
-    .await;
+    assert!(!p.0.join("src/file.txt").exists());
     std::fs::write(p.0.join(".gitignore"), "target/\n").unwrap();
     let ignore_sha = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(b"target/\n"));
+    // Root .gitignore deletion preserves the channel's store exclusion.
     checked(&w, "project_delete", json!({"path":".gitignore","expected_sha256":ignore_sha}),
-        json!({"/error/data/code":"deletion_not_confirmed"}), "refusal").await;
+        json!({"/result/isError":false,"/result/structuredContent/deleted":false,
+            "/result/structuredContent/gitignore_guard":true}), "end_turn").await;
     assert_eq!(
         std::fs::read_to_string(p.0.join(".gitignore")).unwrap(),
-        "target/\n"
+        "/.cortex-dev/\n"
     );
     checked(&w, "project_skill_link", json!({"action":"link","name":"other","request_key":"o3","replace_symlink_target":"elsewhere"}),
         json!({"/result/isError":false,"/result/structuredContent/changed":true,
@@ -8016,6 +8153,12 @@ fn main() {
                 .await.expect("linked checkout journey exceeded deadline");
             println!("linked checkout: supervised cwd, mounts, work-set receipts and refusals passed");
             return;
+        }
+        if mode == "owner-decision" || mode.is_empty() {
+            tokio::time::timeout(Duration::from_secs(60), coordinator_owner_decision_tools_bind_the_exact_failed_worker())
+                .await.expect("owner decision fixture exceeded deadline");
+            println!("owner decision: authenticated coordinator retry, localized questions and exact owner answers passed");
+            if !mode.is_empty() { return; }
         }
         if mode == "worker-question" {
             tokio::time::timeout(Duration::from_secs(30), worker_question_answer_exact_delivery_and_native_denial())

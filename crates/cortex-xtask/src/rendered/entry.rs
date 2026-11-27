@@ -15,9 +15,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub(super) const PROJECTS: [&str; 5] = ["journey", "second", "terminal", "voice", "attachments"];
-const STAGES: [&str; 8] = [
+const STAGES: [&str; 9] = [
     "common",
     "lifecycle",
+    "baseline",
     "controls",
     "wayland",
     "terminal",
@@ -125,6 +126,8 @@ pub(super) fn native_evidence(j: &mut J, error: &str) -> Value {
 
 /// The wrapper: a scratch tree and a private session bus, then the session below inside it.
 pub fn inside(cli: &Cli) -> Res<i32> {
+    super::baseline_requested(cli)?;
+    super::peer_timing_requested(cli)?;
     if cli.flag("scratch").is_some() {
         return session(cli);
     }
@@ -170,7 +173,7 @@ pub fn inside(cli: &Cli) -> Res<i32> {
         .arg(&tmp.0)
         .stderr(Stdio::null())
         .process_group(0);
-    for name in ["only", "journey-wayland"] {
+    for name in ["only", "journey-wayland", "baseline", "peer-timing"] {
         if let Some(value) = cli.flag(name) {
             command.args([format!("--{name}"), value.to_string()]);
         }
@@ -281,6 +284,12 @@ pub(super) fn session(cli: &Cli) -> Res<i32> {
         engine.is_file(),
         "native-fake-engine is not in the artifacts directory",
     )?;
+    let peer_timing = super::peer_timing_requested(cli)?;
+    let engine = if peer_timing {
+        super::baseline::timed_peer(&scratch, &checkout, &engine)?
+    } else {
+        engine
+    };
     for name in PROJECTS {
         // The coordinator question scenario belongs to the journey project; the others take the engine's plain path.
         let scenario = if name == "journey" {
@@ -295,7 +304,7 @@ pub(super) fn session(cli: &Cli) -> Res<i32> {
     let probe_dir = scratch.join("probe");
     std::fs::create_dir_all(&probe_dir).map_err(|e| e.to_string())?;
     let shim = probe_library(&scratch)?;
-    let st = Stack::new(
+    let mut st = Stack::new(
         scratch.clone(),
         probe_dir,
         shim,
@@ -304,6 +313,8 @@ pub(super) fn session(cli: &Cli) -> Res<i32> {
         channel_json,
         wayland,
     );
+    st.baseline = super::baseline_requested(cli)?;
+    st.peer_timing = peer_timing;
     let mut j = J {
         run: run_,
         st,
@@ -324,6 +335,9 @@ pub(super) fn session(cli: &Cli) -> Res<i32> {
             ("steps_passed", n(j.run.passed)),
         ]);
         v.set("at", arr(vec![]));
+        if let Some(failure) = j.st.observer.as_ref().and_then(|o| o.diagnostic()) {
+            v.set("observer_failure", s(failure));
+        }
         println!("{}", pretty_line(&v));
         let evidence = native_evidence(&mut j, &error);
         outcome(
@@ -349,8 +363,10 @@ pub(super) fn session(cli: &Cli) -> Res<i32> {
         exit = 1;
     }
     j.release_clipboards();
+    // Shut down the observed client before its private relay, then the real service.
+    stop(&mut j.st.app);
+    drop(j.st.observer.take());
     for child in [
-        &mut j.st.app,
         &mut j.st.service,
         &mut j.st.pulse,
         &mut j.st.compositor,

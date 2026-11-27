@@ -448,10 +448,18 @@ fn engine_command(cmdline: &[u8]) -> bool {
 /// working directory cannot be read is counted (fail-closed); a process that exited
 /// or is a zombie cannot act and is not. An unreadable process table counts.
 fn engine_process_in(proc_root: &std::path::Path, roots: &[std::path::PathBuf]) -> bool {
+    visit_engine_candidates(proc_root, roots, |_, _| true).unwrap_or(true)
+}
+
+// Return early when the visitor accepts a candidate. Keep an unreadable process
+// table distinct from an opaque candidate with a known PID.
+fn visit_engine_candidates(
+    proc_root: &std::path::Path,
+    roots: &[std::path::PathBuf],
+    mut visit: impl FnMut(u32, bool) -> bool,
+) -> std::io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
-    let Ok(entries) = std::fs::read_dir(proc_root) else {
-        return true;
-    };
+    let entries = std::fs::read_dir(proc_root)?;
     let me = std::process::id();
     let uid = unsafe { libc::geteuid() };
     let gone = |e: &std::io::Error| {
@@ -472,12 +480,22 @@ fn engine_process_in(proc_root: &std::path::Path, roots: &[std::path::PathBuf]) 
             Ok(m) if m.uid() != uid => continue,
             Ok(_) => {}
             Err(e) if gone(&e) => continue,
-            Err(_) => return true,
+            Err(_) => {
+                if visit(pid, true) {
+                    return Ok(true);
+                }
+                continue;
+            }
         }
         let cmdline = match std::fs::read(entry.path().join("cmdline")) {
             Ok(c) => c,
             Err(e) if gone(&e) => continue,
-            Err(_) => return true,
+            Err(_) => {
+                if visit(pid, true) {
+                    return Ok(true);
+                }
+                continue;
+            }
         };
         // Empty: a zombie or a kernel thread.
         if cmdline.is_empty() || !engine_command(&cmdline) {
@@ -486,10 +504,42 @@ fn engine_process_in(proc_root: &std::path::Path, roots: &[std::path::PathBuf]) 
         match std::fs::read_link(entry.path().join("cwd")) {
             Ok(cwd) if !roots.iter().any(|r| cwd.starts_with(r)) => continue,
             Err(e) if gone(&e) => continue,
-            _ => return true,
+            result => {
+                if visit(pid, result.is_err()) {
+                    return Ok(true);
+                }
+            }
         }
     }
-    false
+    Ok(false)
+}
+
+impl crate::Service {
+    /// Read-only process diagnostics for the real-binary recovery test, using
+    /// exactly the same candidate rules as startup recovery. The caller cannot
+    /// supply a process table or override a recovery decision.
+    #[doc(hidden)]
+    pub fn recovery_process_observation(
+        roots: &[std::path::PathBuf],
+    ) -> std::io::Result<(bool, std::collections::BTreeSet<(u32, String)>)> {
+        let mut visible = false;
+        let mut opaque = std::collections::BTreeSet::new();
+        let mut unidentified = false;
+        visit_engine_candidates(std::path::Path::new(SYSTEM_PROC), roots, |pid, is_opaque| {
+            if !is_opaque {
+                visible = true;
+            } else if let Some((_, start)) = process_stat(i64::from(pid)) {
+                opaque.insert((pid, start));
+            } else {
+                unidentified = true;
+            }
+            false
+        })?;
+        if unidentified {
+            return Err(std::io::Error::other("opaque candidate has no process identity"));
+        }
+        Ok((visible, opaque))
+    }
 }
 
 /// The roots an engine of these tasks could work in: the project and every task's
@@ -1907,6 +1957,183 @@ mod tests {
         assert!(engine_process_in(&proc_root, std::slice::from_ref(&root)));
         assert!(engine_process_in(&proc_root.join("missing"), &[root]));
         std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    // A local ACP handshake only. It never calls a tool, contacts a provider,
+    // or ends a prompt before the test has inspected the replacement.
+    struct RestartPeer;
+
+    impl crate::native_runtime::NativeRoutes for RestartPeer {
+        fn route(
+            &self,
+            root: &std::path::Path,
+            role: &str,
+        ) -> CoreResult<crate::native_sessions::SessionRoute> {
+            use cortex_engine::environment::{EngineKind, LaunchSpec};
+            assert_eq!(role, "worker-backend-dev");
+            let script = r#"
+config='[{"id":"model","type":"select","currentValue":"fixture","options":[{"value":"fixture","name":"Fixture"}]},{"id":"mode","type":"select","currentValue":"workspace-write","options":[{"value":"workspace-write","name":"Fixture"}]}]'
+while IFS= read -r line; do
+    id=${line#*\"id\":}
+    id=${id%%,*}
+    id=${id%%\}*}
+    case "$line" in
+        *'"method":"initialize"'*)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{}}}\n' "$id" ;;
+        *'"method":"session/new"'*)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"replacement-wire-session","configOptions":%s}}\n' "$id" "$config" ;;
+        *'"method":"session/set_config_option"'*)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"configOptions":%s}}\n' "$id" "$config" ;;
+    esac
+done
+"#;
+            Ok(crate::native_sessions::SessionRoute {
+                launch: LaunchSpec {
+                    engine: EngineKind::Codex,
+                    executable: "/bin/sh".into(),
+                    args: vec!["-c".into(), script.into()],
+                    cwd: root.into(),
+                    native_home: root.into(),
+                    credential_directory: root.into(),
+                    base_environment: Default::default(),
+                    codex_launcher: None,
+                    confinement: None,
+                },
+                relay: "/bin/false".into(),
+                broker_parent: crate::native_runtime::key(root)?.directory(),
+                connection: "fixture".into(),
+                connection_limit: 1,
+                model: "fixture".into(),
+                parameters: Default::default(),
+                instructions: "Local restart fixture".into(),
+                deadline: Duration::from_secs(5),
+            })
+        }
+    }
+
+    async fn restart_unregistered_worker(opaque: bool) {
+        let root = std::env::temp_dir().join(format!("restart-worker-{}", crate::identity().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let key = crate::native_runtime::key(&root).unwrap();
+        let path = root.clone();
+        let runtime = Arc::new(
+            tokio::task::spawn_blocking(move || Runtime::open(&path, "project", Arc::new(RestartPeer)))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        let store = cortex_core::Store::open(key, cortex_core::OpenMode::Initialize).unwrap();
+        cortex_core::lifecycle::TaskMachine::new(&store)
+            .create("t", "Fixture", "owner")
+            .unwrap();
+        store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'", [])?;
+            lifecycle::event_tx(db, "t", "NATIVE_TASK_ADOPTED", json!({"execution_host":"rust"}))?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'node','worker-backend-dev','Work','[]','[\"src\"]','execution','running','old-assignment',NULL)", [])?;
+            db.execute("INSERT INTO delegation_provisioning
+                (idempotency_key,task_id,attempt_id,role_id,step,status,channel_id,engine_session_ref,owner_epoch,created_at,updated_at)
+                VALUES ('old-assignment','t','old-attempt','worker-backend-dev','ready','ready','old-channel','old-wire-session',1,'now','now')", [])?;
+            db.execute("INSERT INTO trusted_channels(channel_id,secret_hash,task_id,principal_thread_id,role,assignment_id,attempt_id,owner_epoch,issued_at)
+                VALUES ('old-channel','fixture','t','thread','worker','old-assignment','old-attempt',1,'now')", [])?;
+            db.execute("INSERT INTO capacity_reservations
+                VALUES ('old-slot','fixture','t','old-assignment','old-attempt','worker','reserved','now','now',NULL)", [])?;
+            Ok(())
+        }).unwrap();
+        let proc_root = fixture::engine_proc(&root);
+        if opaque {
+            let entry = fixture::engine(&root, &root);
+            let cwd = entry.join("cwd");
+            std::fs::remove_file(&cwd).unwrap();
+            std::fs::write(cwd, "not a symlink").unwrap();
+        }
+        runtime.recover_from(&proc_root).await.unwrap();
+        if !opaque {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let ready = store.read(|db| Ok(db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM delegation_provisioning p
+                            JOIN runtime_events e ON e.task_id=p.task_id AND e.type='NATIVE_SESSION_CONFIGURED'
+                                AND json_extract(e.payload_json,'$.channel_id')=p.channel_id
+                            WHERE p.attempt_id!='old-attempt' AND p.status='ready')",
+                        [], |r| r.get::<_, bool>(0),
+                    )?)).unwrap();
+                    if ready {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap_or_else(|_| {
+                let events = store.read(|db| Ok(db.query_row(
+                    "SELECT group_concat(type || ':' || coalesce(json_extract(payload_json,'$.reason'),json_extract(payload_json,'$.error'),''))
+                     FROM runtime_events WHERE task_id='t'", [], |r| r.get::<_, String>(0),
+                )?));
+                panic!("confirmed exit did not provision a replacement: {events:?}");
+            });
+        }
+        store.read(|db| {
+            let old: (String, String, bool, String) = db.query_row(
+                "SELECT p.status,c.state,ch.revoked_at IS NOT NULL,p.engine_session_ref
+                 FROM delegation_provisioning p JOIN capacity_reservations c USING(attempt_id)
+                 JOIN trusted_channels ch USING(channel_id) WHERE p.attempt_id='old-attempt'",
+                [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+            )?;
+            assert!(old.2, "old channel must be fenced in both branches");
+            assert_eq!(old.3, "old-wire-session");
+            let total: i64 = db.query_row("SELECT count(*) FROM delegation_provisioning", [], |r| r.get(0))?;
+            if opaque {
+                assert_eq!((&*old.0, &*old.1, total), ("ambiguous", "ambiguous", 1));
+                assert!(db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_events e, json_each(e.payload_json,'$.attempts') a
+                        WHERE e.task_id='t' AND e.type='NATIVE_PROCESS_UNCONFIRMED' AND a.value='old-attempt')",
+                    [], |r| r.get::<_, bool>(0),
+                )?);
+                assert!(db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id='t' AND type='NATIVE_RECOVERY_REQUIRED'
+                        AND json_extract(payload_json,'$.reason')='native_session_outcome_unknown')",
+                    [], |r| r.get::<_, bool>(0),
+                )?);
+                assert_eq!(db.query_row("SELECT count(*) FROM trusted_channels WHERE revoked_at IS NULL", [], |r| r.get::<_, i64>(0))?, 0);
+            } else {
+                assert_eq!((&*old.0, &*old.1, total), ("terminated", "released", 2));
+                assert!(db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_events e, json_each(e.payload_json,'$.delegations') a
+                        WHERE e.task_id='t' AND e.type='NATIVE_PROCESS_SETTLED'
+                        AND json_extract(e.payload_json,'$.evidence')='service_gone_and_no_engine_process_in_project'
+                        AND json_extract(a.value,'$.attempt')='old-attempt')",
+                    [], |r| r.get::<_, bool>(0),
+                )?);
+                let fresh: (String, String, String) = db.query_row(
+                    "SELECT p.attempt_id,p.engine_session_ref,ch.channel_id
+                     FROM runtime_nodes n JOIN delegation_provisioning p ON p.idempotency_key=n.assignment_ref
+                     JOIN trusted_channels ch ON ch.channel_id=p.channel_id AND ch.attempt_id=p.attempt_id
+                     JOIN runtime_events e ON e.task_id=p.task_id AND e.type='NATIVE_SESSION_CONFIGURED'
+                        AND json_extract(e.payload_json,'$.engine_session_ref')='native:'||p.attempt_id||':'||p.engine_session_ref
+                        AND json_extract(e.payload_json,'$.channel_id')=ch.channel_id
+                     WHERE n.task_id='t' AND n.revision=1 AND n.node_id='node' AND p.status='ready' AND ch.revoked_at IS NULL",
+                    [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+                )?;
+                assert_ne!(fresh.0, "old-attempt");
+                assert_eq!(fresh.1, "replacement-wire-session");
+                assert_ne!(fresh.2, "old-channel");
+            }
+            Ok(())
+        }).unwrap();
+
+        runtime.shutdown().await;
+        drop(runtime);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restart_unregistered_worker_with_proven_exit_provisions_exact_replacement() {
+        restart_unregistered_worker(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restart_unregistered_worker_with_opaque_peer_fences_without_replacement() {
+        restart_unregistered_worker(true).await;
     }
 
     #[tokio::test]

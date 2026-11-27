@@ -938,6 +938,9 @@ impl ProjectionReader {
     }
     fn poll_model(&self, model: &mut Model) -> CoreResult<()> {
         let after = model.stream.high_watermark();
+        #[cfg(feature = "test-observations")]
+        let mut timings = crate::test_observations::observing(Some(self.store.key().root()))
+            .then(Vec::new);
         let (high,changes)=self.store.read(|db| {
             project_row(db,&self.project,&self.actor,self.store.key().root().to_str().unwrap_or(""))?;
             let (high,floor)=position(db,&self.project)?;
@@ -950,6 +953,8 @@ impl ProjectionReader {
             let ids=entries.iter().filter(|r|r.2=="task").map(|r|r.1.clone()).collect::<BTreeSet<_>>();
             let mut changes=Vec::new();
             for id in ids {
+                #[cfg(feature = "test-observations")]
+                let started = timings.as_ref().map(|_| std::time::Instant::now());
                 let base_version=model.versions.get(&id).copied().unwrap_or(ver(0)?);
                 let current=task(db,&self.project,self.store.key().root().to_str().unwrap_or(""),&id)?;
                 let (new_version,operation)=match current {
@@ -958,9 +963,19 @@ impl ProjectionReader {
                     None=>(ver(base_version.get().checked_add(1).ok_or(CoreError::Refused("resync_required"))?)?,DeltaOperation::Remove),
                 };
                 changes.push(EntityChange {kind:EntityKind::Task,id,base_version,new_version,operation});
+                #[cfg(feature = "test-observations")]
+                if let (Some(timings), Some(started)) = (&mut timings, started) {
+                    timings.push(started.elapsed());
+                }
             }
             if changes.is_empty() {
+                #[cfg(feature = "test-observations")]
+                let started = timings.as_ref().map(|_| std::time::Instant::now());
                 changes.push(EntityChange {kind:EntityKind::Project,id:self.project.clone(),base_version:model.project_version,new_version:high,operation:DeltaOperation::Invalidate});
+                #[cfg(feature = "test-observations")]
+                if let (Some(timings), Some(started)) = (&mut timings, started) {
+                    timings.push(started.elapsed());
+                }
             }
             Ok((high,changes))
         })?;
@@ -977,6 +992,32 @@ impl ProjectionReader {
             changes,
         };
         model.stream.publish(batch.clone())?;
+        #[cfg(feature = "test-observations")]
+        if let Some(timings) = timings {
+            use crate::test_observations::{record, Batch, Change, Observation};
+            record(Observation::Projection {
+                batch: Batch {
+                    project: self.project.clone(),
+                    generation: batch.generation.clone(),
+                    from: batch.from_sequence.get(),
+                    through: batch.through_sequence.get(),
+                },
+                depth: (high.get() - after.get()) as usize,
+                changes: batch
+                    .changes
+                    .iter()
+                    .zip(timings)
+                    .map(|(change, duration)| {
+                        let kind = if change.kind == EntityKind::Task { "task" } else { "project" };
+                        (Change {
+                            kind: kind.into(),
+                            id: change.id.clone(),
+                            version: change.new_version.get(),
+                        }, duration)
+                    })
+                    .collect(),
+            });
+        }
         for c in batch.changes {
             if c.kind == EntityKind::Task {
                 model.versions.insert(c.id, c.new_version);

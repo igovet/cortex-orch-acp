@@ -280,12 +280,6 @@ impl Channel {
     }
     /// `trusted` skips the caller and stdout checks: test fixtures only.
     pub(crate) fn open_with(meta: Meta, ttl: Duration, trusted: bool) -> io::Result<Self> {
-        let exe = std::env::current_exe()?;
-        let exe_text = exe
-            .to_str()
-            .filter(|t| !t.contains('\'') && !t.ends_with(" (deleted)"))
-            .ok_or_else(|| io::Error::other("askpass_helper_unavailable"))?
-            .to_owned();
         let base = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .filter(|p| {
@@ -295,6 +289,16 @@ impl Channel {
                     })
             })
             .unwrap_or_else(std::env::temp_dir);
+        Self::open_in(meta, ttl, trusted, &base)
+    }
+
+    fn open_in(meta: Meta, ttl: Duration, trusted: bool, base: &Path) -> io::Result<Self> {
+        let exe = std::env::current_exe()?;
+        let exe_text = exe
+            .to_str()
+            .filter(|t| !t.contains('\'') && !t.ends_with(" (deleted)"))
+            .ok_or_else(|| io::Error::other("askpass_helper_unavailable"))?
+            .to_owned();
         let id = random_hex(16)?;
         let dir = base.join(format!("cw-askpass-{}", &id[..16]));
         std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
@@ -777,6 +781,14 @@ mod tests {
             cwd: PathBuf::from("/nonexistent/project"),
         }
     }
+    fn fixture_channel(scratch: &std::fs::File, ttl: Duration, trusted: bool) -> Channel {
+        use std::os::fd::AsRawFd;
+        // Both ends of the fixture socket live in this process. Keep the scratch
+        // directory fd open until the channel drops so its short alias works for
+        // bind, connect and cleanup, even with a long or confined TMPDIR.
+        let base = PathBuf::from(format!("/proc/self/fd/{}", scratch.as_raw_fd()));
+        Channel::open_in(meta(), ttl, trusted, &base).unwrap()
+    }
     fn route(channel: &Channel) -> (PathBuf, String) {
         let env = channel.env();
         let get = |k: &str| env.iter().find(|(n, _)| *n == k).unwrap().1.clone();
@@ -856,7 +868,8 @@ mod tests {
     /// before any prompt opens.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_untrusted_caller_opens_no_prompt() {
-        let channel = Channel::open_with(meta(), TTL, false).unwrap();
+        let scratch = std::fs::File::open(std::env::temp_dir()).unwrap();
+        let channel = fixture_channel(&scratch, TTL, false);
         let (socket, token) = route(&channel);
         let asked = tokio::task::spawn_blocking(move || ask(&socket, &token, "Password:", false))
             .await
@@ -873,7 +886,8 @@ mod tests {
     /// command, task and worker and carries nothing secret; it closes once answered.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_password_answer_reaches_only_the_helper_and_closes_the_prompt() {
-        let channel = Channel::open_with(meta(), TTL, true).unwrap();
+        let scratch = std::fs::File::open(std::env::temp_dir()).unwrap();
+        let channel = fixture_channel(&scratch, TTL, true);
         let (socket, token) = route(&channel);
         let wrong = token.replace(|c: char| c != '0', "0");
         let (s, w) = (socket.clone(), wrong);
@@ -915,7 +929,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cancel_expiry_and_the_command_ending_fail_the_helper() {
-        let channel = Channel::open_with(meta(), TTL, true).unwrap();
+        let scratch = std::fs::File::open(std::env::temp_dir()).unwrap();
+        let channel = fixture_channel(&scratch, TTL, true);
         let (socket, token) = route(&channel);
         let (s, t) = (socket.clone(), token.clone());
         let asked = tokio::task::spawn_blocking(move || ask(&s, &t, "Password:", false));
@@ -927,7 +942,7 @@ mod tests {
         assert_eq!(asked.await.unwrap().unwrap_err().to_string(), "cancelled");
         drop(channel);
 
-        let channel = Channel::open_with(meta(), Duration::from_millis(300), true).unwrap();
+        let channel = fixture_channel(&scratch, Duration::from_millis(300), true);
         let (socket, token) = route(&channel);
         let asked = tokio::task::spawn_blocking(move || ask(&socket, &token, "Password:", false));
         wait_for(&channel).await;
@@ -950,7 +965,7 @@ mod tests {
         assert_eq!(channel.outcomes(), vec!["expired"]);
         drop(channel);
 
-        let channel = Channel::open_with(meta(), TTL, true).unwrap();
+        let channel = fixture_channel(&scratch, TTL, true);
         let (socket, token) = route(&channel);
         let dir = channel.dir.clone();
         let asked = tokio::task::spawn_blocking(move || ask(&socket, &token, "Password:", false));

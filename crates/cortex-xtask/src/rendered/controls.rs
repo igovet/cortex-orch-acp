@@ -18,9 +18,97 @@ fn scratch_ready(output: impl Read) -> io::Result<bool> {
     Ok(bytes == MARKER)
 }
 
+fn scratch_control_task(route: &str) -> Res<&str> {
+    route
+        .rsplit_once("/t/")
+        .map(|(_, task)| task)
+        .filter(|task| {
+            task.strip_prefix("wt_").is_some_and(|id| {
+                !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric())
+            })
+        })
+        .ok_or_else(|| "scratch_control_task_identity_missing".into())
+}
+
+fn scratch_output_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        && !name.contains("..")
+        && name != "."
+}
+
+/// A timeout observation from the exact fixture task/request, not a substitute
+/// for its required profile, payload marker, and cancellation receipt.
+fn scratch_trace(db: &Path, task: &str) -> Res<crate::json::Value> {
+    let row = native::query(db, &format!("SELECT
+        CASE json_extract(result_json,'$.handle.profile')
+          WHEN 'codex_scratch' THEN 'codex_scratch'
+          WHEN 'development' THEN 'development'
+          WHEN 'guarded' THEN 'guarded'
+          ELSE CASE WHEN json_type(result_json,'$.handle') IS NULL THEN 'unbound' ELSE 'other' END
+        END,
+        coalesce(json_extract(result_json,'$.handle.output'),''),
+        coalesce(json_extract(result_json,'$.handle.reference')=json_extract(result_json,'$.tool_call_ref'),0),
+        coalesce(json_extract(result_json,'$.settled'),0),
+        EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=r.task_id
+          AND e.type='NATIVE_COMMAND_PROCESS'
+          AND json_extract(e.payload_json,'$.ref')=json_extract(r.result_json,'$.tool_call_ref'))
+        FROM runtime_requests r WHERE operation='command_run'
+        AND request_key='scratch-command-control' AND task_id='{task}'"))?;
+    if row.is_empty() {
+        return Ok(obj(vec![("request", b(false))]));
+    }
+    let [profile, output, reference, settled, process]: [&str; 5] = row
+        .split('|')
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| "scratch_control_trace_ambiguous")?;
+    let marker = if reference != "1" || !scratch_output_name(output) {
+        "unbound"
+    } else {
+        let path = db.with_file_name(task).join(".native-output").join(output);
+        match File::open(path) {
+            Ok(file) => match scratch_ready(file) {
+                Ok(true) => "exact",
+                Ok(false) => "not_exact",
+                Err(_) => "unreadable",
+            },
+            Err(e) if e.kind() == io::ErrorKind::NotFound => "absent",
+            Err(_) => "unreadable",
+        }
+    };
+    Ok(obj(vec![
+        ("request", b(true)),
+        ("handle_profile", s(profile)),
+        ("reference_bound", b(reference == "1")),
+        ("process_recorded", b(process == "1")),
+        ("settled", b(settled == "1")),
+        ("output_marker", s(marker)),
+    ]))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::scratch_ready;
+    use super::{scratch_control_task, scratch_output_name, scratch_ready};
+
+    #[test]
+    fn scratch_control_uses_the_open_task_and_a_plain_output_name() {
+        assert_eq!(
+            scratch_control_task("/m/local/t/wt_abc123").unwrap(),
+            "wt_abc123"
+        );
+        for route in [
+            "/m/local/t/",
+            "/m/local/t/wt_abc'/",
+            "/m/local/t/wt_abc/workers",
+        ] {
+            assert!(scratch_control_task(route).is_err(), "{route}");
+        }
+        assert!(scratch_output_name("nc-abc_123.bin"));
+        for name in ["", ".", "..", "../output", "/tmp/output", "x|y"] {
+            assert!(!scratch_output_name(name), "{name}");
+        }
+    }
 
     #[test]
     fn scratch_control_requires_exact_ready_output() {
@@ -66,36 +154,64 @@ impl J {
         // click, still require cancellation and output on that same request.
         let command_url =
             self.start_task(project, "Exercise worker controls", "command-scratch-hold")?;
-        self.wait("scratch_payload_ready", 90, |j| {
-            let db = j.channel.store_db(project);
-            let row = native::query(&db, "SELECT task_id,json_extract(result_json,'$.handle.output')
+        let workspace_task = scratch_control_task(&command_url)?;
+        let db = self.channel.store_db(project);
+        self.step("scratch_control_task_opened", vec![("task", s(workspace_task))]);
+        let mut task = String::new();
+        let ready = self.wait("scratch_payload_ready", 90, |_| {
+            if task.is_empty() {
+                let id = native::query(&db, &format!("SELECT e.runtime_task_id
+                    FROM workspace_tasks w JOIN workspace_executions e
+                    ON e.execution_id=w.execution_id AND e.task_id=w.task_id
+                    WHERE w.task_id='{workspace_task}'"))?;
+                if id.is_empty() {
+                    return Ok(false);
+                }
+                if !scratch_output_name(&id) {
+                    return Err("scratch_control_execution_invalid".into());
+                }
+                task = id;
+            }
+            let output = native::query(&db, &format!("SELECT json_extract(result_json,'$.handle.output')
                 FROM runtime_requests WHERE operation='command_run'
-                AND request_key='scratch-command-control' AND task_id=(SELECT task_id FROM runtime_tasks ORDER BY rowid DESC LIMIT 1)
+                AND request_key='scratch-command-control' AND task_id='{task}'
                 AND json_extract(result_json,'$.handle.profile')='codex_scratch'
                 AND json_extract(result_json,'$.handle.reference')=json_extract(result_json,'$.tool_call_ref')
-                AND json_extract(result_json,'$.settled') IS NOT 1")?;
-            if row.is_empty() {
+                AND json_extract(result_json,'$.settled') IS NOT 1"))?;
+            if output.is_empty() {
                 return Ok(false);
             }
-            let (task, output) = row.split_once('|').ok_or("scratch_payload_handle_invalid")?;
-            let plain_name = |name: &str| {
-                !name.is_empty()
-                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-                    && !name.contains("..")
-                    && name != "."
-            };
-            if !plain_name(task) || !plain_name(output) {
+            if !scratch_output_name(&output) {
                 return Err("scratch_payload_handle_invalid".into());
             }
-            let file = db.with_file_name(task).join(".native-output").join(output);
+            let file = db.with_file_name(&task).join(".native-output").join(output);
             match File::open(file) {
                 Ok(file) => scratch_ready(file).map_err(|e| format!("scratch_payload_read:{}", e.kind())),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
                 Err(e) => Err(format!("scratch_payload_open:{}", e.kind())),
             }
-        })?;
+        });
+        if let Err(error) = ready {
+            let evidence = if task.is_empty() {
+                obj(vec![("execution_bound", b(false))])
+            } else {
+                scratch_trace(&db, &task)
+                    .unwrap_or_else(|_| obj(vec![("trace_unavailable", b(true))]))
+            };
+            super::session::outcome(
+                &mut self.run,
+                "scratch_control_trace",
+                "diagnostic",
+                vec![
+                    ("task", s(workspace_task)),
+                    ("runtime_task", s(&task)),
+                    ("evidence", evidence),
+                ],
+            );
+            return Err(error);
+        }
         self.open_worker(&command_url, "Working")?;
-        let started = self.store_count(project, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_COMMAND_STARTED' AND task_id=(SELECT task_id FROM runtime_tasks ORDER BY rowid DESC LIMIT 1)")?;
+        let started = self.store_count(project, &format!("SELECT count(*) FROM runtime_events WHERE type='NATIVE_COMMAND_STARTED' AND task_id='{task}'"))?;
         let offered = self.wait_js("running_gateway_command", 20, "return [...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Stop command…') ? 'yes' : ''").is_ok();
         if offered {
             self.press("Stop command…")?;
@@ -110,11 +226,11 @@ impl J {
                 "return document.querySelector('dialog[open]') ? '' : 'yes';",
             )?;
             self.wait("scratch_payload_stopped", 30, |j| {
-                Ok(j.store_count(project, "SELECT count(*) FROM runtime_requests WHERE operation='command_run'
-                    AND request_key='scratch-command-control' AND task_id=(SELECT task_id FROM runtime_tasks ORDER BY rowid DESC LIMIT 1)
+                Ok(j.store_count(project, &format!("SELECT count(*) FROM runtime_requests WHERE operation='command_run'
+                    AND request_key='scratch-command-control' AND task_id='{task}'
                     AND json_extract(result_json,'$.profile')='codex_scratch' AND json_extract(result_json,'$.settled')=1
                     AND json_extract(result_json,'$.failure')='owner_stopped'
-                    AND trim(json_extract(result_json,'$.output'),char(10))='scratch-control-ready'")? == 1)
+                    AND trim(json_extract(result_json,'$.output'),char(10))='scratch-control-ready'"))? == 1)
             })?;
             self.step(
                 "command_stop",

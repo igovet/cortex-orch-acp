@@ -9,6 +9,9 @@ mod namespace_host;
 mod peer;
 #[path = "support/service_regressions.rs"]
 mod service_regressions;
+#[cfg(feature = "test-observations")]
+#[path = "support/native_baseline.rs"]
+mod native_baseline;
 use cortex_core::{lifecycle::TaskMachine, CoreResult, OpenMode, Store};
 use cortex_engine::environment::{EngineKind, LaunchSpec as EngineLaunch};
 use serde_json::{json, Value};
@@ -3718,9 +3721,14 @@ async fn binary_journey(scenario: &str) {
     }
     let wrapper = f.0.join("bin/fixture-engine");
     let peer = std::env::current_exe().unwrap();
+    let restart_peer = if matches!(scenario, "hold" | "hold-ambiguous") {
+        " codex-acp-fixture-restart"
+    } else {
+        ""
+    };
     std::fs::write(
         &wrapper,
-        format!("#!/bin/sh\nexec '{}' desktop-auto\n", peer.display()),
+        format!("#!/bin/sh\nexec '{}' desktop-auto{restart_peer}\n", peer.display()),
     )
     .unwrap();
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -3790,7 +3798,7 @@ async fn binary_journey(scenario: &str) {
     if scenario != "complete" {
         std::fs::write(
             f.0.join("project/scenario.txt"),
-            if scenario == "paused" {
+            if matches!(scenario, "paused" | "hold-ambiguous") {
                 "hold"
             } else if checkpoint_pause {
                 // The first and dependent third workers publish results; the
@@ -4292,7 +4300,7 @@ async fn binary_journey(scenario: &str) {
     }
     if scenario != "complete" {
         let signal = match scenario {
-            "hold" | "paused" | "paused-checkpoint" => {
+            "hold" | "hold-ambiguous" | "paused" | "paused-checkpoint" => {
                 "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')"
             }
             "review-hold" => {
@@ -4305,7 +4313,7 @@ async fn binary_journey(scenario: &str) {
             _ => unreachable!(),
         };
         restart_signal(&store, signal).await;
-        if matches!(scenario, "hold" | "paused" | "review-hold") {
+        if matches!(scenario, "hold" | "hold-ambiguous" | "paused" | "review-hold") {
             let marker = if scenario != "review-hold" {
                 "worker-entered"
             } else {
@@ -4528,8 +4536,34 @@ async fn binary_journey(scenario: &str) {
                 )
             })
             .unwrap();
+        let project = f.0.join("project").canonicalize().unwrap();
+        let peer_exit_gate = project.join(".git/restart-peer-exit-gate");
+        let project_process_running = || {
+            std::fs::read_dir("/proc").unwrap().any(|entry| {
+                let entry = entry.unwrap();
+                entry.file_name().to_string_lossy().parse::<u32>().is_ok()
+                    && std::fs::read_link(entry.path().join("cwd"))
+                        .is_ok_and(|cwd| cwd.starts_with(&project))
+            })
+        };
+        if matches!(scenario, "hold" | "hold-ambiguous") {
+            std::fs::write(&peer_exit_gate, "").unwrap();
+        }
         child.kill().await.unwrap();
         assert!(!child.wait().await.unwrap().success());
+        if scenario == "hold" {
+            // Reaping the service doesn't reap its engine peers or their relays.
+            // The safe restart must observe their absence, not assume it.
+            assert!(project_process_running(), "fixture did not hold an old peer");
+            std::fs::remove_file(&peer_exit_gate).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while project_process_running() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("old fixture peers did not exit after the service was killed");
+        }
         // A real SIGKILL and observed child wait, not a synthetic host reopen.
         let last_attempt: i64 = store
             .read(|db| {
@@ -4540,6 +4574,32 @@ async fn binary_journey(scenario: &str) {
                 )?)
             })
             .unwrap();
+        let old_worker = matches!(scenario, "hold" | "hold-ambiguous").then(|| {
+            store.read(|db| {
+                Ok(db.query_row(
+                    "SELECT p.task_id,p.attempt_id,p.channel_id,p.engine_session_ref,n.revision,n.node_id
+                     FROM delegation_provisioning p JOIN runtime_nodes n
+                        ON n.task_id=p.task_id AND n.assignment_ref=p.idempotency_key
+                     JOIN runtime_tasks t ON t.task_id=n.task_id AND t.revision=n.revision
+                     WHERE p.role_id='worker-backend-dev' AND p.status='ready'",
+                    [], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?,r.get::<_, String>(2)?,
+                                r.get::<_, String>(3)?,r.get::<_, i64>(4)?,r.get::<_, String>(5)?)),
+                )?)
+            }).unwrap()
+        });
+        // The test and its service child see the same shared /proc from the
+        // same restriction context. Classify independently of the stored decision.
+        let observe = || {
+            Service::recovery_process_observation(
+                std::slice::from_ref(&project),
+            )
+            .expect("could not identify recovery process candidates")
+        };
+        let opaque_before = (scenario == "hold").then(|| {
+            let (visible, opaque) = observe();
+            assert!(!visible, "the old project engine is still visible before restart");
+            opaque
+        });
         child = spawn_service();
         // A worker question keeps its own wait (a recovery barrier); anything else
         // resumes in its state on the same rung (a restart is infrastructure), or, while
@@ -4549,6 +4609,14 @@ async fn binary_journey(scenario: &str) {
             "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type IN ('NATIVE_RECOVERY_REQUIRED','AUTOMATIC_CONTINUATION') OR (type='NATIVE_RECOVERY_RESUMED' AND json_extract(payload_json,'$.restart_resume')=1))",
         )
         .await;
+        let opaque_restart = opaque_before.is_some_and(|before| {
+            let (_, after) = observe();
+            assert_eq!(
+                before, after,
+                "opaque process identities changed across the recovery decision"
+            );
+            !before.is_empty()
+        });
         store.read(|db| {
             // The interrupted sessions are never replayed: no earlier attempt is live again.
             assert_eq!(db.query_row("SELECT count(*) FROM delegation_provisioning WHERE rowid<=? AND status='ready'",[last_attempt],|r|r.get::<_,i64>(0))?,0,"unknown session replayed");
@@ -4576,14 +4644,50 @@ async fn binary_journey(scenario: &str) {
             }
             Ok(())
         }).unwrap();
-        if scenario == "hold" {
+        if scenario == "hold-ambiguous" || opaque_restart {
+            if scenario == "hold-ambiguous" {
+                assert!(project_process_running(), "fixture did not hold an old peer");
+            }
+            let (task, attempt, channel, _, _, _) = old_worker.as_ref().unwrap();
+            store.read(|db| {
+                assert_eq!(db.query_row("SELECT count(*) FROM delegation_provisioning", [], |r| r.get::<_, i64>(0))?, before, "replacement provisioned with unconfirmed liveness");
+                assert!(db.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM delegation_provisioning d
+                        JOIN capacity_reservations c USING(attempt_id)
+                        JOIN trusted_channels ch ON ch.channel_id=d.channel_id
+                        JOIN runtime_events e ON e.task_id=d.task_id, json_each(e.payload_json,'$.attempts') a
+                        WHERE d.task_id=? AND d.attempt_id=? AND ch.channel_id=? AND ch.revoked_at IS NOT NULL
+                          AND d.status='ambiguous' AND c.state='ambiguous'
+                          AND e.type='NATIVE_PROCESS_UNCONFIRMED' AND a.value=d.attempt_id)",
+                    (task, attempt, channel), |r| r.get::<_, bool>(0),
+                )?);
+                assert!(db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='NATIVE_RECOVERY_REQUIRED'
+                        AND json_extract(payload_json,'$.reason')='native_session_outcome_unknown')",
+                    [task], |r| r.get::<_, bool>(0),
+                )?);
+                assert_eq!(db.query_row("SELECT count(*) FROM trusted_channels WHERE revoked_at IS NULL", [], |r| r.get::<_,i64>(0))?,0);
+                Ok(())
+            }).unwrap();
+            if opaque_restart {
+                println!("stable opaque candidate across real service restart: old channel fenced, no replacement; confirmed exit covered by the controlled-process test");
+            } else {
+                // Keep the peer live until the restarted service is stopped below.
+                println!("live old fixture peer: restart fenced its channel and did not provision a replacement");
+            }
+        }
+        if scenario == "hold" && !opaque_restart {
+            let (task, attempt, channel, session, revision, node) = old_worker.as_ref().unwrap();
             tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
                     let ready = store.read(|db| {
                         Ok(db.query_row(
-                            "SELECT EXISTS(SELECT 1 FROM delegation_provisioning
-                             WHERE rowid>? AND role_id='worker-backend-dev' AND status='ready')",
-                            [last_attempt], |r| r.get::<_, bool>(0),
+                            "SELECT EXISTS(SELECT 1 FROM delegation_provisioning p
+                             JOIN runtime_events e ON e.task_id=p.task_id AND e.type='NATIVE_SESSION_CONFIGURED'
+                                AND json_extract(e.payload_json,'$.channel_id')=p.channel_id
+                             WHERE p.rowid>? AND p.task_id=? AND p.role_id='worker-backend-dev' AND p.status='ready')",
+                            (last_attempt, task), |r| r.get::<_, bool>(0),
                         )?)
                     }).unwrap();
                     if ready {
@@ -4591,20 +4695,41 @@ async fn binary_journey(scenario: &str) {
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            }).await.unwrap_or_else(|_| {
-                let transitions = store.read(|db| {
-                    Ok(db.query_row(
-                        "SELECT json_group_array(json_object('type',type,
-                            'code',json_extract(payload_json,'$.code'),
-                            'reason',json_extract(payload_json,'$.reason'),
-                            'phase',json_extract(payload_json,'$.phase')))
-                         FROM (SELECT type,payload_json FROM runtime_events
-                               WHERE type GLOB 'NATIVE_*' ORDER BY id DESC LIMIT 12)",
-                        [], |row| row.get::<_, String>(0),
-                    )?)
-                });
-                panic!("safe restart did not provision a replacement worker automatically: {transitions:?}");
-            });
+            }).await.expect("clear process observations did not yield a ready replacement");
+            store.read(|db| {
+                assert!(db.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM delegation_provisioning d
+                        JOIN trusted_channels ch ON ch.channel_id=d.channel_id
+                        JOIN capacity_reservations c USING(attempt_id)
+                        JOIN runtime_events e ON e.task_id=d.task_id, json_each(e.payload_json,'$.delegations') a
+                        WHERE d.task_id=? AND d.attempt_id=? AND d.channel_id=? AND d.engine_session_ref=?
+                          AND ch.revoked_at IS NOT NULL AND d.status='terminated'
+                          AND c.state='released' AND c.release_observation='no_engine_process'
+                          AND e.type='NATIVE_PROCESS_SETTLED'
+                          AND json_extract(e.payload_json,'$.evidence')='service_gone_and_no_engine_process_in_project'
+                          AND json_extract(a.value,'$.attempt')=d.attempt_id)",
+                    (task, attempt, channel, session), |r| r.get::<_, bool>(0),
+                )?);
+                assert_eq!(db.query_row(
+                    "SELECT count(*) FROM delegation_provisioning WHERE task_id=? AND rowid>? AND role_id='worker-backend-dev'",
+                    (task, last_attempt), |r| r.get::<_, i64>(0),
+                )?, 1);
+                let (fresh_attempt, fresh_channel): (String, String) = db.query_row(
+                    "SELECT p.attempt_id,p.channel_id FROM runtime_nodes n
+                     JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
+                     JOIN trusted_channels ch ON ch.channel_id=p.channel_id AND ch.attempt_id=p.attempt_id
+                     JOIN runtime_events e ON e.task_id=p.task_id AND e.type='NATIVE_SESSION_CONFIGURED'
+                        AND json_extract(e.payload_json,'$.engine_session_ref')='native:'||p.attempt_id||':'||p.engine_session_ref
+                        AND json_extract(e.payload_json,'$.channel_id')=ch.channel_id
+                     WHERE n.task_id=? AND n.revision=? AND n.node_id=? AND p.rowid>?
+                        AND p.status='ready' AND ch.revoked_at IS NULL AND length(p.engine_session_ref)>0",
+                    (task, revision, node, last_attempt), |r| Ok((r.get(0)?,r.get(1)?)),
+                )?;
+                assert_ne!(&fresh_attempt, attempt);
+                assert_ne!(&fresh_channel, channel);
+                Ok(())
+            }).unwrap();
             // Release only the fixture peer. No owner Resume/Retry RPC was sent.
             std::fs::write(f.0.join("project/scenario.txt"), "complete").unwrap();
             restart_signal(
@@ -5081,6 +5206,13 @@ fn main() {
         );
     }
     let mode = std::env::args().nth(1).unwrap_or_default();
+    if mode == "native-baseline-probe" {
+        #[cfg(feature = "test-observations")]
+        native_baseline::run();
+        #[cfg(not(feature = "test-observations"))]
+        panic!("native-baseline-probe requires --features test-observations");
+        return;
+    }
     if mode == "service-regression-peer" {
         tokio::runtime::Runtime::new()
             .unwrap()
@@ -5096,6 +5228,12 @@ fn main() {
     }
     if mode.starts_with("desktop-") || mode.starts_with('/') {
         peer::main();
+        if std::env::args().nth(2).as_deref() == Some("codex-acp-fixture-restart") {
+            // Hold the fake peer across service exit without depending on scheduling.
+            while Path::new(".git/restart-peer-exit-gate").exists() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
         return;
     }
     if mode.is_empty() || mode == "worktree-bound-probe" {
@@ -5270,7 +5408,7 @@ fn main() {
     }
     if mode == "binary_journey" {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            for scenario in ["paused-checkpoint", "hold", "command-restart-lost"] {
+            for scenario in ["paused-checkpoint", "hold", "hold-ambiguous", "command-restart-lost"] {
                 tokio::time::timeout(Duration::from_secs(90), binary_journey(scenario))
                     .await
                     .unwrap_or_else(|_| panic!("binary journey timed out: {scenario}"));
@@ -5404,6 +5542,7 @@ fn main() {
         for scenario in [
             "complete",
             "hold",
+            "hold-ambiguous",
             "review-hold",
             "verify-slow",
             "question",

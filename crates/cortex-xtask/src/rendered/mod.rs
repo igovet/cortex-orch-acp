@@ -11,6 +11,7 @@
 
 mod a11y;
 mod attachments;
+mod baseline;
 mod controls;
 mod entry;
 mod flow;
@@ -36,6 +37,7 @@ pub const COMMANDS: &[&str] = &[
 
 pub const BUILDER: &str = "cortex-workspace-builder:ubuntu26.04-rust1.99.1-node24.14.1";
 pub const IMAGE: &str = "cortex-workspace-rendered:ubuntu26.04";
+const BASELINE_IMAGE: &str = "cortex-workspace-rendered-baseline:ubuntu26.04";
 pub const PROBE: &str = include_str!("probe.c");
 pub const WEBKIT_HOST: &str =
     include_str!("../../../../packages/workspace-ui/test/rendered/webkit-host.c");
@@ -64,6 +66,10 @@ pub fn run(command: &str, raw: &[String]) -> Res<i32> {
 /// mutter packages only recommend interpreters for helper scripts the checks never run, so a files-free shim package provides
 /// those names and apt is told never to install the real ones.
 pub fn image(tag: &str) -> Res<()> {
+    image_mode(tag, false)
+}
+
+fn image_mode(tag: &str, baseline: bool) -> Res<()> {
     let tmp = crate::proc::TempDir::new("rendered-image-")?;
     let context = &tmp.0;
     let stage = context.join("shim");
@@ -80,14 +86,24 @@ pub fn image(tag: &str) -> Res<()> {
     ])?;
     write(&context.join("probe.c"), PROBE)?;
     write(&context.join("webkit-host.c"), WEBKIT_HOST)?;
+    let (copy_frame, compile_frame, ocr) = if baseline {
+        write(&context.join("baseline-frame.c"), baseline::FRAME)?;
+        (
+            "COPY baseline-frame.c /src/\n",
+            "RUN cc -O2 -Wall -Wextra -Werror -o /out/baseline-frame /src/baseline-frame.c -lX11\n",
+            "tesseract-ocr tesseract-ocr-eng ",
+        )
+    } else {
+        ("", "", "")
+    };
     let dockerfile = format!(
-        "FROM {BUILDER} AS compile\nUSER root\nCOPY probe.c webkit-host.c /src/\n\
+        "FROM {BUILDER} AS compile\nUSER root\nCOPY probe.c webkit-host.c /src/\n{copy_frame}\
          RUN mkdir /out && gcc -shared -fPIC -O1 -w -o /out/probe.so /src/probe.c $(pkg-config --cflags --libs webkit2gtk-4.1 gtk+-3.0) \\\n \
-         && cc -O1 -o /out/webkit-host /src/webkit-host.c $(pkg-config --cflags --libs gtk+-3.0 webkit2gtk-4.1)\n\
+         && cc -O1 -o /out/webkit-host /src/webkit-host.c $(pkg-config --cflags --libs gtk+-3.0 webkit2gtk-4.1)\n{compile_frame}\
          FROM {BASE}\nENV DEBIAN_FRONTEND=noninteractive\nCOPY shim.deb /shim.deb\n\
          RUN dpkg -i /shim.deb && printf 'Package: python3 python3-minimal python3-gi python3.* libpython3*\\nPin: release *\\nPin-Priority: -1\\n' > /etc/apt/preferences.d/no-python\n\
          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libwebkit2gtk-4.1-0 libgtk-3-0t64 libayatana-appindicator3-1 librsvg2-2 libssl3t64 libxdo3 fontconfig fonts-dejavu-core \\\n \
-         xvfb xdotool x11-utils openbox dbus dbus-x11 at-spi2-core xdg-dbus-proxy mutter git pulseaudio pulseaudio-utils bzip2 sqlite3 xclip wl-clipboard && rm -rf /var/lib/apt/lists/*\n\
+         xvfb xauth xdotool x11-utils openbox dbus dbus-x11 at-spi2-core xdg-dbus-proxy mutter git pulseaudio pulseaudio-utils bzip2 sqlite3 xclip wl-clipboard {ocr}&& rm -rf /var/lib/apt/lists/*\n\
          COPY --from=compile /usr/local/bin/node /usr/local/bin/node\nCOPY --from=compile /out/ /opt/cortex-render/\nENTRYPOINT []\n"
     );
     write(&context.join("Dockerfile"), &dockerfile)?;
@@ -100,6 +116,66 @@ pub fn image(tag: &str) -> Res<()> {
         &context.to_string_lossy(),
     ])
     .map(|_| ())
+}
+
+fn baseline_requested(cli: &Cli) -> Res<bool> {
+    let Some(mode) = cli.flag("baseline") else {
+        return Ok(false);
+    };
+    require(
+        mode == "yes"
+            && matches!(cli.flag("only"), Some("lifecycle" | "baseline"))
+            && cli.flag("display").unwrap_or("x11") == "x11"
+            && cli.flag("journey-wayland").is_none(),
+        "--baseline yes requires --only baseline or --only lifecycle, on X11",
+    )?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod baseline_flag_tests {
+    use super::*;
+
+    #[test]
+    fn peer_clock_requires_the_focused_x11_observer() {
+        let check = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|value| value.to_string()).collect();
+            peer_timing_requested(&Cli::parse(&args).unwrap())
+        };
+        assert!(!check(&["--only", "baseline", "--baseline", "yes"]).unwrap());
+        let focused = ["--only", "baseline", "--baseline", "yes", "--peer-timing", "yes"];
+        assert!(check(&focused).unwrap());
+        assert!(check(&["--only", "baseline", "--peer-timing", "yes"]).is_err());
+        let mut lifecycle = focused;
+        lifecycle[1] = "lifecycle";
+        assert!(check(&lifecycle).is_err());
+        assert!(check(&[&focused[..], &["--display", "wayland"]].concat()).is_err());
+    }
+
+    #[test]
+    fn observation_is_explicit_and_limited_to_the_x11_task_journeys() {
+        let check = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|value| value.to_string()).collect();
+            baseline_requested(&Cli::parse(&args).unwrap())
+        };
+        assert!(!check(&[]).unwrap());
+        assert!(!check(&["--only", "baseline"]).unwrap());
+        assert!(check(&["--only", "baseline", "--baseline", "yes"]).unwrap());
+        assert!(check(&["--only", "lifecycle", "--baseline", "yes"]).unwrap());
+        assert!(check(&["--baseline", "yes"]).is_err());
+        assert!(check(&["--only", "baseline", "--baseline", "yes", "--display", "wayland"]).is_err());
+    }
+}
+
+fn peer_timing_requested(cli: &Cli) -> Res<bool> {
+    let Some(mode) = cli.flag("peer-timing") else {
+        return Ok(false);
+    };
+    require(
+        mode == "yes" && cli.flag("only") == Some("baseline") && baseline_requested(cli)?,
+        "--peer-timing yes requires --only baseline --baseline yes on X11",
+    )?;
+    Ok(true)
 }
 
 fn flag_path(cli: &Cli, name: &str) -> Res<PathBuf> {
@@ -116,9 +192,17 @@ fn host(cli: &Cli) -> Res<i32> {
     let root = crate::installed::gate::find_root(cli)?
         .canonicalize()
         .map_err(|e| e.to_string())?;
-    let tag = cli.flag("image").unwrap_or(IMAGE).to_string();
+    let observe = baseline_requested(cli)?;
+    let peer_timing = peer_timing_requested(cli)?;
+    require(
+        !peer_timing || cli.flag("build-image") == Some("no"),
+        "--peer-timing yes requires --build-image no (reuse the existing rendered image)",
+    )?;
+    let tag = cli
+        .flag("image")
+        .unwrap_or(if observe { BASELINE_IMAGE } else { IMAGE });
     if cli.flag("build-image") != Some("no") {
-        image(&tag)?;
+        image_mode(tag, observe)?;
     }
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let tmp = crate::proc::TempDir::new("rendered-")?;
@@ -142,6 +226,29 @@ fn host(cli: &Cli) -> Res<i32> {
     .iter()
     .map(|x| x.to_string())
     .collect();
+    if peer_timing {
+        baseline::compile_peer_hook(&tmp.0, uid, gid)?;
+        argv.push("--pull=never".into());
+    }
+    if cli.flag("only") == Some("baseline") {
+        let mask = tmp.0.join("empty");
+        std::fs::create_dir(&mask).map_err(|e| e.to_string())?;
+        // The fixture needs checkout assets, not either channel's live stores.
+        for name in [".cortex", ".cortex-dev"] {
+            match std::fs::symlink_metadata(root.join(name)) {
+                Ok(meta) => require(meta.is_dir(), "checkout store mask needs a directory")?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("checkout store mask: {e}")),
+            }
+            argv.extend([
+                "--mount".into(),
+                format!(
+                    "type=bind,source={},target=/checkout/{name},readonly",
+                    mask.display()
+                ),
+            ]);
+        }
+    }
     for (source, target) in [
         (&artifacts, "/artifacts"),
         (&root, "/checkout"),
@@ -158,7 +265,7 @@ fn host(cli: &Cli) -> Res<i32> {
     argv.extend([
         "--env".into(),
         "HOME=/tmp".into(),
-        tag,
+        tag.into(),
         "/harness/cortex-xtask".into(),
         "check-rendered-inside".into(),
         "--artifacts".into(),
@@ -166,6 +273,12 @@ fn host(cli: &Cli) -> Res<i32> {
         "--checkout".into(),
         "/checkout".into(),
     ]);
+    if observe {
+        argv.extend(["--baseline".into(), "yes".into()]);
+    }
+    if peer_timing {
+        argv.extend(["--peer-timing".into(), "yes".into()]);
+    }
     if let Some(only) = cli.flag("only") {
         argv.extend(["--only".into(), only.into()]);
     }

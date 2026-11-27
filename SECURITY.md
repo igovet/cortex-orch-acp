@@ -268,7 +268,7 @@ settled at the next start only when the process table shows no engine adapter,
 Codex App Server or session relay of this user working in the project (an
 unreadable entry counts as one); the task is then held for the owner, never
 relaunched by itself. This is not detached unsandboxed descendant settlement
-or engine-session recovery. Auto runs every role's ordinary command in a private host namespace as the owner, with the task checkout writable and Cortex store directories read-only (deletions wait for the owner's permission card). Administrative commands require a separate owner confirmation and then run with the owner's full host access; an argv that deletes or overwrites a live store file is refused. Brokered worker commands in Guarded and Development, read-only
+or engine-session recovery. Auto runs every role's command directly on the owner's full host with no owner card: deletions, administrative commands and writes to the live store files are all allowed (the owner chose this; a write to a live store file can corrupt the running store). Brokered worker commands in Guarded and Development, read-only
 roles and runtime verification run on the host at their real paths, with the
 owner's tools, PATH, HOME and the shared network, under a Landlock ruleset the
 per-command supervisor enters just before exec; no namespace, mount, overlay or
@@ -2915,7 +2915,9 @@ a `.cortex` or `.cortex-dev` directory (`live_store_file` in
 locks on those files and commits every state transition through the database and
 its WAL, so a write from another process can corrupt the running store or drop
 its locks, and no owner answer can make such a write safe. Reads of them follow
-the private-state row.
+the private-state row. Read-only channels cannot write, delete or execute through
+native engine tools in any mode. Native reads and web fetches still follow the
+applicable access-mode rules.
 Workspace Auto host commands can use a fresh private directory per invocation through `CORTEX_COMMAND_TMPDIR`. The runtime cleans that directory after the command. A shared `/var/tmp` path, even with a shell PID in its name, does not establish file ownership for an explicit deletion.
 
 The Workspace session prompt derives host-command guidance from the served channel catalogue. A linked checkout selects the working directory. The runtime evaluates access on each call.

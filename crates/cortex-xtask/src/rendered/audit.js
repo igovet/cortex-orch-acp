@@ -22,12 +22,12 @@ const barBox = bar ? box(bar) : null, inBar = bar ? [...bar.querySelectorAll("a,
 const outside = inBar.filter(el => { const r = el.getBoundingClientRect(), b = bar.getBoundingClientRect(); return r.left < b.left - .5 || r.right > b.right + .5 || r.top < b.top - .5 || r.bottom > b.bottom + .5; }).map(name);
 const overlaps = [];
 inBar.forEach((a, i) => inBar.slice(i + 1).forEach(b => { if (a.contains(b) || b.contains(a)) return; const p = a.getBoundingClientRect(), q = b.getBoundingClientRect(); if (Math.min(p.right, q.right) - Math.max(p.left, q.left) > 1 && Math.min(p.bottom, q.bottom) - Math.max(p.top, q.top) > 1) overlaps.push(name(a) + "+" + name(b)); }));
-const split = document.querySelector(".titlebar .split");
+const split = [...document.querySelectorAll(".titlebar .split")].find(seen);
 const win = [...document.querySelectorAll(".win")];
 const chrome = {
   barBox, outside, overlaps, controls: inBar.length,
   winGroups: win.length, winButtons: win.flatMap(w => [...w.querySelectorAll("button")]).length, winHidden: win.some(w => w.getAttribute("aria-hidden") === "true"),
-  split: split ? { box: box(split), display: css(split).display, parts: [...split.children].map(box) } : null,
+  split: split ? { box: box(split), display: css(split).display, parts: [...split.children].filter(el => el.matches('button, a[href]')).map(box) } : null,
 };
 const texts = new Map(), faces = {};
 const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);

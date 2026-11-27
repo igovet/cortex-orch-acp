@@ -835,6 +835,11 @@ fn every_request_the_real_port_sends_is_allowed() {
                 q["target"] = json!("we_1");
                 q
             }
+            "decisions.get" => {
+                let mut q = query(operation);
+                q["target"] = json!("wd_q1");
+                q
+            }
             "project.snapshot" => query(operation),
             "tasks.create" => command(
                 "tasks.create",

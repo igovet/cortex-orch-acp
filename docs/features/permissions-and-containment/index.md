@@ -126,7 +126,7 @@ table (`classify` in `crates/cortex-engine/src/permission.rs`, path classes in
 | Read or search outside the project | ask the owner | allow, recorded | allow, recorded |
 | Write or edit inside the project (writing workers) | allow | allow | allow |
 | Write or edit outside the project (writing workers) | ask the owner | ask the owner | allow, recorded |
-| Deletion | ask the owner | ask the owner | allow, recorded |
+| Deletion | ask the owner | ask the owner | allow, recorded (`auto_deletion`) |
 | Credential and key material anywhere, read or write | ask the owner | ask the owner | allow, recorded (`auto_credential`) |
 | Git control files, engine and Cortex configuration, write | ask the owner | ask the owner | allow, recorded (`auto_control`) |
 | Cortex private state (`.cortex`, `.cortex-dev`, dev owner files, service state), read or write | ask the owner | ask the owner | allow, recorded (`auto_private`) |
@@ -257,14 +257,14 @@ work, and whether a deletion waits for the user.
 | Behavior | Guarded | Development (fresh-session default) | Auto |
 | --- | --- | --- | --- |
 | Where a writing worker works | project writes; command cwd inside the task tree | host-visible session; eligible non-private host cwd | same as Development |
-| Writing-worker `command_run` | `guarded`: host at real paths under Landlock; writes to the checkout, scratch and tool caches; secrets hidden | `development`: as Guarded plus `/tmp`, `/var/tmp` and an outside cwd; only Cortex stores hidden | on the host as the owner, no ruleset; deletions wait for the owner's card |
+| Writing-worker `command_run` | `guarded`: host at real paths under Landlock; writes to the checkout, scratch and tool caches; secrets hidden | `development`: as Guarded plus `/tmp`, `/var/tmp` and an outside cwd; only Cortex stores hidden | host command in a private namespace with the checkout writable and Cortex store directories read-only; administrative commands use the confirmed full-host route |
 | `outside_write` | action-specific owner consent | action-specific owner consent | runtime decides automatically |
-| `outside_command` (no command sandbox) | action-specific owner consent | action-specific owner consent | runtime decides automatically |
+| `outside_command` | action-specific owner consent | action-specific owner consent | runs on the full host without an owner card, deletions, administrative commands and live store files included |
 | Eligible writer command requests recognized privilege or has a proven pre-launch sandbox failure | routes through `outside_command`; owner consents | same as Guarded | routes through `outside_command`; Auto decides |
-| `sudo` in a host command | owner password prompt on the desktop or a paired phone | same | same |
-| Declared deletion (`project_delete`, `command_delete`, native delete) | consent card | consent card | runtime answers the card itself |
+| `sudo`, `pkexec`, `doas` or another administrative host action | owner password prompt on the desktop or a paired phone | same | separate owner confirmation, then the password prompt if needed |
+| Declared deletion (`project_delete`, `command_delete`, native delete) | consent card | consent card | owner consent card |
 | Reads by ordinary brokered commands | owner-readable inputs exposed by the command profile, no per-read card | same | same |
-| Read-only/reviewer `command_run` | `read_only` (Landlock: scratch and caches only, secrets hidden); cwd inside the task tree | `read_only`; eligible non-private host cwd also allowed | on the host as the owner |
+| Read-only/reviewer `command_run` | `read_only` (Landlock: scratch and caches only, secrets hidden); cwd inside the task tree | `read_only`; eligible non-private host cwd also allowed | host command on the full host with no namespace or overlay |
 | Automatic runtime verification | `read_only` under Landlock, shared network, existing ignored-directory grants | same | same |
 | Engine session mode (see [Native engines](#native-engines)) | independent of access mode | independent of access mode | independent of access mode; no bypass or full access |
 | Channel, role, revocation, owner deny, review and completion gates | retained | retained | retained |
@@ -331,9 +331,7 @@ and ordinary arguments are not shell prefixes. Rejected consent precedes
 working-directory preparation, command mounts and process launch.
 Shell text remains lexical matching, not complete shell interpretation. The
 classifier is not a semantic firewall for interpreters, scripts or Docker effects.
-Auto uses the same host-writable `development_command` profile as
-Development (receipts name it `development`) and keeps its automatic approval
-and engine-mode confirmation. No access mode selects Claude `bypassPermissions` or
+In Workspace Auto, every role runs every command directly on the full host as the owner, including in a linked checkout, with no namespace, overlay or argv seal and no owner card: deletions, administrative commands, protected working directories and the live Cortex store files are all allowed. Each command gets a private directory at `CORTEX_COMMAND_TMPDIR`. Cortex removes it when the command ends. No access mode selects Claude `bypassPermissions` or
 Codex `agent-full-access`, and no Cortex Claude or Codex session has a native
 shell, so commands go through the brokered gateway tools.
 
